@@ -1,5 +1,10 @@
 export type RuntimeKind = "claude" | "codex";
 
+export interface RuntimeWarningPayload {
+  runtime: RuntimeKind;
+  message: string;
+}
+
 export type JsonValue =
   | null
   | boolean

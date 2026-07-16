@@ -11,7 +11,12 @@ use tauri::{Emitter, WebviewWindow};
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 use tokio::task::JoinHandle;
 
+pub mod app_server;
 pub mod discovery;
+pub mod protocol;
+pub mod rpc;
+
+pub use app_server::CodexAppServerState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CodexInstallCommand {
@@ -217,6 +222,15 @@ enum InstallerWaitOutcome {
     Exited { success: bool },
     WaitError(String),
     TimedOut,
+}
+
+fn installer_exit_outcome(success: bool, cleanup: Result<(), String>) -> InstallerWaitOutcome {
+    match cleanup {
+        Ok(()) => InstallerWaitOutcome::Exited { success },
+        Err(error) => InstallerWaitOutcome::WaitError(format!(
+            "Codex installer exited but descendant cleanup failed: {error}"
+        )),
+    }
 }
 
 trait CodexInstallerLifecycle<S: RuntimeInstallEventSink> {
@@ -823,11 +837,14 @@ impl<S: RuntimeInstallEventSink> CodexInstallerLifecycle<S> for ProcessCodexInst
             let outcome = tokio::time::timeout(timeout, child.wait()).await;
             match outcome {
                 Ok(Ok(status)) => {
-                    self.process_tree.take();
+                    let cleanup = self
+                        .process_tree
+                        .take()
+                        .map(discovery::ProcessTreeGuard::cleanup_after_parent_exit)
+                        .transpose()
+                        .map(|_| ());
                     self.child.take();
-                    InstallerWaitOutcome::Exited {
-                        success: status.success(),
-                    }
+                    installer_exit_outcome(status.success(), cleanup)
                 }
                 Ok(Err(error)) => InstallerWaitOutcome::WaitError(format!(
                     "Codex installer failed while waiting: {error}"
@@ -1015,6 +1032,20 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn installer_parent_exit_cleanup_errors_become_wait_errors() {
+        let outcome =
+            installer_exit_outcome(true, Err("installer descendant cleanup denied".to_string()));
+
+        assert_eq!(
+            outcome,
+            InstallerWaitOutcome::WaitError(
+                "Codex installer exited but descendant cleanup failed: installer descendant cleanup denied"
+                    .to_string()
+            )
+        );
+    }
 
     #[test]
     fn platform_installer_uses_the_official_codex_command() {

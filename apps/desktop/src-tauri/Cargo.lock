@@ -511,6 +511,7 @@ dependencies = [
  "flate2",
  "git2",
  "hmac",
+ "libc",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",

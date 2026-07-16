@@ -12,8 +12,109 @@ mod uv;
 mod zotero;
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Condvar, Mutex as StdMutex};
+use std::time::Duration;
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_fs::FsExt;
+
+const EXIT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
+const RESTART_CLEANUP_WAIT_TIMEOUT: Duration = Duration::from_secs(12);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitCleanupAction {
+    Begin,
+    Wait,
+    Allow,
+}
+
+#[derive(Default)]
+struct ExitCleanupGate {
+    state: AtomicU8,
+    completed: StdMutex<bool>,
+    completion_changed: Condvar,
+}
+
+impl ExitCleanupGate {
+    fn on_exit_requested(&self) -> ExitCleanupAction {
+        match self
+            .state
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => ExitCleanupAction::Begin,
+            Err(1) => ExitCleanupAction::Wait,
+            Err(2) => ExitCleanupAction::Allow,
+            Err(_) => ExitCleanupAction::Wait,
+        }
+    }
+
+    fn complete(&self) {
+        *self
+            .completed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        self.state.store(2, Ordering::Release);
+        self.completion_changed.notify_all();
+    }
+
+    fn wait_for_completion(&self, timeout: Duration) -> bool {
+        if self.state.load(Ordering::Acquire) == 2 {
+            return true;
+        }
+        let completed = self
+            .completed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (completed, _) = self
+            .completion_changed
+            .wait_timeout_while(completed, timeout, |completed| !*completed)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *completed
+    }
+}
+
+fn requires_synchronous_exit_cleanup(code: Option<i32>) -> bool {
+    code == Some(tauri::RESTART_EXIT_CODE)
+}
+
+fn spawn_exit_cleanup(
+    app_handle: &tauri::AppHandle,
+    cleanup_gate: Arc<ExitCleanupGate>,
+    exit_after_cleanup: Option<i32>,
+) {
+    let exit_handle = app_handle.clone();
+    let cleanup_handle = app_handle.clone();
+    let latex_state = app_handle
+        .state::<latex::LatexCompilerState>()
+        .inner()
+        .clone();
+    tauri::async_runtime::spawn(async move {
+        let mut cleanup_task = tauri::async_runtime::spawn(async move {
+            let codex_state = cleanup_handle.state::<runtime::codex::CodexAppServerState>();
+            let (_, codex_result) = tokio::join!(
+                latex::cleanup_all_builds(&latex_state),
+                codex_state.shutdown(),
+            );
+            if codex_result.is_err() {
+                eprintln!("[codex-app-server] shutdown failed during exit cleanup");
+            }
+        });
+
+        match tokio::time::timeout(EXIT_CLEANUP_TIMEOUT, &mut cleanup_task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => eprintln!("[exit-cleanup] cleanup task failed"),
+            Err(_) => {
+                cleanup_task.abort();
+                eprintln!("[exit-cleanup] cleanup timed out");
+            }
+        }
+
+        cleanup_gate.complete();
+        if let Some(exit_code) = exit_after_cleanup {
+            exit_handle.exit(exit_code);
+        }
+    });
+}
 
 /// Entry point for the `--tectonic-compile` subprocess mode.
 /// Runs tectonic compilation in an isolated process so that C-level global state
@@ -567,6 +668,8 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_process::init())
         .manage(claude::ClaudeProcessState::default())
+        .manage(runtime::codex::CodexAppServerState::default())
+        .manage(runtime::process::RuntimeProcessState::default())
         .manage(latex::LatexCompilerState::default())
         .manage(zotero::ZoteroOAuthState::default())
         .setup(|app| {
@@ -659,7 +762,8 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|app_handle, event| {
+    let exit_cleanup_gate = Arc::new(ExitCleanupGate::default());
+    app.run(move |app_handle, event| {
         match event {
             // Set the dock icon after the app is fully initialized.
             // Doing this in setup() causes SIGBUS on first launch from signed
@@ -717,20 +821,90 @@ pub fn run() {
                     claude::kill_process_for_window(&state_clone, &label_clone).await;
                 });
 
+                // Remove only routes owned by the destroyed window. The Codex
+                // app-server itself is application-wide and remains available
+                // to every other window.
+                let runtime_handle = app_handle.clone();
+                let runtime_label = label.clone();
+                tauri::async_runtime::spawn(async move {
+                    runtime_handle
+                        .state::<runtime::process::RuntimeProcessState>()
+                        .remove_window(&runtime_label)
+                        .await;
+                });
+
                 // Quit the app when the last window is closed
                 if app_handle.webview_windows().is_empty() {
                     app_handle.exit(0);
                 }
             }
-            tauri::RunEvent::ExitRequested { .. } => {
-                // Clean up LaTeX build temp directories
-                let latex_state = app_handle.state::<latex::LatexCompilerState>();
-                let state_clone = latex_state.inner().clone();
-                tauri::async_runtime::spawn(async move {
-                    latex::cleanup_all_builds(&state_clone).await;
-                });
+            tauri::RunEvent::ExitRequested { code, api, .. } => {
+                let restart = requires_synchronous_exit_cleanup(code);
+                let action = exit_cleanup_gate.on_exit_requested();
+                match action {
+                    ExitCleanupAction::Begin => {
+                        if !restart {
+                            api.prevent_exit();
+                        }
+                        spawn_exit_cleanup(
+                            app_handle,
+                            exit_cleanup_gate.clone(),
+                            (!restart).then_some(code.unwrap_or(0)),
+                        );
+                    }
+                    ExitCleanupAction::Wait if !restart => api.prevent_exit(),
+                    ExitCleanupAction::Wait | ExitCleanupAction::Allow => {}
+                }
+                if restart
+                    && action != ExitCleanupAction::Allow
+                    && !exit_cleanup_gate.wait_for_completion(RESTART_CLEANUP_WAIT_TIMEOUT)
+                {
+                    eprintln!("[exit-cleanup] restart cleanup wait timed out");
+                }
             }
             _ => {}
         }
     });
+}
+
+#[cfg(test)]
+mod exit_cleanup_tests {
+    use super::{ExitCleanupAction, ExitCleanupGate};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn cleanup_gate_starts_once_waits_for_reentry_and_then_allows_exit() {
+        let gate = ExitCleanupGate::default();
+
+        assert_eq!(gate.on_exit_requested(), ExitCleanupAction::Begin);
+        assert_eq!(gate.on_exit_requested(), ExitCleanupAction::Wait);
+        gate.complete();
+        assert_eq!(gate.on_exit_requested(), ExitCleanupAction::Allow);
+    }
+
+    #[test]
+    fn restart_wait_blocks_until_the_inflight_cleanup_completes() {
+        let gate = Arc::new(ExitCleanupGate::default());
+        assert_eq!(gate.on_exit_requested(), ExitCleanupAction::Begin);
+        let worker_gate = gate.clone();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            worker_gate.complete();
+        });
+        let started = Instant::now();
+
+        assert!(gate.wait_for_completion(Duration::from_millis(200)));
+        assert!(started.elapsed() >= Duration::from_millis(20));
+        worker.join().expect("cleanup worker panicked");
+    }
+
+    #[test]
+    fn only_tauri_restart_exit_requires_synchronous_cleanup_waiting() {
+        assert!(super::requires_synchronous_exit_cleanup(Some(
+            tauri::RESTART_EXIT_CODE
+        )));
+        assert!(!super::requires_synchronous_exit_cleanup(Some(0)));
+        assert!(!super::requires_synchronous_exit_cleanup(None));
+    }
 }

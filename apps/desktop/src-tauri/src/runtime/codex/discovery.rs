@@ -12,6 +12,9 @@ use tokio::task::JoinHandle;
 use std::os::windows::process::CommandExt;
 
 #[cfg(unix)]
+use std::num::NonZeroI32;
+
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
 pub const CODEX_NOT_FOUND: &str = "Codex CLI was not found or failed validation";
@@ -678,6 +681,59 @@ fn resume_suspended_child(child: &tokio::process::Child) -> Result<(), String> {
 pub(super) struct ProcessTreeGuard {
     #[cfg(target_os = "windows")]
     windows_job: WindowsJobHandle,
+    #[cfg(unix)]
+    unix_process_group: Option<NonZeroI32>,
+}
+
+impl ProcessTreeGuard {
+    pub(super) fn terminate(self) -> Result<(), String> {
+        #[cfg(target_os = "windows")]
+        {
+            self.windows_job.terminate()
+        }
+
+        #[cfg(unix)]
+        {
+            let mut guard = self;
+            let Some(process_group) = guard.unix_process_group else {
+                return Ok(());
+            };
+            let result = terminate_unix_process_group(process_group);
+            if result.is_ok() {
+                guard.unix_process_group.take();
+            }
+            result
+        }
+
+        #[cfg(not(any(target_os = "windows", unix)))]
+        {
+            Ok(())
+        }
+    }
+
+    pub(super) fn cleanup_after_parent_exit(self) -> Result<(), String> {
+        #[cfg(target_os = "windows")]
+        {
+            // Closing a kill-on-close Job is the reliable post-exit cleanup operation. It also
+            // covers descendants that outlived the original app-server process.
+            drop(self);
+            Ok(())
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.terminate()
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessTreeGuard {
+    fn drop(&mut self) {
+        if let Some(process_group) = self.unix_process_group.take() {
+            let _ = terminate_unix_process_group(process_group);
+        }
+    }
 }
 
 pub(super) fn attach_process_tree(
@@ -692,8 +748,19 @@ pub(super) fn attach_process_tree(
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = child;
-        Ok(ProcessTreeGuard {})
+        #[cfg(unix)]
+        {
+            let process_group = process_group_from_child(child)?;
+            Ok(ProcessTreeGuard {
+                unix_process_group: Some(process_group),
+            })
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = child;
+            Ok(ProcessTreeGuard {})
+        }
     }
 }
 
@@ -721,39 +788,56 @@ async fn terminate_suspended_child(
     }
 }
 
-#[cfg(unix)]
-fn trusted_unix_kill() -> Option<PathBuf> {
-    [PathBuf::from("/bin/kill"), PathBuf::from("/usr/bin/kill")]
-        .into_iter()
-        .find(|candidate| candidate.is_file())
-}
-
-#[cfg(unix)]
-async fn terminate_platform_process_tree(process_id: u32, timeout: Duration) -> Result<(), String> {
-    let kill = trusted_unix_kill()
-        .ok_or_else(|| "trusted /bin/kill or /usr/bin/kill was unavailable".to_string())?;
-    let process_group = format!("-{process_id}");
-    let mut command = tokio::process::Command::new(kill);
-    command
-        .args(["-KILL", "--", &process_group])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    match tokio::time::timeout(timeout, command.status()).await {
-        Ok(Ok(status)) if status.success() => Ok(()),
-        Ok(Ok(status)) => Err(format!("kill exited with status {status}")),
-        Ok(Err(error)) => Err(format!("kill could not be started: {error}")),
-        Err(_) => Err("kill timed out while terminating the process group".into()),
+#[cfg(any(unix, test))]
+fn classify_process_group_termination(
+    result: std::io::Result<()>,
+    missing_process_code: i32,
+) -> Result<(), String> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.raw_os_error() == Some(missing_process_code) => Ok(()),
+        Err(error) => Err(format!("process group termination failed: {error}")),
     }
 }
 
-#[cfg(not(any(target_os = "windows", unix)))]
-async fn terminate_platform_process_tree(
-    _process_id: u32,
-    _timeout: Duration,
+#[cfg(any(unix, test))]
+fn validate_process_group_target(
+    process_group: i32,
+    current_process_group: i32,
 ) -> Result<(), String> {
-    Err("process-tree termination is unsupported on this platform".into())
+    if process_group <= 0 {
+        return Err("process group id must be positive".into());
+    }
+    if process_group == current_process_group {
+        return Err("refusing to terminate the desktop application's own process group".into());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn process_group_from_child(child: &tokio::process::Child) -> Result<NonZeroI32, String> {
+    let process_id = child.id().ok_or_else(|| {
+        "child process id was unavailable for process-group ownership".to_string()
+    })?;
+    let process_group = i32::try_from(process_id)
+        .map_err(|_| "child process id did not fit a Unix process-group id".to_string())?;
+    NonZeroI32::new(process_group)
+        .ok_or_else(|| "child process group id was unexpectedly zero".to_string())
+}
+
+#[cfg(unix)]
+fn terminate_unix_process_group(process_group: NonZeroI32) -> Result<(), String> {
+    // SAFETY: getpgrp has no preconditions and returns the caller's current process group.
+    let current_process_group = unsafe { libc::getpgrp() };
+    validate_process_group_target(process_group.get(), current_process_group)?;
+    // SAFETY: A negative PID addresses a process group. The stored PGID is positive, came from
+    // an isolated child created with process_group(0), and was checked against our own PGID.
+    let result = if unsafe { libc::kill(-process_group.get(), libc::SIGKILL) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    };
+    classify_process_group_termination(result, libc::ESRCH)
 }
 
 pub(super) async fn terminate_process_tree(
@@ -763,22 +847,21 @@ pub(super) async fn terminate_process_tree(
 ) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let tree_result = match process_tree {
-        Some(guard) => {
-            let result = guard.windows_job.terminate();
-            drop(guard);
-            result
-        }
+        Some(guard) => guard.terminate(),
         // Callers pass no guard only when attach/resume failed while the child was still suspended.
         None => return terminate_suspended_child(child, timeout).await,
     };
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(unix)]
+    let tree_result = match process_tree {
+        Some(guard) => guard.terminate(),
+        None => process_group_from_child(child).and_then(terminate_unix_process_group),
+    };
+
+    #[cfg(not(any(target_os = "windows", unix)))]
     let tree_result = {
         drop(process_tree);
-        match child.id() {
-            Some(process_id) => terminate_platform_process_tree(process_id, timeout).await,
-            None => Err("process id was unavailable for tree termination".into()),
-        }
+        Err("process-tree termination is unsupported on this platform".into())
     };
 
     let _ = child.start_kill();
@@ -870,10 +953,14 @@ async fn run_candidate_command(
         }
     };
 
-    drop(process_tree.take());
+    let tree_cleanup = process_tree
+        .take()
+        .map(ProcessTreeGuard::cleanup_after_parent_exit)
+        .transpose();
 
     let stdout = finish_candidate_reader(stdout_task).await;
     let stderr = finish_candidate_reader(stderr_task).await;
+    tree_cleanup?;
     let stdout = stdout?;
     let stderr = stderr?;
     if let Some(error) = stdout.read_error.or(stderr.read_error) {
@@ -1281,6 +1368,30 @@ mod tests {
         assert_eq!(error, CODEX_NOT_FOUND);
     }
 
+    #[test]
+    fn missing_process_group_is_already_terminated_but_other_errors_are_preserved() {
+        let missing_code = 42_424;
+        assert!(classify_process_group_termination(
+            Err(std::io::Error::from_raw_os_error(missing_code)),
+            missing_code,
+        )
+        .is_ok());
+
+        let error = classify_process_group_termination(
+            Err(std::io::Error::from_raw_os_error(missing_code + 1)),
+            missing_code,
+        )
+        .expect_err("non-missing process-group error was discarded");
+        assert!(error.contains("process group"));
+    }
+
+    #[test]
+    fn desktop_process_group_is_never_a_valid_cleanup_target() {
+        assert!(validate_process_group_target(17, 17).is_err());
+        assert!(validate_process_group_target(18, 17).is_ok());
+        assert!(validate_process_group_target(0, 17).is_err());
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn command_scripts_use_rusts_hardened_direct_batch_launch() {
@@ -1667,6 +1778,48 @@ try {
         assert!(
             started.elapsed() < Duration::from_secs(4),
             "candidate timeout cleanup exceeded its bounded deadline"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn successful_candidate_exit_terminates_unix_process_group_descendants() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let sentinel = temp
+            .path()
+            .join("successful-candidate-descendant-survived.txt");
+        let ready = temp
+            .path()
+            .join("successful-candidate-descendant-ready.txt");
+        let script = temp.path().join("codex-success-with-descendant");
+        let escaped_sentinel = sentinel.to_string_lossy().replace('\'', "'\\''");
+        let escaped_ready = ready.to_string_lossy().replace('\'', "'\\''");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n(trap '' HUP; printf ready > '{}'; sleep 0.5; printf survived > '{}') </dev/null >/dev/null 2>&1 &\nwhile [ ! -f '{}' ]; do sleep 0.01; done\nprintf 'codex-cli 1.2.3\\n'\nexit 0\n",
+                escaped_ready, escaped_sentinel, escaped_ready
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let output = run_candidate_command(
+            version_command(&script).unwrap(),
+            Duration::from_secs(2),
+            1024,
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        assert!(output.success);
+        assert_eq!(parse_codex_version(&output.stdout), Some("1.2.3".into()));
+        assert!(
+            !sentinel.exists(),
+            "successful candidate exit left a descendant alive"
         );
     }
 
