@@ -180,24 +180,90 @@ fn push_command_forms(paths: &mut Vec<PathBuf>, directory: &Path, windows: bool)
     paths.push(directory.join("codex"));
 }
 
-fn candidate_key(path: &Path, windows: bool) -> String {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
+fn collapse_lexical_components<'a>(
+    components: impl Iterator<Item = &'a str>,
+    rooted: bool,
+    protected_components: usize,
+) -> Vec<&'a str> {
+    let mut normalized = Vec::new();
+    for component in components {
         match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                if !normalized.pop() {
-                    normalized.push(component.as_os_str());
+            "" | "." => {}
+            ".." => {
+                if normalized.len() > protected_components
+                    && normalized.last().is_some_and(|part| *part != "..")
+                {
+                    normalized.pop();
+                } else if !rooted {
+                    normalized.push(component);
                 }
             }
-            _ => normalized.push(component.as_os_str()),
+            _ => normalized.push(component),
         }
     }
-    let key = normalized.to_string_lossy().replace('/', "\\");
-    if windows {
-        key.to_ascii_lowercase()
+    normalized
+}
+
+fn windows_candidate_key(raw: &str) -> String {
+    let standardized = raw.replace('\\', "/");
+    let (prefix, remainder, rooted, protected_components) = if standardized.starts_with("//") {
+        ("//", standardized.trim_start_matches('/'), true, 2)
+    } else if standardized.as_bytes().get(1) == Some(&b':') {
+        let prefix_end = 2;
+        let after_drive = &standardized[prefix_end..];
+        if after_drive.starts_with('/') {
+            (
+                &standardized[..prefix_end],
+                after_drive.trim_start_matches('/'),
+                true,
+                0,
+            )
+        } else {
+            (&standardized[..prefix_end], after_drive, false, 0)
+        }
+    } else if standardized.starts_with('/') {
+        ("/", standardized.trim_start_matches('/'), true, 0)
     } else {
-        path.to_string_lossy().into_owned()
+        ("", standardized.as_str(), false, 0)
+    };
+    let components =
+        collapse_lexical_components(remainder.split('/'), rooted, protected_components);
+    let joined = components.join("\\");
+    let normalized = match prefix {
+        "//" => format!(r"\\{joined}"),
+        "/" => format!(r"\{joined}"),
+        "" => joined,
+        drive if rooted => {
+            if joined.is_empty() {
+                format!(r"{drive}\")
+            } else {
+                format!(r"{drive}\{joined}")
+            }
+        }
+        drive => format!("{drive}{joined}"),
+    };
+    normalized.to_lowercase()
+}
+
+fn unix_candidate_key(raw: &str) -> String {
+    let rooted = raw.starts_with('/');
+    let components = collapse_lexical_components(raw.split('/'), rooted, 0);
+    let joined = components.join("/");
+    if rooted {
+        format!("/{joined}")
+    } else if joined.is_empty() {
+        ".".into()
+    } else {
+        joined
+    }
+}
+
+fn candidate_key(path: &Path, windows: bool) -> String {
+    let raw = path.to_string_lossy();
+    if windows {
+        windows_candidate_key(&raw)
+    } else {
+        unix_candidate_key(&raw)
     }
 }
 
@@ -536,6 +602,38 @@ mod tests {
             PathBuf::from(r"C:\PATH-ONE\.\nested\..\CODEX.EXE")
         );
         assert!(!paths.contains(&PathBuf::from(r"C:\path-one\codex.exe")));
+    }
+
+    #[test]
+    fn unix_candidates_are_lexically_deduplicated_while_preserving_the_first_path() {
+        let first = PathBuf::from("/a/b/../c");
+        let paths = deduplicate(
+            vec![
+                first.clone(),
+                PathBuf::from("/a/c"),
+                PathBuf::from("/a/./c"),
+            ],
+            false,
+        );
+
+        assert_eq!(candidate_key(&first, false), "/a/c");
+        assert_eq!(paths, vec![first]);
+    }
+
+    #[test]
+    fn simulated_windows_candidates_are_host_independently_deduplicated() {
+        let first = PathBuf::from(r"C:\A\b\..\c");
+        let paths = deduplicate(
+            vec![
+                first.clone(),
+                PathBuf::from("c:/a/c"),
+                PathBuf::from(r"C:\A\.\c"),
+            ],
+            true,
+        );
+
+        assert_eq!(candidate_key(&first, true), r"c:\a\c");
+        assert_eq!(paths, vec![first]);
     }
 
     #[derive(Default)]
