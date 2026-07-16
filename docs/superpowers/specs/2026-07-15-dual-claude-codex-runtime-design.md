@@ -1,6 +1,6 @@
 # Dual Claude and Codex Runtime Design
 
-**Status:** Approved in conversation on 2026-07-15
+**Status:** Approved in conversation on 2026-07-15; independent-review amendment requested on 2026-07-16
 
 **Scope:** Add a first-class Codex runtime while preserving all existing Claude Code and OpenAI-compatible behavior. Extend skill management to Claude and Codex, add runtime-native custom agents with assigned skills, expose subagent activity, and keep the Windows installer workflow.
 
@@ -517,8 +517,24 @@ The feature is complete only when all of the following have current evidence:
 9. Frontend tests, Rust tests, lint, type/build checks, and the Tauri Windows build finish successfully.
 10. The expected Windows NSIS and MSI artifacts exist and pass the documented installation smoke tests.
 11. Upgrade testing demonstrates that existing projects, Claude sessions, provider credentials, history, and unmanaged skills remain intact.
+12. A separate read-only Codex task reviews the completed candidate across requirement completeness, logical correctness, boundary cases, code quality, test coverage, and actual runtime results; all blocking findings are repaired and re-reviewed until it returns an evidence-backed approval.
 
-## 18. Authoritative References
+## 18. Independent Completion Review
+
+After implementation and all internal acceptance gates are complete, ClaudePrism's main implementation task creates a separate Codex task as a strict reviewer. The reviewer receives the approved specification, implementation plans, candidate commit, source diff, automated results, real-runtime evidence, and Windows installer evidence. It may inspect and run diagnostics but must not edit, stage, commit, reset, or delete source files.
+
+The reviewer evaluates six dimensions independently:
+
+1. requirement completeness;
+2. logical correctness;
+3. boundary and failure cases;
+4. code quality and maintainability;
+5. test coverage and whether tests prove the claims;
+6. actual runtime and installer results.
+
+A changes-required verdict must include an ordered, evidence-backed repair checklist. The main task reproduces each issue, repairs it with tests, reruns affected and full verification, and returns the new candidate to the same review task for a complete re-review. This loop continues without an iteration limit until the reviewer returns an evidence-backed approval with no unresolved blocking finding. The active goal cannot be marked complete before that approval and its review/repair history are recorded.
+
+## 19. Authoritative References
 
 - Codex app-server protocol: <https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md>
 - Codex custom agents and subagents: <https://developers.openai.com/codex/subagents>
