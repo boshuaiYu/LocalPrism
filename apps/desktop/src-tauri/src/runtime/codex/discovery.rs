@@ -444,8 +444,6 @@ fn version_command(path: &Path) -> Result<tokio::process::Command, String> {
 
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     command.kill_on_drop(true);
-    #[cfg(target_os = "windows")]
-    command.as_std_mut().creation_flags(0x0800_0000);
     Ok(command)
 }
 
@@ -498,11 +496,212 @@ fn system32_executable(name: &str) -> Option<PathBuf> {
 }
 
 pub(super) fn isolate_process_tree(command: &mut tokio::process::Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+
+        // The suspended launch closes the spawn-to-job-assignment race: no candidate or installer
+        // code can create descendants before `attach_process_tree` assigns the process to its job.
+        command
+            .as_std_mut()
+            .creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+    }
+
     #[cfg(unix)]
     command.as_std_mut().process_group(0);
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, target_os = "windows")))]
     let _ = command;
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsOwnedHandle {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(target_os = "windows")]
+// SAFETY: Windows kernel handles are process-wide values. This wrapper owns the handle and
+// only exposes thread-safe kernel operations; Drop closes it exactly once.
+unsafe impl Send for WindowsOwnedHandle {}
+
+#[cfg(target_os = "windows")]
+impl WindowsOwnedHandle {
+    fn raw(&self) -> windows_sys::Win32::Foundation::HANDLE {
+        self.handle
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsOwnedHandle {
+    fn drop(&mut self) {
+        // SAFETY: This wrapper uniquely owns the valid handle and Drop runs exactly once.
+        let _ = unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsJobHandle {
+    handle: WindowsOwnedHandle,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsJobHandle {
+    fn attach(child: &tokio::process::Child) -> Result<Self, String> {
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        // SAFETY: Null security attributes/name request a private unnamed job. The returned handle
+        // is checked and immediately wrapped for single-owner CloseHandle cleanup.
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(format!(
+                "Windows job object creation failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let job = Self {
+            handle: WindowsOwnedHandle { handle },
+        };
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let information_size = u32::try_from(std::mem::size_of_val(&limits))
+            .map_err(|_| "Windows job object information was too large".to_string())?;
+        // SAFETY: `limits` has the exact layout required by JobObjectExtendedLimitInformation and
+        // remains alive for the duration of this synchronous call.
+        if unsafe {
+            SetInformationJobObject(
+                job.handle.raw(),
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&limits).cast(),
+                information_size,
+            )
+        } == 0
+        {
+            return Err(format!(
+                "Windows job object configuration failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let process_handle = child
+            .raw_handle()
+            .ok_or_else(|| "child process handle was unavailable for job assignment".to_string())?;
+        // SAFETY: Tokio owns a valid process handle while the child is running; AssignProcessToJobObject
+        // only borrows it for this call. The job handle remains owned by `job`.
+        if unsafe { AssignProcessToJobObject(job.handle.raw(), process_handle.cast()) } == 0 {
+            return Err(format!(
+                "Windows job object assignment failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(job)
+    }
+
+    fn terminate(&self) -> Result<(), String> {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+
+        // SAFETY: `self.handle` is a live owned job handle until Drop closes it.
+        if unsafe { TerminateJobObject(self.handle.raw(), 1) } == 0 {
+            return Err(format!(
+                "Windows job object termination failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn resume_suspended_child(child: &tokio::process::Child) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    let process_id = child
+        .id()
+        .ok_or_else(|| "child process id was unavailable for thread resume".to_string())?;
+    // SAFETY: The snapshot call has no borrowed inputs. A successful handle is uniquely wrapped
+    // below and closed on every return path.
+    let snapshot_handle = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot_handle == INVALID_HANDLE_VALUE {
+        return Err(format!(
+            "Windows thread snapshot failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let snapshot = WindowsOwnedHandle {
+        handle: snapshot_handle,
+    };
+    let mut entry = THREADENTRY32 {
+        dwSize: u32::try_from(std::mem::size_of::<THREADENTRY32>())
+            .map_err(|_| "Windows thread entry was too large".to_string())?,
+        ..THREADENTRY32::default()
+    };
+    // SAFETY: `entry` has the required size and remains writable for these synchronous calls.
+    if unsafe { Thread32First(snapshot.raw(), &mut entry) } == 0 {
+        return Err(format!(
+            "Windows thread enumeration failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    loop {
+        if entry.th32OwnerProcessID == process_id {
+            // SAFETY: The enumerated thread id belongs to the newly created child. The returned
+            // handle is checked, uniquely wrapped, and used only for ResumeThread.
+            let thread_handle = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+            if thread_handle.is_null() {
+                return Err(format!(
+                    "Windows child thread open failed: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let thread = WindowsOwnedHandle {
+                handle: thread_handle,
+            };
+            // SAFETY: `thread` is a live handle with THREAD_SUSPEND_RESUME access.
+            if unsafe { ResumeThread(thread.raw()) } == u32::MAX {
+                return Err(format!(
+                    "Windows child thread resume failed: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            return Ok(());
+        }
+
+        // SAFETY: The snapshot and output entry remain valid for the synchronous enumeration.
+        if unsafe { Thread32Next(snapshot.raw(), &mut entry) } == 0 {
+            break;
+        }
+    }
+
+    Err("Windows child primary thread was unavailable for resume".into())
+}
+
+pub(super) struct ProcessTreeGuard {
+    #[cfg(target_os = "windows")]
+    windows_job: WindowsJobHandle,
+}
+
+pub(super) fn attach_process_tree(
+    child: &tokio::process::Child,
+) -> Result<ProcessTreeGuard, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let windows_job = WindowsJobHandle::attach(child)?;
+        resume_suspended_child(child)?;
+        Ok(ProcessTreeGuard { windows_job })
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = child;
+        Ok(ProcessTreeGuard {})
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -562,11 +761,29 @@ async fn terminate_platform_process_tree(
 
 pub(super) async fn terminate_process_tree(
     child: &mut tokio::process::Child,
+    process_tree: Option<ProcessTreeGuard>,
     timeout: Duration,
 ) -> Result<(), String> {
-    let tree_result = match child.id() {
-        Some(process_id) => terminate_platform_process_tree(process_id, timeout).await,
-        None => Err("process id was unavailable for tree termination".into()),
+    #[cfg(target_os = "windows")]
+    let tree_result = match process_tree {
+        Some(guard) => {
+            let result = guard.windows_job.terminate();
+            drop(guard);
+            result
+        }
+        None => match child.id() {
+            Some(process_id) => terminate_platform_process_tree(process_id, timeout).await,
+            None => Err("process id was unavailable for tree termination".into()),
+        },
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let tree_result = {
+        drop(process_tree);
+        match child.id() {
+            Some(process_id) => terminate_platform_process_tree(process_id, timeout).await,
+            None => Err("process id was unavailable for tree termination".into()),
+        }
     };
 
     let _ = child.start_kill();
@@ -585,7 +802,7 @@ pub(super) async fn terminate_process_tree(
 }
 
 async fn terminate_candidate(child: &mut tokio::process::Child) -> Result<(), String> {
-    terminate_process_tree(child, CANDIDATE_REAP_TIMEOUT)
+    terminate_process_tree(child, None, CANDIDATE_REAP_TIMEOUT)
         .await
         .map_err(|error| format!("candidate cleanup failed: {error}"))
 }
@@ -600,19 +817,31 @@ async fn run_candidate_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    #[cfg(target_os = "windows")]
-    command.as_std_mut().creation_flags(0x0800_0000);
     isolate_process_tree(&mut command);
 
     let mut child = command
         .spawn()
         .map_err(|error| format!("failed to start candidate: {error}"))?;
+    let mut process_tree = match attach_process_tree(&child) {
+        Ok(process_tree) => Some(process_tree),
+        Err(error) => {
+            let cleanup = terminate_candidate(&mut child).await.err();
+            return Err(match cleanup {
+                Some(cleanup) => {
+                    format!("failed to isolate candidate process tree: {error}; {cleanup}")
+                }
+                None => format!("failed to isolate candidate process tree: {error}"),
+            });
+        }
+    };
     let Some(stdout) = child.stdout.take() else {
-        let _ = terminate_candidate(&mut child).await;
+        let _ =
+            terminate_process_tree(&mut child, process_tree.take(), CANDIDATE_REAP_TIMEOUT).await;
         return Err("candidate stdout was unavailable".into());
     };
     let Some(stderr) = child.stderr.take() else {
-        let _ = terminate_candidate(&mut child).await;
+        let _ =
+            terminate_process_tree(&mut child, process_tree.take(), CANDIDATE_REAP_TIMEOUT).await;
         return Err("candidate stderr was unavailable".into());
     };
     let stdout_task = tokio::spawn(capture_candidate_stream(stdout, output_limit));
@@ -622,7 +851,10 @@ async fn run_candidate_command(
     let status = match wait_result {
         Ok(Ok(status)) => Some(status),
         Ok(Err(error)) => {
-            let cleanup = terminate_candidate(&mut child).await.err();
+            let cleanup =
+                terminate_process_tree(&mut child, process_tree.take(), CANDIDATE_REAP_TIMEOUT)
+                    .await
+                    .err();
             let _ = finish_candidate_reader(stdout_task).await;
             let _ = finish_candidate_reader(stderr_task).await;
             return Err(match cleanup {
@@ -633,7 +865,10 @@ async fn run_candidate_command(
             });
         }
         Err(_) => {
-            let cleanup = terminate_candidate(&mut child).await.err();
+            let cleanup =
+                terminate_process_tree(&mut child, process_tree.take(), CANDIDATE_REAP_TIMEOUT)
+                    .await
+                    .err();
             let _ = finish_candidate_reader(stdout_task).await;
             let _ = finish_candidate_reader(stderr_task).await;
             return Err(match cleanup {
@@ -642,6 +877,8 @@ async fn run_candidate_command(
             });
         }
     };
+
+    drop(process_tree.take());
 
     let stdout = finish_candidate_reader(stdout_task).await;
     let stderr = finish_candidate_reader(stderr_task).await;
@@ -1160,20 +1397,110 @@ mod tests {
     #[tokio::test]
     async fn candidate_timeout_terminates_windows_descendants() {
         let temp = tempfile::tempdir().unwrap();
-        let sentinel = temp.path().join("candidate-descendant-sentinel.txt");
+        let trigger = temp.path().join("candidate-descendant-trigger.txt");
+        let mut sentinels = Vec::new();
+        let mut tasks = tokio::task::JoinSet::new();
+        for index in 0..4 {
+            let sentinel = temp
+                .path()
+                .join(format!("candidate-descendant-sentinel-{index}.txt"));
+            let mut command = candidate_test_command(
+                "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-NonInteractive','-Command','while (-not (Test-Path -LiteralPath $env:CODEX_DESCENDANT_TRIGGER)) { Start-Sleep -Milliseconds 20 }; Set-Content -LiteralPath $env:CODEX_DESCENDANT_SENTINEL alive'; Start-Sleep -Seconds 5",
+                "",
+            );
+            command
+                .env("CODEX_DESCENDANT_TRIGGER", &trigger)
+                .env("CODEX_DESCENDANT_SENTINEL", &sentinel);
+            sentinels.push(sentinel);
+            tasks.spawn(async move {
+                run_candidate_command(command, Duration::from_millis(100), 1024).await
+            });
+        }
+
+        while let Some(result) = tasks.join_next().await {
+            let error = result.unwrap().unwrap_err();
+            assert!(error.contains("timed out"));
+        }
+        std::fs::write(&trigger, "check for survivors").unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        for sentinel in sentinels {
+            assert!(!sentinel.exists(), "candidate descendant survived timeout");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn windows_job_guard_drop_terminates_the_assigned_process_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let ready = temp.path().join("job-guard-descendant-ready.txt");
+        let trigger = temp.path().join("job-guard-descendant-trigger.txt");
+        let sentinel = temp.path().join("job-guard-descendant-sentinel.txt");
         let mut command = candidate_test_command(
-            "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep -Milliseconds 500; Set-Content -LiteralPath $env:CODEX_DESCENDANT_SENTINEL alive'; Start-Sleep -Seconds 5",
+            "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-NonInteractive','-Command','while (-not (Test-Path -LiteralPath $env:CODEX_JOB_TRIGGER)) { Start-Sleep -Milliseconds 20 }; Set-Content -LiteralPath $env:CODEX_JOB_SENTINEL alive'; Set-Content -LiteralPath $env:CODEX_JOB_READY ready; Start-Sleep -Seconds 5",
             "",
         );
-        command.env("CODEX_DESCENDANT_SENTINEL", &sentinel);
+        command
+            .env("CODEX_JOB_READY", &ready)
+            .env("CODEX_JOB_TRIGGER", &trigger)
+            .env("CODEX_JOB_SENTINEL", &sentinel)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        isolate_process_tree(&mut command);
+        let mut child = command.spawn().unwrap();
+        let guard = attach_process_tree(&child).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !ready.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
 
-        let error = run_candidate_command(command, Duration::from_millis(100), 1024)
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(2), child.wait())
             .await
-            .unwrap_err();
-        tokio::time::sleep(Duration::from_millis(800)).await;
+            .unwrap()
+            .unwrap();
+        std::fs::write(&trigger, "check for survivors").unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
-        assert!(error.contains("timed out"));
-        assert!(!sentinel.exists(), "candidate descendant survived timeout");
+        assert!(!sentinel.exists(), "job guard drop left a descendant alive");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn windows_assignment_failure_fallback_kills_the_suspended_child_before_it_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        let sentinel = temp.path().join("fallback-root-ran.txt");
+        let mut command = candidate_test_command(
+            "Set-Content -LiteralPath $env:CODEX_FALLBACK_SENTINEL ran; Start-Sleep -Seconds 5",
+            "",
+        );
+        command
+            .env("CODEX_FALLBACK_SENTINEL", &sentinel)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        isolate_process_tree(&mut command);
+        let mut child = command.spawn().unwrap();
+        assert!(
+            !sentinel.exists(),
+            "suspended fallback child ran before cleanup"
+        );
+
+        terminate_process_tree(&mut child, None, Duration::from_secs(2))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        assert!(
+            !sentinel.exists(),
+            "assignment-failure fallback allowed suspended child code to run"
+        );
     }
 
     #[cfg(unix)]

@@ -11,9 +11,6 @@ use tauri::{Emitter, WebviewWindow};
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 use tokio::task::JoinHandle;
 
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-
 pub mod discovery;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -739,6 +736,7 @@ where
 #[derive(Default)]
 struct ProcessCodexInstallerLifecycle {
     child: Option<tokio::process::Child>,
+    process_tree: Option<discovery::ProcessTreeGuard>,
     reader_tasks: Vec<JoinHandle<()>>,
 }
 
@@ -756,8 +754,6 @@ impl<S: RuntimeInstallEventSink> CodexInstallerLifecycle<S> for ProcessCodexInst
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
-            #[cfg(target_os = "windows")]
-            command.as_std_mut().creation_flags(0x0800_0000);
             discovery::isolate_process_tree(&mut command);
 
             let mut child = command.spawn().map_err(|error| {
@@ -765,20 +761,41 @@ impl<S: RuntimeInstallEventSink> CodexInstallerLifecycle<S> for ProcessCodexInst
                     "Codex installer could not be started: {error}"
                 ))
             })?;
+            let process_tree = match discovery::attach_process_tree(&child) {
+                Ok(process_tree) => process_tree,
+                Err(error) => {
+                    let cleanup = discovery::terminate_process_tree(
+                        &mut child,
+                        None,
+                        INSTALL_PROCESS_REAP_TIMEOUT,
+                    )
+                    .await
+                    .err();
+                    let cleanup = cleanup
+                        .map(|cleanup| format!("; cleanup also failed: {cleanup}"))
+                        .unwrap_or_default();
+                    return Err(InstallerStartFailure::Spawn(format!(
+                        "Codex installer process isolation failed: {error}{cleanup}"
+                    )));
+                }
+            };
             let Some(stdout) = child.stdout.take() else {
                 self.child = Some(child);
+                self.process_tree = Some(process_tree);
                 return Err(InstallerStartFailure::Pipe(
                     "Codex installer stdout was unavailable".into(),
                 ));
             };
             let Some(stderr) = child.stderr.take() else {
                 self.child = Some(child);
+                self.process_tree = Some(process_tree);
                 return Err(InstallerStartFailure::Pipe(
                     "Codex installer stderr was unavailable".into(),
                 ));
             };
 
             self.child = Some(child);
+            self.process_tree = Some(process_tree);
             self.reader_tasks.push(tokio::spawn(stream_installer_lines(
                 sink.clone(),
                 RuntimeInstallStream::Stdout,
@@ -806,6 +823,7 @@ impl<S: RuntimeInstallEventSink> CodexInstallerLifecycle<S> for ProcessCodexInst
             let outcome = tokio::time::timeout(timeout, child.wait()).await;
             match outcome {
                 Ok(Ok(status)) => {
+                    self.process_tree.take();
                     self.child.take();
                     InstallerWaitOutcome::Exited {
                         success: status.success(),
@@ -822,11 +840,16 @@ impl<S: RuntimeInstallEventSink> CodexInstallerLifecycle<S> for ProcessCodexInst
     fn terminate_and_reap<'a>(&'a mut self) -> InstallLifecycleFuture<'a, Result<(), String>> {
         Box::pin(async move {
             let Some(mut child) = self.child.take() else {
+                self.process_tree.take();
                 return Ok(());
             };
-            discovery::terminate_process_tree(&mut child, INSTALL_PROCESS_REAP_TIMEOUT)
-                .await
-                .map_err(|error| format!("Codex installer cleanup failed: {error}"))
+            discovery::terminate_process_tree(
+                &mut child,
+                self.process_tree.take(),
+                INSTALL_PROCESS_REAP_TIMEOUT,
+            )
+            .await
+            .map_err(|error| format!("Codex installer cleanup failed: {error}"))
         })
     }
 
@@ -1460,6 +1483,43 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    fn windows_descendant_install_spec(
+        root: &std::path::Path,
+        index: usize,
+    ) -> (CodexInstallCommand, PathBuf, PathBuf) {
+        let trigger = root.join(format!("installer-descendant-trigger-{index}.txt"));
+        let sentinel = root.join(format!("installer-descendant-survived-{index}.txt"));
+        let script = root.join(format!("installer-with-descendant-{index}.cmd"));
+        let escaped_trigger = trigger.to_string_lossy().replace('\'', "''");
+        let escaped_sentinel = sentinel.to_string_lossy().replace('\'', "''");
+        std::fs::write(
+            &script,
+            format!(
+                concat!(
+                    "@echo off\r\n",
+                    "start \"\" /b \"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" ",
+                    "-NoProfile -NonInteractive -Command \"while (-not [System.IO.File]::Exists('{}')) ",
+                    "{{ Start-Sleep -Milliseconds 20 }}; ",
+                    "[System.IO.File]::WriteAllText('{}', 'survived')\"\r\n",
+                    "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" ",
+                    "-NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 5\"\r\n"
+                ),
+                escaped_trigger,
+                escaped_sentinel
+            ),
+        )
+        .unwrap();
+        (
+            CodexInstallCommand {
+                program: script,
+                args: Vec::new(),
+            },
+            trigger,
+            sentinel,
+        )
+    }
+
     fn completion_values(events: &[RuntimeInstallEvent]) -> Vec<bool> {
         events
             .iter()
@@ -1734,28 +1794,7 @@ mod tests {
     #[tokio::test]
     async fn production_installer_timeout_terminates_windows_descendants_before_completion() {
         let temp = tempfile::tempdir().unwrap();
-        let sentinel = temp.path().join("installer-descendant-survived.txt");
-        let script = temp.path().join("installer-with-descendant.cmd");
-        let escaped_sentinel = sentinel.to_string_lossy().replace('\'', "''");
-        std::fs::write(
-            &script,
-            format!(
-                concat!(
-                    "@echo off\r\n",
-                    "start \"\" /b \"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" ",
-                    "-NoProfile -NonInteractive -Command \"Start-Sleep -Milliseconds 800; ",
-                    "[System.IO.File]::WriteAllText('{}', 'survived')\"\r\n",
-                    "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" ",
-                    "-NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 5\"\r\n"
-                ),
-                escaped_sentinel
-            ),
-        )
-        .unwrap();
-        let spec = CodexInstallCommand {
-            program: script,
-            args: Vec::new(),
-        };
+        let (spec, trigger, sentinel) = windows_descendant_install_spec(temp.path(), 0);
         let mut lifecycle = ProcessCodexInstallerLifecycle::default();
         let mut discoverer = FakePostInstallDiscoverer {
             result: Err("must not be called".into()),
@@ -1773,7 +1812,8 @@ mod tests {
             Duration::from_millis(100),
         )
         .await;
-        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        std::fs::write(&trigger, "check for survivors").unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         assert_eq!(result, Ok(false));
         assert!(
@@ -1787,6 +1827,64 @@ mod tests {
         assert!(lifecycle.child.is_none());
         assert!(lifecycle.reader_tasks.is_empty());
         assert_one_terminal_completion(&sink.events(), false);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn production_installer_job_cleanup_is_stable_under_concurrency() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut triggers = Vec::new();
+        let mut sentinels = Vec::new();
+        let mut tasks = tokio::task::JoinSet::new();
+        for index in 0..4 {
+            let (spec, trigger, sentinel) = windows_descendant_install_spec(temp.path(), index);
+            triggers.push(trigger);
+            sentinels.push(sentinel);
+            tasks.spawn(async move {
+                let mut lifecycle = ProcessCodexInstallerLifecycle::default();
+                let mut discoverer = FakePostInstallDiscoverer {
+                    result: Err("must not be called".into()),
+                    calls: 0,
+                };
+                let sink = RecordingInstallSink::default();
+                let result = orchestrate_codex_installation(
+                    &mut lifecycle,
+                    &mut discoverer,
+                    sink.clone(),
+                    &spec,
+                    Duration::from_millis(100),
+                    Duration::from_millis(100),
+                )
+                .await;
+                (
+                    result,
+                    discoverer.calls,
+                    lifecycle.child.is_none(),
+                    lifecycle.reader_tasks.is_empty(),
+                    sink.events(),
+                )
+            });
+        }
+
+        while let Some(result) = tasks.join_next().await {
+            let (install, discovery_calls, child_reaped, readers_finished, events) =
+                result.unwrap();
+            assert_eq!(install, Ok(false));
+            assert_eq!(discovery_calls, 0);
+            assert!(child_reaped);
+            assert!(readers_finished);
+            assert_one_terminal_completion(&events, false);
+        }
+        for trigger in triggers {
+            std::fs::write(trigger, "check for survivors").unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        for sentinel in sentinels {
+            assert!(
+                !sentinel.exists(),
+                "concurrent installer descendant survived cleanup"
+            );
+        }
     }
 
     #[cfg(unix)]
