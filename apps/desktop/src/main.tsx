@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { initializeAppZoom } from "./lib/app-zoom";
 import { createLogger } from "./lib/debug/logger";
 import { APP_VISIBILITY_RESTORED } from "./lib/debug/log-store";
+import "@/stores/runtime-store";
 import "./styles/globals.css";
 
 const isDebugWindow = new URLSearchParams(window.location.search).has("debug");

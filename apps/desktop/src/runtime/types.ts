@@ -43,6 +43,38 @@ export interface RuntimeModel {
   isDefault: boolean;
 }
 
+export type RuntimeLoginStartResult =
+  | { type: "apiKey" }
+  | { type: "chatgpt"; authUrl: string; loginId: string }
+  | {
+      type: "chatgptDeviceCode";
+      verificationUrl: string;
+      userCode: string;
+      loginId: string;
+    };
+
+export type RuntimeLoginState =
+  | {
+      mode: "browser";
+      status: "waiting";
+      loginId: string;
+      authUrl: string;
+    }
+  | {
+      mode: "device-code";
+      status: "waiting";
+      loginId: string;
+      verificationUrl: string;
+      userCode: string;
+    }
+  | { mode: "api-key"; status: "complete"; loginId: null }
+  | {
+      mode: "browser" | "device-code" | "api-key";
+      status: "error";
+      loginId: string | null;
+      message: string;
+    };
+
 export interface ConversationRef {
   runtime: RuntimeKind;
   sessionId: string;

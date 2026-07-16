@@ -2,16 +2,19 @@ use super::discovery::{
     attach_process_tree, discover_codex_binary, isolate_process_tree, terminate_process_tree,
     ProcessTreeGuard,
 };
-use super::protocol::InitializeParams;
+use super::protocol::{
+    AccountLoginCompletedNotification, AccountUpdatedNotification, InitializeParams,
+};
 use super::rpc::{RpcClient, RpcInbound};
 use super::sanitize_install_output;
 use crate::runtime::RuntimeKind;
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tauri::Emitter;
@@ -26,8 +29,10 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 const PROCESS_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 const WARNING_EVENT: &str = "runtime-warning";
+const ACCOUNT_UPDATED_EVENT: &str = "runtime-account-updated";
 const WARNING_METHOD_LIMIT: usize = 256;
 const INBOUND_QUEUE_CAPACITY: usize = 32;
+const EARLY_LOGIN_COMPLETION_LIMIT: usize = 8;
 
 type DynReader = Box<dyn AsyncRead + Unpin + Send>;
 type DynWriter = Box<dyn AsyncWrite + Unpin + Send>;
@@ -300,11 +305,17 @@ fn safe_warning_method(method: &str) -> String {
 
 trait WarningSink: Send + Sync {
     fn emit(&self, message: String);
+
+    fn handle_notification(&self, _client: Arc<RpcClient>, _method: String, _params: Value) {}
+
+    fn transport_reset(&self) {}
 }
 
 #[derive(Clone)]
 struct TauriWarningSink {
     app: tauri::AppHandle,
+    account_events: Arc<AccountEventState>,
+    codex_version: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -312,6 +323,75 @@ struct TauriWarningSink {
 struct RuntimeWarningPayload {
     runtime: RuntimeKind,
     message: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AccountNotificationAction {
+    Ignore,
+    Refresh {
+        warning: Option<String>,
+        sequence: u64,
+    },
+}
+
+fn classify_account_notification(
+    account_events: &AccountEventState,
+    method: &str,
+    params: Value,
+) -> Result<AccountNotificationAction, String> {
+    match method {
+        "account/login/completed" => {
+            let notification: AccountLoginCompletedNotification = serde_json::from_value(params)
+                .map_err(|_| {
+                    "Malformed Codex `account/login/completed` notification".to_string()
+                })?;
+            let Some(login_id) = notification.login_id.as_deref() else {
+                return Ok(AccountNotificationAction::Ignore);
+            };
+            let mut tracking = account_events
+                .login_tracking
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if tracking.active_login_id.as_deref() == Some(login_id) {
+                tracking.active_login_id.take();
+                let sequence = account_events.reserve_refresh_locked();
+                drop(tracking);
+                return Ok(AccountNotificationAction::Refresh {
+                    warning: login_completion_warning(&notification),
+                    sequence,
+                });
+            }
+            if tracking.pending_attempt.is_some() {
+                if tracking.early_completions.len() == EARLY_LOGIN_COMPLETION_LIMIT {
+                    tracking.early_completions.pop_front();
+                }
+                tracking.early_completions.push_back(notification);
+            }
+            Ok(AccountNotificationAction::Ignore)
+        }
+        "account/updated" => {
+            let _notification: AccountUpdatedNotification = serde_json::from_value(params)
+                .map_err(|_| "Malformed Codex `account/updated` notification".to_string())?;
+            let sequence = account_events.reserve_refresh();
+            Ok(AccountNotificationAction::Refresh {
+                warning: None,
+                sequence,
+            })
+        }
+        _ => Ok(AccountNotificationAction::Ignore),
+    }
+}
+
+fn login_completion_warning(notification: &AccountLoginCompletedNotification) -> Option<String> {
+    if notification.success {
+        return None;
+    }
+    Some(match notification.error.as_deref() {
+        Some(error) if !error.is_empty() => {
+            format!("Codex login failed: {}", safe_warning_method(error))
+        }
+        _ => "Codex login failed".to_string(),
+    })
 }
 
 impl WarningSink for TauriWarningSink {
@@ -324,6 +404,83 @@ impl WarningSink for TauriWarningSink {
             },
         );
     }
+
+    fn handle_notification(&self, client: Arc<RpcClient>, method: String, params: Value) {
+        let action = match classify_account_notification(&self.account_events, &method, params) {
+            Ok(action) => action,
+            Err(error) => {
+                self.emit(error);
+                return;
+            }
+        };
+        let AccountNotificationAction::Refresh { warning, sequence } = action else {
+            return;
+        };
+        let account_error = warning;
+
+        let sink = self.clone();
+        tokio::spawn(async move {
+            let _refresh_guard = sink.account_events.refresh.lock().await;
+            {
+                let _tracking = sink
+                    .account_events
+                    .login_tracking
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if sink.account_events.sequence.load(Ordering::Acquire) != sequence {
+                    return;
+                }
+                if let Some(warning) = account_error.as_ref() {
+                    sink.emit(warning.clone());
+                }
+            }
+            let account = match super::read_account_with_request(
+                true,
+                sink.codex_version.clone(),
+                |method, params| {
+                    let client = client.clone();
+                    async move {
+                        client
+                            .request(method, params, DEFAULT_REQUEST_TIMEOUT)
+                            .await
+                    }
+                },
+            )
+            .await
+            {
+                Ok(account) => account,
+                Err(error) => {
+                    let _tracking = sink
+                        .account_events
+                        .login_tracking
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if sink.account_events.sequence.load(Ordering::Acquire) == sequence {
+                        sink.emit(format!(
+                            "Failed to refresh Codex account: {}",
+                            safe_warning_method(&error)
+                        ));
+                    }
+                    return;
+                }
+            };
+            let _tracking = sink
+                .account_events
+                .login_tracking
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if sink.account_events.sequence.load(Ordering::Acquire) != sequence {
+                return;
+            }
+            let mut account = account;
+            account.error = account_error;
+            let _ = sink.app.emit(ACCOUNT_UPDATED_EVENT, account);
+        });
+    }
+
+    fn transport_reset(&self) {
+        self.account_events.reset_transport();
+    }
 }
 
 async fn handle_inbound(
@@ -333,7 +490,9 @@ async fn handle_inbound(
 ) {
     while let Some(message) = inbound.recv().await {
         match message {
-            RpcInbound::Notification { .. } => {}
+            RpcInbound::Notification { method, params } => {
+                warnings.handle_notification(client.clone(), method, params);
+            }
             RpcInbound::ServerRequest { id, method, .. }
                 if matches!(
                     method.as_str(),
@@ -743,6 +902,8 @@ async fn run_supervisor(
             }
         };
 
+        warnings.transport_reset();
+
         if restart_used {
             let fatal = with_diagnostics(
                 &format!(
@@ -798,14 +959,279 @@ fn with_diagnostics(message: &str, diagnostics: &StdMutex<RecentDiagnostics>) ->
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LoginAttemptToken {
+    attempt: u64,
+    transport_generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BufferedLoginCompletion {
+    pub(crate) warning: Option<String>,
+    pub(crate) token: LoginAttemptToken,
+    pub(crate) sequence: u64,
+}
+
+#[derive(Default)]
+struct LoginTrackingState {
+    active_login_id: Option<String>,
+    pending_attempt: Option<LoginAttemptToken>,
+    early_completions: VecDeque<AccountLoginCompletedNotification>,
+    next_attempt: u64,
+    transport_generation: u64,
+}
+
+#[derive(Default)]
+struct AccountEventState {
+    login_tracking: StdMutex<LoginTrackingState>,
+    refresh: Mutex<()>,
+    sequence: AtomicU64,
+    codex_version: StdMutex<Option<String>>,
+}
+
+impl AccountEventState {
+    fn reserve_refresh_locked(&self) -> u64 {
+        self.sequence.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
+    }
+
+    fn reserve_refresh(&self) -> u64 {
+        let _tracking = self
+            .login_tracking
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.reserve_refresh_locked()
+    }
+
+    fn reset_transport(&self) {
+        let mut tracking = self
+            .login_tracking
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        tracking.transport_generation = tracking.transport_generation.wrapping_add(1);
+        tracking.active_login_id = None;
+        tracking.pending_attempt = None;
+        tracking.early_completions.clear();
+        self.reserve_refresh_locked();
+    }
+}
+
 #[derive(Default)]
 pub struct CodexAppServerState {
     inner: Mutex<Option<CodexAppServer>>,
     startup: Mutex<()>,
     shutting_down: AtomicBool,
+    account_events: Arc<AccountEventState>,
 }
 
 impl CodexAppServerState {
+    #[cfg(test)]
+    pub(crate) fn remember_active_login(&self, login_id: String) {
+        let mut tracking = self
+            .account_events
+            .login_tracking
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        tracking.active_login_id = Some(login_id);
+        tracking.pending_attempt = None;
+        tracking.early_completions.clear();
+        self.account_events.sequence.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn begin_login_attempt(&self) -> LoginAttemptToken {
+        let mut tracking = self
+            .account_events
+            .login_tracking
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        tracking.next_attempt = tracking.next_attempt.wrapping_add(1);
+        let token = LoginAttemptToken {
+            attempt: tracking.next_attempt,
+            transport_generation: tracking.transport_generation,
+        };
+        tracking.active_login_id = None;
+        tracking.pending_attempt = Some(token);
+        tracking.early_completions.clear();
+        self.account_events.sequence.fetch_add(1, Ordering::AcqRel);
+        token
+    }
+
+    pub(crate) fn finish_login_attempt(
+        &self,
+        token: LoginAttemptToken,
+        login_id: String,
+    ) -> Result<Option<BufferedLoginCompletion>, String> {
+        let mut tracking = self
+            .account_events
+            .login_tracking
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if tracking.pending_attempt != Some(token)
+            || tracking.transport_generation != token.transport_generation
+        {
+            return Err(
+                "Codex login connection restarted or was superseded before login could be tracked"
+                    .into(),
+            );
+        }
+        tracking.pending_attempt = None;
+        let completion = tracking
+            .early_completions
+            .iter()
+            .position(|completion| completion.login_id.as_deref() == Some(login_id.as_str()))
+            .and_then(|position| tracking.early_completions.remove(position));
+        tracking.early_completions.clear();
+        if let Some(completion) = completion {
+            tracking.active_login_id = None;
+            let sequence = self.account_events.reserve_refresh_locked();
+            return Ok(Some(BufferedLoginCompletion {
+                warning: login_completion_warning(&completion),
+                token,
+                sequence,
+            }));
+        }
+        tracking.active_login_id = Some(login_id);
+        Ok(None)
+    }
+
+    pub(crate) fn finish_login_attempt_without_id(
+        &self,
+        token: LoginAttemptToken,
+    ) -> Result<(), String> {
+        let mut tracking = self
+            .account_events
+            .login_tracking
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if tracking.pending_attempt != Some(token)
+            || tracking.transport_generation != token.transport_generation
+        {
+            return Err(
+                "Codex login connection restarted or was superseded before login could be tracked"
+                    .into(),
+            );
+        }
+        tracking.pending_attempt = None;
+        tracking.active_login_id = None;
+        tracking.early_completions.clear();
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_login_attempt_current(&self, token: LoginAttemptToken) -> bool {
+        let tracking = self
+            .account_events
+            .login_tracking
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        tracking.next_attempt == token.attempt
+            && tracking.transport_generation == token.transport_generation
+    }
+
+    pub(crate) async fn lock_account_refresh(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.account_events.refresh.lock().await
+    }
+
+    pub(crate) fn is_buffered_login_completion_current(
+        &self,
+        completion: &BufferedLoginCompletion,
+    ) -> bool {
+        let tracking = self
+            .account_events
+            .login_tracking
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        tracking.next_attempt == completion.token.attempt
+            && tracking.transport_generation == completion.token.transport_generation
+            && self.account_events.sequence.load(Ordering::Acquire) == completion.sequence
+    }
+
+    pub(crate) fn with_current_buffered_login_completion<T>(
+        &self,
+        completion: &BufferedLoginCompletion,
+        action: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let tracking = self
+            .account_events
+            .login_tracking
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if tracking.next_attempt != completion.token.attempt
+            || tracking.transport_generation != completion.token.transport_generation
+            || self.account_events.sequence.load(Ordering::Acquire) != completion.sequence
+        {
+            return None;
+        }
+        Some(action())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reserve_account_refresh(&self) -> u64 {
+        self.account_events.reserve_refresh()
+    }
+
+    pub(crate) fn abandon_login_attempt(&self, token: LoginAttemptToken) {
+        let mut tracking = self
+            .account_events
+            .login_tracking
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if tracking.pending_attempt == Some(token) {
+            tracking.pending_attempt = None;
+            tracking.early_completions.clear();
+        }
+    }
+
+    pub(crate) fn reset_account_transport(&self) {
+        self.account_events.reset_transport();
+    }
+
+    pub(crate) fn active_login_id(&self) -> Option<String> {
+        self.account_events
+            .login_tracking
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active_login_id
+            .clone()
+    }
+
+    pub(crate) fn take_matching_active_login(&self, login_id: Option<&str>) -> bool {
+        let Some(login_id) = login_id else {
+            return false;
+        };
+        let mut tracking = self
+            .account_events
+            .login_tracking
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if tracking.active_login_id.as_deref() != Some(login_id) {
+            return false;
+        }
+        tracking.active_login_id.take();
+        self.account_events.sequence.fetch_add(1, Ordering::AcqRel);
+        true
+    }
+
+    pub(crate) fn clear_active_login(&self) {
+        let mut tracking = self
+            .account_events
+            .login_tracking
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        tracking.active_login_id = None;
+        tracking.pending_attempt = None;
+        tracking.early_completions.clear();
+        tracking.next_attempt = tracking.next_attempt.wrapping_add(1);
+        self.account_events.sequence.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn codex_version(&self) -> Option<String> {
+        self.account_events
+            .codex_version
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     fn ensure_accepting_requests(&self) -> Result<(), String> {
         if self.shutting_down.load(Ordering::Acquire) {
             Err("Codex app-server is shutting down".into())
@@ -855,8 +1281,18 @@ impl CodexAppServerState {
             if remaining.is_zero() {
                 return Err("Codex app-server startup timed out".into());
             }
+            let codex_version = Some(binary.version.clone());
+            *self
+                .account_events
+                .codex_version
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = codex_version.clone();
             let spawner = Arc::new(ProcessSpawner::new(binary.path));
-            let warnings = Arc::new(TauriWarningSink { app: app.clone() });
+            let warnings = Arc::new(TauriWarningSink {
+                app: app.clone(),
+                account_events: self.account_events.clone(),
+                codex_version,
+            });
             let version = app.package_info().version.to_string();
             let server = tokio::time::timeout_at(
                 deadline,
@@ -914,6 +1350,7 @@ impl CodexAppServerState {
 
     pub async fn shutdown(&self) -> Result<(), String> {
         self.shutting_down.store(true, Ordering::Release);
+        self.reset_account_transport();
         let _startup_guard = self.startup.lock().await;
         let server = self.inner.lock().await.take();
         match server {
@@ -942,9 +1379,9 @@ impl CodexAppServerState {
 #[cfg(test)]
 mod tests {
     use super::{
-        handle_inbound, run_supervisor, start_supervisor, AppServerProcess, AppServerSpawner,
-        CodexAppServerState, ProcessExit, RecentDiagnostics, ServerFuture, WarningSink,
-        STDERR_LIMIT,
+        classify_account_notification, handle_inbound, run_supervisor, start_supervisor,
+        AccountNotificationAction, AppServerProcess, AppServerSpawner, CodexAppServerState,
+        ProcessExit, RecentDiagnostics, ServerFuture, WarningSink, STDERR_LIMIT,
     };
     use crate::runtime::codex::rpc::{RpcClient, RpcInbound};
     use serde_json::{json, Value};
@@ -1294,6 +1731,20 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct CollectNotifications(StdMutex<Vec<(String, Value)>>);
+
+    impl WarningSink for CollectNotifications {
+        fn emit(&self, _message: String) {}
+
+        fn handle_notification(&self, _client: Arc<RpcClient>, method: String, params: Value) {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push((method, params));
+        }
+    }
+
     async fn wait_for_spawns(spawner: &FakeSpawner, expected: usize) -> Result<(), String> {
         tokio::time::timeout(Duration::from_secs(1), async {
             while spawner.spawn_count() < expected {
@@ -1318,6 +1769,209 @@ mod tests {
         assert!(error.contains("shutting down"));
         assert!(state.inner.lock().await.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn account_and_models_only_matching_login_completion_consumes_the_active_login() {
+        let state = CodexAppServerState::default();
+        state.remember_active_login("login-7".to_string());
+
+        assert!(!state.take_matching_active_login(Some("login-other")));
+        assert_eq!(state.active_login_id().as_deref(), Some("login-7"));
+        assert!(state.take_matching_active_login(Some("login-7")));
+        assert_eq!(state.active_login_id(), None);
+        assert!(!state.take_matching_active_login(None));
+    }
+
+    #[test]
+    fn account_and_models_early_completion_is_consumed_after_login_response() {
+        let state = CodexAppServerState::default();
+        let attempt = state.begin_login_attempt();
+
+        assert_eq!(
+            classify_account_notification(
+                &state.account_events,
+                "account/login/completed",
+                json!({"loginId":"login-early","success":true,"error":null}),
+            )
+            .expect("valid early completion"),
+            AccountNotificationAction::Ignore
+        );
+
+        let completion = state
+            .finish_login_attempt(attempt, "login-early".into())
+            .expect("same-transport response")
+            .expect("early completion must be retained");
+        assert_eq!(completion.warning, None);
+        assert!(state.is_login_attempt_current(completion.token));
+        state.begin_login_attempt();
+        assert!(!state.is_login_attempt_current(completion.token));
+        assert_eq!(state.active_login_id(), None);
+    }
+
+    #[test]
+    fn account_and_models_transport_reset_invalidates_inflight_login_response() {
+        let state = CodexAppServerState::default();
+        let attempt = state.begin_login_attempt();
+
+        state.reset_account_transport();
+
+        let error = state
+            .finish_login_attempt(attempt, "stale-login".into())
+            .expect_err("a response from the failed transport must stay stale");
+        assert!(error.contains("connection restarted"));
+        assert_eq!(state.active_login_id(), None);
+    }
+
+    #[test]
+    fn account_and_models_newer_login_attempt_supersedes_an_older_response() {
+        let state = CodexAppServerState::default();
+        let older = state.begin_login_attempt();
+        let newer = state.begin_login_attempt();
+
+        assert!(state
+            .finish_login_attempt(older, "older-login".into())
+            .is_err());
+        assert_eq!(state.active_login_id(), None);
+        assert!(state
+            .finish_login_attempt(newer, "newer-login".into())
+            .expect("newest response")
+            .is_none());
+        assert_eq!(state.active_login_id().as_deref(), Some("newer-login"));
+    }
+
+    #[test]
+    fn account_and_models_api_key_attempt_supersedes_old_interactive_login() {
+        let state = CodexAppServerState::default();
+        state.remember_active_login("old-browser".into());
+
+        let api_key_attempt = state.begin_login_attempt();
+        assert_eq!(state.active_login_id(), None);
+        assert_eq!(
+            classify_account_notification(
+                &state.account_events,
+                "account/login/completed",
+                json!({"loginId":"old-browser","success":true,"error":null}),
+            )
+            .expect("old completion is valid but stale"),
+            AccountNotificationAction::Ignore
+        );
+        state
+            .finish_login_attempt_without_id(api_key_attempt)
+            .expect("current API-key attempt");
+        assert_eq!(state.active_login_id(), None);
+    }
+
+    #[test]
+    fn account_and_models_new_login_invalidates_reserved_notification_refreshes() {
+        let state = CodexAppServerState::default();
+        state.remember_active_login("old-login".into());
+        let action = classify_account_notification(
+            &state.account_events,
+            "account/login/completed",
+            json!({"loginId":"old-login","success":false,"error":"old failure"}),
+        )
+        .expect("valid old completion");
+        let AccountNotificationAction::Refresh { sequence, .. } = action else {
+            panic!("matching completion must reserve a refresh");
+        };
+
+        state.begin_login_attempt();
+
+        assert_ne!(
+            state.account_events.sequence.load(Ordering::Acquire),
+            sequence,
+            "the old warning/account refresh must be stale before it can emit"
+        );
+    }
+
+    #[test]
+    fn account_and_models_notification_classifier_refreshes_only_the_active_login() {
+        let state = CodexAppServerState::default();
+        state.remember_active_login("login-7".to_string());
+
+        let unmatched = classify_account_notification(
+            &state.account_events,
+            "account/login/completed",
+            json!({"loginId":"login-other","success":true,"error":null}),
+        )
+        .expect("valid unmatched notification");
+        assert_eq!(unmatched, AccountNotificationAction::Ignore);
+        assert_eq!(state.active_login_id().as_deref(), Some("login-7"));
+
+        let matched = classify_account_notification(
+            &state.account_events,
+            "account/login/completed",
+            json!({"loginId":"login-7","success":true,"error":null}),
+        )
+        .expect("valid matching notification");
+        assert!(matches!(
+            matched,
+            AccountNotificationAction::Refresh { warning: None, .. }
+        ));
+        assert_eq!(state.active_login_id(), None);
+    }
+
+    #[test]
+    fn account_and_models_notification_classifier_sanitizes_failures_and_updates() {
+        let state = CodexAppServerState::default();
+        state.remember_active_login("login-8".to_string());
+
+        let failed = classify_account_notification(
+            &state.account_events,
+            "account/login/completed",
+            json!({
+                "loginId":"login-8",
+                "success":false,
+                "error":"Authorization: Bearer notification-secret"
+            }),
+        )
+        .expect("valid failed notification");
+        let AccountNotificationAction::Refresh {
+            warning: Some(warning),
+            ..
+        } = failed
+        else {
+            panic!("failed matching login must refresh with a warning");
+        };
+        assert!(!warning.contains("notification-secret"));
+
+        state.remember_active_login("login-still-active".to_string());
+        assert!(matches!(
+            classify_account_notification(
+                &state.account_events,
+                "account/updated",
+                json!({"authMode":"chatgpt","planType":"plus"}),
+            )
+            .expect("valid account update"),
+            AccountNotificationAction::Refresh { warning: None, .. }
+        ));
+        assert_eq!(
+            state.active_login_id().as_deref(),
+            Some("login-still-active")
+        );
+    }
+
+    #[test]
+    fn account_and_models_notification_classifier_rejects_malformed_account_frames() {
+        let state = CodexAppServerState::default();
+        let error = classify_account_notification(
+            &state.account_events,
+            "account/login/completed",
+            json!({"loginId":7,"success":"yes"}),
+        )
+        .expect_err("malformed account notification must not be accepted");
+        assert!(error.contains("account/login/completed"));
+
+        assert_eq!(
+            classify_account_notification(
+                &state.account_events,
+                "thread/started",
+                json!({"thread": {"id":"thread-1"}}),
+            )
+            .expect("unrelated notification"),
+            AccountNotificationAction::Ignore
+        );
     }
 
     #[tokio::test]
@@ -1743,6 +2397,53 @@ mod tests {
         assert!(!warning.contains("warning-secret"));
         assert!(!warning.contains(['\r', '\n']));
         assert!(warning.len() <= 512);
+
+        reader.abort();
+        handler.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn account_and_models_forwards_account_notifications_instead_of_dropping_them(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (client_io, mut server_io) = duplex(4096);
+        let (client_read, client_write) = tokio::io::split(client_io);
+        let client = Arc::new(RpcClient::new(client_write));
+        let (inbound_tx, inbound_rx) = mpsc::channel::<RpcInbound>(16);
+        let notifications = Arc::new(CollectNotifications::default());
+        let reader = tokio::spawn(client.clone().read_loop(client_read, inbound_tx));
+        let handler = tokio::spawn(handle_inbound(client, inbound_rx, notifications.clone()));
+
+        server_io
+            .write_all(
+                b"{\"method\":\"account/login/completed\",\"params\":{\"loginId\":\"login-7\",\"success\":true,\"error\":null}}\n",
+            )
+            .await?;
+
+        tokio::time::timeout(Duration::from_millis(100), async {
+            loop {
+                if !notifications
+                    .0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| "account notification was dropped")?;
+
+        let captured = notifications
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].0, "account/login/completed");
+        assert_eq!(captured[0].1["loginId"], "login-7");
 
         reader.abort();
         handler.abort();

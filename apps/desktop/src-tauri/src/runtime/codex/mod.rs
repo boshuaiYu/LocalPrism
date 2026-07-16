@@ -1,6 +1,8 @@
 use self::discovery::CodexBinary;
-use super::RuntimeKind;
+use super::{RuntimeAccount, RuntimeKind, RuntimeLoginMode, RuntimeLoginStartResult, RuntimeModel};
 use serde::Serialize;
+use serde_json::Value;
+use std::collections::HashSet;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -17,6 +19,341 @@ pub mod protocol;
 pub mod rpc;
 
 pub use app_server::CodexAppServerState;
+
+const RUNTIME_ACCOUNT_UPDATED_EVENT: &str = "runtime-account-updated";
+const RUNTIME_WARNING_EVENT: &str = "runtime-warning";
+
+async fn read_account_with_request<F, Fut>(
+    installed: bool,
+    version: Option<String>,
+    mut request: F,
+) -> Result<RuntimeAccount, String>
+where
+    F: FnMut(&'static str, Value) -> Fut,
+    Fut: Future<Output = Result<Value, String>>,
+{
+    let params = serde_json::to_value(protocol::GetAccountParams {
+        refresh_token: false,
+    })
+    .map_err(|error| format!("Failed to serialize Codex account request: {error}"))?;
+    let response = request("account/read", params).await?;
+    let response: protocol::GetAccountResponse = serde_json::from_value(response)
+        .map_err(|error| format!("Invalid Codex account response: {error}"))?;
+    Ok(response.into_runtime_account(installed, version))
+}
+
+pub(super) async fn read_account(
+    app: &tauri::AppHandle,
+    state: &CodexAppServerState,
+    version: String,
+) -> Result<RuntimeAccount, String> {
+    read_account_with_request(true, Some(version), |method, params| {
+        state.request(app, method, params)
+    })
+    .await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LoginStartOutcome {
+    result: RuntimeLoginStartResult,
+    active_login_id: Option<String>,
+}
+
+async fn start_login_with_request<F, Fut>(
+    mode: RuntimeLoginMode,
+    api_key: Option<String>,
+    mut request: F,
+) -> Result<LoginStartOutcome, String>
+where
+    F: FnMut(&'static str, Value) -> Fut,
+    Fut: Future<Output = Result<Value, String>>,
+{
+    let params = match mode {
+        RuntimeLoginMode::Browser => protocol::LoginAccountParams::chatgpt(),
+        RuntimeLoginMode::DeviceCode => protocol::LoginAccountParams::chatgpt_device_code(),
+        RuntimeLoginMode::ApiKey => protocol::LoginAccountParams::api_key(
+            api_key.ok_or_else(|| "Codex API key is required".to_string())?,
+        ),
+    };
+    let params = serde_json::to_value(params)
+        .map_err(|error| format!("Failed to serialize Codex login request: {error}"))?;
+    let response = match request("account/login/start", params).await {
+        Ok(response) => response,
+        Err(_) if mode == RuntimeLoginMode::ApiKey => {
+            return Err("Codex API-key login failed".into());
+        }
+        Err(error) => return Err(error),
+    };
+    let response: protocol::LoginAccountResponse =
+        serde_json::from_value(response).map_err(|error| {
+            if mode == RuntimeLoginMode::ApiKey {
+                "Invalid Codex API-key login response".to_string()
+            } else {
+                format!("Invalid Codex login response: {error}")
+            }
+        })?;
+
+    match (mode, response) {
+        (RuntimeLoginMode::ApiKey, protocol::LoginAccountResponse::ApiKey) => {
+            Ok(LoginStartOutcome {
+                result: RuntimeLoginStartResult::ApiKey,
+                active_login_id: None,
+            })
+        }
+        (
+            RuntimeLoginMode::Browser,
+            protocol::LoginAccountResponse::Chatgpt { auth_url, login_id },
+        ) => Ok(LoginStartOutcome {
+            active_login_id: Some(login_id.clone()),
+            result: RuntimeLoginStartResult::Chatgpt { auth_url, login_id },
+        }),
+        (
+            RuntimeLoginMode::DeviceCode,
+            protocol::LoginAccountResponse::ChatgptDeviceCode {
+                verification_url,
+                user_code,
+                login_id,
+            },
+        ) => Ok(LoginStartOutcome {
+            active_login_id: Some(login_id.clone()),
+            result: RuntimeLoginStartResult::ChatgptDeviceCode {
+                verification_url,
+                user_code,
+                login_id,
+            },
+        }),
+        (RuntimeLoginMode::ApiKey, _) => Err("Invalid Codex API-key login response".into()),
+        (RuntimeLoginMode::Browser, _) => {
+            Err("Codex login response did not match browser mode".into())
+        }
+        (RuntimeLoginMode::DeviceCode, _) => {
+            Err("Codex login response did not match device-code mode".into())
+        }
+    }
+}
+
+pub(super) async fn login_start(
+    app: &tauri::AppHandle,
+    state: &CodexAppServerState,
+    mode: RuntimeLoginMode,
+    api_key: Option<String>,
+) -> Result<RuntimeLoginStartResult, String> {
+    let attempt = state.begin_login_attempt();
+    let outcome = match start_login_with_request(mode, api_key, |method, params| {
+        state.request(app, method, params)
+    })
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            state.abandon_login_attempt(attempt);
+            return Err(error);
+        }
+    };
+    let completion = match outcome.active_login_id {
+        Some(login_id) => state.finish_login_attempt(attempt, login_id)?,
+        None => {
+            state.finish_login_attempt_without_id(attempt)?;
+            None
+        }
+    };
+    let completion_error = if let Some(completion) = completion {
+        let completion_error = completion.warning.clone();
+        emit_buffered_login_completion(app, state, completion).await;
+        completion_error
+    } else {
+        None
+    };
+    login_result_after_buffered_completion(outcome.result, completion_error)
+}
+
+fn login_result_after_buffered_completion(
+    result: RuntimeLoginStartResult,
+    completion_error: Option<String>,
+) -> Result<RuntimeLoginStartResult, String> {
+    match completion_error {
+        Some(error) => Err(error),
+        None => Ok(result),
+    }
+}
+
+async fn read_buffered_login_account_with_request<F, Fut>(
+    state: &CodexAppServerState,
+    completion: &app_server::BufferedLoginCompletion,
+    version: Option<String>,
+    request: F,
+) -> Result<Option<RuntimeAccount>, String>
+where
+    F: FnMut(&'static str, Value) -> Fut,
+    Fut: Future<Output = Result<Value, String>>,
+{
+    let _refresh_guard = state.lock_account_refresh().await;
+    if !state.is_buffered_login_completion_current(completion) {
+        return Ok(None);
+    }
+    let account = read_account_with_request(true, version, request).await?;
+    if !state.is_buffered_login_completion_current(completion) {
+        return Ok(None);
+    }
+    Ok(Some(account))
+}
+
+async fn emit_buffered_login_completion(
+    app: &tauri::AppHandle,
+    state: &CodexAppServerState,
+    completion: app_server::BufferedLoginCompletion,
+) {
+    let account = read_buffered_login_account_with_request(
+        state,
+        &completion,
+        state.codex_version(),
+        |method, params| state.request(app, method, params),
+    )
+    .await;
+    match account {
+        Ok(Some(mut account)) => {
+            account.error = completion.warning.clone();
+            let _ = state.with_current_buffered_login_completion(&completion, || {
+                if let Some(warning) = completion.warning.as_ref() {
+                    let _ = app.emit(
+                        RUNTIME_WARNING_EVENT,
+                        serde_json::json!({
+                            "runtime": RuntimeKind::Codex,
+                            "message": warning,
+                        }),
+                    );
+                }
+                let _ = app.emit(RUNTIME_ACCOUNT_UPDATED_EVENT, account);
+            });
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let refresh_error = sanitize_install_output(&error);
+            let _ = state.with_current_buffered_login_completion(&completion, || {
+                if let Some(warning) = completion.warning.as_ref() {
+                    let _ = app.emit(
+                        RUNTIME_WARNING_EVENT,
+                        serde_json::json!({
+                            "runtime": RuntimeKind::Codex,
+                            "message": warning,
+                        }),
+                    );
+                }
+                let _ = app.emit(
+                    RUNTIME_WARNING_EVENT,
+                    serde_json::json!({
+                        "runtime": RuntimeKind::Codex,
+                        "message": format!(
+                            "Failed to refresh Codex account after login: {refresh_error}"
+                        ),
+                    }),
+                );
+            });
+        }
+    }
+}
+
+async fn cancel_login_with_request<F, Fut>(login_id: String, mut request: F) -> Result<(), String>
+where
+    F: FnMut(&'static str, Value) -> Fut,
+    Fut: Future<Output = Result<Value, String>>,
+{
+    let params = serde_json::to_value(protocol::CancelLoginAccountParams { login_id })
+        .map_err(|error| format!("Failed to serialize Codex login cancellation: {error}"))?;
+    let response = request("account/login/cancel", params).await?;
+    let response: protocol::CancelLoginAccountResponse = serde_json::from_value(response)
+        .map_err(|error| format!("Invalid Codex login cancellation response: {error}"))?;
+    match response.status {
+        protocol::CancelLoginAccountStatus::Canceled
+        | protocol::CancelLoginAccountStatus::NotFound => Ok(()),
+    }
+}
+
+pub(super) async fn cancel_login(
+    app: &tauri::AppHandle,
+    state: &CodexAppServerState,
+    login_id: String,
+) -> Result<(), String> {
+    let result = cancel_login_with_request(login_id.clone(), |method, params| {
+        state.request(app, method, params)
+    })
+    .await;
+    if result.is_ok() {
+        state.take_matching_active_login(Some(&login_id));
+    }
+    result
+}
+
+async fn logout_with_request<F, Fut>(mut request: F) -> Result<(), String>
+where
+    F: FnMut(&'static str, Value) -> Fut,
+    Fut: Future<Output = Result<Value, String>>,
+{
+    let response = request("account/logout", Value::Null).await?;
+    serde_json::from_value::<protocol::LogoutAccountResponse>(response)
+        .map_err(|error| format!("Invalid Codex logout response: {error}"))?;
+    Ok(())
+}
+
+pub(super) async fn logout(
+    app: &tauri::AppHandle,
+    state: &CodexAppServerState,
+) -> Result<(), String> {
+    logout_with_request(|method, params| state.request(app, method, params)).await?;
+    state.clear_active_login();
+    Ok(())
+}
+
+const MODEL_PAGE_LIMIT: usize = 100;
+
+async fn list_models_with_request<F, Fut>(
+    max_pages: usize,
+    mut request: F,
+) -> Result<Vec<RuntimeModel>, String>
+where
+    F: FnMut(&'static str, Value) -> Fut,
+    Fut: Future<Output = Result<Value, String>>,
+{
+    let mut cursor = None;
+    let mut seen_cursors = HashSet::new();
+    let mut models = Vec::new();
+
+    for _ in 0..max_pages {
+        let params = serde_json::to_value(protocol::ModelListParams {
+            cursor,
+            limit: None,
+            include_hidden: Some(false),
+        })
+        .map_err(|error| format!("Failed to serialize Codex model request: {error}"))?;
+        let response = request("model/list", params).await?;
+        let response: protocol::ModelListResponse = serde_json::from_value(response)
+            .map_err(|error| format!("Invalid Codex model response: {error}"))?;
+        let next_cursor = response.next_cursor.clone();
+        models.extend(response.into_visible_runtime_models());
+
+        let Some(next_cursor) = next_cursor else {
+            return Ok(models);
+        };
+        if !seen_cursors.insert(next_cursor.clone()) {
+            return Err("Codex model pagination returned a repeated cursor".into());
+        }
+        cursor = Some(next_cursor);
+    }
+
+    Err(format!(
+        "Codex model pagination exceeded the {max_pages}-page limit"
+    ))
+}
+
+pub(super) async fn list_models(
+    app: &tauri::AppHandle,
+    state: &CodexAppServerState,
+) -> Result<Vec<RuntimeModel>, String> {
+    list_models_with_request(MODEL_PAGE_LIMIT, |method, params| {
+        state.request(app, method, params)
+    })
+    .await
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CodexInstallCommand {
@@ -1030,8 +1367,433 @@ pub(super) async fn install(window: WebviewWindow) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
+    use std::collections::VecDeque;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn account_and_models_account_read_uses_no_refresh_and_converts_the_response() {
+        let calls = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let recorded = calls.clone();
+
+        let account =
+            read_account_with_request(true, Some("0.135.0".into()), move |method, params| {
+                let recorded = recorded.clone();
+                async move {
+                    recorded
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push((method.to_string(), params));
+                    Ok(json!({
+                        "account": {
+                            "type": "chatgpt",
+                            "email": "person@example.com",
+                            "planType": "plus"
+                        },
+                        "requiresOpenaiAuth": true
+                    }))
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec![("account/read".into(), json!({ "refreshToken": false }))]
+        );
+        assert_eq!(account.runtime, RuntimeKind::Codex);
+        assert!(account.installed);
+        assert!(account.authenticated);
+        assert_eq!(account.version.as_deref(), Some("0.135.0"));
+        assert_eq!(account.account_label.as_deref(), Some("person@example.com"));
+        assert_eq!(account.auth_mode.as_deref(), Some("chatgpt"));
+    }
+
+    #[tokio::test]
+    async fn account_and_models_browser_login_uses_streamlined_login_and_returns_active_id() {
+        let calls = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let recorded = calls.clone();
+
+        let outcome =
+            start_login_with_request(RuntimeLoginMode::Browser, None, move |method, params| {
+                let recorded = recorded.clone();
+                async move {
+                    recorded
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push((method.to_string(), params));
+                    Ok(json!({
+                        "type": "chatgpt",
+                        "authUrl": "https://chatgpt.example/authorize",
+                        "loginId": "login-browser"
+                    }))
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec![(
+                "account/login/start".into(),
+                json!({
+                    "type": "chatgpt",
+                    "codexStreamlinedLogin": true
+                })
+            )]
+        );
+        assert_eq!(
+            outcome.result,
+            RuntimeLoginStartResult::Chatgpt {
+                auth_url: "https://chatgpt.example/authorize".into(),
+                login_id: "login-browser".into(),
+            }
+        );
+        assert_eq!(outcome.active_login_id.as_deref(), Some("login-browser"));
+    }
+
+    #[tokio::test]
+    async fn account_and_models_login_rejects_cross_mode_success_responses() {
+        let browser_error =
+            start_login_with_request(RuntimeLoginMode::Browser, None, |_, _| async {
+                Ok(json!({ "type": "apiKey" }))
+            })
+            .await
+            .unwrap_err();
+        assert!(browser_error.contains("browser"));
+
+        let device_error =
+            start_login_with_request(RuntimeLoginMode::DeviceCode, None, |_, _| async {
+                Ok(json!({
+                    "type": "chatgpt",
+                    "authUrl": "https://wrong.example",
+                    "loginId": "wrong-browser"
+                }))
+            })
+            .await
+            .unwrap_err();
+        assert!(device_error.contains("device-code"));
+
+        let api_error = start_login_with_request(
+            RuntimeLoginMode::ApiKey,
+            Some("<api-key>".into()),
+            |_, _| async {
+                Ok(json!({
+                    "type": "chatgptDeviceCode",
+                    "verificationUrl": "https://wrong.example/device",
+                    "userCode": "WRONG",
+                    "loginId": "wrong-device"
+                }))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(api_error, "Invalid Codex API-key login response");
+    }
+
+    #[tokio::test]
+    async fn account_and_models_buffered_refresh_drops_a_result_staled_by_new_login() {
+        let state = CodexAppServerState::default();
+        let token = state.begin_login_attempt();
+        let completion = app_server::BufferedLoginCompletion {
+            warning: None,
+            token,
+            sequence: state.reserve_account_refresh(),
+        };
+
+        let result = read_buffered_login_account_with_request(
+            &state,
+            &completion,
+            Some("0.135.0".into()),
+            |_, _| {
+                state.begin_login_attempt();
+                async {
+                    Ok(json!({
+                        "account": {
+                            "type": "chatgpt",
+                            "email": "stale@example.com",
+                            "planType": "plus"
+                        },
+                        "requiresOpenaiAuth": true
+                    }))
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn account_and_models_buffered_refresh_drops_a_result_staled_by_account_update() {
+        let state = CodexAppServerState::default();
+        let token = state.begin_login_attempt();
+        let completion = app_server::BufferedLoginCompletion {
+            warning: None,
+            token,
+            sequence: state.reserve_account_refresh(),
+        };
+
+        let result = read_buffered_login_account_with_request(
+            &state,
+            &completion,
+            Some("0.135.0".into()),
+            |_, _| {
+                state.reserve_account_refresh();
+                async {
+                    Ok(json!({
+                        "account": {
+                            "type": "chatgpt",
+                            "email": "stale-before-account-update@example.com",
+                            "planType": "plus"
+                        },
+                        "requiresOpenaiAuth": true
+                    }))
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result.is_none(),
+            "a later account/updated refresh must invalidate the buffered login result"
+        );
+    }
+
+    #[test]
+    fn account_and_models_buffered_failure_cannot_be_returned_as_login_success() {
+        let result = login_result_after_buffered_completion(
+            RuntimeLoginStartResult::Chatgpt {
+                auth_url: "https://auth.example".into(),
+                login_id: "login-failed-early".into(),
+            },
+            Some("Codex login failed".into()),
+        );
+
+        assert_eq!(result.unwrap_err(), "Codex login failed");
+    }
+
+    #[tokio::test]
+    async fn account_and_models_api_key_login_never_reflects_the_secret_from_request_errors() {
+        let calls = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let recorded = calls.clone();
+        let secret = "sk-task5-secret-sentinel".to_string();
+        let reflected = secret.clone();
+
+        let error = start_login_with_request(
+            RuntimeLoginMode::ApiKey,
+            Some(secret.clone()),
+            move |method, params| {
+                let recorded = recorded.clone();
+                let reflected = reflected.clone();
+                async move {
+                    recorded
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push((method.to_string(), params));
+                    Err(format!("server reflected {reflected}"))
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec![(
+                "account/login/start".into(),
+                json!({ "type": "apiKey", "apiKey": secret })
+            )]
+        );
+        assert!(!error.contains("sk-task5-secret-sentinel"));
+    }
+
+    #[tokio::test]
+    async fn account_and_models_cancel_sends_login_id_and_treats_not_found_as_complete() {
+        let calls = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let recorded = calls.clone();
+        cancel_login_with_request("login-7".into(), move |method, params| {
+            let recorded = recorded.clone();
+            async move {
+                recorded
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((method.to_string(), params));
+                Ok(json!({ "status": "canceled" }))
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec![(
+                "account/login/cancel".into(),
+                json!({ "loginId": "login-7" })
+            )]
+        );
+
+        cancel_login_with_request("gone".into(), |_, _| async {
+            Ok(json!({ "status": "notFound" }))
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn account_and_models_logout_sends_json_null_not_an_empty_object() {
+        let calls = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let recorded = calls.clone();
+
+        logout_with_request(move |method, params| {
+            let recorded = recorded.clone();
+            async move {
+                recorded
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((method.to_string(), params));
+                Ok(json!({}))
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec![("account/logout".into(), Value::Null)]
+        );
+    }
+
+    fn model_page_entry(model: &str, hidden: bool) -> Value {
+        json!({
+            "id": format!("catalog-{model}"),
+            "model": model,
+            "displayName": model.to_uppercase(),
+            "description": format!("{model} description"),
+            "hidden": hidden,
+            "supportedReasoningEfforts": [
+                { "reasoningEffort": "low", "description": "Low" },
+                { "reasoningEffort": "high", "description": "High" }
+            ],
+            "defaultReasoningEffort": "high",
+            "inputModalities": ["text"],
+            "isDefault": model == "gpt-first"
+        })
+    }
+
+    #[tokio::test]
+    async fn account_and_models_model_list_paginates_in_order_filters_hidden_and_has_no_fallback() {
+        let calls = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let recorded = calls.clone();
+        let responses = Arc::new(Mutex::new(VecDeque::from([
+            json!({
+                "data": [
+                    model_page_entry("gpt-first", false),
+                    model_page_entry("gpt-hidden", true)
+                ],
+                "nextCursor": "cursor-2"
+            }),
+            json!({
+                "data": [model_page_entry("gpt-second", false)],
+                "nextCursor": null
+            }),
+        ])));
+        let queued = responses.clone();
+
+        let models = list_models_with_request(8, move |method, params| {
+            let recorded = recorded.clone();
+            let queued = queued.clone();
+            async move {
+                recorded
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((method.to_string(), params));
+                queued
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .pop_front()
+                    .ok_or_else(|| "unexpected extra page".to_string())
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec![
+                ("model/list".into(), json!({ "includeHidden": false })),
+                (
+                    "model/list".into(),
+                    json!({ "cursor": "cursor-2", "includeHidden": false })
+                )
+            ]
+        );
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-first", "gpt-second"]
+        );
+        assert!(responses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty());
+
+        let empty = list_models_with_request(8, |_, _| async {
+            Ok(json!({ "data": [], "nextCursor": null }))
+        })
+        .await
+        .unwrap();
+        assert!(empty.is_empty());
+    }
+
+    #[tokio::test]
+    async fn account_and_models_model_list_rejects_repeated_cursor_and_page_overflow() {
+        let repeat = list_models_with_request(8, |_, _| async {
+            Ok(json!({ "data": [], "nextCursor": "same" }))
+        })
+        .await
+        .unwrap_err();
+        assert!(repeat.contains("repeated cursor"));
+
+        let next = Arc::new(Mutex::new(0usize));
+        let counter = next.clone();
+        let overflow = list_models_with_request(2, move |_, _| {
+            let counter = counter.clone();
+            async move {
+                let mut current = counter
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *current += 1;
+                Ok(json!({
+                    "data": [],
+                    "nextCursor": format!("cursor-{}", *current)
+                }))
+            }
+        })
+        .await
+        .unwrap_err();
+        assert!(overflow.contains("page limit"));
+        assert_eq!(
+            *next.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+            2
+        );
+    }
 
     #[test]
     fn installer_parent_exit_cleanup_errors_become_wait_errors() {
