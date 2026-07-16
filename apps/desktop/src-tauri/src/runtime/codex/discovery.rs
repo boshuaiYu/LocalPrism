@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
 use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::task::JoinHandle;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -12,6 +14,9 @@ use std::os::windows::process::CommandExt;
 pub const CODEX_NOT_FOUND: &str = "Codex CLI was not found or failed validation";
 const VERSION_PREFIX: &str = "codex-cli ";
 const VALIDATION_TIMEOUT: Duration = Duration::from_secs(5);
+const CANDIDATE_OUTPUT_LIMIT: usize = 64 * 1024;
+const CANDIDATE_READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+const CANDIDATE_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexBinary {
@@ -151,8 +156,11 @@ fn enumerate_windows_apps(program_files: &Path) -> Vec<PathBuf> {
 }
 
 fn windows_app_version(path: &Path) -> Vec<u64> {
-    path.components()
-        .filter_map(|component| component.as_os_str().to_str())
+    windows_app_version_from_text(&path.to_string_lossy())
+}
+
+fn windows_app_version_from_text(path: &str) -> Vec<u64> {
+    path.split(['/', '\\'])
         .find_map(|component| component.strip_prefix("OpenAI.Codex_"))
         .and_then(|suffix| suffix.split('_').next())
         .map(|version| {
@@ -258,13 +266,40 @@ fn unix_candidate_key(raw: &str) -> String {
     }
 }
 
-fn candidate_key(path: &Path, windows: bool) -> String {
-    let raw = path.to_string_lossy();
-    if windows {
-        windows_candidate_key(&raw)
-    } else {
-        unix_candidate_key(&raw)
+#[derive(Debug, Hash, PartialEq, Eq)]
+enum CandidateKey {
+    ResolvedWindows(String),
+    ResolvedNative(PathBuf),
+    LexicalWindows(String),
+    LexicalUnix(String),
+    UnresolvedNative(OsString),
+}
+
+fn candidate_key_with_resolution(
+    path: &Path,
+    windows: bool,
+    resolved: Option<PathBuf>,
+) -> CandidateKey {
+    if let Some(resolved) = resolved {
+        if windows {
+            return resolved
+                .to_str()
+                .map(windows_candidate_key)
+                .map(CandidateKey::ResolvedWindows)
+                .unwrap_or(CandidateKey::ResolvedNative(resolved));
+        }
+        return CandidateKey::ResolvedNative(resolved);
     }
+
+    match (windows, path.to_str()) {
+        (true, Some(raw)) => CandidateKey::LexicalWindows(windows_candidate_key(raw)),
+        (false, Some(raw)) => CandidateKey::LexicalUnix(unix_candidate_key(raw)),
+        (_, None) => CandidateKey::UnresolvedNative(path.as_os_str().to_owned()),
+    }
+}
+
+fn candidate_key(path: &Path, windows: bool) -> CandidateKey {
+    candidate_key_with_resolution(path, windows, path.canonicalize().ok())
 }
 
 fn deduplicate(paths: Vec<PathBuf>, windows: bool) -> Vec<PathBuf> {
@@ -375,6 +410,12 @@ struct CandidateProcessOutput {
     stderr: String,
 }
 
+#[derive(Debug)]
+struct CandidateStreamCapture {
+    bytes: Vec<u8>,
+    read_error: Option<String>,
+}
+
 type CandidateRunFuture<'a> =
     Pin<Box<dyn Future<Output = Result<CandidateProcessOutput, String>> + Send + 'a>>;
 
@@ -392,32 +433,11 @@ impl CandidateRunner for ProcessRunner {
 }
 
 fn version_command(path: &Path) -> Result<tokio::process::Command, String> {
-    let is_cmd = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("cmd"));
-
-    #[cfg(target_os = "windows")]
-    let mut command = if is_cmd {
-        if path.to_string_lossy().contains('"') {
-            return Err("Codex command path contains an invalid quote".into());
-        }
-        let mut command = tokio::process::Command::new("cmd.exe");
-        command.args(["/d", "/c"]).arg(path).arg("--version");
-        command
-    } else {
-        let mut command = tokio::process::Command::new(path);
-        command.arg("--version");
-        command
-    };
-
-    #[cfg(not(target_os = "windows"))]
-    let mut command = {
-        let _ = is_cmd;
-        let mut command = tokio::process::Command::new(path);
-        command.arg("--version");
-        command
-    };
+    // Rust's Windows process launcher applies its hardened batch-file escaping when a `.cmd`
+    // path is launched directly. Keeping the script as the program avoids reparsing an
+    // override/PATH candidate as a hand-built `cmd.exe /c` command line.
+    let mut command = tokio::process::Command::new(path);
+    command.arg("--version");
 
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     command.kill_on_drop(true);
@@ -426,21 +446,158 @@ fn version_command(path: &Path) -> Result<tokio::process::Command, String> {
     Ok(command)
 }
 
-async fn run_version_command(path: &Path) -> Result<CandidateProcessOutput, String> {
-    let mut command = version_command(path)?;
-    let child = command
+async fn capture_candidate_stream<R>(mut reader: R, limit: usize) -> CandidateStreamCapture
+where
+    R: AsyncRead + Unpin,
+{
+    let mut bytes = Vec::with_capacity(limit.min(8 * 1024));
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(read) => {
+                let keep = read.min(limit.saturating_sub(bytes.len()));
+                bytes.extend_from_slice(&buffer[..keep]);
+            }
+            Err(error) => {
+                return CandidateStreamCapture {
+                    bytes,
+                    read_error: Some(error.to_string()),
+                };
+            }
+        }
+    }
+    CandidateStreamCapture {
+        bytes,
+        read_error: None,
+    }
+}
+
+async fn finish_candidate_reader(
+    mut task: JoinHandle<CandidateStreamCapture>,
+) -> Result<CandidateStreamCapture, String> {
+    match tokio::time::timeout(CANDIDATE_READER_DRAIN_TIMEOUT, &mut task).await {
+        Ok(Ok(capture)) => Ok(capture),
+        Ok(Err(error)) => Err(format!("candidate output reader failed: {error}")),
+        Err(_) => {
+            task.abort();
+            let _ = task.await;
+            Err("candidate output reader timed out".into())
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn system32_executable(name: &str) -> Option<PathBuf> {
+    let root = std::env::var_os("SystemRoot").map(PathBuf::from)?;
+    let candidate = root.join("System32").join(name);
+    candidate.is_file().then_some(candidate)
+}
+
+#[cfg(target_os = "windows")]
+async fn terminate_windows_process_tree(process_id: u32) {
+    let Some(taskkill) = system32_executable("taskkill.exe") else {
+        return;
+    };
+    let mut command = tokio::process::Command::new(taskkill);
+    command
+        .args(["/PID", &process_id.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    command.as_std_mut().creation_flags(0x0800_0000);
+    let _ = tokio::time::timeout(CANDIDATE_REAP_TIMEOUT, command.status()).await;
+}
+
+async fn terminate_candidate(child: &mut tokio::process::Child) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    if let Some(process_id) = child.id() {
+        terminate_windows_process_tree(process_id).await;
+    }
+
+    let _ = child.start_kill();
+    match tokio::time::timeout(CANDIDATE_REAP_TIMEOUT, child.wait()).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => Err(format!("candidate process could not be reaped: {error}")),
+        Err(_) => Err("candidate process could not be reaped before timeout".into()),
+    }
+}
+
+async fn run_candidate_command(
+    mut command: tokio::process::Command,
+    wait_timeout: Duration,
+    output_limit: usize,
+) -> Result<CandidateProcessOutput, String> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(target_os = "windows")]
+    command.as_std_mut().creation_flags(0x0800_0000);
+
+    let mut child = command
         .spawn()
         .map_err(|error| format!("failed to start candidate: {error}"))?;
-    let output = tokio::time::timeout(VALIDATION_TIMEOUT, child.wait_with_output())
-        .await
-        .map_err(|_| "candidate version check timed out".to_string())?
-        .map_err(|error| format!("candidate version check failed: {error}"))?;
+    let Some(stdout) = child.stdout.take() else {
+        let _ = terminate_candidate(&mut child).await;
+        return Err("candidate stdout was unavailable".into());
+    };
+    let Some(stderr) = child.stderr.take() else {
+        let _ = terminate_candidate(&mut child).await;
+        return Err("candidate stderr was unavailable".into());
+    };
+    let stdout_task = tokio::spawn(capture_candidate_stream(stdout, output_limit));
+    let stderr_task = tokio::spawn(capture_candidate_stream(stderr, output_limit));
+
+    let wait_result = tokio::time::timeout(wait_timeout, child.wait()).await;
+    let status = match wait_result {
+        Ok(Ok(status)) => Some(status),
+        Ok(Err(error)) => {
+            let cleanup = terminate_candidate(&mut child).await.err();
+            let _ = finish_candidate_reader(stdout_task).await;
+            let _ = finish_candidate_reader(stderr_task).await;
+            return Err(match cleanup {
+                Some(cleanup) => {
+                    format!("candidate version check failed: {error}; {cleanup}")
+                }
+                None => format!("candidate version check failed: {error}"),
+            });
+        }
+        Err(_) => {
+            let cleanup = terminate_candidate(&mut child).await.err();
+            let _ = finish_candidate_reader(stdout_task).await;
+            let _ = finish_candidate_reader(stderr_task).await;
+            return Err(match cleanup {
+                Some(cleanup) => format!("candidate version check timed out; {cleanup}"),
+                None => "candidate version check timed out".into(),
+            });
+        }
+    };
+
+    let stdout = finish_candidate_reader(stdout_task).await;
+    let stderr = finish_candidate_reader(stderr_task).await;
+    let stdout = stdout?;
+    let stderr = stderr?;
+    if let Some(error) = stdout.read_error.or(stderr.read_error) {
+        return Err(format!("candidate output read failed: {error}"));
+    }
 
     Ok(CandidateProcessOutput {
-        success: output.status.success(),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        success: status.is_some_and(|status| status.success()),
+        stdout: String::from_utf8_lossy(&stdout.bytes).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr.bytes).into_owned(),
     })
+}
+
+async fn run_version_command(path: &Path) -> Result<CandidateProcessOutput, String> {
+    run_candidate_command(
+        version_command(path)?,
+        VALIDATION_TIMEOUT,
+        CANDIDATE_OUTPUT_LIMIT,
+    )
+    .await
 }
 
 async fn discover_from_candidates<R: CandidateRunner>(
@@ -477,6 +634,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
+    #[cfg(target_os = "windows")]
     fn fake_windows_environment() -> DiscoveryEnvironment {
         DiscoveryEnvironment {
             exact_override: Some(PathBuf::from(r"C:\override\custom-codex.exe")),
@@ -520,6 +678,7 @@ mod tests {
         assert_eq!(parse_codex_version("codex-cli 0.135.0 extra"), None);
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn candidates_cover_all_sources_in_priority_order_and_sort_windows_apps_newest_first() {
         let home = Path::new(r"C:\Users\alice");
@@ -584,6 +743,7 @@ mod tests {
         assert!(local_pnpm < appdata_pnpm);
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn windows_candidates_are_deduplicated_case_and_slash_insensitively() {
         let mut environment = fake_windows_environment();
@@ -616,8 +776,52 @@ mod tests {
             false,
         );
 
-        assert_eq!(candidate_key(&first, false), "/a/c");
+        assert_eq!(unix_candidate_key(first.to_str().unwrap()), "/a/c");
         assert_eq!(paths, vec![first]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unresolved_override_does_not_suppress_a_later_existing_candidate() {
+        let temp = tempfile::tempdir().unwrap();
+        let valid_directory = temp.path().join("valid");
+        std::fs::create_dir(&valid_directory).unwrap();
+        let valid = valid_directory.join("codex");
+        std::fs::write(&valid, "codex").unwrap();
+        let unresolved = temp
+            .path()
+            .join("missing")
+            .join("..")
+            .join("valid")
+            .join("codex");
+
+        let paths = deduplicate(vec![unresolved.clone(), valid.clone()], false);
+
+        assert_eq!(paths, vec![unresolved, valid]);
+    }
+
+    #[test]
+    fn resolved_and_unresolved_candidate_keys_are_distinct() {
+        let unresolved = candidate_key_with_resolution(Path::new("/a/b/../c"), false, None);
+        let resolved =
+            candidate_key_with_resolution(Path::new("/a/c"), false, Some(PathBuf::from("/a/c")));
+
+        assert_ne!(unresolved, resolved);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_unix_candidates_are_not_lossily_merged() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let first = PathBuf::from(OsString::from_vec(b"/tmp/codex-\x80".to_vec()));
+        let second = PathBuf::from(OsString::from_vec(b"/tmp/codex-\x81".to_vec()));
+
+        assert_eq!(
+            deduplicate(vec![first.clone(), second.clone()], false),
+            vec![first, second]
+        );
     }
 
     #[test]
@@ -632,8 +836,55 @@ mod tests {
             true,
         );
 
-        assert_eq!(candidate_key(&first, true), r"c:\a\c");
+        assert_eq!(windows_candidate_key(first.to_str().unwrap()), r"c:\a\c");
         assert_eq!(paths, vec![first]);
+    }
+
+    #[test]
+    fn windows_app_versions_are_parsed_with_host_independent_grammar() {
+        let backslash = r"C:\Program Files\WindowsApps\OpenAI.Codex_26.707.12708.0_x64__publisher\app\resources\codex.exe";
+        let slash = "C:/Program Files/WindowsApps/OpenAI.Codex_26.701.1.0_x64__publisher/app/resources/codex.exe";
+
+        assert_eq!(
+            windows_app_version_from_text(backslash),
+            vec![26, 707, 12708, 0]
+        );
+        assert_eq!(windows_app_version_from_text(slash), vec![26, 701, 1, 0]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_candidate_sources_keep_the_documented_priority_order() {
+        let environment = DiscoveryEnvironment {
+            exact_override: Some(PathBuf::from("/override/codex")),
+            path_dirs: vec![PathBuf::from("/path")],
+            registry_path_dirs: vec![PathBuf::from("/registry")],
+            app_data: Some(PathBuf::from("/appdata")),
+            local_app_data: Some(PathBuf::from("/local-appdata")),
+            volta_home: Some(PathBuf::from("/volta")),
+            scoop_home: Some(PathBuf::from("/scoop")),
+            windows_apps: Vec::new(),
+            npm_prefix: Some(PathBuf::from("/npm-prefix")),
+            pnpm_home: Some(PathBuf::from("/pnpm-home")),
+            windows: false,
+        };
+        let paths = candidate_paths_from_environment(Path::new("/home/alice"), &environment);
+        let ordered = [
+            Path::new("/override/codex"),
+            Path::new("/path/codex"),
+            Path::new("/registry/codex"),
+            Path::new("/appdata/npm/codex"),
+            Path::new("/volta/bin/codex"),
+            Path::new("/scoop/shims/codex"),
+            Path::new("/local-appdata/Programs/Codex/codex"),
+            Path::new("/home/alice/.local/bin/codex"),
+            Path::new("/opt/homebrew/bin/codex"),
+            Path::new("/npm-prefix/codex"),
+            Path::new("/pnpm-home/codex"),
+        ];
+        let positions = ordered.map(|path| position(&paths, path));
+
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[derive(Default)]
@@ -736,21 +987,40 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn command_scripts_are_run_through_a_hidden_noninteractive_cmd_shell() {
+    fn command_scripts_use_rusts_hardened_direct_batch_launch() {
         use std::ffi::OsStr;
 
-        let command = version_command(Path::new(r"C:\Program Files\npm\codex.cmd")).unwrap();
+        let script = Path::new(r"C:\Program Files\npm\codex.cmd");
+        let command = version_command(script).unwrap();
         let std_command = command.as_std();
-        assert_eq!(std_command.get_program(), OsStr::new("cmd.exe"));
+        assert_eq!(std_command.get_program(), script.as_os_str());
         assert_eq!(
             std_command.get_args().collect::<Vec<_>>(),
-            [
-                OsStr::new("/d"),
-                OsStr::new("/c"),
-                OsStr::new(r"C:\Program Files\npm\codex.cmd"),
-                OsStr::new("--version"),
-            ]
+            [OsStr::new("--version")]
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn cmd_metacharacter_candidates_never_execute_trailing_commands() {
+        let temp = tempfile::tempdir().unwrap();
+        let sentinel = temp.path().join("codex-injection-sentinel.txt");
+
+        for metacharacter in ['&', '(', ')', '^', '|', '<', '>', '%', '!'] {
+            let _ = std::fs::remove_file(&sentinel);
+            let candidate = PathBuf::from(format!(
+                r"{}\missing{metacharacter}.cmd & echo forged>{} & rem.cmd",
+                temp.path().display(),
+                sentinel.display()
+            ));
+
+            let _ = run_version_command(&candidate).await;
+
+            assert!(
+                !sentinel.exists(),
+                "candidate containing {metacharacter:?} executed a trailing command"
+            );
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -762,22 +1032,81 @@ mod tests {
         let script = directory.join("codex.cmd");
         std::fs::write(&script, "@echo off\r\necho codex-cli 9.8.7\r\n").unwrap();
 
-        let known_good = tokio::process::Command::new("cmd.exe")
-            .args(["/d", "/c"])
-            .arg(&script)
-            .arg("--version")
-            .output()
-            .await
-            .unwrap();
-        assert!(
-            known_good.status.success(),
-            "known-good cmd argv failed: {}",
-            String::from_utf8_lossy(&known_good.stderr)
-        );
-
         let output = run_version_command(&script).await.unwrap();
         assert!(output.success, "constructed argv failed: {}", output.stderr);
         assert_eq!(parse_codex_version(&output.stdout), Some("9.8.7".into()));
+    }
+
+    fn candidate_test_command(windows_script: &str, unix_script: &str) -> tokio::process::Command {
+        #[cfg(target_os = "windows")]
+        {
+            let _ = unix_script;
+            let mut command = tokio::process::Command::new("powershell.exe");
+            command.args(["-NoProfile", "-NonInteractive", "-Command", windows_script]);
+            command
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut command = tokio::process::Command::new("sh");
+            command.args(["-c", unix_script]);
+            command
+        }
+    }
+
+    #[tokio::test]
+    async fn candidate_output_is_bounded_while_both_streams_are_drained() {
+        let command = candidate_test_command(
+            "[Console]::Out.Write('codex-cli 1.2.3' + ('x' * 200000)); [Console]::Error.Write('e' * 200000)",
+            "printf 'codex-cli 1.2.3'; yes x | head -c 200000; yes e | head -c 200000 >&2",
+        );
+
+        let output = run_candidate_command(command, Duration::from_secs(5), 1024)
+            .await
+            .unwrap();
+
+        assert!(output.success);
+        assert!(output.stdout.len() <= 1024);
+        assert!(output.stderr.len() <= 1024);
+        assert!(output.stdout.starts_with("codex-cli 1.2.3"));
+    }
+
+    #[tokio::test]
+    async fn candidate_timeout_terminates_and_reaps_before_returning() {
+        let temp = tempfile::tempdir().unwrap();
+        let sentinel = temp.path().join("candidate-timeout-sentinel.txt");
+        let mut command = candidate_test_command(
+            "[Console]::Out.Write(('x' * 200000)); Start-Sleep -Milliseconds 500; Set-Content -LiteralPath $env:CODEX_SENTINEL alive",
+            "yes x | head -c 200000; sleep 0.5; printf alive > \"$CODEX_SENTINEL\"",
+        );
+        command.env("CODEX_SENTINEL", &sentinel);
+
+        let error = run_candidate_command(command, Duration::from_millis(50), 1024)
+            .await
+            .unwrap_err();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+
+        assert!(error.contains("timed out"));
+        assert!(!sentinel.exists(), "timed-out candidate was still running");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn candidate_timeout_terminates_windows_descendants() {
+        let temp = tempfile::tempdir().unwrap();
+        let sentinel = temp.path().join("candidate-descendant-sentinel.txt");
+        let mut command = candidate_test_command(
+            "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep -Milliseconds 500; Set-Content -LiteralPath $env:CODEX_DESCENDANT_SENTINEL alive'; Start-Sleep -Seconds 5",
+            "",
+        );
+        command.env("CODEX_DESCENDANT_SENTINEL", &sentinel);
+
+        let error = run_candidate_command(command, Duration::from_millis(100), 1024)
+            .await
+            .unwrap_err();
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        assert!(error.contains("timed out"));
+        assert!(!sentinel.exists(), "candidate descendant survived timeout");
     }
 
     #[tokio::test]
