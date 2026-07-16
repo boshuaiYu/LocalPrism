@@ -2,6 +2,7 @@
 
 # Dependencies
 node_modules
+.pnpm-store/
 .pnp
 .pnp.js
 package-lock.json
@@ -43,6 +44,7 @@ yarn-error.log*
 
 # Misc
 .DS_Store
+.worktrees/
 *.pem
 
 *.acn
