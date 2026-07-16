@@ -249,6 +249,7 @@ const RUNTIME_INSTALL_OUTPUT_EVENT: &str = "runtime-install-output";
 const RUNTIME_INSTALL_COMPLETE_EVENT: &str = "runtime-install-complete";
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
 const INSTALL_READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+const INSTALL_PROCESS_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 const INSTALL_OUTPUT_LINE_LIMIT: usize = 64 * 1024;
 
 struct CodexInstallGate {
@@ -757,6 +758,7 @@ impl<S: RuntimeInstallEventSink> CodexInstallerLifecycle<S> for ProcessCodexInst
                 .kill_on_drop(true);
             #[cfg(target_os = "windows")]
             command.as_std_mut().creation_flags(0x0800_0000);
+            discovery::isolate_process_tree(&mut command);
 
             let mut child = command.spawn().map_err(|error| {
                 InstallerStartFailure::Spawn(format!(
@@ -822,18 +824,9 @@ impl<S: RuntimeInstallEventSink> CodexInstallerLifecycle<S> for ProcessCodexInst
             let Some(mut child) = self.child.take() else {
                 return Ok(());
             };
-            let kill_error = child.kill().await.err();
-            match child.wait().await {
-                Ok(_) => Ok(()),
-                Err(wait_error) => {
-                    let kill_detail = kill_error
-                        .map(|error| format!("; termination also failed: {error}"))
-                        .unwrap_or_default();
-                    Err(format!(
-                        "Codex installer could not be reaped: {wait_error}{kill_detail}"
-                    ))
-                }
-            }
+            discovery::terminate_process_tree(&mut child, INSTALL_PROCESS_REAP_TIMEOUT)
+                .await
+                .map_err(|error| format!("Codex installer cleanup failed: {error}"))
         })
     }
 
@@ -1735,5 +1728,119 @@ mod tests {
         let events = sink.events();
         assert!(!format!("{events:?}").contains("production-secret"));
         assert_one_terminal_completion(&events, false);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn production_installer_timeout_terminates_windows_descendants_before_completion() {
+        let temp = tempfile::tempdir().unwrap();
+        let sentinel = temp.path().join("installer-descendant-survived.txt");
+        let script = temp.path().join("installer-with-descendant.cmd");
+        let escaped_sentinel = sentinel.to_string_lossy().replace('\'', "''");
+        std::fs::write(
+            &script,
+            format!(
+                concat!(
+                    "@echo off\r\n",
+                    "start \"\" /b \"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" ",
+                    "-NoProfile -NonInteractive -Command \"Start-Sleep -Milliseconds 800; ",
+                    "[System.IO.File]::WriteAllText('{}', 'survived')\"\r\n",
+                    "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" ",
+                    "-NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 5\"\r\n"
+                ),
+                escaped_sentinel
+            ),
+        )
+        .unwrap();
+        let spec = CodexInstallCommand {
+            program: script,
+            args: Vec::new(),
+        };
+        let mut lifecycle = ProcessCodexInstallerLifecycle::default();
+        let mut discoverer = FakePostInstallDiscoverer {
+            result: Err("must not be called".into()),
+            calls: 0,
+        };
+        let sink = RecordingInstallSink::default();
+
+        let started = std::time::Instant::now();
+        let result = orchestrate_codex_installation(
+            &mut lifecycle,
+            &mut discoverer,
+            sink.clone(),
+            &spec,
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+
+        assert_eq!(result, Ok(false));
+        assert!(
+            !sentinel.exists(),
+            "installer descendant survived timeout cleanup"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "installer cleanup exceeded its bounded deadline"
+        );
+        assert!(lifecycle.child.is_none());
+        assert!(lifecycle.reader_tasks.is_empty());
+        assert_one_terminal_completion(&sink.events(), false);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn production_installer_timeout_terminates_unix_process_group_descendants() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let sentinel = temp.path().join("installer-descendant-survived.txt");
+        let script = temp.path().join("installer-with-descendant");
+        let escaped_sentinel = sentinel.to_string_lossy().replace('\'', "'\\''");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n(sleep 0.8; printf survived > '{}') &\nsleep 5\n",
+                escaped_sentinel
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let spec = CodexInstallCommand {
+            program: script,
+            args: Vec::new(),
+        };
+        let mut lifecycle = ProcessCodexInstallerLifecycle::default();
+        let mut discoverer = FakePostInstallDiscoverer {
+            result: Err("must not be called".into()),
+            calls: 0,
+        };
+        let sink = RecordingInstallSink::default();
+
+        let started = std::time::Instant::now();
+        let result = orchestrate_codex_installation(
+            &mut lifecycle,
+            &mut discoverer,
+            sink.clone(),
+            &spec,
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+
+        assert_eq!(result, Ok(false));
+        assert!(
+            !sentinel.exists(),
+            "installer descendant survived timeout cleanup"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "installer cleanup exceeded its bounded deadline"
+        );
+        assert!(lifecycle.child.is_none());
+        assert!(lifecycle.reader_tasks.is_empty());
+        assert_one_terminal_completion(&sink.events(), false);
     }
 }

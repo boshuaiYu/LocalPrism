@@ -11,6 +11,9 @@ use tokio::task::JoinHandle;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 pub const CODEX_NOT_FOUND: &str = "Codex CLI was not found or failed validation";
 const VERSION_PREFIX: &str = "codex-cli ";
 const VALIDATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -494,11 +497,18 @@ fn system32_executable(name: &str) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
+pub(super) fn isolate_process_tree(command: &mut tokio::process::Command) {
+    #[cfg(unix)]
+    command.as_std_mut().process_group(0);
+
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
 #[cfg(target_os = "windows")]
-async fn terminate_windows_process_tree(process_id: u32) {
-    let Some(taskkill) = system32_executable("taskkill.exe") else {
-        return;
-    };
+async fn terminate_platform_process_tree(process_id: u32, timeout: Duration) -> Result<(), String> {
+    let taskkill = system32_executable("taskkill.exe")
+        .ok_or_else(|| "trusted System32 taskkill.exe was unavailable".to_string())?;
     let mut command = tokio::process::Command::new(taskkill);
     command
         .args(["/PID", &process_id.to_string(), "/T", "/F"])
@@ -507,21 +517,77 @@ async fn terminate_windows_process_tree(process_id: u32) {
         .stderr(Stdio::null())
         .kill_on_drop(true);
     command.as_std_mut().creation_flags(0x0800_0000);
-    let _ = tokio::time::timeout(CANDIDATE_REAP_TIMEOUT, command.status()).await;
+    match tokio::time::timeout(timeout, command.status()).await {
+        Ok(Ok(status)) if status.success() => Ok(()),
+        Ok(Ok(status)) => Err(format!("taskkill exited with status {status}")),
+        Ok(Err(error)) => Err(format!("taskkill could not be started: {error}")),
+        Err(_) => Err("taskkill timed out while terminating the process tree".into()),
+    }
+}
+
+#[cfg(unix)]
+fn trusted_unix_kill() -> Option<PathBuf> {
+    [PathBuf::from("/bin/kill"), PathBuf::from("/usr/bin/kill")]
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+}
+
+#[cfg(unix)]
+async fn terminate_platform_process_tree(process_id: u32, timeout: Duration) -> Result<(), String> {
+    let kill = trusted_unix_kill()
+        .ok_or_else(|| "trusted /bin/kill or /usr/bin/kill was unavailable".to_string())?;
+    let process_group = format!("-{process_id}");
+    let mut command = tokio::process::Command::new(kill);
+    command
+        .args(["-KILL", "--", &process_group])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    match tokio::time::timeout(timeout, command.status()).await {
+        Ok(Ok(status)) if status.success() => Ok(()),
+        Ok(Ok(status)) => Err(format!("kill exited with status {status}")),
+        Ok(Err(error)) => Err(format!("kill could not be started: {error}")),
+        Err(_) => Err("kill timed out while terminating the process group".into()),
+    }
+}
+
+#[cfg(not(any(target_os = "windows", unix)))]
+async fn terminate_platform_process_tree(
+    _process_id: u32,
+    _timeout: Duration,
+) -> Result<(), String> {
+    Err("process-tree termination is unsupported on this platform".into())
+}
+
+pub(super) async fn terminate_process_tree(
+    child: &mut tokio::process::Child,
+    timeout: Duration,
+) -> Result<(), String> {
+    let tree_result = match child.id() {
+        Some(process_id) => terminate_platform_process_tree(process_id, timeout).await,
+        None => Err("process id was unavailable for tree termination".into()),
+    };
+
+    let _ = child.start_kill();
+    let reap_result = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => Err(format!("process could not be reaped: {error}")),
+        Err(_) => Err("process could not be reaped before the cleanup timeout".into()),
+    };
+
+    match (tree_result, reap_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(tree_error), Ok(())) => Err(tree_error),
+        (Ok(()), Err(reap_error)) => Err(reap_error),
+        (Err(tree_error), Err(reap_error)) => Err(format!("{tree_error}; {reap_error}")),
+    }
 }
 
 async fn terminate_candidate(child: &mut tokio::process::Child) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    if let Some(process_id) = child.id() {
-        terminate_windows_process_tree(process_id).await;
-    }
-
-    let _ = child.start_kill();
-    match tokio::time::timeout(CANDIDATE_REAP_TIMEOUT, child.wait()).await {
-        Ok(Ok(_)) => Ok(()),
-        Ok(Err(error)) => Err(format!("candidate process could not be reaped: {error}")),
-        Err(_) => Err("candidate process could not be reaped before timeout".into()),
-    }
+    terminate_process_tree(child, CANDIDATE_REAP_TIMEOUT)
+        .await
+        .map_err(|error| format!("candidate cleanup failed: {error}"))
 }
 
 async fn run_candidate_command(
@@ -536,6 +602,7 @@ async fn run_candidate_command(
         .kill_on_drop(true);
     #[cfg(target_os = "windows")]
     command.as_std_mut().creation_flags(0x0800_0000);
+    isolate_process_tree(&mut command);
 
     let mut child = command
         .spawn()
@@ -1107,6 +1174,43 @@ mod tests {
 
         assert!(error.contains("timed out"));
         assert!(!sentinel.exists(), "candidate descendant survived timeout");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn candidate_timeout_terminates_unix_process_group_descendants() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let sentinel = temp.path().join("candidate-descendant-survived.txt");
+        let script = temp.path().join("codex-with-descendant");
+        let escaped_sentinel = sentinel.to_string_lossy().replace('\'', "'\\''");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n(sleep 0.8; printf survived > '{}') &\nsleep 5\n",
+                escaped_sentinel
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let started = std::time::Instant::now();
+        let error = run_candidate_command(
+            version_command(&script).unwrap(),
+            Duration::from_millis(100),
+            1024,
+        )
+        .await
+        .unwrap_err();
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+
+        assert!(error.contains("timed out"));
+        assert!(!sentinel.exists(), "candidate descendant survived timeout");
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "candidate timeout cleanup exceeded its bounded deadline"
+        );
     }
 
     #[tokio::test]
