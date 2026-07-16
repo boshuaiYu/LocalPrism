@@ -488,13 +488,6 @@ async fn finish_candidate_reader(
     }
 }
 
-#[cfg(target_os = "windows")]
-fn system32_executable(name: &str) -> Option<PathBuf> {
-    let root = std::env::var_os("SystemRoot").map(PathBuf::from)?;
-    let candidate = root.join("System32").join(name);
-    candidate.is_file().then_some(candidate)
-}
-
 pub(super) fn isolate_process_tree(command: &mut tokio::process::Command) {
     #[cfg(target_os = "windows")]
     {
@@ -704,23 +697,27 @@ pub(super) fn attach_process_tree(
     }
 }
 
-#[cfg(target_os = "windows")]
-async fn terminate_platform_process_tree(process_id: u32, timeout: Duration) -> Result<(), String> {
-    let taskkill = system32_executable("taskkill.exe")
-        .ok_or_else(|| "trusted System32 taskkill.exe was unavailable".to_string())?;
-    let mut command = tokio::process::Command::new(taskkill);
-    command
-        .args(["/PID", &process_id.to_string(), "/T", "/F"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    command.as_std_mut().creation_flags(0x0800_0000);
-    match tokio::time::timeout(timeout, command.status()).await {
-        Ok(Ok(status)) if status.success() => Ok(()),
-        Ok(Ok(status)) => Err(format!("taskkill exited with status {status}")),
-        Ok(Err(error)) => Err(format!("taskkill could not be started: {error}")),
-        Err(_) => Err("taskkill timed out while terminating the process tree".into()),
+async fn terminate_suspended_child(
+    child: &mut tokio::process::Child,
+    timeout: Duration,
+) -> Result<(), String> {
+    // This path is reserved for attach/resume failures. CREATE_SUSPENDED guarantees the child has
+    // not run user code or created descendants, so a direct bounded kill/reap is both sufficient
+    // and avoids making cleanup success depend on an external process-tree utility.
+    let kill_error = child
+        .start_kill()
+        .err()
+        .map(|error| format!("suspended child could not be terminated: {error}"));
+    let reap_error = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(_)) => None,
+        Ok(Err(error)) => Some(format!("suspended child could not be reaped: {error}")),
+        Err(_) => Some("suspended child could not be reaped before the cleanup timeout".into()),
+    };
+
+    match (kill_error, reap_error) {
+        (_, None) => Ok(()),
+        (None, Some(reap_error)) => Err(reap_error),
+        (Some(kill_error), Some(reap_error)) => Err(format!("{kill_error}; {reap_error}")),
     }
 }
 
@@ -771,10 +768,8 @@ pub(super) async fn terminate_process_tree(
             drop(guard);
             result
         }
-        None => match child.id() {
-            Some(process_id) => terminate_platform_process_tree(process_id, timeout).await,
-            None => Err("process id was unavailable for tree termination".into()),
-        },
+        // Callers pass no guard only when attach/resume failed while the child was still suspended.
+        None => return terminate_suspended_child(child, timeout).await,
     };
 
     #[cfg(not(target_os = "windows"))]
@@ -801,12 +796,6 @@ pub(super) async fn terminate_process_tree(
     }
 }
 
-async fn terminate_candidate(child: &mut tokio::process::Child) -> Result<(), String> {
-    terminate_process_tree(child, None, CANDIDATE_REAP_TIMEOUT)
-        .await
-        .map_err(|error| format!("candidate cleanup failed: {error}"))
-}
-
 async fn run_candidate_command(
     mut command: tokio::process::Command,
     wait_timeout: Duration,
@@ -825,7 +814,10 @@ async fn run_candidate_command(
     let mut process_tree = match attach_process_tree(&child) {
         Ok(process_tree) => Some(process_tree),
         Err(error) => {
-            let cleanup = terminate_candidate(&mut child).await.err();
+            let cleanup = terminate_suspended_child(&mut child, CANDIDATE_REAP_TIMEOUT)
+                .await
+                .err()
+                .map(|cleanup| format!("candidate cleanup failed: {cleanup}"));
             return Err(match cleanup {
                 Some(cleanup) => {
                     format!("failed to isolate candidate process tree: {error}; {cleanup}")
@@ -1474,32 +1466,63 @@ mod tests {
     #[tokio::test]
     async fn windows_assignment_failure_fallback_kills_the_suspended_child_before_it_runs() {
         let temp = tempfile::tempdir().unwrap();
-        let sentinel = temp.path().join("fallback-root-ran.txt");
+        for index in 0..4 {
+            let sentinel = temp.path().join(format!("fallback-root-ran-{index}.txt"));
+            let mut command = candidate_test_command(
+                "Set-Content -LiteralPath $env:CODEX_FALLBACK_SENTINEL ran; Start-Sleep -Seconds 5",
+                "",
+            );
+            command
+                .env("CODEX_FALLBACK_SENTINEL", &sentinel)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+            isolate_process_tree(&mut command);
+            let mut child = command.spawn().unwrap();
+            assert!(
+                !sentinel.exists(),
+                "suspended fallback child ran before cleanup"
+            );
+
+            terminate_suspended_child(&mut child, Duration::from_secs(2))
+                .await
+                .unwrap();
+
+            assert!(
+                !sentinel.exists(),
+                "assignment-failure fallback allowed suspended child code to run"
+            );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn windows_resume_failure_cleanup_reaps_after_job_guard_drop() {
+        let temp = tempfile::tempdir().unwrap();
+        let sentinel = temp.path().join("resume-failure-child-ran.txt");
         let mut command = candidate_test_command(
-            "Set-Content -LiteralPath $env:CODEX_FALLBACK_SENTINEL ran; Start-Sleep -Seconds 5",
+            "Set-Content -LiteralPath $env:CODEX_RESUME_FAILURE_SENTINEL ran; Start-Sleep -Seconds 5",
             "",
         );
         command
-            .env("CODEX_FALLBACK_SENTINEL", &sentinel)
+            .env("CODEX_RESUME_FAILURE_SENTINEL", &sentinel)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
         isolate_process_tree(&mut command);
         let mut child = command.spawn().unwrap();
-        assert!(
-            !sentinel.exists(),
-            "suspended fallback child ran before cleanup"
-        );
+        let job = WindowsJobHandle::attach(&child).unwrap();
 
-        terminate_process_tree(&mut child, None, Duration::from_secs(2))
+        drop(job);
+        terminate_suspended_child(&mut child, Duration::from_secs(2))
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(250)).await;
 
         assert!(
             !sentinel.exists(),
-            "assignment-failure fallback allowed suspended child code to run"
+            "resume-failure cleanup allowed suspended child code to run"
         );
     }
 
