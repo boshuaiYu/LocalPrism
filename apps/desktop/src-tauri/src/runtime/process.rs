@@ -11,7 +11,7 @@ pub struct TurnRoute {
 
 #[derive(Default)]
 pub struct RuntimeProcessState {
-    routes: tokio::sync::RwLock<std::collections::HashMap<String, TurnRoute>>,
+    routes: tokio::sync::RwLock<std::collections::HashMap<(String, String), TurnRoute>>,
 }
 
 impl RuntimeProcessState {
@@ -19,14 +19,14 @@ impl RuntimeProcessState {
         self.routes
             .write()
             .await
-            .insert(format!("{}:{}", route.window_label, route.tab_id), route);
+            .insert((route.window_label.clone(), route.tab_id.clone()), route);
     }
 
     pub async fn get(&self, window: &str, tab: &str) -> Option<TurnRoute> {
         self.routes
             .read()
             .await
-            .get(&format!("{window}:{tab}"))
+            .get(&(window.to_owned(), tab.to_owned()))
             .cloned()
     }
 
@@ -64,6 +64,19 @@ mod tests {
 
         assert_eq!(state.get("window-a", "tab-1").await, Some(first));
         assert_eq!(state.get("window-b", "tab-1").await, Some(second));
+    }
+
+    #[tokio::test]
+    async fn separators_in_window_and_tab_ids_do_not_collide() {
+        let state = RuntimeProcessState::default();
+        let first = route(RuntimeKind::Claude, "a:b", "c");
+        let second = route(RuntimeKind::Codex, "a", "b:c");
+
+        state.upsert(first.clone()).await;
+        state.upsert(second.clone()).await;
+
+        assert_eq!(state.get("a:b", "c").await, Some(first));
+        assert_eq!(state.get("a", "b:c").await, Some(second));
     }
 
     #[tokio::test]

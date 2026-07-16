@@ -25,9 +25,7 @@ mod tests {
     use crate::runtime::{RuntimeCapabilities, RuntimeKind};
 
     #[test]
-    fn maps_fully_populated_claude_status_without_changing_provider_configuration() {
-        let provider_model = "claude-sonnet-4".to_owned();
-        let provider_base_url = "https://provider.example/v1".to_owned();
+    fn maps_fully_populated_claude_status_to_the_shared_account_boundary() {
         let status = crate::claude::ClaudeStatus {
             installed: true,
             authenticated: true,
@@ -35,8 +33,8 @@ mod tests {
             version: Some("2.1.0".into()),
             provider_kind: "openai-compatible".into(),
             account_email: Some("writer@example.com".into()),
-            provider_model: Some(provider_model.clone()),
-            provider_base_url: Some(provider_base_url.clone()),
+            provider_model: Some("claude-sonnet-4".into()),
+            provider_base_url: Some("https://provider.example/v1".into()),
             claude_provider_configured: true,
             missing_git: true,
         };
@@ -61,7 +59,21 @@ mod tests {
         );
         assert_eq!(account.error, None);
 
-        assert_eq!(provider_model, "claude-sonnet-4");
-        assert_eq!(provider_base_url, "https://provider.example/v1");
+        let value = serde_json::to_value(account).unwrap();
+        assert_eq!(value["authMode"], "openai-compatible");
+        assert_eq!(value["accountLabel"], "writer@example.com");
+
+        for provider_only_field in [
+            "binaryPath",
+            "providerModel",
+            "providerBaseUrl",
+            "claudeProviderConfigured",
+            "missingGit",
+        ] {
+            assert!(
+                value.get(provider_only_field).is_none(),
+                "{provider_only_field} must not cross the shared runtime boundary"
+            );
+        }
     }
 }
