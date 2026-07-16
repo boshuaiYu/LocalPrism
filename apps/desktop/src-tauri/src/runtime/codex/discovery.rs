@@ -1333,6 +1333,101 @@ mod tests {
         assert_eq!(parse_codex_version(&output.stdout), Some("9.8.7".into()));
     }
 
+    #[cfg(target_os = "windows")]
+    fn hidden_windows_descendant_script(
+        trigger_env: &str,
+        sentinel_env: &str,
+        ready_env: Option<&str>,
+    ) -> String {
+        fn is_safe_environment_name(name: &str) -> bool {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        }
+
+        assert!(is_safe_environment_name(trigger_env));
+        assert!(is_safe_environment_name(sentinel_env));
+        assert!(ready_env.is_none_or(is_safe_environment_name));
+
+        let ready_statement = ready_env
+            .map(|name| format!("Set-Content -LiteralPath $env:{name} ready; "))
+            .unwrap_or_default();
+
+        const TEMPLATE: &str = r#"$systemRoot = [System.Environment]::GetEnvironmentVariable('SystemRoot');
+if ([System.String]::IsNullOrWhiteSpace($systemRoot)) { throw 'SystemRoot is unavailable' };
+$powerShellPath = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($systemRoot, 'System32\WindowsPowerShell\v1.0\powershell.exe'));
+if (-not [System.IO.Path]::IsPathRooted($powerShellPath) -or -not [System.IO.File]::Exists($powerShellPath)) { throw 'Windows PowerShell executable is unavailable' };
+$descendantScript = '__READY_STATEMENT__while (-not (Test-Path -LiteralPath $env:__TRIGGER_ENV__)) { Start-Sleep -Milliseconds 20 }; Set-Content -LiteralPath $env:__SENTINEL_ENV__ alive';
+$encodedCommand = [System.Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($descendantScript));
+$startInfo = [System.Diagnostics.ProcessStartInfo]::new();
+$startInfo.FileName = $powerShellPath;
+$startInfo.Arguments = '-NoProfile -NonInteractive -EncodedCommand ' + $encodedCommand;
+$startInfo.UseShellExecute = $false;
+$startInfo.CreateNoWindow = $true;
+$startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden;
+$startInfo.RedirectStandardInput = $true;
+$startInfo.RedirectStandardOutput = $true;
+$startInfo.RedirectStandardError = $true;
+$descendant = [System.Diagnostics.Process]::new();
+$descendant.StartInfo = $startInfo;
+try {
+    if (-not $descendant.Start()) { throw 'Failed to start hidden descendant' };
+    $descendant.StandardInput.Close();
+    $descendant.StandardOutput.Close();
+    $descendant.StandardError.Close();
+} finally {
+    $descendant.Dispose();
+}"#;
+
+        TEMPLATE
+            .replace("__READY_STATEMENT__", &ready_statement)
+            .replace("__TRIGGER_ENV__", trigger_env)
+            .replace("__SENTINEL_ENV__", sentinel_env)
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_descendant_script_uses_an_absolute_hidden_process_start_info() {
+        let script = hidden_windows_descendant_script(
+            "CODEX_TEST_DESCENDANT_TRIGGER",
+            "CODEX_TEST_DESCENDANT_SENTINEL",
+            Some("CODEX_TEST_DESCENDANT_READY"),
+        );
+
+        for required in [
+            "[System.IO.Path]::GetFullPath",
+            "[System.IO.Path]::IsPathRooted",
+            "[System.IO.File]::Exists",
+            r"System32\WindowsPowerShell\v1.0\powershell.exe",
+            "[System.Diagnostics.ProcessStartInfo]::new()",
+            ".UseShellExecute = $false",
+            ".CreateNoWindow = $true",
+            ".WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden",
+            ".RedirectStandardInput = $true",
+            ".RedirectStandardOutput = $true",
+            ".RedirectStandardError = $true",
+            ".StandardInput.Close()",
+            ".StandardOutput.Close()",
+            ".StandardError.Close()",
+            ".Dispose()",
+            "$env:CODEX_TEST_DESCENDANT_TRIGGER",
+            "$env:CODEX_TEST_DESCENDANT_SENTINEL",
+            "$env:CODEX_TEST_DESCENDANT_READY",
+        ] {
+            assert!(
+                script.contains(required),
+                "hidden descendant script omitted {required:?}: {script}"
+            );
+        }
+        assert!(!script.contains("Start-Process"));
+        assert!(
+            script.find("$env:CODEX_TEST_DESCENDANT_READY").unwrap()
+                < script.find("$env:CODEX_TEST_DESCENDANT_TRIGGER").unwrap(),
+            "the child must report readiness before waiting for the trigger"
+        );
+    }
+
     fn candidate_test_command(windows_script: &str, unix_script: &str) -> tokio::process::Command {
         #[cfg(target_os = "windows")]
         {
@@ -1396,10 +1491,15 @@ mod tests {
             let sentinel = temp
                 .path()
                 .join(format!("candidate-descendant-sentinel-{index}.txt"));
-            let mut command = candidate_test_command(
-                "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-NonInteractive','-Command','while (-not (Test-Path -LiteralPath $env:CODEX_DESCENDANT_TRIGGER)) { Start-Sleep -Milliseconds 20 }; Set-Content -LiteralPath $env:CODEX_DESCENDANT_SENTINEL alive'; Start-Sleep -Seconds 5",
-                "",
+            let windows_script = format!(
+                "{}; Start-Sleep -Seconds 5",
+                hidden_windows_descendant_script(
+                    "CODEX_DESCENDANT_TRIGGER",
+                    "CODEX_DESCENDANT_SENTINEL",
+                    None,
+                )
             );
+            let mut command = candidate_test_command(&windows_script, "");
             command
                 .env("CODEX_DESCENDANT_TRIGGER", &trigger)
                 .env("CODEX_DESCENDANT_SENTINEL", &sentinel);
@@ -1426,14 +1526,21 @@ mod tests {
     async fn windows_job_guard_drop_terminates_the_assigned_process_tree() {
         let temp = tempfile::tempdir().unwrap();
         let ready = temp.path().join("job-guard-descendant-ready.txt");
+        let descendant_ready = temp.path().join("job-guard-hidden-child-ready.txt");
         let trigger = temp.path().join("job-guard-descendant-trigger.txt");
         let sentinel = temp.path().join("job-guard-descendant-sentinel.txt");
-        let mut command = candidate_test_command(
-            "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-NonInteractive','-Command','while (-not (Test-Path -LiteralPath $env:CODEX_JOB_TRIGGER)) { Start-Sleep -Milliseconds 20 }; Set-Content -LiteralPath $env:CODEX_JOB_SENTINEL alive'; Set-Content -LiteralPath $env:CODEX_JOB_READY ready; Start-Sleep -Seconds 5",
-            "",
+        let windows_script = format!(
+            "{}; while (-not (Test-Path -LiteralPath $env:CODEX_JOB_DESCENDANT_READY)) {{ Start-Sleep -Milliseconds 10 }}; Set-Content -LiteralPath $env:CODEX_JOB_READY ready; Start-Sleep -Seconds 5",
+            hidden_windows_descendant_script(
+                "CODEX_JOB_TRIGGER",
+                "CODEX_JOB_SENTINEL",
+                Some("CODEX_JOB_DESCENDANT_READY"),
+            )
         );
+        let mut command = candidate_test_command(&windows_script, "");
         command
             .env("CODEX_JOB_READY", &ready)
+            .env("CODEX_JOB_DESCENDANT_READY", &descendant_ready)
             .env("CODEX_JOB_TRIGGER", &trigger)
             .env("CODEX_JOB_SENTINEL", &sentinel)
             .stdin(Stdio::null())
