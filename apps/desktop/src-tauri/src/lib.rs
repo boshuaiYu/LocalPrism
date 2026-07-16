@@ -5,6 +5,7 @@ mod claude;
 mod claude_process;
 mod history;
 mod latex;
+mod runtime;
 mod skills;
 mod slash_commands;
 mod uv;
