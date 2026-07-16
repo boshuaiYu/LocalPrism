@@ -81,6 +81,8 @@ const IGNORED_EXTENSIONS = new Set([
   ".vrb",
   ".run.xml",
   ".bcf",
+  ".pyc",
+  ".pyo",
 ]);
 
 export function shouldSkipProjectDirectory(name: string): boolean {

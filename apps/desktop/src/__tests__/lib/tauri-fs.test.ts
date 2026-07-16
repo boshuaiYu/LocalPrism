@@ -28,12 +28,16 @@ describe("tauri fs helpers", () => {
       expect(getProjectFileType("main.synctex.gz")).toBeNull();
     });
 
+    it("ignores Python bytecode files", () => {
+      expect(getProjectFileType("module.pyc")).toBeNull();
+      expect(getProjectFileType("optimized.pyo")).toBeNull();
+    });
+
     it("keeps imported files with arbitrary extensions visible", () => {
       expect(getProjectFileType("archive.zip")).toBe("other");
       expect(getProjectFileType("paper.docx")).toBe("other");
       expect(getProjectFileType("data.xlsx")).toBe("other");
       expect(getProjectFileType("movie.mp4")).toBe("other");
-      expect(getProjectFileType("module.pyc")).toBe("other");
       expect(getProjectFileType("native.pyd")).toBe("other");
     });
   });
@@ -88,7 +92,7 @@ describe("tauri fs helpers", () => {
       ]);
     });
 
-    it("keeps arbitrary file formats visible as other files", async () => {
+    it("keeps arbitrary user file formats visible but skips Python bytecode", async () => {
       vi.mocked(readDir).mockResolvedValue([
         { name: "module.pyc", isDirectory: false },
         { name: "worker.py", isDirectory: false },
@@ -99,11 +103,10 @@ describe("tauri fs helpers", () => {
       const result = await scanProjectFolder("/project");
 
       expect(result.files.map((file) => file.relativePath)).toEqual([
-        "module.pyc",
         "worker.py",
         "notes.txt",
       ]);
-      expect(stat).toHaveBeenCalledTimes(3);
+      expect(stat).toHaveBeenCalledTimes(2);
       expect(result.files.every((file) => file.type === "other")).toBe(true);
     });
   });
