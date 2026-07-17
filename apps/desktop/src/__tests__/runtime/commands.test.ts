@@ -2,8 +2,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   interruptRuntimeTurn,
+  runtimeArchiveConversation,
   runtimeReadConversation,
   runtimeInstall,
+  runtimeListConversations,
   runtimeListModels,
   runtimeLoginCancel,
   runtimeLoginStart,
@@ -14,6 +16,7 @@ import {
 import type {
   ConversationRef,
   RuntimeAccount,
+  RuntimeConversation,
   RuntimeLoginStartResult,
   RuntimeLoginState,
   RuntimeModel,
@@ -278,6 +281,46 @@ describe("runtime command wrappers", () => {
 
     await expect(runtimeReadConversation(reference)).resolves.toBe(history);
     expect(invoke).toHaveBeenCalledWith("runtime_read_conversation", {
+      reference,
+    });
+  });
+
+  it("lists conversations with exactly the selected runtime and project path", async () => {
+    const conversations: RuntimeConversation[] = [
+      {
+        reference: {
+          runtime: "codex",
+          sessionId: "thread-3",
+          projectPath: "C:/work/paper",
+        },
+        title: "Paper review",
+        status: "idle",
+        updatedAt: 42,
+      },
+    ];
+    vi.mocked(invoke).mockResolvedValueOnce(conversations);
+
+    await expect(
+      runtimeListConversations("codex", "C:/work/paper"),
+    ).resolves.toBe(conversations);
+    expect(invoke).toHaveBeenCalledWith("runtime_list_conversations", {
+      runtime: "codex",
+      projectPath: "C:/work/paper",
+    });
+  });
+
+  it("archives a conversation with exactly its complete reference", async () => {
+    const reference: ConversationRef = {
+      runtime: "claude",
+      sessionId: "session-9",
+      projectPath: "C:/work/notes",
+    };
+    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+
+    await expect(
+      runtimeArchiveConversation(reference),
+    ).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenCalledWith("runtime_archive_conversation", {
       reference,
     });
   });

@@ -1,0 +1,192 @@
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@/components/claude-chat/session-selector", () => ({
+  SessionSelector: () => <div data-testid="session-selector" />,
+}));
+
+import { ChatTabBar } from "@/components/claude-chat/chat-tab-bar";
+import { type TabState, useClaudeChatStore } from "@/stores/claude-chat-store";
+
+function makeTab(
+  id: string,
+  title: string,
+  runtime: TabState["runtime"],
+  isStreaming = false,
+): TabState {
+  const baseTab = useClaudeChatStore.getState().tabs[0];
+  return {
+    ...baseTab,
+    id,
+    title,
+    projectPath: "C:/project",
+    runtime,
+    sessionRef: null,
+    sessionId: null,
+    messages: [],
+    isStreaming,
+    streamingStartedAt: isStreaming ? 1 : null,
+    cancelledAttempts: [],
+    activeAttemptId: isStreaming ? `${id}-attempt` : null,
+  };
+}
+
+function tabButton(container: HTMLElement, tabId: string): HTMLButtonElement {
+  const button = container.querySelector(`button[data-tab-id="${tabId}"]`);
+  if (!(button instanceof HTMLButtonElement)) {
+    throw new Error(`Tab button not found: ${tabId}`);
+  }
+  return button;
+}
+
+describe("ChatTabBar runtime badges", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  let chatSnapshot: ReturnType<typeof useClaudeChatStore.getState>;
+  let scrollIntoViewDescriptor: PropertyDescriptor | undefined;
+
+  beforeEach(() => {
+    chatSnapshot = useClaudeChatStore.getState();
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    scrollIntoViewDescriptor = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      "scrollIntoView",
+    );
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    (
+      globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    useClaudeChatStore.setState(chatSnapshot, true);
+    if (scrollIntoViewDescriptor) {
+      Object.defineProperty(
+        HTMLElement.prototype,
+        "scrollIntoView",
+        scrollIntoViewDescriptor,
+      );
+    } else {
+      Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
+    }
+  });
+
+  async function renderTabs(tabs: TabState[]) {
+    const activeTab = tabs[0];
+    useClaudeChatStore.setState({
+      tabs,
+      activeTabId: activeTab.id,
+      activeProjectPath: activeTab.projectPath,
+      messages: activeTab.messages,
+      sessionId: activeTab.sessionId,
+      isStreaming: activeTab.isStreaming,
+      streamingStartedAt: activeTab.streamingStartedAt,
+      error: activeTab.error,
+      totalInputTokens: activeTab.totalInputTokens,
+      totalOutputTokens: activeTab.totalOutputTokens,
+    });
+    await act(async () => root.render(<ChatTabBar />));
+  }
+
+  it("visibly and accessibly identifies every tab runtime", async () => {
+    await renderTabs([
+      makeTab("tab-claude", "Literature review", "claude"),
+      makeTab("tab-codex", "Run checks", "codex"),
+    ]);
+
+    const claudeTab = tabButton(container, "tab-claude");
+    const codexTab = tabButton(container, "tab-codex");
+    const claudeBadge = Array.from(claudeTab.querySelectorAll("span")).find(
+      (node) => node.textContent === "Claude",
+    );
+    const codexBadge = Array.from(codexTab.querySelectorAll("span")).find(
+      (node) => node.textContent === "Codex",
+    );
+
+    expect(claudeBadge).toBeInstanceOf(HTMLSpanElement);
+    expect(codexBadge).toBeInstanceOf(HTMLSpanElement);
+    expect(claudeTab.getAttribute("aria-label")).toBe(
+      "Claude runtime: Literature review",
+    );
+    expect(codexTab.getAttribute("aria-label")).toBe(
+      "Codex runtime: Run checks",
+    );
+  });
+
+  it("keeps the streaming indicator and close-button protections", async () => {
+    await renderTabs([
+      makeTab("tab-claude", "Streaming", "claude", true),
+      makeTab("tab-codex", "Idle", "codex"),
+    ]);
+
+    const streamingTab = tabButton(container, "tab-claude");
+    const idleTab = tabButton(container, "tab-codex");
+    expect(streamingTab.querySelector(".animate-ping")).not.toBeNull();
+    expect(
+      streamingTab.querySelector('[role="button"][aria-label="Close tab"]'),
+    ).toBeNull();
+
+    const closeButton = idleTab.querySelector(
+      '[role="button"][aria-label="Close tab"]',
+    );
+    expect(closeButton).toBeInstanceOf(HTMLSpanElement);
+    await act(async () => (closeButton as HTMLSpanElement).click());
+
+    expect(useClaudeChatStore.getState().tabs.map((tab) => tab.id)).toEqual([
+      "tab-claude",
+    ]);
+    expect(useClaudeChatStore.getState().activeTabId).toBe("tab-claude");
+  });
+
+  it("keeps tab switching, creation, and closing keyboard shortcuts", async () => {
+    await renderTabs([
+      makeTab("tab-claude", "Claude work", "claude"),
+      makeTab("tab-codex", "Codex work", "codex"),
+    ]);
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Tab", ctrlKey: true }),
+      );
+    });
+    expect(useClaudeChatStore.getState().activeTabId).toBe("tab-codex");
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Tab",
+          ctrlKey: true,
+          shiftKey: true,
+        }),
+      );
+    });
+    expect(useClaudeChatStore.getState().activeTabId).toBe("tab-claude");
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "t", ctrlKey: true }),
+      );
+    });
+    const createdTabId = useClaudeChatStore.getState().activeTabId;
+    expect(useClaudeChatStore.getState().tabs).toHaveLength(3);
+    expect(createdTabId).not.toBe("tab-claude");
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "w", ctrlKey: true }),
+      );
+    });
+    expect(useClaudeChatStore.getState().tabs).toHaveLength(2);
+    expect(
+      useClaudeChatStore.getState().tabs.some((tab) => tab.id === createdTabId),
+    ).toBe(false);
+  });
+});

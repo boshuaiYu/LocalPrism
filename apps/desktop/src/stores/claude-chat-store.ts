@@ -198,6 +198,18 @@ export interface TabState {
   cancelledAttempts?: AttemptCancellation[];
 }
 
+export type TabRuntimeSelection = Pick<
+  TabState,
+  "runtimeModel" | "reasoningEffort" | "agentId"
+>;
+
+export type UpdateTabRuntimeSelectionResult =
+  | "changed"
+  | "unchanged"
+  | "not-found"
+  | "blocked-streaming"
+  | "blocked-stopping";
+
 /** Fields that are projected from the active tab to top-level state */
 const TAB_FIELDS = [
   "sessionId",
@@ -936,6 +948,10 @@ interface ClaudeChatState {
     nextRuntime: RuntimeKind,
     options?: { confirmSessionReset?: boolean },
   ) => ChangeTabRuntimeResult;
+  updateTabRuntimeSelection: (
+    tabId: string,
+    selection: TabRuntimeSelection,
+  ) => UpdateTabRuntimeSelectionResult;
 
   // Tab actions
   createTab: () => string;
@@ -950,6 +966,7 @@ interface ClaudeChatState {
   _appendMessage: (tabId: string, msg: ClaudeStreamMessage) => void;
   _setSessionId: (tabId: string, id: string) => void;
   _setSessionTitle: (sessionId: string, title: string) => void;
+  _setConversationTitle: (reference: ConversationRef, title: string) => void;
   _setStreaming: (tabId: string, streaming: boolean) => void;
   _setError: (tabId: string, error: string | null) => void;
   _addUsage: (tabId: string, inputTokens: number, outputTokens: number) => void;
@@ -1136,8 +1153,8 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     }
 
     const runtime = activeTab.runtime;
-    const runtimeModel = activeTab.runtimeModel?.trim() ?? "";
-    const codexReasoningEffort = activeTab.reasoningEffort?.trim() || null;
+    const runtimeModel = activeTab.runtimeModel?.trim() || null;
+    const tabReasoningEffort = activeTab.reasoningEffort?.trim() || null;
     const codexAgentId = activeTab.agentId?.trim() || null;
     if (runtime === "codex" && !runtimeModel) {
       set((s) =>
@@ -1148,6 +1165,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       discardRejectedPrompt(activeTabId);
       return;
     }
+    const requestModel = runtimeModel ?? state.selectedModel;
     const attemptEpoch = (activeTab.attemptEpoch ?? 0) + 1;
     const attemptId = nextRuntimeAttemptId(activeTabId);
     const isCurrentAttempt = () => {
@@ -1205,7 +1223,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         ? activeTab.sessionRef
         : null;
     const sessionId = sessionRef?.sessionId ?? null;
-    const { selectedModel, effortLevel, selectedProviderModels } = state;
+    const { effortLevel, selectedProviderModels } = state;
     let providerCredentialId: string | null = null;
     if (runtime === "claude") {
       const tabSelectedProviderCredentialId =
@@ -1406,9 +1424,11 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         attemptId,
         sessionId: resumeSessionId,
         prompt,
-        model: runtime === "claude" ? selectedModel : runtimeModel,
+        model: requestModel,
         reasoningEffort:
-          runtime === "claude" ? effortLevel : codexReasoningEffort,
+          runtime === "claude"
+            ? (tabReasoningEffort ?? effortLevel)
+            : tabReasoningEffort,
         agentId: runtime === "codex" ? codexAgentId : null,
         providerCredentialId:
           runtime === "claude" ? providerCredentialId : null,
@@ -2027,9 +2047,11 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       const id = nextTabId();
       const newTab = {
         ...makeDefaultTab(id, projectPath),
-        providerKey:
-          activeTab.providerKey ??
-          providerKeyForSelectedCredential(get().selectedProviderCredentialId),
+        runtime: activeTab.runtime,
+        runtimeModel: activeTab.runtimeModel,
+        reasoningEffort: activeTab.reasoningEffort,
+        agentId: activeTab.agentId,
+        providerKey: activeTab.providerKey,
       };
       set({
         tabs: [...tabs, newTab],
@@ -2124,6 +2146,34 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     return "changed";
   },
 
+  updateTabRuntimeSelection: (tabId, selection) => {
+    let result: UpdateTabRuntimeSelectionResult = "not-found";
+    set((state) => {
+      const tab = state.tabs.find((candidate) => candidate.id === tabId);
+      if (!tab) return state;
+      if (tab.isStreaming) {
+        result = "blocked-streaming";
+        return state;
+      }
+      if ((tab.cancelledAttempts?.length ?? 0) > 0) {
+        result = "blocked-stopping";
+        return state;
+      }
+      if (
+        tab.runtimeModel === selection.runtimeModel &&
+        tab.reasoningEffort === selection.reasoningEffort &&
+        tab.agentId === selection.agentId
+      ) {
+        result = "unchanged";
+        return state;
+      }
+
+      result = "changed";
+      return applyTabUpdate(state, tabId, selection);
+    });
+    return result;
+  },
+
   resumeConversation: async (reference, title) => {
     log.info(`Resuming ${reference.runtime} session`, {
       session: reference.sessionId.slice(0, 8),
@@ -2179,6 +2229,14 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         const id = nextTabId();
         const newTab = {
           ...makeDefaultTab(id, reference.projectPath),
+          ...(activeTab.runtime === reference.runtime
+            ? {
+                runtime: activeTab.runtime,
+                runtimeModel: activeTab.runtimeModel,
+                reasoningEffort: activeTab.reasoningEffort,
+                agentId: activeTab.agentId,
+              }
+            : {}),
           providerKey:
             activeTab.providerKey ??
             providerKeyForSelectedCredential(
@@ -2209,6 +2267,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     if (!targetTab || isBusy(targetTab)) return;
     const resumeRequestId = nextResumeRequestId(activeTabId);
     const discardedTemporaryFilePaths = temporaryFilesOwnedByTab(targetTab);
+    const runtimeChanged = targetTab.runtime !== reference.runtime;
 
     set((s) => ({
       ...applyTabUpdate(s, activeTabId, {
@@ -2217,9 +2276,13 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         runtime: reference.runtime,
         sessionRef: { ...reference },
         sessionId: reference.sessionId,
-        runtimeModel: null,
-        reasoningEffort: null,
-        agentId: null,
+        ...(runtimeChanged
+          ? {
+              runtimeModel: null,
+              reasoningEffort: null,
+              agentId: null,
+            }
+          : {}),
         providerKey: null,
         sessionProviderKey: null,
         error: null,
@@ -2361,9 +2424,23 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       null;
     const newTab = {
       ...makeDefaultTab(id, projectPath),
-      providerKey:
-        activeTab?.providerKey ??
-        providerKeyForSelectedCredential(state.selectedProviderCredentialId),
+      ...(activeTab
+        ? {
+            runtime: activeTab.runtime,
+            runtimeModel: activeTab.runtimeModel,
+            reasoningEffort: activeTab.reasoningEffort,
+            agentId: activeTab.agentId,
+            providerKey:
+              activeTab.providerKey ??
+              providerKeyForSelectedCredential(
+                state.selectedProviderCredentialId,
+              ),
+          }
+        : {
+            providerKey: providerKeyForSelectedCredential(
+              state.selectedProviderCredentialId,
+            ),
+          }),
     };
     set((s) => ({
       tabs: [...s.tabs, newTab],
@@ -2543,6 +2620,27 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
           ? { ...tab, title: cleanTitle }
           : tab,
       ),
+    }));
+  },
+
+  _setConversationTitle: (reference: ConversationRef, title: string) => {
+    const cleanTitle = title.trim();
+    if (!cleanTitle) return;
+    set((state) => ({
+      tabs: state.tabs.map((tab) => {
+        const tabReference =
+          tab.sessionRef ??
+          (tab.sessionId && tab.projectPath
+            ? {
+                runtime: tab.runtime,
+                sessionId: tab.sessionId,
+                projectPath: tab.projectPath,
+              }
+            : null);
+        return sameConversationReference(tabReference, reference)
+          ? { ...tab, title: cleanTitle }
+          : tab;
+      }),
     }));
   },
 

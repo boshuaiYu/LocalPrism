@@ -21,12 +21,9 @@ import {
   ImageIcon,
   FileSpreadsheetIcon,
   PaperclipIcon,
-  ZapIcon,
   CheckIcon,
   ChevronDownIcon,
   SparklesIcon,
-  RabbitIcon,
-  LayersIcon,
   PlusIcon,
   Trash2Icon,
   Loader2Icon,
@@ -69,6 +66,15 @@ import {
   rememberModelListCapabilityMetadata,
 } from "@/lib/model-capabilities";
 import { ModelCapabilityBadges } from "@/components/model-capability-badges";
+import {
+  CLAUDE_MODEL_OPTIONS,
+  CLAUDE_REASONING_EFFORT_OPTIONS,
+  getSelectedCodexModel,
+  isRuntimeSelectionReady,
+  isRuntimeSendDisabled,
+  RuntimeSelector,
+  runtimeSelectionSupportsImages,
+} from "@/components/runtime/runtime-selector";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { ClaudeSetup } from "@/components/claude-setup";
 import {
@@ -81,6 +87,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { useRuntimeStore } from "@/stores/runtime-store";
 import { SlashCommandPicker, type SlashCommand } from "./slash-command-picker";
 import { createLogger } from "@/lib/debug/logger";
 
@@ -193,17 +200,6 @@ function formatGuidanceText(guidance: QueuedGuidance) {
     : guidance.prompt;
 }
 
-type EffortLevel = "low" | "medium" | "high";
-const EFFORT_LEVELS: EffortLevel[] = ["low", "medium", "high"];
-
-function effortShortLabel(level: EffortLevel) {
-  return level === "low" ? "L" : level === "medium" ? "M" : "H";
-}
-
-function effortDisplayLabel(level: EffortLevel) {
-  return effortShortLabel(level);
-}
-
 function claudeModelDisplayName(model: string) {
   switch (model) {
     case "sonnet":
@@ -217,39 +213,6 @@ function claudeModelDisplayName(model: string) {
     default:
       return model;
   }
-}
-
-function EffortControls({
-  effortLevel,
-  setEffortLevel,
-}: {
-  effortLevel: EffortLevel;
-  setEffortLevel: (level: EffortLevel) => void;
-}) {
-  return (
-    <>
-      <div className="my-1 border-border border-t" />
-      <div className="px-2 py-1 font-medium text-muted-foreground text-xs">
-        Effort
-      </div>
-      <div className="flex gap-1 px-2 pb-2">
-        {EFFORT_LEVELS.map((level) => (
-          <button
-            key={level}
-            className={cn(
-              "flex-1 rounded-md py-1 text-center font-medium text-xs transition-colors",
-              effortLevel === level
-                ? "bg-primary text-primary-foreground"
-                : "bg-muted text-muted-foreground hover:bg-muted/80",
-            )}
-            onClick={() => setEffortLevel(level)}
-          >
-            {effortDisplayLabel(level)}
-          </button>
-        ))}
-      </div>
-    </>
-  );
 }
 
 export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
@@ -281,6 +244,13 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
   const effortLevel = useClaudeChatStore((s) => s.effortLevel);
   const setEffortLevel = useClaudeChatStore((s) => s.setEffortLevel);
   const activeTabId = useClaudeChatStore((s) => s.activeTabId);
+  const activeTab = useClaudeChatStore((s) =>
+    s.tabs.find((tab) => tab.id === s.activeTabId),
+  );
+  const changeTabRuntime = useClaudeChatStore((s) => s.changeTabRuntime);
+  const updateTabRuntimeSelection = useClaudeChatStore(
+    (s) => s.updateTabRuntimeSelection,
+  );
   const queuedGuidance = useClaudeChatStore(
     (s) =>
       s.tabs.find((tab) => tab.id === s.activeTabId)?.queuedGuidance ??
@@ -300,6 +270,10 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
     (s) => s.claudeProviderConfigured,
   );
   const deleteApiCredential = useClaudeSetupStore((s) => s.deleteApiCredential);
+  const codexAccount = useRuntimeStore((s) => s.accounts.codex);
+  const codexModels = useRuntimeStore((s) => s.models.codex);
+  const codexModelsLoading = useRuntimeStore((s) => !!s.loading.codex);
+  const refreshCodexModels = useRuntimeStore((s) => s.refreshModels);
   const configuredOpenAiCredential =
     selectedProviderCredentialId &&
     selectedProviderCredentialId !== CLAUDE_CODE_PROVIDER_ID
@@ -325,6 +299,42 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
     showClaudeProvider && !selectedProviderCredential;
   const providerSelectionReady =
     claudeProviderActive || !!selectedProviderCredential;
+  const activeRuntime = activeTab?.runtime ?? "claude";
+  const selectedRuntimeModelId =
+    activeRuntime === "claude"
+      ? (activeTab?.runtimeModel ?? selectedModel)
+      : (activeTab?.runtimeModel ?? null);
+  const selectedRuntimeEffort =
+    activeRuntime === "claude"
+      ? (activeTab?.reasoningEffort ?? effortLevel)
+      : (activeTab?.reasoningEffort ?? null);
+  const selectedClaudeModel =
+    activeRuntime === "claude"
+      ? (CLAUDE_MODEL_OPTIONS.find(
+          (model) => model.id === selectedRuntimeModelId,
+        )?.id ?? selectedModel)
+      : selectedModel;
+  const selectedClaudeEffort =
+    activeRuntime === "claude"
+      ? (CLAUDE_REASONING_EFFORT_OPTIONS.find(
+          (effort) => effort === selectedRuntimeEffort,
+        ) ?? effortLevel)
+      : effortLevel;
+  const selectedCodexModel = getSelectedCodexModel(
+    codexModels,
+    activeRuntime === "codex" ? selectedRuntimeModelId : null,
+  );
+  const codexAvailable = codexAccount.installed && codexAccount.authenticated;
+  const runtimeSelectionReady = isRuntimeSelectionReady(
+    activeRuntime,
+    providerSelectionReady,
+    codexAvailable,
+    selectedCodexModel,
+    selectedRuntimeEffort,
+  );
+  const runtimeBusy =
+    !!activeTab &&
+    (activeTab.isStreaming || (activeTab.cancelledAttempts?.length ?? 0) > 0);
   const selectedProviderModel = selectedProviderCredential
     ? selectedProviderModels[selectedProviderCredential.id] ||
       selectedProviderCredential.model
@@ -502,7 +512,12 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
   );
 
   useEffect(() => {
-    if (!modelPickerOpen || !selectedProviderCredential) return;
+    if (
+      !modelPickerOpen ||
+      activeRuntime !== "claude" ||
+      !selectedProviderCredential
+    )
+      return;
 
     const credentialId = selectedProviderCredential.id;
     if (providerModelOptions[credentialId]) return;
@@ -562,18 +577,34 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
     return () => {
       cancelled = true;
     };
-  }, [modelPickerOpen, providerModelOptions, selectedProviderCredential]);
+  }, [
+    activeRuntime,
+    modelPickerOpen,
+    providerModelOptions,
+    selectedProviderCredential,
+  ]);
 
   // Pinned contexts — supports multiple files/selections
   const [pinnedContexts, setPinnedContexts] = useState<PinnedContext[]>([]);
   const hasPinnedImages = pinnedContexts.some(
     (context) => context.imageDataUrl,
   );
+  const runtimeSupportsImages = runtimeSelectionSupportsImages(
+    activeRuntime,
+    selectedCodexModel,
+    selectedProviderSupportsVision,
+  );
   const imageCompatibilityError =
-    selectedProviderCredential &&
     hasPinnedImages &&
-    !selectedProviderSupportsVision
-      ? `${selectedProviderDisplayName} ${directProviderModel} does not support image input. Remove the pasted image or switch to a vision-capable model.`
+    !runtimeSupportsImages &&
+    (activeRuntime === "codex"
+      ? selectedCodexModel !== null
+      : selectedProviderCredential !== null)
+      ? `${
+          activeRuntime === "codex"
+            ? `Codex ${selectedCodexModel?.displayName ?? selectedRuntimeModelId}`
+            : `${selectedProviderDisplayName} ${directProviderModel}`
+        } does not support image input. Remove the pasted image or switch to a vision-capable model.`
       : null;
 
   useEffect(() => {
@@ -1104,7 +1135,7 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
   const handleSend = useCallback(() => {
     const trimmed = input.trim();
     if (!trimmed) return;
-    if (!providerSelectionReady) return;
+    if (!runtimeSelectionReady) return;
     if (imageCompatibilityError) {
       setChatError(activeTabId, imageCompatibilityError);
       return;
@@ -1169,7 +1200,7 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
     sendPrompt,
     pinnedContexts,
     imageCompatibilityError,
-    providerSelectionReady,
+    runtimeSelectionReady,
     setChatError,
     slashCommands,
   ]);
@@ -1321,32 +1352,6 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [modelPickerOpen]);
 
-  const claudeModelOptions = [
-    {
-      id: "sonnet" as const,
-      name: "Sonnet",
-      desc: "Fast, efficient for most tasks",
-      icon: <ZapIcon className="size-3.5" />,
-    },
-    {
-      id: "opus" as const,
-      name: "Opus",
-      desc: "Most capable, complex reasoning",
-      icon: <SparklesIcon className="size-3.5" />,
-    },
-    {
-      id: "haiku" as const,
-      name: "Haiku",
-      desc: "Fastest, simple tasks",
-      icon: <RabbitIcon className="size-3.5" />,
-    },
-    {
-      id: "opusplan" as const,
-      name: "OpusPlan",
-      desc: "Opus for planning, Sonnet for execution",
-      icon: <LayersIcon className="size-3.5" />,
-    },
-  ];
   const activeProviderModelOptions = selectedProviderCredential
     ? Array.from(
         new Set(
@@ -1371,31 +1376,218 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
     providerModelLoadingId === selectedProviderCredential.id;
   const activeProviderModelOptionsKey = activeProviderModelOptions.join("\0");
 
-  useLayoutEffect(() => {
-    if (
-      !modelPickerOpen ||
-      claudeProviderActive ||
-      activeProviderModelsLoading
-    ) {
-      return;
-    }
+  const setProviderModelListNode = useCallback(
+    (node: HTMLDivElement | null) => {
+      providerModelListRef.current = node;
 
-    const list = providerModelListRef.current;
-    const item = providerModelItemRefs.current[directProviderModel];
-    if (!list || !item) return;
+      if (
+        !node ||
+        !modelPickerOpen ||
+        claudeProviderActive ||
+        activeProviderModelsLoading
+      ) {
+        return;
+      }
 
-    const itemTop = item.offsetTop - list.offsetTop;
-    const centeredTop =
-      itemTop - Math.max(0, (list.clientHeight - item.offsetHeight) / 2);
-    list.scrollTop = Math.max(0, centeredTop);
-  }, [
-    activeProviderModelOptionsKey,
-    activeProviderModelsLoading,
-    claudeProviderActive,
-    directProviderModel,
-    modelPickerOpen,
-    selectedProviderCredential?.id,
-  ]);
+      providerModelItemRefs.current[directProviderModel]?.scrollIntoView({
+        block: "center",
+      });
+    },
+    [
+      activeProviderModelOptionsKey,
+      activeProviderModelsLoading,
+      claudeProviderActive,
+      directProviderModel,
+      modelPickerOpen,
+      selectedProviderCredential?.id,
+    ],
+  );
+
+  const claudeProviderControls = (
+    <>
+      {showClaudeProvider && (
+        <button
+          type="button"
+          className={cn(
+            "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+            claudeProviderActive
+              ? "bg-accent text-accent-foreground"
+              : "hover:bg-muted",
+          )}
+          disabled={runtimeBusy}
+          onClick={() => {
+            setSelectedProviderCredentialId(CLAUDE_CODE_PROVIDER_ID);
+          }}
+        >
+          {claudeCodeIconSrc ? (
+            <img
+              src={claudeCodeIconSrc}
+              alt=""
+              className="size-4 shrink-0 object-contain"
+            />
+          ) : (
+            <SparklesIcon className="size-3.5 shrink-0" />
+          )}
+          <div className="min-w-0 flex-1">
+            <div className="truncate font-medium text-xs">Claude Code</div>
+            <div className="truncate text-muted-foreground text-xs">
+              {claudeModelDisplayName(selectedClaudeModel)}
+            </div>
+          </div>
+          {claudeProviderActive && <CheckIcon className="size-3 shrink-0" />}
+        </button>
+      )}
+
+      {openAiCredentials.map((credential) => {
+        const active = selectedProviderCredential?.id === credential.id;
+        const displayName = getProviderDisplayName({
+          label: credential.label,
+          baseUrl: credential.base_url,
+          model: credential.model,
+        });
+        const iconSrc = getProviderIconSrc({
+          label: credential.label,
+          baseUrl: credential.base_url,
+          model: credential.model,
+        });
+        const currentModel =
+          selectedProviderModels[credential.id] || credential.model;
+        const isDeleting = deletingProviderId === credential.id;
+        const providerDisabled = runtimeBusy || isDeleting;
+        const selectCredential = () => {
+          if (providerDisabled) return;
+          setSelectedProviderCredentialId(credential.id);
+        };
+
+        return (
+          <div
+            key={credential.id}
+            role="button"
+            tabIndex={providerDisabled ? -1 : 0}
+            aria-disabled={providerDisabled}
+            className={cn(
+              "group/provider flex w-full cursor-pointer items-center gap-2 rounded-lg py-2 pr-1 pl-3 text-left text-sm transition-colors",
+              active ? "bg-accent text-accent-foreground" : "hover:bg-muted",
+              providerDisabled && "pointer-events-none opacity-70",
+            )}
+            onClick={selectCredential}
+            onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                selectCredential();
+              }
+            }}
+          >
+            {iconSrc ? (
+              <img
+                src={iconSrc}
+                alt=""
+                className="size-4 shrink-0 object-contain"
+              />
+            ) : (
+              <SparklesIcon className="size-3.5 shrink-0" />
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="truncate font-medium text-xs">{displayName}</div>
+              <div className="truncate text-muted-foreground text-xs">
+                {currentModel}
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              {active && <CheckIcon className="size-3 shrink-0" />}
+              <button
+                type="button"
+                className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                aria-label={`Delete ${displayName}`}
+                title="Delete provider"
+                disabled={runtimeBusy || !!deletingProviderId}
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setProviderDeleteError(null);
+                  setProviderDeleteTarget(credential);
+                }}
+              >
+                {isDeleting ? (
+                  <Loader2Icon className="size-3.5 animate-spin" />
+                ) : (
+                  <Trash2Icon className="size-3.5" />
+                )}
+              </button>
+            </div>
+          </div>
+        );
+      })}
+      <button
+        type="button"
+        className="mt-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-muted-foreground text-sm transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+        disabled={runtimeBusy}
+        onClick={() => {
+          setModelPickerOpen(false);
+          setProviderSetupOpen(true);
+        }}
+      >
+        <PlusIcon className="size-3.5 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <div className="truncate font-medium text-xs">Add Provider</div>
+          <div className="truncate text-xs">Save another API key</div>
+        </div>
+      </button>
+    </>
+  );
+
+  const claudeProviderModelControls = selectedProviderCredential ? (
+    <>
+      {activeProviderModelsLoading && (
+        <div className="px-3 py-1.5 text-muted-foreground text-xs">
+          Fetching models...
+        </div>
+      )}
+      {activeProviderModelOptions.map((modelId) => (
+        <button
+          type="button"
+          key={modelId}
+          aria-pressed={directProviderModel === modelId}
+          ref={(node) => {
+            if (node) {
+              providerModelItemRefs.current[modelId] = node;
+            } else {
+              delete providerModelItemRefs.current[modelId];
+            }
+          }}
+          className={cn(
+            "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+            directProviderModel === modelId
+              ? "bg-accent text-accent-foreground"
+              : "hover:bg-muted",
+          )}
+          disabled={runtimeBusy}
+          onClick={() => {
+            setSelectedProviderModel(selectedProviderCredential.id, modelId);
+          }}
+        >
+          <span className="flex min-w-0 flex-1 items-center gap-2">
+            <span className="min-w-0 truncate font-medium text-xs">
+              {modelId}
+            </span>
+            <ModelCapabilityBadges
+              label={selectedProviderCredential.label}
+              baseUrl={selectedProviderCredential.base_url}
+              model={modelId}
+            />
+          </span>
+          {directProviderModel === modelId && (
+            <CheckIcon className="size-3 shrink-0" />
+          )}
+        </button>
+      ))}
+      {providerModelError && (
+        <div className="px-3 py-1 text-amber-600 text-xs">
+          {providerModelError}
+        </div>
+      )}
+    </>
+  ) : undefined;
 
   return (
     <div
@@ -1435,246 +1627,31 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
               zIndex: 9999,
             }}
           >
-            <div className="grid grid-cols-[minmax(0,11.5rem)_minmax(0,1fr)]">
-              <div className="max-h-80 overflow-y-auto border-border border-r pr-1">
-                <div className="px-2 py-1 font-medium text-muted-foreground text-xs">
-                  Provider
-                </div>
-                {showClaudeProvider && (
-                  <button
-                    className={cn(
-                      "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors",
-                      claudeProviderActive
-                        ? "bg-accent text-accent-foreground"
-                        : "hover:bg-muted",
-                    )}
-                    onClick={() => {
-                      setSelectedProviderCredentialId(CLAUDE_CODE_PROVIDER_ID);
-                    }}
-                  >
-                    {claudeCodeIconSrc ? (
-                      <img
-                        src={claudeCodeIconSrc}
-                        alt=""
-                        className="size-4 shrink-0 object-contain"
-                      />
-                    ) : (
-                      <SparklesIcon className="size-3.5 shrink-0" />
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate font-medium text-xs">
-                        Claude Code
-                      </div>
-                      <div className="truncate text-muted-foreground text-xs">
-                        {claudeModelDisplayName(selectedModel)}
-                      </div>
-                    </div>
-                    {claudeProviderActive && (
-                      <CheckIcon className="size-3 shrink-0" />
-                    )}
-                  </button>
-                )}
-
-                {openAiCredentials.map((credential) => {
-                  const active =
-                    selectedProviderCredential?.id === credential.id;
-                  const displayName = getProviderDisplayName({
-                    label: credential.label,
-                    baseUrl: credential.base_url,
-                    model: credential.model,
-                  });
-                  const iconSrc = getProviderIconSrc({
-                    label: credential.label,
-                    baseUrl: credential.base_url,
-                    model: credential.model,
-                  });
-                  const currentModel =
-                    selectedProviderModels[credential.id] || credential.model;
-
-                  const isDeleting = deletingProviderId === credential.id;
-                  const selectCredential = () => {
-                    if (isDeleting) return;
-                    setSelectedProviderCredentialId(credential.id);
-                  };
-
-                  return (
-                    <div
-                      key={credential.id}
-                      role="button"
-                      tabIndex={0}
-                      className={cn(
-                        "group/provider flex w-full cursor-pointer items-center gap-2 rounded-lg py-2 pr-1 pl-3 text-left text-sm transition-colors",
-                        active
-                          ? "bg-accent text-accent-foreground"
-                          : "hover:bg-muted",
-                        isDeleting && "pointer-events-none opacity-70",
-                      )}
-                      onClick={selectCredential}
-                      onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          selectCredential();
-                        }
-                      }}
-                    >
-                      {iconSrc ? (
-                        <img
-                          src={iconSrc}
-                          alt=""
-                          className="size-4 shrink-0 object-contain"
-                        />
-                      ) : (
-                        <SparklesIcon className="size-3.5 shrink-0" />
-                      )}
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate font-medium text-xs">
-                          {displayName}
-                        </div>
-                        <div className="truncate text-muted-foreground text-xs">
-                          {currentModel}
-                        </div>
-                      </div>
-                      <div className="flex shrink-0 items-center gap-1">
-                        {active && <CheckIcon className="size-3 shrink-0" />}
-                        <button
-                          type="button"
-                          className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                          aria-label={`Delete ${displayName}`}
-                          title="Delete provider"
-                          disabled={!!deletingProviderId}
-                          onClick={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            setProviderDeleteError(null);
-                            setProviderDeleteTarget(credential);
-                          }}
-                        >
-                          {isDeleting ? (
-                            <Loader2Icon className="size-3.5 animate-spin" />
-                          ) : (
-                            <Trash2Icon className="size-3.5" />
-                          )}
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-                <button
-                  className="mt-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-muted-foreground text-sm transition-colors hover:bg-muted hover:text-foreground"
-                  onClick={() => {
-                    setModelPickerOpen(false);
-                    setProviderSetupOpen(true);
-                  }}
-                >
-                  <PlusIcon className="size-3.5 shrink-0" />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate font-medium text-xs">
-                      Add Provider
-                    </div>
-                    <div className="truncate text-xs">Save another API key</div>
-                  </div>
-                </button>
-              </div>
-
-              <div className="flex max-h-80 min-w-0 flex-col pl-1">
-                <div
-                  ref={providerModelListRef}
-                  className="min-h-0 flex-1 overflow-y-auto"
-                >
-                  <div className="px-2 py-1 font-medium text-muted-foreground text-xs">
-                    Model
-                  </div>
-                  {claudeProviderActive ? (
-                    claudeModelOptions.map((m) => (
-                      <button
-                        key={m.id}
-                        className={cn(
-                          "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors",
-                          selectedModel === m.id
-                            ? "bg-accent text-accent-foreground"
-                            : "hover:bg-muted",
-                        )}
-                        onClick={() => setSelectedModel(m.id)}
-                      >
-                        {m.icon}
-                        <div className="min-w-0 flex-1">
-                          <div className="font-medium text-xs">{m.name}</div>
-                          <div className="truncate text-muted-foreground text-xs">
-                            {m.desc}
-                          </div>
-                        </div>
-                        {selectedModel === m.id && (
-                          <CheckIcon className="size-3 shrink-0" />
-                        )}
-                      </button>
-                    ))
-                  ) : selectedProviderCredential ? (
-                    <>
-                      {activeProviderModelsLoading && (
-                        <div className="px-3 py-1.5 text-muted-foreground text-xs">
-                          Fetching models...
-                        </div>
-                      )}
-                      {activeProviderModelOptions.map((modelId) => (
-                        <button
-                          key={modelId}
-                          ref={(node) => {
-                            if (node) {
-                              providerModelItemRefs.current[modelId] = node;
-                            } else {
-                              delete providerModelItemRefs.current[modelId];
-                            }
-                          }}
-                          className={cn(
-                            "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors",
-                            directProviderModel === modelId
-                              ? "bg-accent text-accent-foreground"
-                              : "hover:bg-muted",
-                          )}
-                          onClick={() => {
-                            setSelectedProviderModel(
-                              selectedProviderCredential.id,
-                              modelId,
-                            );
-                          }}
-                        >
-                          <span className="flex min-w-0 flex-1 items-center gap-2">
-                            <span className="min-w-0 truncate font-medium text-xs">
-                              {modelId}
-                            </span>
-                            <ModelCapabilityBadges
-                              label={selectedProviderCredential.label}
-                              baseUrl={selectedProviderCredential.base_url}
-                              model={modelId}
-                            />
-                          </span>
-                          {directProviderModel === modelId && (
-                            <CheckIcon className="size-3 shrink-0" />
-                          )}
-                        </button>
-                      ))}
-                      {providerModelError && (
-                        <div className="px-3 py-1 text-amber-600 text-xs">
-                          {providerModelError}
-                        </div>
-                      )}
-                    </>
-                  ) : (
-                    <div className="px-3 py-2 text-muted-foreground text-xs">
-                      Select a provider
-                    </div>
-                  )}
-                </div>
-                {(claudeProviderActive || selectedProviderCredential) && (
-                  <div className="shrink-0">
-                    <EffortControls
-                      effortLevel={effortLevel}
-                      setEffortLevel={setEffortLevel}
-                    />
-                  </div>
-                )}
-              </div>
-            </div>
+            <RuntimeSelector
+              key={activeTabId}
+              runtime={activeRuntime}
+              claudeAvailable={providerSelectionReady}
+              codexAvailable={codexAvailable}
+              codexModels={codexModels}
+              codexModelsLoading={codexModelsLoading}
+              selectedModelId={selectedRuntimeModelId}
+              reasoningEffort={selectedRuntimeEffort}
+              busy={runtimeBusy}
+              claudeProviderControls={claudeProviderControls}
+              claudeModelControls={claudeProviderModelControls}
+              claudeModelListRef={setProviderModelListNode}
+              selectedClaudeModel={selectedClaudeModel}
+              selectedClaudeEffort={selectedClaudeEffort}
+              onRuntimeChange={(nextRuntime, options) =>
+                changeTabRuntime(activeTabId, nextRuntime, options)
+              }
+              onSelectionChange={(selection) =>
+                updateTabRuntimeSelection(activeTabId, selection)
+              }
+              onClaudeModelChange={setSelectedModel}
+              onClaudeEffortChange={setEffortLevel}
+              onRefreshCodexModels={() => refreshCodexModels("codex")}
+            />
           </div>,
           document.body,
         )}
@@ -1960,9 +1937,22 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
               type="button"
               onClick={() => setModelPickerOpen((v) => !v)}
               title="Switch provider or model"
-              className="flex h-7 items-center gap-1.5 rounded-full px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground"
+              disabled={runtimeBusy}
+              className="flex h-7 items-center gap-1.5 rounded-full px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {selectedProviderCredential ? (
+              {activeRuntime === "codex" ? (
+                <>
+                  <SparklesIcon className="size-3" />
+                  <span>Codex</span>
+                  <span className="max-w-40 truncate text-muted-foreground/80">
+                    {selectedCodexModel?.displayName ?? "No model"}
+                  </span>
+                  <span className="max-w-20 truncate text-muted-foreground/60">
+                    {selectedRuntimeEffort ?? "No effort"}
+                  </span>
+                  <ChevronDownIcon className="size-3" />
+                </>
+              ) : selectedProviderCredential ? (
                 <>
                   {selectedProviderIconSrc ? (
                     <img
@@ -1973,14 +1963,15 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
                   ) : (
                     <SparklesIcon className="size-3" />
                   )}
-                  <span className="max-w-36 truncate">
+                  <span>Claude</span>
+                  <span className="max-w-28 truncate">
                     {selectedProviderDisplayName}
                   </span>
                   <span className="max-w-32 truncate text-muted-foreground/60">
                     {directProviderModel}
                   </span>
                   <span className="text-muted-foreground/60">
-                    {effortShortLabel(effortLevel)}
+                    {selectedRuntimeEffort ?? effortLevel}
                   </span>
                   <ChevronDownIcon className="size-3" />
                 </>
@@ -1995,21 +1986,24 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
                   ) : (
                     <SparklesIcon className="size-3" />
                   )}
+                  <span>Claude</span>
                   <span>Claude Code</span>
                   <span className="max-w-32 truncate">
-                    {claudeModelDisplayName(selectedModel)}
+                    {claudeModelDisplayName(
+                      selectedRuntimeModelId ?? selectedModel,
+                    )}
                   </span>
                   <span className="text-muted-foreground/60">
-                    {effortShortLabel(effortLevel)}
+                    {selectedRuntimeEffort ?? effortLevel}
                   </span>
                   <ChevronDownIcon className="size-3" />
                 </>
               ) : (
                 <>
                   <SparklesIcon className="size-3" />
-                  <span>Provider</span>
+                  <span>Claude</span>
                   <span className="text-muted-foreground/60">
-                    {setupStatus === "checking" ? "Loading" : "Select"}
+                    {setupStatus === "checking" ? "Loading" : "Select provider"}
                   </span>
                   <ChevronDownIcon className="size-3" />
                 </>
@@ -2035,7 +2029,11 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
                   ? () => void cancelExecution(activeTabId)
                   : handleSend
               }
-              disabled={!isStreaming && (!hasInput || !providerSelectionReady)}
+              disabled={isRuntimeSendDisabled(
+                isStreaming,
+                hasInput,
+                runtimeSelectionReady,
+              )}
             >
               {isStreaming && !hasInput ? (
                 <SquareIcon className="size-3.5 fill-current" />

@@ -1,8 +1,24 @@
 import type { ReactNode } from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { invoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+  ConversationRef,
+  RuntimeConversation,
+  RuntimeKind,
+} from "@/runtime/types";
+
+const { runtimeListConversations, runtimeArchiveConversation } = vi.hoisted(
+  () => ({
+    runtimeListConversations: vi.fn(),
+    runtimeArchiveConversation: vi.fn(),
+  }),
+);
+
+vi.mock("@/runtime/commands", () => ({
+  runtimeListConversations,
+  runtimeArchiveConversation,
+}));
 
 vi.mock("@/components/ui/dropdown-menu", () => ({
   DropdownMenu: ({
@@ -35,7 +51,8 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
     onSelect?: () => void;
   }) => (
     <div
-      data-disabled={disabled ? "true" : "false"}
+      role="menuitem"
+      aria-disabled={disabled ? "true" : "false"}
       onClick={() => !disabled && onSelect?.()}
     >
       {children}
@@ -66,25 +83,35 @@ vi.mock("@/components/ui/dialog", () => ({
 }));
 
 import { SessionSelector } from "@/components/claude-chat/session-selector";
-import { useClaudeChatStore } from "@/stores/claude-chat-store";
+import { type TabState, useClaudeChatStore } from "@/stores/claude-chat-store";
 import { useDocumentStore } from "@/stores/document-store";
 
-interface SessionInfo {
-  session_id: string;
-  title: string;
-  last_modified: number;
-}
-
 function deferred<T>() {
-  let resolve!: (value: T) => void;
+  let resolve!: (value: T | PromiseLike<T>) => void;
   const promise = new Promise<T>((resolvePromise) => {
     resolve = resolvePromise;
   });
   return { promise, resolve };
 }
 
-function session(sessionId: string, title: string): SessionInfo {
-  return { session_id: sessionId, title, last_modified: 1 };
+function reference(
+  runtime: RuntimeKind,
+  projectPath: string,
+  sessionId: string,
+): ConversationRef {
+  return { runtime, projectPath, sessionId };
+}
+
+function conversation(
+  conversationReference: ConversationRef,
+  title: string,
+): RuntimeConversation {
+  return {
+    reference: conversationReference,
+    title,
+    status: "active",
+    updatedAt: 1,
+  };
 }
 
 function findButton(label: string): HTMLButtonElement {
@@ -95,40 +122,61 @@ function findButton(label: string): HTMLButtonElement {
   return button;
 }
 
-describe("SessionSelector concurrency guards", () => {
+function findDialogButton(label: string): HTMLButtonElement {
+  const button = Array.from(document.querySelectorAll("button")).find(
+    (candidate) => candidate.textContent?.trim() === label,
+  );
+  if (!(button instanceof HTMLButtonElement)) {
+    throw new Error(`Dialog button not found: ${label}`);
+  }
+  return button;
+}
+
+function findMenuItem(title: string): HTMLElement {
+  const titleNode = Array.from(document.querySelectorAll("span")).find(
+    (candidate) => candidate.textContent === title,
+  );
+  const item = titleNode?.closest('[role="menuitem"]');
+  if (!(item instanceof HTMLElement)) {
+    throw new Error(`Menu item not found: ${title}`);
+  }
+  return item;
+}
+
+describe("SessionSelector runtime conversation ownership", () => {
   let container: HTMLDivElement;
   let root: Root;
   const originalNewSession = useClaudeChatStore.getState().newSession;
-  const originalSetSessionTitle =
-    useClaudeChatStore.getState()._setSessionTitle;
+  const originalResumeConversation =
+    useClaudeChatStore.getState().resumeConversation;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    runtimeListConversations.mockResolvedValue([]);
+    runtimeArchiveConversation.mockResolvedValue(undefined);
     const baseTab = useClaudeChatStore.getState().tabs[0];
-    useDocumentStore.setState({ projectRoot: "/project-a" });
+    const currentRef = reference("claude", "/project-a", "shared-session");
+    const tab: TabState = {
+      ...baseTab,
+      id: "tab-a",
+      title: "Current chat",
+      runtime: currentRef.runtime,
+      projectPath: currentRef.projectPath,
+      sessionId: currentRef.sessionId,
+      sessionRef: currentRef,
+      isStreaming: false,
+      cancelledAttempts: [],
+    };
+    useDocumentStore.setState({ projectRoot: currentRef.projectPath });
     useClaudeChatStore.setState({
-      tabs: [
-        {
-          ...baseTab,
-          id: "tab-a",
-          projectPath: "/project-a",
-          sessionId: "shared-session",
-          sessionRef: {
-            runtime: "claude",
-            projectPath: "/project-a",
-            sessionId: "shared-session",
-          },
-          isStreaming: false,
-          cancelledAttempts: [],
-        },
-      ],
-      activeTabId: "tab-a",
-      activeProjectPath: "/project-a",
-      sessionId: "shared-session",
+      tabs: [tab],
+      activeTabId: tab.id,
+      activeProjectPath: currentRef.projectPath,
+      sessionId: currentRef.sessionId,
       messages: [],
       isStreaming: false,
       newSession: originalNewSession,
-      _setSessionTitle: originalSetSessionTitle,
+      resumeConversation: originalResumeConversation,
     });
     container = document.createElement("div");
     document.body.append(container);
@@ -143,7 +191,7 @@ describe("SessionSelector concurrency guards", () => {
     container.remove();
     useClaudeChatStore.setState({
       newSession: originalNewSession,
-      _setSessionTitle: originalSetSessionTitle,
+      resumeConversation: originalResumeConversation,
     });
   });
 
@@ -152,145 +200,341 @@ describe("SessionSelector concurrency guards", () => {
     await act(async () => {
       findButton("Open test session menu").click();
       await Promise.resolve();
+      await Promise.resolve();
     });
   }
 
-  it("disables deletion with an accessible hint while a session is stopping", async () => {
+  function switchActiveContext(next: ConversationRef) {
+    useDocumentStore.setState({ projectRoot: next.projectPath });
+    useClaudeChatStore.setState((state) => {
+      const current = state.tabs.find((tab) => tab.id === state.activeTabId);
+      if (!current) return {};
+      const tab = {
+        ...current,
+        runtime: next.runtime,
+        projectPath: next.projectPath,
+        sessionId: next.sessionId,
+        sessionRef: next,
+        isStreaming: false,
+        cancelledAttempts: [],
+      };
+      return {
+        tabs: state.tabs.map((candidate) =>
+          candidate.id === tab.id ? tab : candidate,
+        ),
+        activeProjectPath: next.projectPath,
+        sessionId: next.sessionId,
+      };
+    });
+  }
+
+  it("lists, filters, and resumes only the active runtime and project", async () => {
+    const activeRef = reference("codex", "/project-a", "current-codex");
+    const listedRef = reference("codex", "/project-a", "codex-session");
+    switchActiveContext(activeRef);
+    const resumeConversation = vi.fn();
+    useClaudeChatStore.setState({ resumeConversation });
+    runtimeListConversations.mockResolvedValue([
+      conversation(listedRef, "Codex session"),
+      conversation(
+        reference("claude", "/project-a", "codex-session"),
+        "Wrong runtime",
+      ),
+      conversation(
+        reference("codex", "/project-b", "codex-session"),
+        "Wrong project",
+      ),
+    ]);
+
+    await renderAndOpen();
+
+    expect(runtimeListConversations).toHaveBeenCalledWith(
+      "codex",
+      "/project-a",
+    );
+    expect(document.body.textContent).toContain("Codex session");
+    expect(document.body.textContent).not.toContain("Wrong runtime");
+    expect(document.body.textContent).not.toContain("Wrong project");
+
+    await act(async () => findMenuItem("Codex session").click());
+    expect(resumeConversation).toHaveBeenCalledWith(listedRef, "Codex session");
+  });
+
+  it("ignores a late list after runtime and project ownership changes", async () => {
+    const projectA = deferred<RuntimeConversation[]>();
+    const projectB = deferred<RuntimeConversation[]>();
+    runtimeListConversations.mockImplementation((runtime, projectPath) =>
+      runtime === "claude" && projectPath === "/project-a"
+        ? projectA.promise
+        : projectB.promise,
+    );
+
+    await renderAndOpen();
+    await act(async () => {
+      switchActiveContext(reference("codex", "/project-b", "same-id"));
+    });
+    await act(async () => {
+      findButton("Open test session menu").click();
+      projectB.resolve([
+        conversation(
+          reference("codex", "/project-b", "same-id"),
+          "Project B Codex",
+        ),
+      ]);
+      await projectB.promise;
+    });
+    await act(async () => {
+      projectA.resolve([
+        conversation(
+          reference("claude", "/project-a", "same-id"),
+          "Project A stale",
+        ),
+      ]);
+      await projectA.promise;
+    });
+
+    expect(document.body.textContent).toContain("Project B Codex");
+    expect(document.body.textContent).not.toContain("Project A stale");
+  });
+
+  it("revalidates the active context before selecting a stale item", async () => {
+    const listedRef = reference("claude", "/project-a", "other-session");
+    const resumeConversation = vi.fn();
+    useClaudeChatStore.setState({ resumeConversation });
+    runtimeListConversations.mockResolvedValue([
+      conversation(listedRef, "Old context session"),
+    ]);
+    await renderAndOpen();
+    const staleItem = findMenuItem("Old context session");
+
+    await act(async () => {
+      switchActiveContext(reference("codex", "/project-b", "other-session"));
+      staleItem.click();
+      await Promise.resolve();
+    });
+
+    expect(resumeConversation).not.toHaveBeenCalled();
+  });
+
+  it("does not treat the same session id in another runtime as busy", async () => {
+    const claudeRef = reference("claude", "/project-a", "shared-session");
+    const codexBusyTab: TabState = {
+      ...useClaudeChatStore.getState().tabs[0],
+      id: "tab-codex",
+      runtime: "codex",
+      projectPath: "/project-a",
+      sessionId: claudeRef.sessionId,
+      sessionRef: { ...claudeRef, runtime: "codex" },
+      isStreaming: true,
+      activeAttemptId: "codex-attempt",
+      cancelledAttempts: [],
+    };
     useClaudeChatStore.setState((state) => ({
-      tabs: state.tabs.map((tab) => ({
-        ...tab,
-        activeAttemptId: "attempt-a",
-        cancelledAttempts: [
-          {
-            attemptId: "attempt-a",
-            attemptEpoch: 1,
-            runtime: "claude" as const,
-            mode: "terminate" as const,
-          },
-        ],
-      })),
+      tabs: [...state.tabs, codexBusyTab],
     }));
-    vi.mocked(invoke).mockResolvedValue([
-      session("shared-session", "Stopping session"),
-    ] as never);
+    runtimeListConversations.mockResolvedValue([
+      conversation(claudeRef, "Claude same id"),
+    ]);
+
+    await renderAndOpen();
+
+    expect(findButton("Delete Claude same id").disabled).toBe(false);
+    expect(
+      document.querySelector(
+        'button[aria-label^="Cannot delete Claude same id"]',
+      ),
+    ).toBeNull();
+  });
+
+  it("switches to an existing busy conversation while keeping archive disabled", async () => {
+    const listedRef = reference("claude", "/project-a", "busy-session");
+    const baseTab = useClaudeChatStore.getState().tabs[0];
+    const busyTab: TabState = {
+      ...baseTab,
+      id: "tab-busy",
+      title: "Busy chat",
+      runtime: listedRef.runtime,
+      projectPath: listedRef.projectPath,
+      sessionId: listedRef.sessionId,
+      sessionRef: listedRef,
+      isStreaming: true,
+      cancelledAttempts: [],
+    };
+    const resumeConversation = vi.fn();
+    useClaudeChatStore.setState((state) => ({
+      tabs: [...state.tabs, busyTab],
+      resumeConversation,
+    }));
+    runtimeListConversations.mockResolvedValue([
+      conversation(listedRef, "Busy session"),
+    ]);
 
     await renderAndOpen();
 
     const deleteButton = findButton(
-      "Cannot delete Stopping session while it is running or stopping",
+      "Cannot delete Busy session while it is running or stopping",
     );
     expect(deleteButton.disabled).toBe(true);
-    expect(deleteButton.title).toContain("running or stopping");
+
+    await act(async () => findMenuItem("Busy session").click());
+    expect(resumeConversation).toHaveBeenCalledWith(listedRef, "Busy session");
   });
 
-  it("keeps the newer project list when an older list request resolves last", async () => {
-    const projectA = deferred<SessionInfo[]>();
-    const projectB = deferred<SessionInfo[]>();
-    vi.mocked(invoke).mockImplementation((command, args: any) => {
-      if (command !== "list_claude_sessions") return Promise.resolve() as any;
-      return (
-        args.projectPath === "/project-a" ? projectA.promise : projectB.promise
-      ) as any;
-    });
-
-    await renderAndOpen();
-    await act(async () => {
-      useDocumentStore.setState({ projectRoot: "/project-b" });
-    });
-    await act(async () => {
-      findButton("Open test session menu").click();
-      projectB.resolve([session("shared-session", "Project B session")]);
-      await projectB.promise;
-    });
-    await act(async () => {
-      projectA.resolve([session("shared-session", "Project A stale")]);
-      await projectA.promise;
-    });
-
-    expect(document.body.textContent).toContain("Project B session");
-    expect(document.body.textContent).not.toContain("Project A stale");
-  });
-
-  it("ignores a delete completion after the project owner changes", async () => {
-    const deletion = deferred<void>();
+  it("permanently deletes Claude chat through the shared archive command", async () => {
+    const target = reference("claude", "/project-a", "shared-session");
     const newSession = vi.fn();
     useClaudeChatStore.setState({ newSession });
-    vi.mocked(invoke).mockImplementation((command, args: any) => {
-      if (command === "list_claude_sessions") {
-        const title =
-          args.projectPath === "/project-a"
-            ? "Project A session"
-            : "Project B session";
-        return Promise.resolve([session("shared-session", title)]) as any;
-      }
-      if (command === "delete_claude_session") return deletion.promise as any;
-      return Promise.resolve() as any;
-    });
-
+    runtimeListConversations.mockResolvedValue([
+      conversation(target, "Claude chat"),
+    ]);
     await renderAndOpen();
-    await act(async () => findButton("Delete Project A session").click());
-    const dialogDelete = Array.from(document.querySelectorAll("button")).find(
-      (button) => button.textContent?.trim() === "Delete",
-    );
-    if (!(dialogDelete instanceof HTMLButtonElement)) {
-      throw new Error("Dialog delete button not found");
-    }
-    await act(async () => dialogDelete.click());
+
+    expect(findButton("Delete Claude chat").title).toBe("Delete chat");
+    await act(async () => findButton("Delete Claude chat").click());
+    expect(document.body.textContent).toContain("Delete Chat");
+    expect(document.body.textContent?.toLowerCase()).toContain("permanently");
 
     await act(async () => {
-      useDocumentStore.setState({ projectRoot: "/project-b" });
-      useClaudeChatStore.setState({
-        activeProjectPath: "/project-b",
-        sessionId: "shared-session",
-      });
+      findDialogButton("Delete").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(runtimeArchiveConversation).toHaveBeenCalledWith(target);
+    expect(newSession).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).not.toContain("Claude chat");
+  });
+
+  it("archives Codex with rollout-safe copy and exact-reference identity", async () => {
+    const target = reference("codex", "/project-a", "shared-session");
+    switchActiveContext(target);
+    const newSession = vi.fn();
+    useClaudeChatStore.setState({ newSession });
+    runtimeListConversations.mockResolvedValue([
+      conversation(target, "Codex chat"),
+    ]);
+    await renderAndOpen();
+
+    expect(findButton("Archive Codex chat").title).toBe("Archive chat");
+    await act(async () => findButton("Archive Codex chat").click());
+    expect(document.body.textContent).toContain("Archive Chat");
+    expect(document.body.textContent).toContain(
+      "Codex rollout files are not deleted",
+    );
+
+    await act(async () => {
+      findDialogButton("Archive").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(runtimeArchiveConversation).toHaveBeenCalledWith(target);
+    expect(newSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let a stale archive completion change a new context", async () => {
+    const archive = deferred<void>();
+    runtimeArchiveConversation.mockReturnValue(archive.promise);
+    const oldRef = reference("claude", "/project-a", "shared-session");
+    const newRef = reference("codex", "/project-b", "shared-session");
+    const newSession = vi.fn();
+    useClaudeChatStore.setState({ newSession });
+    runtimeListConversations.mockImplementation((runtime, projectPath) =>
+      Promise.resolve([
+        conversation(
+          runtime === "claude" && projectPath === "/project-a"
+            ? oldRef
+            : newRef,
+          runtime === "claude" ? "Old Claude" : "New Codex",
+        ),
+      ]),
+    );
+    await renderAndOpen();
+    await act(async () => findButton("Delete Old Claude").click());
+    await act(async () => findDialogButton("Delete").click());
+
+    await act(async () => {
+      switchActiveContext(newRef);
     });
     await act(async () => {
       findButton("Open test session menu").click();
       await Promise.resolve();
+      await Promise.resolve();
     });
     await act(async () => {
-      deletion.resolve();
-      await deletion.promise;
+      archive.resolve();
+      await archive.promise;
     });
 
-    expect(document.body.textContent).toContain("Project B session");
+    expect(document.body.textContent).toContain("New Codex");
     expect(newSession).not.toHaveBeenCalled();
   });
 
-  it("does not let an in-flight list resurrect a session deleted on the same project", async () => {
-    const staleList = deferred<SessionInfo[]>();
-    const deletion = deferred<void>();
-    let listCount = 0;
-    vi.mocked(invoke).mockImplementation((command) => {
-      if (command === "list_claude_sessions") {
-        listCount += 1;
-        return (
-          listCount === 1
-            ? Promise.resolve([session("shared-session", "Delete me")])
-            : staleList.promise
-        ) as any;
+  it("removes an archived reference after leaving and returning to its context", async () => {
+    const archive = deferred<void>();
+    runtimeArchiveConversation.mockReturnValue(archive.promise);
+    const target = reference("claude", "/project-a", "shared-session");
+    const otherContext = reference("codex", "/project-b", "other-session");
+    const newSession = vi.fn();
+    let projectAListCount = 0;
+    useClaudeChatStore.setState({ newSession });
+    runtimeListConversations.mockImplementation((runtime, projectPath) => {
+      if (runtime === "claude" && projectPath === "/project-a") {
+        projectAListCount += 1;
+        return Promise.resolve([
+          conversation(
+            target,
+            projectAListCount === 1 ? "Archive me" : "Archived stale row",
+          ),
+        ]);
       }
-      if (command === "delete_claude_session") return deletion.promise as any;
-      return Promise.resolve() as any;
+      return Promise.resolve([conversation(otherContext, "Other context")]);
     });
 
     await renderAndOpen();
-    await act(async () => findButton("Delete Delete me").click());
-    const dialogDelete = Array.from(document.querySelectorAll("button")).find(
-      (button) => button.textContent?.trim() === "Delete",
-    );
-    if (!(dialogDelete instanceof HTMLButtonElement)) {
-      throw new Error("Dialog delete button not found");
-    }
-    await act(async () => dialogDelete.click());
+    await act(async () => findButton("Delete Archive me").click());
+    await act(async () => findDialogButton("Delete").click());
+
+    await act(async () => switchActiveContext(otherContext));
+    await act(async () => {
+      findButton("Open test session menu").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => switchActiveContext(target));
+    await act(async () => {
+      findButton("Open test session menu").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(document.body.textContent).toContain("Archived stale row");
+
+    await act(async () => {
+      archive.resolve();
+      await archive.promise;
+    });
+
+    expect(document.body.textContent).not.toContain("Archived stale row");
+    expect(newSession).not.toHaveBeenCalled();
+  });
+
+  it("does not let an in-flight list resurrect an archived reference", async () => {
+    const target = reference("claude", "/project-a", "shared-session");
+    const staleList = deferred<RuntimeConversation[]>();
+    let listCount = 0;
+    runtimeListConversations.mockImplementation(() => {
+      listCount += 1;
+      return listCount === 1
+        ? Promise.resolve([conversation(target, "Archive me")])
+        : staleList.promise;
+    });
+    await renderAndOpen();
+    await act(async () => findButton("Delete Archive me").click());
+    await act(async () => findDialogButton("Delete").click());
     await act(async () => findButton("Open test session menu").click());
 
     await act(async () => {
-      deletion.resolve();
-      await deletion.promise;
-    });
-    await act(async () => {
-      staleList.resolve([session("shared-session", "Resurrected")]);
+      staleList.resolve([conversation(target, "Resurrected")]);
       await staleList.promise;
     });
 

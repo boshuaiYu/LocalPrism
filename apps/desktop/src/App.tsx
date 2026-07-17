@@ -18,6 +18,7 @@ import { useUvSetupStore } from "@/stores/uv-setup-store";
 import { ErrorFallback } from "@/components/error-fallback";
 import { createLogger } from "@/lib/debug/logger";
 import { EnvironmentOnboarding } from "@/components/environment-onboarding";
+import { runtimeListConversations } from "@/runtime/commands";
 
 const log = createLogger("app");
 
@@ -26,12 +27,6 @@ const LazyDebugPage = lazy(() =>
     default: m.DebugPage,
   })),
 );
-
-interface ClaudeSessionInfo {
-  session_id: string;
-  title: string;
-  last_modified: number;
-}
 
 function NativeWindowThemeBridge() {
   const { resolvedTheme, theme } = useTheme();
@@ -81,14 +76,20 @@ function NativeWindowThemeBridge() {
 function WorkspaceWithClaude() {
   const projectRoot = useDocumentStore((s) => s.projectRoot);
   const initialized = useDocumentStore((s) => s.initialized);
-  const stoppingAttemptCount = useClaudeChatStore((s) =>
+  const chatScopeBlockerCount = useClaudeChatStore((s) =>
     s.tabs.reduce(
-      (count, tab) => count + (tab.cancelledAttempts?.length ?? 0),
+      (count, tab) =>
+        count +
+        (tab.isStreaming ? 1 : 0) +
+        (tab.cancelledAttempts?.length ?? 0),
       0,
     ),
   );
   const autoResumedProjectRef = useRef<string | null>(null);
   const chatProjectRef = useRef<string | null>(null);
+  const [chatScopeReadyProject, setChatScopeReadyProject] = useState<
+    string | null
+  >(null);
 
   // Update window title
   useEffect(() => {
@@ -105,8 +106,9 @@ function WorkspaceWithClaude() {
       .resetForProject(projectRoot ?? null);
     if (result !== "blocked-stopping") {
       chatProjectRef.current = projectRoot;
+      setChatScopeReadyProject(projectRoot);
     }
-  }, [projectRoot, stoppingAttemptCount]);
+  }, [chatScopeBlockerCount, projectRoot]);
 
   // Auto-setup Python venv when project opens
   useEffect(() => {
@@ -132,40 +134,77 @@ function WorkspaceWithClaude() {
       return;
     }
     if (!initialized) return;
+    if (chatScopeReadyProject !== projectRoot) return;
     if (autoResumedProjectRef.current === projectRoot) return;
 
-    const chatState = useClaudeChatStore.getState();
-    if (chatState.pendingInitialPrompt) return;
+    const capturedState = useClaudeChatStore.getState();
+    const capturedTab = capturedState.tabs.find(
+      (tab) => tab.id === capturedState.activeTabId,
+    );
+    const tabIsBusy = (tab: typeof capturedTab) =>
+      !!tab && (tab.isStreaming || (tab.cancelledAttempts?.length ?? 0) > 0);
+    if (
+      capturedState.pendingInitialPrompt ||
+      !capturedTab ||
+      capturedTab.projectPath !== projectRoot ||
+      tabIsBusy(capturedTab)
+    ) {
+      return;
+    }
+
+    const capturedTabId = capturedTab.id;
+    const capturedRuntime = capturedTab.runtime;
+    const capturedProjectPath = projectRoot;
+    const capturedAttemptEpoch = capturedTab.attemptEpoch ?? 0;
 
     autoResumedProjectRef.current = projectRoot;
     let cancelled = false;
 
-    invoke<ClaudeSessionInfo[]>("list_claude_sessions", {
-      projectPath: projectRoot,
-      generateTitles: false,
-    })
-      .then((sessions) => {
-        if (cancelled) return;
-        const latest = sessions
-          .slice()
-          .sort((a, b) => b.last_modified - a.last_modified)[0];
+    const capturedContextIsCurrent = () => {
+      if (
+        cancelled ||
+        useDocumentStore.getState().projectRoot !== capturedProjectPath
+      ) {
+        return false;
+      }
 
+      const current = useClaudeChatStore.getState();
+      const currentTab = current.tabs.find((tab) => tab.id === capturedTabId);
+      return (
+        !current.pendingInitialPrompt &&
+        current.activeTabId === capturedTabId &&
+        currentTab?.runtime === capturedRuntime &&
+        currentTab.projectPath === capturedProjectPath &&
+        (currentTab.attemptEpoch ?? 0) === capturedAttemptEpoch &&
+        !tabIsBusy(currentTab)
+      );
+    };
+
+    runtimeListConversations(capturedRuntime, capturedProjectPath)
+      .then((conversations) => {
+        if (!capturedContextIsCurrent()) return;
+        const latest = conversations
+          .filter(
+            (conversation) =>
+              conversation.reference.runtime === capturedRuntime &&
+              conversation.reference.projectPath === capturedProjectPath,
+          )
+          .sort((a, b) => b.updatedAt - a.updatedAt)[0];
         const current = useClaudeChatStore.getState();
-        if (current.pendingInitialPrompt || current.isStreaming) {
-          return;
-        }
 
-        if (!latest?.session_id) {
+        if (!latest?.reference.sessionId) {
           current.newSession();
           return;
         }
 
-        current.resumeSession(latest.session_id, latest.title).catch((err) => {
-          log.warn("Failed to auto-resume latest chat session", {
-            sessionId: latest.session_id,
-            error: String(err),
+        current
+          .resumeConversation(latest.reference, latest.title)
+          .catch((err) => {
+            log.warn("Failed to auto-resume latest chat session", {
+              sessionId: latest.reference.sessionId,
+              error: String(err),
+            });
           });
-        });
       })
       .catch((err) => {
         log.warn("Failed to auto-resume latest chat session", {
@@ -176,7 +215,7 @@ function WorkspaceWithClaude() {
     return () => {
       cancelled = true;
     };
-  }, [initialized, projectRoot]);
+  }, [chatScopeReadyProject, initialized, projectRoot]);
 
   // Consume pending initial prompt from project wizard
   useEffect(() => {

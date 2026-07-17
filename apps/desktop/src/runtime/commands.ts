@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   ConversationRef,
   RuntimeAccount,
+  RuntimeConversation,
   RuntimeConversationHistory,
   RuntimeKind,
   RuntimeLoginStartResult,
@@ -100,12 +101,28 @@ export function runtimeListModels(
   return invoke<RuntimeModel[]>("runtime_list_models", { runtime });
 }
 
+export function runtimeListConversations(
+  runtime: RuntimeKind,
+  projectPath: string,
+): Promise<RuntimeConversation[]> {
+  return invoke<RuntimeConversation[]>("runtime_list_conversations", {
+    runtime,
+    projectPath,
+  });
+}
+
 export function runtimeReadConversation(
   reference: ConversationRef,
 ): Promise<RuntimeConversationHistory> {
   return invoke<RuntimeConversationHistory>("runtime_read_conversation", {
     reference,
   });
+}
+
+export function runtimeArchiveConversation(
+  reference: ConversationRef,
+): Promise<void> {
+  return invoke<void>("runtime_archive_conversation", { reference });
 }
 
 export function startRuntimeTurn(request: RuntimeTurnRequest): Promise<void> {

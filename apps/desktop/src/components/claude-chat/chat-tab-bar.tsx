@@ -125,10 +125,13 @@ function TabButton({
   onClick: () => void;
   onClose: (e: React.MouseEvent) => void;
 }) {
+  const runtimeLabel = tab.runtime === "codex" ? "Codex" : "Claude";
+
   return (
     <button
       type="button"
       data-tab-id={tab.id}
+      aria-label={`${runtimeLabel} runtime: ${tab.title}`}
       onClick={onClick}
       className={cn(
         "group relative flex min-w-0 max-w-[160px] items-center gap-1.5 border-b-2 px-3 py-1.5 text-xs transition-colors",
@@ -144,6 +147,12 @@ function TabButton({
           <span className="relative inline-flex size-2 rounded-full bg-primary" />
         </span>
       )}
+      <span
+        aria-hidden="true"
+        className="inline-flex shrink-0 items-center rounded-full bg-primary/15 px-1.5 py-0.5 font-semibold text-[9px] text-primary leading-none"
+      >
+        {runtimeLabel}
+      </span>
       <span className="truncate">{tab.title}</span>
       {/* Close button — hidden for the last remaining tab or when streaming on this tab */}
       {!isLastTab && !isStreaming && (
