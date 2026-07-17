@@ -2,6 +2,7 @@ import { ThemeProvider, useTheme } from "next-themes";
 import { ErrorBoundary } from "react-error-boundary";
 import { Toaster } from "@/components/ui/sonner";
 import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
+import { useClaudeRuntimeSync } from "@/hooks/use-claude-runtime-sync";
 import { useRuntimeWarningEvents } from "@/hooks/use-runtime-warning-events";
 
 import { useDocumentStore } from "@/stores/document-store";
@@ -190,6 +191,7 @@ export function App({ onReady }: { onReady?: () => void }) {
 
   // Register global keyboard shortcuts (Cmd+S, Cmd+N) at the app level
   useKeyboardShortcuts();
+  useClaudeRuntimeSync();
   useRuntimeWarningEvents();
 
   useEffect(() => {

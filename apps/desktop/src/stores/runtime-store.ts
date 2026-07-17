@@ -85,6 +85,14 @@ function initialData() {
   } satisfies Pick<RuntimeState, "accounts" | "models" | "loading" | "login">;
 }
 
+export function hasReadyRuntime(
+  accounts: Record<RuntimeKind, RuntimeAccount>,
+): boolean {
+  return Object.values(accounts).some(
+    (account) => account.installed && account.authenticated,
+  );
+}
+
 function messageFrom(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === "string" && error) return error;
@@ -289,16 +297,26 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
   },
 
   install: async (runtime) => {
+    const accountEpoch = invalidateAccount(runtime);
     setLoading(runtime, true);
     try {
       const installed = await runtimeInstall(runtime);
-      if (installed) await get().refresh(runtime);
-      return installed;
+      if (!installed) {
+        if (isCurrentAccount(runtime, accountEpoch)) {
+          setAccountError(runtime, "Runtime installation failed");
+        }
+        return false;
+      }
+      if (!isCurrentAccount(runtime, accountEpoch)) return true;
+      await get().refresh(runtime);
+      return true;
     } catch (error) {
-      setAccountError(
-        runtime,
-        messageFrom(error, "Runtime installation failed"),
-      );
+      if (isCurrentAccount(runtime, accountEpoch)) {
+        setAccountError(
+          runtime,
+          messageFrom(error, "Runtime installation failed"),
+        );
+      }
       return false;
     } finally {
       setLoading(runtime, false);
@@ -457,12 +475,18 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
 
   logout: async (runtime) => {
     invalidateLogin(runtime);
-    invalidateAccount(runtime);
+    const accountEpoch = invalidateAccount(runtime);
     setLoading(runtime, true);
     set((state) => ({ login: { ...state.login, [runtime]: null } }));
     try {
       await runtimeLogout(runtime);
+      if (!isCurrentAccount(runtime, accountEpoch)) return;
       await get().refresh(runtime);
+    } catch (error) {
+      if (isCurrentAccount(runtime, accountEpoch)) {
+        setAccountError(runtime, messageFrom(error, "Runtime logout failed"));
+      }
+      throw error;
     } finally {
       setLoading(runtime, false);
     }

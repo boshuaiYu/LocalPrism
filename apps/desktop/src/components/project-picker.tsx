@@ -36,7 +36,7 @@ import type { LucideIcon } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useProjectStore } from "@/stores/project-store";
 import { useDocumentStore } from "@/stores/document-store";
-import { useClaudeSetupStore } from "@/stores/claude-setup-store";
+import { useRuntimeStore } from "@/stores/runtime-store";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { compileLatex } from "@/lib/latex-compiler";
@@ -52,7 +52,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { ProjectWizard, type CreationMode } from "./project-wizard";
-import { ClaudeSetup } from "./claude-setup";
+import { RuntimeSettings } from "./runtime/runtime-settings";
 import { cn } from "@/lib/utils";
 
 interface DefaultProject {
@@ -63,7 +63,7 @@ interface DefaultProject {
 }
 
 type ProjectPickerSection = "projects" | "settings";
-type SettingsDetailSection = "provider" | "environment";
+type SettingsDetailSection = "runtimes" | "environment";
 
 type RecentProject = {
   path: string;
@@ -96,7 +96,7 @@ export function ProjectPicker() {
   const [activeSection, setActiveSection] =
     useState<ProjectPickerSection>("projects");
   const [settingsDetailSection, setSettingsDetailSection] =
-    useState<SettingsDetailSection>("provider");
+    useState<SettingsDetailSection>("runtimes");
   const [searchQuery, setSearchQuery] = useState("");
   const [removeProjectTarget, setRemoveProjectTarget] =
     useState<RecentProject | null>(null);
@@ -110,14 +110,16 @@ export function ProjectPicker() {
   const removeRecentProject = useProjectStore((s) => s.removeRecentProject);
   const openProject = useDocumentStore((s) => s.openProject);
 
-  const claudeStatus = useClaudeSetupStore((s) => s.status);
-  const checkClaudeStatus = useClaudeSetupStore((s) => s.checkStatus);
-  const isClaudeReady = claudeStatus === "ready";
+  const readyRuntimeCount = useRuntimeStore(
+    (state) =>
+      Object.values(state.accounts).filter(
+        (account) => account.installed && account.authenticated,
+      ).length,
+  );
 
   useEffect(() => {
-    checkClaudeStatus();
     getVersion().then(setAppVersion);
-  }, [checkClaudeStatus]);
+  }, []);
 
   useEffect(() => {
     const handleSearchShortcut = (event: KeyboardEvent) => {
@@ -390,11 +392,11 @@ export function ProjectPicker() {
             <div className="mx-auto grid w-full max-w-6xl grid-cols-1 gap-6 px-8 py-7 lg:grid-cols-[13rem_minmax(0,1fr)]">
               <aside className="space-y-1 lg:border-border/60 lg:border-r lg:pr-4">
                 <SettingsDetailButton
-                  active={settingsDetailSection === "provider"}
+                  active={settingsDetailSection === "runtimes"}
                   icon={KeyRoundIcon}
-                  label="Provider"
-                  meta={isClaudeReady ? "Ready" : "Setup"}
-                  onClick={() => setSettingsDetailSection("provider")}
+                  label="AI Runtimes"
+                  meta={`${readyRuntimeCount}/2 ready`}
+                  onClick={() => setSettingsDetailSection("runtimes")}
                 />
                 <SettingsDetailButton
                   active={settingsDetailSection === "environment"}
@@ -406,13 +408,13 @@ export function ProjectPicker() {
               </aside>
 
               <div className="min-w-0">
-                {settingsDetailSection === "provider" ? (
+                {settingsDetailSection === "runtimes" ? (
                   <SettingsPanel
-                    title="Provider"
+                    title="AI Runtimes"
                     icon={KeyRoundIcon}
                     contentClassName="p-0"
                   >
-                    <ClaudeSetup variant="embedded" />
+                    <RuntimeSettings />
                   </SettingsPanel>
                 ) : (
                   <SettingsPanel

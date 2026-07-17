@@ -40,6 +40,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: eventMocks.listen }));
 import {
   disposeRuntimeStore,
   ensureRuntimeAccountListener,
+  hasReadyRuntime,
   resetRuntimeStoreForTests,
   useRuntimeStore,
 } from "@/stores/runtime-store";
@@ -81,6 +82,49 @@ function model(runtime: RuntimeKind, id: string): RuntimeModel {
     isDefault: false,
   };
 }
+
+describe("hasReadyRuntime", () => {
+  it.each([
+    [
+      "Claude only",
+      account("claude", { authenticated: true }),
+      account("codex", { installed: false }),
+      true,
+    ],
+    [
+      "Codex only",
+      account("claude", { installed: false }),
+      account("codex", { authenticated: true }),
+      true,
+    ],
+    [
+      "both runtimes",
+      account("claude", { authenticated: true }),
+      account("codex", { authenticated: true }),
+      true,
+    ],
+    [
+      "neither runtime",
+      account("claude", { authenticated: false }),
+      account("codex", { installed: false, authenticated: true }),
+      false,
+    ],
+    [
+      "a ready Claude runtime despite a Codex error",
+      account("claude", { authenticated: true }),
+      account("codex", { authenticated: false, error: "Codex unavailable" }),
+      true,
+    ],
+    [
+      "a ready Codex runtime despite an unauthenticated Claude runtime",
+      account("claude", { authenticated: false }),
+      account("codex", { authenticated: true }),
+      true,
+    ],
+  ])("returns the readiness of %s", (_label, claude, codex, expected) => {
+    expect(hasReadyRuntime({ claude, codex })).toBe(expected);
+  });
+});
 
 beforeAll(async () => {
   await ensureRuntimeAccountListener();
@@ -386,6 +430,99 @@ describe("isolated runtime actions", () => {
     expect(useRuntimeStore.getState().loading.codex).toBe(false);
   });
 
+  it("stores a false installation result only on the requested runtime", async () => {
+    const claude = account("claude", { authenticated: true });
+    useRuntimeStore.setState({
+      accounts: { claude, codex: account("codex", { installed: false }) },
+    });
+    commandMocks.runtimeInstall.mockResolvedValue(false);
+
+    await expect(useRuntimeStore.getState().install("codex")).resolves.toBe(
+      false,
+    );
+
+    expect(commandMocks.runtimeStatus).not.toHaveBeenCalled();
+    expect(useRuntimeStore.getState().accounts.codex.error).toBe(
+      "Runtime installation failed",
+    );
+    expect(useRuntimeStore.getState().accounts.claude).toBe(claude);
+    expect(useRuntimeStore.getState().loading.codex).toBe(false);
+  });
+
+  it("does not let an old false installation overwrite a newer refresh", async () => {
+    let resolveInstall: ((installed: boolean) => void) | undefined;
+    commandMocks.runtimeInstall.mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        resolveInstall = resolve;
+      }),
+    );
+    const latest = account("codex", {
+      authenticated: true,
+      version: "latest-after-install",
+    });
+    commandMocks.runtimeStatus.mockResolvedValue(latest);
+
+    const installation = useRuntimeStore.getState().install("codex");
+    await useRuntimeStore.getState().refresh("codex");
+    resolveInstall?.(false);
+
+    await expect(installation).resolves.toBe(false);
+    expect(useRuntimeStore.getState().accounts.codex).toBe(latest);
+    expect(useRuntimeStore.getState().accounts.codex.error).toBeNull();
+    expect(useRuntimeStore.getState().loading.codex).toBe(false);
+  });
+
+  it("does not let an old installation error overwrite a newer refresh", async () => {
+    let rejectInstall: ((error: Error) => void) | undefined;
+    commandMocks.runtimeInstall.mockReturnValue(
+      new Promise<boolean>((_resolve, reject) => {
+        rejectInstall = reject;
+      }),
+    );
+    const latest = account("codex", {
+      authenticated: true,
+      version: "latest-after-install-error",
+    });
+    commandMocks.runtimeStatus.mockResolvedValue(latest);
+
+    const installation = useRuntimeStore.getState().install("codex");
+    await useRuntimeStore.getState().refresh("codex");
+    rejectInstall?.(new Error("stale installation failure"));
+
+    await expect(installation).resolves.toBe(false);
+    expect(useRuntimeStore.getState().accounts.codex).toBe(latest);
+    expect(useRuntimeStore.getState().accounts.codex.error).toBeNull();
+    expect(useRuntimeStore.getState().loading.codex).toBe(false);
+  });
+
+  it("does not let an old successful installation refresh over a newer refresh", async () => {
+    let resolveInstall: ((installed: boolean) => void) | undefined;
+    commandMocks.runtimeInstall.mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        resolveInstall = resolve;
+      }),
+    );
+    const latest = account("codex", {
+      authenticated: true,
+      version: "latest-before-old-install",
+    });
+    const staleInstalled = account("codex", {
+      authenticated: false,
+      version: "stale-old-install",
+    });
+    commandMocks.runtimeStatus.mockResolvedValue(latest);
+
+    const installation = useRuntimeStore.getState().install("codex");
+    await useRuntimeStore.getState().refresh("codex");
+    commandMocks.runtimeStatus.mockResolvedValue(staleInstalled);
+    resolveInstall?.(true);
+
+    await expect(installation).resolves.toBe(true);
+    expect(commandMocks.runtimeStatus).toHaveBeenCalledTimes(1);
+    expect(useRuntimeStore.getState().accounts.codex).toBe(latest);
+    expect(useRuntimeStore.getState().loading.codex).toBe(false);
+  });
+
   it("stores browser login metadata without touching the other runtime", async () => {
     const claude = account("claude", { authenticated: true });
     useRuntimeStore.setState({
@@ -601,6 +738,86 @@ describe("isolated runtime actions", () => {
     expect(useRuntimeStore.getState().login.codex).toBeNull();
     expect(useRuntimeStore.getState().accounts.codex).toEqual(loggedOutCodex);
     expect(useRuntimeStore.getState().accounts.claude).toBe(claude);
+  });
+
+  it("isolates a logout failure and preserves its rejection", async () => {
+    const claude = account("claude", { authenticated: true });
+    useRuntimeStore.setState({
+      accounts: {
+        claude,
+        codex: account("codex", { authenticated: true }),
+      },
+    });
+    commandMocks.runtimeLogout.mockRejectedValue(
+      new Error("Runtime logout unavailable"),
+    );
+
+    await expect(useRuntimeStore.getState().logout("codex")).rejects.toThrow(
+      "Runtime logout unavailable",
+    );
+
+    expect(commandMocks.runtimeStatus).not.toHaveBeenCalled();
+    expect(useRuntimeStore.getState().accounts.codex.error).toBe(
+      "Runtime logout unavailable",
+    );
+    expect(useRuntimeStore.getState().accounts.claude).toBe(claude);
+    expect(useRuntimeStore.getState().loading.codex).toBe(false);
+  });
+
+  it("rethrows an old logout failure without overwriting a newer account event", async () => {
+    let handler: RuntimeEventHandler | undefined;
+    eventMocks.listen.mockImplementation(async (_event, callback) => {
+      handler = callback;
+      return vi.fn<() => void>();
+    });
+    await ensureRuntimeAccountListener();
+    let rejectLogout: ((error: Error) => void) | undefined;
+    commandMocks.runtimeLogout.mockReturnValue(
+      new Promise<void>((_resolve, reject) => {
+        rejectLogout = reject;
+      }),
+    );
+    const latest = account("codex", {
+      authenticated: true,
+      version: "latest-event-account",
+    });
+
+    const logout = useRuntimeStore.getState().logout("codex");
+    handler?.({ payload: latest });
+    rejectLogout?.(new Error("stale logout failure"));
+
+    await expect(logout).rejects.toThrow("stale logout failure");
+    expect(useRuntimeStore.getState().accounts.codex).toBe(latest);
+    expect(useRuntimeStore.getState().accounts.codex.error).toBeNull();
+    expect(useRuntimeStore.getState().loading.codex).toBe(false);
+  });
+
+  it("does not let an old successful logout refresh over a newer refresh", async () => {
+    let resolveLogout: (() => void) | undefined;
+    commandMocks.runtimeLogout.mockReturnValue(
+      new Promise<void>((resolve) => {
+        resolveLogout = resolve;
+      }),
+    );
+    const latest = account("codex", {
+      authenticated: true,
+      version: "latest-before-old-logout",
+    });
+    const staleLoggedOut = account("codex", {
+      authenticated: false,
+      version: "stale-old-logout",
+    });
+    commandMocks.runtimeStatus.mockResolvedValue(latest);
+
+    const logout = useRuntimeStore.getState().logout("codex");
+    await useRuntimeStore.getState().refresh("codex");
+    commandMocks.runtimeStatus.mockResolvedValue(staleLoggedOut);
+    resolveLogout?.();
+    await logout;
+
+    expect(commandMocks.runtimeStatus).toHaveBeenCalledTimes(1);
+    expect(useRuntimeStore.getState().accounts.codex).toBe(latest);
+    expect(useRuntimeStore.getState().loading.codex).toBe(false);
   });
 
   it("ignores a generic status response that began before logout", async () => {
