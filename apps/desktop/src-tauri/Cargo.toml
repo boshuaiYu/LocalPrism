@@ -39,6 +39,8 @@ tectonic = { version = "0.15", default-features = true, features = ["external-ha
 #   Windows: vcpkg install harfbuzz[graphite2] freetype icu fontconfig (with TECTONIC_DEP_BACKEND=vcpkg)
 flate2 = "1"
 tar = "0.4"
+sha2 = "0.10"
+toml_edit = { version = "0.22", features = ["serde"] }
 
 [lints.clippy]
 unwrap_used = "deny"

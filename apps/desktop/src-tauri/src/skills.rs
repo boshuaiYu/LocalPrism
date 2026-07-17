@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tauri::{Emitter, Manager, WebviewWindow};
 
+pub mod domain;
+pub mod paths;
+
 const TARBALL_URLS: &[&str] = &[
     "https://github.com/K-Dense-AI/scientific-agent-skills/archive/refs/heads/main.tar.gz",
     "https://codeload.github.com/K-Dense-AI/scientific-agent-skills/tar.gz/refs/heads/main",
@@ -360,14 +363,39 @@ fn skill_categories() -> Vec<SkillCategory> {
 // ─── Helpers ───
 
 /// Resolve the target skills directory.
-fn skills_dir(project_path: Option<&str>) -> PathBuf {
-    match project_path {
-        Some(p) => PathBuf::from(p).join(".claude").join("skills"),
-        None => dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".claude")
-            .join("skills"),
-    }
+fn skills_dir(project_path: Option<&str>) -> Result<PathBuf, String> {
+    let scope = if project_path.is_some() {
+        domain::SkillScope::Project
+    } else {
+        domain::SkillScope::User
+    };
+    paths::resolve_skill_root(
+        crate::runtime::RuntimeKind::Claude,
+        scope,
+        project_path.map(Path::new),
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+fn skills_dir_with_home(
+    home_dir: Option<&Path>,
+    project_path: Option<&str>,
+) -> Result<PathBuf, String> {
+    let scope = if project_path.is_some() {
+        domain::SkillScope::Project
+    } else {
+        domain::SkillScope::User
+    };
+    paths::resolve_skill_root_with_home(
+        home_dir,
+        project_path.map(Path::new),
+        domain::SkillTarget {
+            runtime: crate::runtime::RuntimeKind::Claude,
+            scope,
+        },
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn sanitize_skill_folder_name(name: &str) -> String {
@@ -1145,7 +1173,7 @@ pub async fn install_scientific_skills(
     window: WebviewWindow,
     project_path: String,
 ) -> Result<InstallResult, String> {
-    let target = skills_dir(Some(&project_path));
+    let target = skills_dir(Some(&project_path))?;
     install_skills_with_timeout(&window, &target, Some(&project_path)).await
 }
 
@@ -1153,7 +1181,7 @@ pub async fn install_scientific_skills(
 pub async fn install_scientific_skills_global(
     window: WebviewWindow,
 ) -> Result<InstallResult, String> {
-    let target = skills_dir(None);
+    let target = skills_dir(None)?;
     install_skills_with_timeout(&window, &target, None).await
 }
 
@@ -1175,7 +1203,7 @@ pub async fn import_skill_from_folder(source_path: String) -> Result<Vec<SkillIn
         );
     }
 
-    let target_root = skills_dir(None);
+    let target_root = skills_dir(None)?;
     std::fs::create_dir_all(&target_root).map_err(|e| {
         format!(
             "Failed to create skills dir {}: {}",
@@ -1395,7 +1423,7 @@ async fn install_skills_to(
 
 #[tauri::command]
 pub async fn check_skills_installed(project_path: Option<String>) -> Result<SkillsStatus, String> {
-    let target = skills_dir(project_path.as_deref());
+    let target = skills_dir(project_path.as_deref())?;
 
     if !target.exists() {
         return Ok(SkillsStatus {
@@ -1418,7 +1446,7 @@ pub async fn check_skills_installed(project_path: Option<String>) -> Result<Skil
 
 #[tauri::command]
 pub async fn list_installed_skills(project_path: Option<String>) -> Result<Vec<SkillInfo>, String> {
-    let target = skills_dir(project_path.as_deref());
+    let target = skills_dir(project_path.as_deref())?;
 
     if !target.exists() {
         return Ok(Vec::new());
@@ -1445,7 +1473,7 @@ pub async fn delete_installed_skill(skill_folder: String) -> Result<(), String> 
         return Err("Skill folder cannot be empty".into());
     }
 
-    let target = skills_dir(None);
+    let target = skills_dir(None)?;
     if !target.exists() {
         return Err("No global skills directory found".into());
     }
@@ -1480,7 +1508,7 @@ pub async fn delete_installed_skill(skill_folder: String) -> Result<(), String> 
 
 #[tauri::command]
 pub async fn uninstall_scientific_skills(project_path: Option<String>) -> Result<(), String> {
-    let target = skills_dir(project_path.as_deref());
+    let target = skills_dir(project_path.as_deref())?;
 
     if target.exists() {
         std::fs::remove_dir_all(&target).map_err(|e| format!("Failed to remove skills: {}", e))?;
@@ -1503,8 +1531,8 @@ pub async fn get_skill_content(
 ) -> Result<String, String> {
     // Try local (project-level first, then global)
     let locations: Vec<PathBuf> = match project_path.as_deref() {
-        Some(pp) => vec![skills_dir(Some(pp)), skills_dir(None)],
-        None => vec![skills_dir(None)],
+        Some(pp) => vec![skills_dir(Some(pp))?, skills_dir(None)?],
+        None => vec![skills_dir(None)?],
     };
 
     for base in &locations {
@@ -1581,15 +1609,24 @@ mod tests {
 
     #[test]
     fn test_skills_dir_global() {
-        let dir = skills_dir(None);
-        assert!(dir.to_string_lossy().contains(".claude"));
-        assert!(dir.to_string_lossy().ends_with("skills"));
+        let temp = tempfile::tempdir().unwrap();
+        let dir = skills_dir_with_home(Some(temp.path()), None).unwrap();
+        assert_eq!(dir, temp.path().join(".claude").join("skills"));
     }
 
     #[test]
     fn test_skills_dir_project() {
-        let dir = skills_dir(Some("/tmp/my-project"));
-        assert_eq!(dir, PathBuf::from("/tmp/my-project/.claude/skills"));
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("my-project");
+        let project_string = project.to_string_lossy().to_string();
+        let dir = skills_dir_with_home(None, Some(&project_string)).unwrap();
+        assert_eq!(dir, project.join(".claude").join("skills"));
+    }
+
+    #[test]
+    fn test_skills_dir_global_does_not_fall_back_to_current_directory() {
+        let error = skills_dir_with_home(None, None).unwrap_err();
+        assert!(error.contains("home directory"));
     }
 
     #[test]

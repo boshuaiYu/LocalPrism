@@ -1,5 +1,25 @@
 export type RuntimeKind = "claude" | "codex";
 
+export type SkillScope = "user" | "project";
+
+export interface SkillTarget {
+  runtime: RuntimeKind;
+  scope: SkillScope;
+}
+
+export interface RuntimeSkill {
+  id: string;
+  name: string;
+  description: string;
+  folder: string;
+  sourcePath: string;
+  targets: SkillTarget[];
+  managed: boolean;
+  compatibleRuntimes: RuntimeKind[];
+  enabled: boolean;
+  discoveryError: string | null;
+}
+
 export interface RuntimeWarningPayload {
   runtime: RuntimeKind;
   message: string;
