@@ -3,7 +3,6 @@ import { getVersion } from "@tauri-apps/api/app";
 import {
   FileTextIcon,
   FolderIcon,
-  HomeIcon,
   FolderPlusIcon,
   ImageIcon,
   PlusIcon,
@@ -78,6 +77,8 @@ import { Input } from "@/components/ui/input";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
+import { useClaudeChatStore } from "@/stores/claude-chat-store";
+import { ProjectCloseButton } from "@/components/workspace/project-close-button";
 import { UvSetupDialog } from "@/components/uv-setup";
 import { createLogger } from "@/lib/debug/logger";
 
@@ -427,6 +428,11 @@ export function Sidebar({
   const moveFile = useDocumentStore((s) => s.moveFile);
   const moveFolder = useDocumentStore((s) => s.moveFolder);
   const closeProject = useDocumentStore((s) => s.closeProject);
+  const runtimeBusy = useClaudeChatStore((s) =>
+    s.tabs.some(
+      (tab) => tab.isStreaming || (tab.cancelledAttempts?.length ?? 0) > 0,
+    ),
+  );
   const refreshFiles = useDocumentStore((s) => s.refreshFiles);
   const projectRoot = useDocumentStore((s) => s.projectRoot);
   const folders = useDocumentStore((s) => s.folders);
@@ -1188,16 +1194,11 @@ export function Sidebar({
         </Button>
       </div>
       <div className="flex h-9 w-full items-center justify-center border-sidebar-border border-t">
-        <Button
-          variant="ghost"
-          size="icon"
+        <ProjectCloseButton
           className="size-7 transition-transform duration-300 ease-in-out hover:scale-105"
-          onClick={closeProject}
-          title="Close Project"
-          aria-label="Close Project"
-        >
-          <HomeIcon className="size-3.5" />
-        </Button>
+          onClose={closeProject}
+          runtimeBusy={runtimeBusy}
+        />
       </div>
     </div>
   );
@@ -1228,16 +1229,11 @@ export function Sidebar({
           {/* Header — padded top for macOS overlay titlebar */}
           <div className="grid h-[calc(var(--workspace-topbar-height)+var(--titlebar-height))] grid-cols-[2rem_minmax(0,1fr)_2rem] items-center gap-2 border-sidebar-border border-b px-3">
             <div className="flex items-center justify-start">
-              <Button
-                variant="ghost"
-                size="icon"
+              <ProjectCloseButton
                 className="size-6 transition-all duration-150 ease-out hover:scale-105"
-                onClick={closeProject}
-                title="Close Project"
-                aria-label="Close Project"
-              >
-                <HomeIcon className="size-3.5" />
-              </Button>
+                onClose={closeProject}
+                runtimeBusy={runtimeBusy}
+              />
             </div>
             <button
               type="button"

@@ -1,9 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  ConversationRef,
   RuntimeAccount,
+  RuntimeConversationHistory,
   RuntimeKind,
   RuntimeLoginStartResult,
   RuntimeModel,
+  RuntimeStopMode,
+  RuntimeTurnRequest,
 } from "@/runtime/types";
 
 type RuntimeLoginMode = "browser" | "device-code" | "api-key";
@@ -94,4 +98,30 @@ export function runtimeListModels(
   runtime: RuntimeKind,
 ): Promise<RuntimeModel[]> {
   return invoke<RuntimeModel[]>("runtime_list_models", { runtime });
+}
+
+export function runtimeReadConversation(
+  reference: ConversationRef,
+): Promise<RuntimeConversationHistory> {
+  return invoke<RuntimeConversationHistory>("runtime_read_conversation", {
+    reference,
+  });
+}
+
+export function startRuntimeTurn(request: RuntimeTurnRequest): Promise<void> {
+  return invoke<void>("runtime_start_turn", { request });
+}
+
+export function interruptRuntimeTurn(
+  runtime: RuntimeKind,
+  tabId: string,
+  attemptId: string,
+  mode: RuntimeStopMode,
+): Promise<boolean> {
+  return invoke<boolean>("runtime_interrupt_turn", {
+    runtime,
+    tabId,
+    attemptId,
+    mode,
+  });
 }

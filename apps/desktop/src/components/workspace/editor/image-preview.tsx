@@ -6,6 +6,10 @@ import { useDocumentStore, type ProjectFile } from "@/stores/document-store";
 import { LOCAL_ZOOM_SHORTCUTS_ATTR } from "@/lib/app-zoom";
 import { getAssetUrl } from "@/lib/tauri/fs";
 import { Button } from "@/components/ui/button";
+import {
+  ownsProjectFsState,
+  runProjectFsOperation,
+} from "@/lib/project-fs-operations";
 
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 4;
@@ -48,6 +52,9 @@ export function ImagePreview({
 }: ImagePreviewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
+  const isProjectMutating = useDocumentStore(
+    (state) => state.isProjectMutating,
+  );
 
   // Crop state
   const [cropRect, setCropRect] = useState<CropRect | null>(null);
@@ -279,6 +286,12 @@ export function ImagePreview({
   // Apply crop
   const handleApplyCrop = useCallback(async () => {
     if (!cropRect || !file.dataUrl || isSaving) return;
+    const initial = useDocumentStore.getState();
+    if (!initial.projectRoot || initial.isProjectMutating) return;
+    const owner = {
+      projectRoot: initial.projectRoot,
+      projectGeneration: initial.projectGeneration,
+    };
     setIsSaving(true);
 
     try {
@@ -330,10 +343,30 @@ export function ImagePreview({
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 
-      await writeFile(file.absolutePath, bytes);
+      const current = useDocumentStore.getState();
+      const currentFile = current.files.find(
+        (candidate) => candidate.id === file.id,
+      );
+      if (
+        current.isProjectMutating ||
+        !ownsProjectFsState(owner, current) ||
+        currentFile?.absolutePath !== file.absolutePath
+      ) {
+        return;
+      }
+      await runProjectFsOperation(owner, () =>
+        writeFile(file.absolutePath, bytes),
+      );
 
       // Update store
-      useDocumentStore.getState().updateImageDataUrl(file.id, dataUrl);
+      const afterWrite = useDocumentStore.getState();
+      if (
+        afterWrite.isProjectMutating ||
+        !ownsProjectFsState(owner, afterWrite)
+      ) {
+        return;
+      }
+      afterWrite.updateImageDataUrl(file.id, dataUrl);
 
       onCropModeChange?.(false);
       toast.success("Image cropped and saved");
@@ -491,7 +524,7 @@ export function ImagePreview({
                   size="sm"
                   className="h-7 gap-1 px-2.5 text-xs"
                   onClick={handleApplyCrop}
-                  disabled={isSaving}
+                  disabled={isSaving || isProjectMutating}
                 >
                   <CheckIcon className="size-3.5" />
                   {isSaving ? "Saving..." : "Apply"}

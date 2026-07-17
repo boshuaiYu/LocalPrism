@@ -130,6 +130,7 @@ export function EditorToolbar({
   );
 
   const insertText = (before: string, after: string = "") => {
+    if (useDocumentStore.getState().isProjectMutating) return;
     const view = editorView.current;
     if (!view) return;
 

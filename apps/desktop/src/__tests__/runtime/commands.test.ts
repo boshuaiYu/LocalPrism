@@ -1,18 +1,23 @@
 import { invoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  interruptRuntimeTurn,
+  runtimeReadConversation,
   runtimeInstall,
   runtimeListModels,
   runtimeLoginCancel,
   runtimeLoginStart,
   runtimeLogout,
   runtimeStatus,
+  startRuntimeTurn,
 } from "@/runtime/commands";
 import type {
+  ConversationRef,
   RuntimeAccount,
   RuntimeLoginStartResult,
   RuntimeLoginState,
   RuntimeModel,
+  RuntimeTurnRequest,
 } from "@/runtime/types";
 
 const account: RuntimeAccount = {
@@ -236,6 +241,60 @@ describe("runtime command wrappers", () => {
     vi.mocked(invoke).mockResolvedValueOnce([]);
 
     await expect(runtimeListModels("codex")).resolves.toEqual([]);
+  });
+
+  it("starts a turn through the typed runtime request wrapper", async () => {
+    const request: RuntimeTurnRequest = {
+      runtime: "codex",
+      projectPath: "C:/work/paper",
+      tabId: "tab-7",
+      attemptId: "attempt-7",
+      sessionId: "thread-3",
+      prompt: "Continue",
+      model: "gpt-5.4",
+      reasoningEffort: "high",
+      agentId: "reviewer",
+      providerCredentialId: null,
+      providerModelOverride: null,
+    };
+    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+
+    await startRuntimeTurn(request);
+
+    expect(invoke).toHaveBeenCalledWith("runtime_start_turn", { request });
+  });
+
+  it("reads a conversation through its complete typed reference", async () => {
+    const reference: ConversationRef = {
+      runtime: "codex",
+      sessionId: "thread-3",
+      projectPath: "C:/work/paper",
+    };
+    const history = {
+      reference,
+      items: [{ type: "agentMessage", text: "Done" }],
+    };
+    vi.mocked(invoke).mockResolvedValueOnce(history);
+
+    await expect(runtimeReadConversation(reference)).resolves.toBe(history);
+    expect(invoke).toHaveBeenCalledWith("runtime_read_conversation", {
+      reference,
+    });
+  });
+
+  it("interrupts a turn with its explicit runtime and tab id", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(true);
+
+    await expect(
+      interruptRuntimeTurn("codex", "tab-7", "attempt-7", "interrupt"),
+    ).resolves.toBe(true);
+
+    expect(invoke).toHaveBeenCalledWith("runtime_interrupt_turn", {
+      runtime: "codex",
+      tabId: "tab-7",
+      attemptId: "attempt-7",
+      mode: "interrupt",
+    });
   });
 
   it("passes invoke errors through unchanged", async () => {

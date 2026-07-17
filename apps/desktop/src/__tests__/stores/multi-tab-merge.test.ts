@@ -8,7 +8,16 @@ vi.mock("@/stores/document-store", () => ({
   useDocumentStore: {
     getState: vi.fn(() => ({
       projectRoot: "/project",
-      files: [],
+      projectGeneration: 1,
+      isProjectMutating: false,
+      files: [
+        {
+          id: "main.tex",
+          relativePath: "main.tex",
+          absolutePath: "/project/main.tex",
+          content: "",
+        },
+      ],
       activeFileId: null,
       selectionRange: null,
       reloadFile: vi.fn(),
@@ -45,7 +54,12 @@ function resetStores() {
         id: "tab-default",
         title: "New Chat",
         projectPath: "/project",
+        runtime: "claude",
+        sessionRef: null,
         sessionId: null,
+        runtimeModel: null,
+        reasoningEffort: null,
+        agentId: null,
         providerKey: null,
         sessionProviderKey: null,
         messages: [],
@@ -59,7 +73,6 @@ function resetStores() {
     ],
     activeTabId: "tab-default",
     activeProjectPath: "/project",
-    _cancelledByUser: false,
   });
   useProposedChangesStore.setState({ changes: [] });
 }

@@ -51,6 +51,12 @@ import {
 } from "@/stores/claude-setup-store";
 import { useDocumentStore, type ProjectFile } from "@/stores/document-store";
 import { getUniqueTargetName } from "@/lib/tauri/fs";
+import { runProjectFsOperation } from "@/lib/project-fs-operations";
+import {
+  commitOwnedChatAttachmentContexts,
+  finishTemporaryChatAttachment,
+  ownsChatAttachmentState,
+} from "@/lib/chat-attachment-commit";
 import {
   getProviderDisplayName,
   getProviderIconSrc,
@@ -630,7 +636,6 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
   const activeFileId = useDocumentStore((s) => s.activeFileId);
   const files = useDocumentStore((s) => s.files);
   const importFiles = useDocumentStore((s) => s.importFiles);
-  const refreshFiles = useDocumentStore((s) => s.refreshFiles);
   const projectRoot = useDocumentStore((s) => s.projectRoot);
 
   // Consume pending attachments from external sources (e.g. PDF capture)
@@ -808,13 +813,35 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
     async () => {},
   );
   handleFileDropRef.current = async (paths: string[]) => {
-    if (!projectRoot || paths.length === 0) return;
+    const initialDocument = useDocumentStore.getState();
+    const initiatingTabId = useClaudeChatStore.getState().activeTabId;
+    if (
+      !initialDocument.projectRoot ||
+      initialDocument.isProjectMutating ||
+      paths.length === 0
+    ) {
+      return;
+    }
+    const owner = {
+      projectRoot: initialDocument.projectRoot,
+      projectGeneration: initialDocument.projectGeneration,
+      tabId: initiatingTabId,
+    };
+    const stillOwnsAttachment = () => {
+      const currentDocument = useDocumentStore.getState();
+      return ownsChatAttachmentState(
+        owner,
+        currentDocument,
+        useClaudeChatStore.getState().activeTabId,
+      );
+    };
     if (isProcessingDropRef.current) return;
     isProcessingDropRef.current = true;
 
     try {
       // Import files to attachments/ folder — returns actual (deduplicated) relative paths
       const importedPaths = await importFiles(paths, "attachments");
+      if (!stillOwnsAttachment()) return;
 
       // Pin each file as context
       const storeFiles = useDocumentStore.getState().files;
@@ -838,8 +865,15 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
       }
 
       if (newContexts.length > 0) {
-        setPinnedContexts((prev) => {
-          return appendUniquePinnedContexts(prev, newContexts);
+        await commitOwnedChatAttachmentContexts({
+          contexts: newContexts,
+          isCurrent: stillOwnsAttachment,
+          cleanup: cleanupTemporaryFilePaths,
+          commit: (contexts) => {
+            setPinnedContexts((prev) => {
+              return appendUniquePinnedContexts(prev, contexts);
+            });
+          },
         });
       }
     } finally {
@@ -911,8 +945,29 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
   const handlePaste = useCallback(
     async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
       const clipboardFiles = e.clipboardData?.files;
-      if (!clipboardFiles || clipboardFiles.length === 0 || !projectRoot)
+      const initialDocument = useDocumentStore.getState();
+      const initiatingTabId = useClaudeChatStore.getState().activeTabId;
+      if (
+        !clipboardFiles ||
+        clipboardFiles.length === 0 ||
+        !initialDocument.projectRoot ||
+        initialDocument.isProjectMutating
+      ) {
         return;
+      }
+      const owner = {
+        projectRoot: initialDocument.projectRoot,
+        projectGeneration: initialDocument.projectGeneration,
+        tabId: initiatingTabId,
+      };
+      const stillOwnsProject = () => {
+        const current = useDocumentStore.getState();
+        return ownsChatAttachmentState(
+          owner,
+          current,
+          useClaudeChatStore.getState().activeTabId,
+        );
+      };
 
       // Check if there are actual file items (not just text)
       const fileItems = Array.from(clipboardFiles);
@@ -941,19 +996,25 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
             const buffer = await file.arrayBuffer();
             await writeFile(fullPath, new Uint8Array(buffer));
 
-            newContexts.push({
-              label:
-                fileItems.length > 1
-                  ? `Pasted image ${index + 1}`
-                  : "Pasted image",
-              filePath: fullPath,
-              selectedText: [
-                `[Temporary pasted image: ${fullPath}]`,
-                "Use this image file as visual context for the user's message.",
-              ].join("\n"),
-              imageDataUrl: await readFileAsDataUrl(file),
-              isTemporary: true,
+            const context = await finishTemporaryChatAttachment({
+              temporaryPath: fullPath,
+              isCurrent: stillOwnsProject,
+              cleanup: cleanupTemporaryFilePaths,
+              buildContext: async (): Promise<PinnedContext> => ({
+                label:
+                  fileItems.length > 1
+                    ? `Pasted image ${index + 1}`
+                    : "Pasted image",
+                filePath: fullPath,
+                selectedText: [
+                  `[Temporary pasted image: ${fullPath}]`,
+                  "Use this image file as visual context for the user's message.",
+                ].join("\n"),
+                imageDataUrl: await readFileAsDataUrl(file),
+                isTemporary: true,
+              }),
             });
+            if (context) newContexts.push(context);
           } catch (err) {
             log.error("Failed to save pasted image", {
               fileName: file.name || "clipboard image",
@@ -973,31 +1034,31 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
         const targetName = `attachments/${fileName}`;
 
         try {
-          // Ensure attachments/ directory exists
-          const attachmentsDir = await join(projectRoot, "attachments");
-          if (!(await exists(attachmentsDir))) {
-            await mkdir(attachmentsDir, { recursive: true });
-          }
-
-          // Deduplicate filename
-          const uniqueName = await getUniqueTargetName(projectRoot, targetName);
-          const fullPath = await join(projectRoot, uniqueName);
-
-          // Read file data and write to disk
           const buffer = await file.arrayBuffer();
-          await writeFile(fullPath, new Uint8Array(buffer));
+          const isText = file.type.startsWith("text/");
+          const textContent = isText ? await file.text() : null;
+          if (!stillOwnsProject()) continue;
 
-          let content: string;
+          const uniqueName = await runProjectFsOperation(owner, async () => {
+            const attachmentsDir = await join(owner.projectRoot, "attachments");
+            if (!(await exists(attachmentsDir))) {
+              await mkdir(attachmentsDir, { recursive: true });
+            }
+            const name = await getUniqueTargetName(
+              owner.projectRoot,
+              targetName,
+            );
+            const fullPath = await join(owner.projectRoot, name);
+            await writeFile(fullPath, new Uint8Array(buffer));
+            return name;
+          });
+          if (!stillOwnsProject()) continue;
 
-          if (isPdfPath(uniqueName) || file.type === "application/pdf") {
-            content = `[Attached file: ${uniqueName} (PDF)]`;
-          } else {
-            // Determine if it's a text file
-            const isText = file.type.startsWith("text/");
-            content = isText
-              ? await file.text()
-              : `[Attached file: ${uniqueName} (${file.type})]`;
-          }
+          const content =
+            isPdfPath(uniqueName) || file.type === "application/pdf"
+              ? `[Attached file: ${uniqueName} (PDF)]`
+              : (textContent ??
+                `[Attached file: ${uniqueName} (${file.type})]`);
 
           newContexts.push({
             label: `@${uniqueName}`,
@@ -1013,17 +1074,31 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
       }
 
       if (newContexts.length > 0) {
-        if (newContexts.some((context) => context.label.startsWith("@"))) {
-          // Refresh only for files imported into the project tree.
-          await refreshFiles();
+        const shouldRefresh = newContexts.some((context) =>
+          context.label.startsWith("@"),
+        );
+        try {
+          await commitOwnedChatAttachmentContexts({
+            contexts: newContexts,
+            isCurrent: stillOwnsProject,
+            cleanup: cleanupTemporaryFilePaths,
+            beforeCommit: shouldRefresh
+              ? () => useDocumentStore.getState().refreshFiles()
+              : undefined,
+            commit: (contexts) => {
+              setPinnedContexts((prev) => {
+                return appendUniquePinnedContexts(prev, contexts);
+              });
+            },
+          });
+        } catch (err) {
+          log.error("Failed to commit pasted file contexts", {
+            error: String(err),
+          });
         }
-
-        setPinnedContexts((prev) => {
-          return appendUniquePinnedContexts(prev, newContexts);
-        });
       }
     },
-    [projectRoot, refreshFiles],
+    [],
   );
 
   const handleSend = useCallback(() => {

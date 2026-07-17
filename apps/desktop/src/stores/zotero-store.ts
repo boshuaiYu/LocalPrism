@@ -13,6 +13,12 @@ import {
 import { useDocumentStore } from "@/stores/document-store";
 import { createFileOnDisk } from "@/lib/tauri/fs";
 import { createLogger } from "@/lib/debug/logger";
+import {
+  canonicalProjectPath,
+  type ProjectFsOwner,
+  ownsProjectFsState,
+  runProjectFsOperation,
+} from "@/lib/project-fs-operations";
 
 const log = createLogger("zotero");
 
@@ -47,6 +53,10 @@ interface ZoteroState {
   error: string | null;
   collections: ZoteroCollection[];
   isLoadingCollections: boolean;
+  /** Request currently allowed to own the global sync progress indicator. */
+  activeSyncRequestId: number | null;
+  /** Mounted project that owns the global sync progress indicator. */
+  activeSyncProjectOwner: ProjectFsOwner | null;
 
   connectWithOAuth: () => Promise<boolean>;
   connectWithApiKey: (apiKey: string) => Promise<boolean>;
@@ -63,8 +73,170 @@ interface ZoteroState {
 }
 
 const MYLIB_KEY = "__my_library__";
+let nextSyncRequestId = 0;
+const latestCollectionRequests = new Map<string, number>();
+let accountGeneration = 0;
+let nextCollectionsRequestId = 0;
+let latestCollectionsRequestId = 0;
+
+interface AccountRequestOwner {
+  generation: number;
+}
+
+interface AccountSnapshot extends AccountRequestOwner {
+  apiKey: string;
+  userID: string;
+}
+
+interface CollectionsRequest extends AccountSnapshot {
+  id: number;
+}
+
+interface ProjectSyncRequest {
+  id: number;
+  key: string;
+  owner: ProjectFsOwner;
+}
+
 function storeKey(collectionKey: string | null): string {
   return collectionKey ?? MYLIB_KEY;
+}
+
+function beginAccountRequest(): AccountRequestOwner {
+  return { generation: ++accountGeneration };
+}
+
+function ownsAccountRequest(request: AccountRequestOwner): boolean {
+  return request.generation === accountGeneration;
+}
+
+function captureAccountSnapshot(): AccountSnapshot | null {
+  const { apiKey, userID } = useZoteroStore.getState();
+  if (!apiKey || !userID) return null;
+  return { generation: accountGeneration, apiKey, userID };
+}
+
+function beginCollectionsRequest(account: AccountSnapshot): CollectionsRequest {
+  const request = { ...account, id: ++nextCollectionsRequestId };
+  latestCollectionsRequestId = request.id;
+  return request;
+}
+
+function ownsAccountSnapshot(request: AccountSnapshot): boolean {
+  const state = useZoteroStore.getState();
+  return (
+    ownsAccountRequest(request) &&
+    state.apiKey === request.apiKey &&
+    state.userID === request.userID
+  );
+}
+
+function ownsCollectionsRequest(request: CollectionsRequest): boolean {
+  return (
+    request.id === latestCollectionsRequestId && ownsAccountSnapshot(request)
+  );
+}
+
+function projectStoreKey(projectRoot: string): string {
+  return canonicalProjectPath(projectRoot);
+}
+
+function projectCollections(
+  allCollections: ProjectSyncedCollections,
+  projectRoot: string,
+): Record<string, CollectionSyncInfo> {
+  const key = projectStoreKey(projectRoot);
+  if (allCollections[key]) return allCollections[key];
+  return (
+    Object.entries(allCollections).find(
+      ([candidate]) => projectStoreKey(candidate) === key,
+    )?.[1] ?? {}
+  );
+}
+
+function withProjectCollections(
+  allCollections: ProjectSyncedCollections,
+  projectRoot: string,
+  collections: Record<string, CollectionSyncInfo>,
+): ProjectSyncedCollections {
+  const key = projectStoreKey(projectRoot);
+  const next: ProjectSyncedCollections = {};
+  for (const [candidate, value] of Object.entries(allCollections)) {
+    if (projectStoreKey(candidate) !== key) next[candidate] = value;
+  }
+  next[key] = collections;
+  return next;
+}
+
+function normalizeProjectCollections(
+  allCollections: ProjectSyncedCollections,
+): ProjectSyncedCollections {
+  const normalized: ProjectSyncedCollections = {};
+  for (const [projectRoot, collections] of Object.entries(allCollections)) {
+    const key = projectStoreKey(projectRoot);
+    normalized[key] = { ...(normalized[key] ?? {}), ...collections };
+  }
+  return normalized;
+}
+
+function captureProjectOwner(): ProjectFsOwner | null {
+  const state = useDocumentStore.getState();
+  if (!state.projectRoot || state.isProjectMutating) return null;
+  return {
+    projectRoot: state.projectRoot,
+    projectGeneration: state.projectGeneration,
+  };
+}
+
+function makeRequestKey(owner: ProjectFsOwner, sk: string): string {
+  return `${canonicalProjectPath(owner.projectRoot)}\0${owner.projectGeneration}\0${sk}`;
+}
+
+function beginProjectSyncRequest(
+  owner: ProjectFsOwner,
+  sk: string,
+): ProjectSyncRequest {
+  const request: ProjectSyncRequest = {
+    id: ++nextSyncRequestId,
+    key: makeRequestKey(owner, sk),
+    owner,
+  };
+  latestCollectionRequests.set(request.key, request.id);
+  return request;
+}
+
+function isLatestProjectRequest(request: ProjectSyncRequest): boolean {
+  return latestCollectionRequests.get(request.key) === request.id;
+}
+
+function ownsMountedProject(request: ProjectSyncRequest): boolean {
+  const state = useDocumentStore.getState();
+  return (
+    isLatestProjectRequest(request) &&
+    !state.isProjectMutating &&
+    ownsProjectFsState(request.owner, state)
+  );
+}
+
+function rootBibFilePath(owner: ProjectFsOwner, bibFileName: string): string {
+  const root = canonicalProjectPath(owner.projectRoot);
+  return canonicalProjectPath(
+    root.endsWith("/") ? `${root}${bibFileName}` : `${root}/${bibFileName}`,
+  );
+}
+
+function findOwnedBibFile(request: ProjectSyncRequest, bibFileName: string) {
+  if (!ownsMountedProject(request)) return null;
+  const expectedPath = rootBibFilePath(request.owner, bibFileName);
+  return (
+    useDocumentStore
+      .getState()
+      .files.find(
+        (file) =>
+          file.type === "bib" &&
+          canonicalProjectPath(file.absolutePath) === expectedPath,
+      ) ?? null
+  );
 }
 
 function sanitizeFileName(name: string): string {
@@ -104,25 +276,36 @@ export const useZoteroStore = create<ZoteroState>()(
       error: null,
       collections: [],
       isLoadingCollections: false,
+      activeSyncRequestId: null,
+      activeSyncProjectOwner: null,
 
       connectWithOAuth: async () => {
+        const request = beginAccountRequest();
         log.info("Starting OAuth connection");
-        set({ isValidating: true, error: null });
+        set({ isValidating: true, isLoadingCollections: false, error: null });
         try {
           await startOAuth();
+          if (!ownsAccountRequest(request)) return false;
           const creds = await completeOAuth();
+          if (!ownsAccountRequest(request)) return false;
           log.info(`OAuth connected as ${creds.username}`);
+          latestCollectionRequests.clear();
           set({
             apiKey: creds.apiKey,
             userID: creds.userID,
             username: creds.username,
             isAuthenticated: true,
             isValidating: false,
+            activeSyncRequestId: null,
+            activeSyncProjectOwner: null,
+            isSyncing: null,
+            syncProgress: null,
           });
           // Auto-load collections after connecting
-          get().loadCollections();
+          void get().loadCollections();
           return true;
         } catch (err) {
+          if (!ownsAccountRequest(request)) return false;
           set({
             error: err instanceof Error ? err.message : "Connection failed",
             isValidating: false,
@@ -132,19 +315,27 @@ export const useZoteroStore = create<ZoteroState>()(
       },
 
       connectWithApiKey: async (apiKey: string) => {
-        set({ isValidating: true, error: null });
+        const request = beginAccountRequest();
+        set({ isValidating: true, isLoadingCollections: false, error: null });
         try {
           const creds = await validateApiKey(apiKey);
+          if (!ownsAccountRequest(request)) return false;
+          latestCollectionRequests.clear();
           set({
             apiKey: creds.apiKey,
             userID: creds.userID,
             username: creds.username,
             isAuthenticated: true,
             isValidating: false,
+            activeSyncRequestId: null,
+            activeSyncProjectOwner: null,
+            isSyncing: null,
+            syncProgress: null,
           });
-          get().loadCollections();
+          void get().loadCollections();
           return true;
         } catch (err) {
+          if (!ownsAccountRequest(request)) return false;
           set({
             error: err instanceof Error ? err.message : "Connection failed",
             isValidating: false,
@@ -154,11 +345,19 @@ export const useZoteroStore = create<ZoteroState>()(
       },
 
       cancelConnect: () => {
+        beginAccountRequest();
         cancelOAuth().catch(() => {});
-        set({ isValidating: false, error: null });
+        set({
+          isValidating: false,
+          isLoadingCollections: false,
+          error: null,
+        });
       },
 
       disconnect: () => {
+        beginAccountRequest();
+        latestCollectionsRequestId = ++nextCollectionsRequestId;
+        latestCollectionRequests.clear();
         set({
           apiKey: null,
           userID: null,
@@ -167,36 +366,50 @@ export const useZoteroStore = create<ZoteroState>()(
           isAuthenticated: false,
           error: null,
           collections: [],
+          isValidating: false,
+          isLoadingCollections: false,
+          activeSyncRequestId: null,
+          activeSyncProjectOwner: null,
+          isSyncing: null,
+          syncProgress: null,
         });
       },
 
       revalidate: async () => {
-        const { apiKey } = get();
-        if (!apiKey) return;
+        const account = captureAccountSnapshot();
+        if (!account) return;
         try {
-          const creds = await validateApiKey(apiKey);
+          const creds = await validateApiKey(account.apiKey);
+          if (!ownsAccountSnapshot(account)) return;
           log.debug(`Revalidated as ${creds.username}`);
           set({
             userID: creds.userID,
             username: creds.username,
             isAuthenticated: true,
           });
-          get().loadCollections();
+          void get().loadCollections();
         } catch (err) {
+          if (!ownsAccountSnapshot(account)) return;
           log.warn("Revalidation failed", { error: String(err) });
           set({ isAuthenticated: false });
         }
       },
 
       loadCollections: async () => {
-        const { apiKey, userID } = get();
-        if (!apiKey || !userID) return;
+        const account = captureAccountSnapshot();
+        if (!account) return;
+        const request = beginCollectionsRequest(account);
         set({ isLoadingCollections: true });
         try {
-          const collections = await fetchCollections(apiKey, userID);
+          const collections = await fetchCollections(
+            request.apiKey,
+            request.userID,
+          );
+          if (!ownsCollectionsRequest(request)) return;
           log.debug(`Loaded ${collections.length} collections`);
           set({ collections, isLoadingCollections: false });
         } catch (err) {
+          if (!ownsCollectionsRequest(request)) return;
           log.error("Failed to load collections", { error: String(err) });
           set({ isLoadingCollections: false });
         }
@@ -206,12 +419,17 @@ export const useZoteroStore = create<ZoteroState>()(
         const { apiKey, userID } = get();
         if (!apiKey || !userID) return;
 
-        const docStore = useDocumentStore.getState();
-        if (!docStore.projectRoot) return;
-        const projectRoot = docStore.projectRoot;
-
+        const owner = captureProjectOwner();
+        if (!owner) return;
         const sk = storeKey(collectionKey);
-        set({ isSyncing: sk, syncProgress: null, error: null });
+        const request = beginProjectSyncRequest(owner, sk);
+        set({
+          activeSyncRequestId: request.id,
+          activeSyncProjectOwner: request.owner,
+          isSyncing: sk,
+          syncProgress: null,
+          error: null,
+        });
 
         try {
           const result = await importCollection(
@@ -219,33 +437,54 @@ export const useZoteroStore = create<ZoteroState>()(
             userID,
             collectionKey,
             (loaded, total) => {
-              set({ syncProgress: { loaded, total } });
+              if (!ownsMountedProject(request)) return;
+              set((state) =>
+                state.activeSyncRequestId === request.id
+                  ? { syncProgress: { loaded, total } }
+                  : {},
+              );
             },
           );
+
+          // The network request is deliberately outside the filesystem
+          // registry. Re-authorize its project immediately before committing.
+          if (!ownsMountedProject(request)) return;
 
           // Determine .bib file name
           const bibFileName = `${sanitizeFileName(name)}.bib`;
 
-          // Check if this .bib file already exists in the project
-          const existingFile = docStore.files.find(
-            (f) => f.name === bibFileName,
-          );
+          // Re-read the mounted project after the network await. Never use the
+          // document snapshot captured when the request started.
+          const existingFile = findOwnedBibFile(request, bibFileName);
           if (existingFile) {
-            docStore.updateFileContent(existingFile.id, result.bibtex);
+            useDocumentStore
+              .getState()
+              .updateFileContent(existingFile.id, result.bibtex);
           } else {
-            const fullPath = await createFileOnDisk(
-              projectRoot,
-              bibFileName,
-              result.bibtex,
+            const fullPath = await runProjectFsOperation(request.owner, () =>
+              createFileOnDisk(
+                request.owner.projectRoot,
+                bibFileName,
+                result.bibtex,
+              ),
             );
-            docStore.addFile({
+            if (
+              !ownsMountedProject(request) ||
+              canonicalProjectPath(fullPath) !==
+                rootBibFilePath(request.owner, bibFileName)
+            ) {
+              return;
+            }
+            useDocumentStore.getState().addFile({
               name: bibFileName,
               relativePath: bibFileName,
               absolutePath: fullPath,
-              type: "tex",
+              type: "bib",
               content: result.bibtex,
             });
           }
+
+          if (!ownsMountedProject(request)) return;
 
           // Store sync info scoped to current project
           const syncInfo: CollectionSyncInfo = {
@@ -256,22 +495,43 @@ export const useZoteroStore = create<ZoteroState>()(
             keyMap: result.keyMap,
           };
           set((s) => {
-            const projectColls = s.syncedCollections[projectRoot] ?? {};
+            if (!ownsMountedProject(request)) return {};
+            const projectColls = projectCollections(
+              s.syncedCollections,
+              request.owner.projectRoot,
+            );
             return {
-              syncedCollections: {
-                ...s.syncedCollections,
-                [projectRoot]: { ...projectColls, [sk]: syncInfo },
-              },
-              isSyncing: null,
-              syncProgress: null,
+              syncedCollections: withProjectCollections(
+                s.syncedCollections,
+                request.owner.projectRoot,
+                { ...projectColls, [sk]: syncInfo },
+              ),
             };
           });
         } catch (err) {
-          set({
-            error: err instanceof Error ? err.message : "Import failed",
-            isSyncing: null,
-            syncProgress: null,
-          });
+          if (ownsMountedProject(request)) {
+            set((state) =>
+              state.activeSyncRequestId === request.id
+                ? {
+                    error: err instanceof Error ? err.message : "Import failed",
+                  }
+                : {},
+            );
+          }
+        } finally {
+          if (isLatestProjectRequest(request)) {
+            latestCollectionRequests.delete(request.key);
+          }
+          set((state) =>
+            state.activeSyncRequestId === request.id
+              ? {
+                  activeSyncRequestId: null,
+                  activeSyncProjectOwner: null,
+                  isSyncing: null,
+                  syncProgress: null,
+                }
+              : {},
+          );
         }
       },
 
@@ -279,21 +539,32 @@ export const useZoteroStore = create<ZoteroState>()(
         const { apiKey, userID, syncedCollections } = get();
         if (!apiKey || !userID) return;
 
-        const docStore = useDocumentStore.getState();
-        if (!docStore.projectRoot) return;
-        const projectRoot = docStore.projectRoot;
-
+        const owner = captureProjectOwner();
+        if (!owner) return;
         const sk = storeKey(collectionKey);
-        const projectColls = syncedCollections[projectRoot] ?? {};
+        const projectColls = projectCollections(
+          syncedCollections,
+          owner.projectRoot,
+        );
         const syncInfo = projectColls[sk];
         if (!syncInfo) return;
 
-        const bibFile = docStore.files.find(
-          (f) => f.name === syncInfo.bibFileName,
-        );
-        if (!bibFile) return;
+        const request = beginProjectSyncRequest(owner, sk);
+        const bibFile = findOwnedBibFile(request, syncInfo.bibFileName);
+        if (!bibFile) {
+          if (isLatestProjectRequest(request)) {
+            latestCollectionRequests.delete(request.key);
+          }
+          return;
+        }
 
-        set({ isSyncing: sk, syncProgress: null, error: null });
+        set({
+          activeSyncRequestId: request.id,
+          activeSyncProjectOwner: request.owner,
+          isSyncing: sk,
+          syncProgress: null,
+          error: null,
+        });
 
         try {
           const result = await syncCollection(
@@ -302,9 +573,26 @@ export const useZoteroStore = create<ZoteroState>()(
             collectionKey,
             syncInfo.libraryVersion,
             (loaded, total) => {
-              set({ syncProgress: { loaded, total } });
+              if (!ownsMountedProject(request)) return;
+              set((state) =>
+                state.activeSyncRequestId === request.id
+                  ? { syncProgress: { loaded, total } }
+                  : {},
+              );
             },
           );
+
+          if (!ownsMountedProject(request)) return;
+          const currentSyncInfo = projectCollections(
+            get().syncedCollections,
+            request.owner.projectRoot,
+          )[sk];
+          if (!currentSyncInfo) return;
+          const currentBibFile = findOwnedBibFile(
+            request,
+            currentSyncInfo.bibFileName,
+          );
+          if (!currentBibFile) return;
 
           if (collectionKey) {
             // For specific collections, syncCollection returns a full re-import
@@ -318,31 +606,36 @@ export const useZoteroStore = create<ZoteroState>()(
               }
             }
             const updatedContent = `${entries.join("\n\n")}\n`;
-            docStore.updateFileContent(bibFile.id, updatedContent);
+            useDocumentStore
+              .getState()
+              .updateFileContent(currentBibFile.id, updatedContent);
 
             set((s) => {
-              const pColls = s.syncedCollections[projectRoot] ?? {};
+              if (!ownsMountedProject(request)) return {};
+              const pColls = projectCollections(
+                s.syncedCollections,
+                request.owner.projectRoot,
+              );
               return {
-                syncedCollections: {
-                  ...s.syncedCollections,
-                  [projectRoot]: {
+                syncedCollections: withProjectCollections(
+                  s.syncedCollections,
+                  request.owner.projectRoot,
+                  {
                     ...pColls,
                     [sk]: {
-                      ...syncInfo,
+                      ...currentSyncInfo,
                       libraryVersion: result.libraryVersion,
                       keyMap: newKeyMap,
                     },
                   },
-                },
-                isSyncing: null,
-                syncProgress: null,
+                ),
               };
             });
           } else {
             // For "My Library", apply incremental diff
-            const currentContent = bibFile.content ?? "";
+            const currentContent = currentBibFile.content ?? "";
             const entries = parseBibEntries(currentContent);
-            const newKeyMap = { ...syncInfo.keyMap };
+            const newKeyMap = { ...currentSyncInfo.keyMap };
 
             for (const entry of result.updatedEntries) {
               const oldCitekey = newKeyMap[entry.key];
@@ -362,49 +655,93 @@ export const useZoteroStore = create<ZoteroState>()(
             }
 
             const updatedContent = `${Array.from(entries.values()).join("\n\n")}\n`;
-            docStore.updateFileContent(bibFile.id, updatedContent);
+            useDocumentStore
+              .getState()
+              .updateFileContent(currentBibFile.id, updatedContent);
 
             set((s) => {
-              const pColls = s.syncedCollections[projectRoot] ?? {};
+              if (!ownsMountedProject(request)) return {};
+              const pColls = projectCollections(
+                s.syncedCollections,
+                request.owner.projectRoot,
+              );
               return {
-                syncedCollections: {
-                  ...s.syncedCollections,
-                  [projectRoot]: {
+                syncedCollections: withProjectCollections(
+                  s.syncedCollections,
+                  request.owner.projectRoot,
+                  {
                     ...pColls,
                     [sk]: {
-                      ...syncInfo,
+                      ...currentSyncInfo,
                       libraryVersion: result.libraryVersion,
                       keyMap: newKeyMap,
                     },
                   },
-                },
-                isSyncing: null,
-                syncProgress: null,
+                ),
               };
             });
           }
         } catch (err) {
-          set({
-            error: err instanceof Error ? err.message : "Sync failed",
-            isSyncing: null,
-            syncProgress: null,
-          });
+          if (ownsMountedProject(request)) {
+            set((state) =>
+              state.activeSyncRequestId === request.id
+                ? {
+                    error: err instanceof Error ? err.message : "Sync failed",
+                  }
+                : {},
+            );
+          }
+        } finally {
+          if (isLatestProjectRequest(request)) {
+            latestCollectionRequests.delete(request.key);
+          }
+          set((state) =>
+            state.activeSyncRequestId === request.id
+              ? {
+                  activeSyncRequestId: null,
+                  activeSyncProjectOwner: null,
+                  isSyncing: null,
+                  syncProgress: null,
+                }
+              : {},
+          );
         }
       },
 
       removeCollection: (collectionKey) => {
-        const projectRoot = useDocumentStore.getState().projectRoot;
-        if (!projectRoot) return;
-
+        const owner = captureProjectOwner();
+        if (!owner) return;
         const sk = storeKey(collectionKey);
+        const requestKey = makeRequestKey(owner, sk);
+        const invalidatedRequestId = latestCollectionRequests.get(requestKey);
+        latestCollectionRequests.delete(requestKey);
         set((s) => {
-          const projectColls = s.syncedCollections[projectRoot] ?? {};
+          const documentState = useDocumentStore.getState();
+          if (
+            documentState.isProjectMutating ||
+            !ownsProjectFsState(owner, documentState)
+          ) {
+            return {};
+          }
+          const projectColls = projectCollections(
+            s.syncedCollections,
+            owner.projectRoot,
+          );
           const { [sk]: _, ...rest } = projectColls;
           return {
-            syncedCollections: {
-              ...s.syncedCollections,
-              [projectRoot]: rest,
-            },
+            syncedCollections: withProjectCollections(
+              s.syncedCollections,
+              owner.projectRoot,
+              rest,
+            ),
+            ...(s.activeSyncRequestId === invalidatedRequestId
+              ? {
+                  activeSyncRequestId: null,
+                  activeSyncProjectOwner: null,
+                  isSyncing: null,
+                  syncProgress: null,
+                }
+              : {}),
           };
         });
       },
@@ -415,9 +752,14 @@ export const useZoteroStore = create<ZoteroState>()(
         apiKey: state.apiKey,
         userID: state.userID,
         username: state.username,
-        syncedCollections: state.syncedCollections,
+        syncedCollections: normalizeProjectCollections(state.syncedCollections),
       }),
       onRehydrateStorage: () => (state) => {
+        if (state) {
+          state.syncedCollections = normalizeProjectCollections(
+            state.syncedCollections ?? {},
+          );
+        }
         if (state?.apiKey) {
           state.isAuthenticated = true;
         }
@@ -425,3 +767,20 @@ export const useZoteroStore = create<ZoteroState>()(
     },
   ),
 );
+
+useDocumentStore.subscribe((documentState, previousDocumentState) => {
+  if (
+    documentState.projectRoot === previousDocumentState.projectRoot &&
+    documentState.projectGeneration === previousDocumentState.projectGeneration
+  ) {
+    return;
+  }
+  const activeOwner = useZoteroStore.getState().activeSyncProjectOwner;
+  if (!activeOwner || ownsProjectFsState(activeOwner, documentState)) return;
+  useZoteroStore.setState({
+    activeSyncRequestId: null,
+    activeSyncProjectOwner: null,
+    isSyncing: null,
+    syncProgress: null,
+  });
+});

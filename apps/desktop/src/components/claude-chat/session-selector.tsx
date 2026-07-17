@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   HistoryIcon,
@@ -63,14 +63,18 @@ export function SessionSelector() {
   const resumeSession = useClaudeChatStore((s) => s.resumeSession);
   const setSessionTitle = useClaudeChatStore((s) => s._setSessionTitle);
   const projectRoot = useDocumentStore((s) => s.projectRoot);
-  const streamingSessionIds = useMemo(
+  const projectRootRef = useRef(projectRoot);
+  const listRequestRef = useRef(0);
+  const deleteRequestRef = useRef(0);
+  projectRootRef.current = projectRoot;
+  const busySessionIds = useMemo(
     () =>
       new Set(
         tabs
           .filter(
             (tab) =>
               tab.projectPath === projectRoot &&
-              tab.isStreaming &&
+              (tab.isStreaming || (tab.cancelledAttempts?.length ?? 0) > 0) &&
               tab.sessionId,
           )
           .map((tab) => tab.sessionId as string),
@@ -78,25 +82,42 @@ export function SessionSelector() {
     [projectRoot, tabs],
   );
 
+  useEffect(() => {
+    listRequestRef.current += 1;
+    deleteRequestRef.current += 1;
+    setSessions([]);
+    setIsLoading(false);
+    setDeletingId(null);
+    setDeleteTarget(null);
+    setDeleteError(null);
+  }, [projectRoot]);
+
   const loadSessions = useCallback(async () => {
     if (!projectRoot) return;
+    const requestRoot = projectRoot;
+    const requestId = ++listRequestRef.current;
+    const stillOwnsRequest = () =>
+      listRequestRef.current === requestId &&
+      projectRootRef.current === requestRoot;
     setIsLoading(true);
-    log.debug(`loading sessions for projectRoot: ${projectRoot}`);
+    log.debug(`loading sessions for projectRoot: ${requestRoot}`);
     try {
       const result = await invoke<ClaudeSessionInfo[]>("list_claude_sessions", {
-        projectPath: projectRoot,
+        projectPath: requestRoot,
         generateTitles: false,
       });
+      if (!stillOwnsRequest()) return;
       log.debug("loaded sessions", { count: result.length });
       setSessions(result);
       for (const session of result) {
         setSessionTitle(session.session_id, session.title);
       }
     } catch (err) {
+      if (!stillOwnsRequest()) return;
       log.error("Failed to load sessions", { error: String(err) });
       setSessions([]);
     } finally {
-      setIsLoading(false);
+      if (stillOwnsRequest()) setIsLoading(false);
     }
   }, [projectRoot, setSessionTitle]);
 
@@ -121,33 +142,48 @@ export function SessionSelector() {
 
   const handleDeleteSession = useCallback(
     async (sid: string) => {
-      if (deletingId || !projectRoot || streamingSessionIds.has(sid)) return;
+      if (deletingId || !projectRoot || busySessionIds.has(sid)) return;
 
+      const requestRoot = projectRoot;
+      const requestId = ++deleteRequestRef.current;
+      const stillOwnsRequest = () =>
+        deleteRequestRef.current === requestId &&
+        projectRootRef.current === requestRoot;
       setDeleteError(null);
       setDeletingId(sid);
       try {
         await invoke("delete_claude_session", {
-          projectPath: projectRoot,
+          projectPath: requestRoot,
           sessionId: sid,
         });
+        if (!stillOwnsRequest()) return;
+        listRequestRef.current += 1;
+        setIsLoading(false);
         setSessions((prev) => prev.filter((item) => item.session_id !== sid));
-        if (sid === sessionId) {
-          newSession();
+        const chatState = useClaudeChatStore.getState();
+        if (
+          chatState.activeProjectPath === requestRoot &&
+          chatState.sessionId === sid
+        ) {
+          chatState.newSession();
         }
         setDeleteTarget((current) =>
           current?.session_id === sid ? null : current,
         );
       } catch (err) {
+        if (!stillOwnsRequest()) return;
         log.error("Failed to delete session", {
           sessionId: sid,
           error: String(err),
         });
         setDeleteError(err instanceof Error ? err.message : String(err));
       } finally {
-        setDeletingId((current) => (current === sid ? null : current));
+        if (stillOwnsRequest()) {
+          setDeletingId((current) => (current === sid ? null : current));
+        }
       }
     },
-    [deletingId, newSession, projectRoot, sessionId, streamingSessionIds],
+    [busySessionIds, deletingId, projectRoot],
   );
 
   const handleNewChat = useCallback(() => {
@@ -193,9 +229,7 @@ export function SessionSelector() {
             </div>
           ) : (
             sessions.map((session) => {
-              const sessionIsStreaming = streamingSessionIds.has(
-                session.session_id,
-              );
+              const sessionIsBusy = busySessionIds.has(session.session_id);
               return (
                 <DropdownMenuItem
                   key={session.session_id}
@@ -210,7 +244,7 @@ export function SessionSelector() {
                     </span>
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
-                    {sessionIsStreaming ? (
+                    {sessionIsBusy ? (
                       <Loader2Icon className="size-4 animate-spin text-primary" />
                     ) : (
                       session.session_id === sessionId && (
@@ -220,14 +254,18 @@ export function SessionSelector() {
                     <button
                       type="button"
                       className="flex size-6 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40"
-                      aria-label={`Delete ${session.title}`}
+                      aria-label={
+                        sessionIsBusy
+                          ? `Cannot delete ${session.title} while it is running or stopping`
+                          : `Delete ${session.title}`
+                      }
                       title={
-                        sessionIsStreaming
-                          ? "Cannot delete a running session"
+                        sessionIsBusy
+                          ? "Cannot delete a session while it is running or stopping"
                           : "Delete session"
                       }
                       disabled={
-                        sessionIsStreaming || deletingId === session.session_id
+                        sessionIsBusy || deletingId === session.session_id
                       }
                       onPointerDown={(event) => event.stopPropagation()}
                       onClick={(event) => {
@@ -295,7 +333,7 @@ export function SessionSelector() {
               disabled={
                 !deleteTarget ||
                 !!deletingId ||
-                streamingSessionIds.has(deleteTarget.session_id)
+                busySessionIds.has(deleteTarget.session_id)
               }
             >
               {deletingId ? (

@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   scanProjectFolder,
   readTexFileContent,
-  writeTexFileContent,
   readImageAsDataUrl,
   createFileOnDisk,
   copyFileToProject,
@@ -24,9 +23,18 @@ import { clearZoomCache } from "@/components/workspace/preview/pdf-preview";
 import { clearEditorStateCache } from "@/components/workspace/editor/latex-editor";
 import { useProjectStore } from "@/stores/project-store";
 import { createLogger } from "@/lib/debug/logger";
+import {
+  drainProjectFsOperations,
+  runProjectFsOperation,
+  runProjectFsOperationAfterDrain,
+} from "@/lib/project-fs-operations";
+import { writeProjectTextFileInOrder } from "@/lib/project-file-writes";
 
 const log = createLogger("document");
 const PROJECT_RENAME_LOCK_RETRY_DELAYS_MS = [150, 300, 600, 1000];
+const PROJECT_RENAME_CHAT_STOP_TIMEOUT_MS = 5_000;
+const PROJECT_RENAME_CHAT_STOP_POLL_MS = 50;
+const MANUAL_SAVE_BUSY_DELAY_MS = 500;
 
 export interface ProjectFile {
   id: string; // relativePath is the id
@@ -39,6 +47,69 @@ export interface ProjectFile {
   isDirty: boolean;
   /** File size in bytes (from stat). Used to skip auto-loading large files. */
   fileSize?: number;
+}
+
+interface ProjectOwner {
+  projectRoot: string;
+  projectGeneration: number;
+}
+
+function captureProjectOwner(state: DocumentState): ProjectOwner | null {
+  return state.projectRoot
+    ? {
+        projectRoot: state.projectRoot,
+        projectGeneration: state.projectGeneration,
+      }
+    : null;
+}
+
+function stillOwnsProject(
+  state: DocumentState,
+  owner: ProjectOwner | null,
+): boolean {
+  return (
+    owner != null &&
+    state.projectRoot === owner.projectRoot &&
+    state.projectGeneration === owner.projectGeneration
+  );
+}
+
+function bindHistoryToDocumentProject(
+  state: Pick<
+    DocumentState,
+    "projectRoot" | "projectGeneration" | "isProjectMutating"
+  >,
+): void {
+  useHistoryStore
+    .getState()
+    .bindProject(
+      state.projectRoot,
+      state.projectGeneration,
+      state.isProjectMutating,
+    );
+}
+
+function initializeHistoryForMountedProject(
+  projectRoot: string,
+  projectGeneration: number,
+): void {
+  const history = useHistoryStore.getState();
+  void history
+    .init(projectRoot)
+    .then(() => {
+      const document = useDocumentStore.getState();
+      if (
+        document.projectRoot !== projectRoot ||
+        document.projectGeneration !== projectGeneration ||
+        document.isProjectMutating
+      ) {
+        return;
+      }
+      return useHistoryStore.getState().loadSnapshots(projectRoot);
+    })
+    .catch((err) => {
+      log.error("Failed to initialize history", { error: String(err) });
+    });
 }
 
 // ── PDF bytes cache (kept outside Zustand to avoid React diffing large buffers) ──
@@ -87,6 +158,14 @@ interface DocumentState {
   pdfRevision: number;
   compileError: string | null;
   isCompiling: boolean;
+  /** Serializes project open/close/rename against runtime turn preflight. */
+  isProjectMutating: boolean;
+  /** Invalidates async work whenever the mounted project incarnation changes. */
+  projectGeneration: number;
+  /** Gives the latest refresh request exclusive ownership of its commit. */
+  refreshRequestGeneration: number;
+  /** Invalidates scans and async tree operations after any structural change. */
+  fileTreeGeneration: number;
   /** When true, a recompile will be triggered after the current compile finishes. */
   pendingRecompile: boolean;
   isSaving: boolean;
@@ -98,14 +177,17 @@ interface DocumentState {
   /** Per-root-file: rootFileId → contentGeneration at last successful compile. */
   lastCompiledGenerations: Map<string, number>;
 
-  openProject: (rootPath: string) => Promise<void>;
+  openProject: (
+    rootPath: string,
+    options?: { allowDuringMutation?: boolean },
+  ) => Promise<void>;
   renameProject: (newName: string) => Promise<void>;
-  closeProject: () => void;
+  closeProject: () => boolean | Promise<boolean>;
   setActiveFile: (id: string) => void;
   addFile: (file: Omit<ProjectFile, "id" | "isDirty">) => string;
-  deleteFile: (id: string) => void;
+  deleteFile: (id: string) => Promise<void>;
   deleteFolder: (folderPath: string) => Promise<void>;
-  renameFile: (id: string, name: string) => void;
+  renameFile: (id: string, name: string) => Promise<void>;
   updateFileContent: (id: string, content: string) => void;
   updateImageDataUrl: (id: string, dataUrl: string) => void;
   setCursorPosition: (position: number) => void;
@@ -122,8 +204,11 @@ interface DocumentState {
   replaceSelection: (start: number, end: number, text: string) => void;
   findAndReplace: (find: string, replace: string) => boolean;
   setInitialized: () => void;
-  saveFile: (id: string) => Promise<void>;
-  saveAllFiles: () => Promise<void>;
+  saveFile: (
+    id: string,
+    options?: { allowDuringMutation?: boolean },
+  ) => Promise<void>;
+  saveAllFiles: (options?: { allowDuringMutation?: boolean }) => Promise<void>;
   saveCurrentFile: () => Promise<void>;
   createNewFile: (
     name: string,
@@ -332,17 +417,55 @@ async function waitForCompileToFinish(
   }
 }
 
+async function waitForChatTabsToSettle(tabIds: string[]): Promise<void> {
+  const pendingIds = new Set(tabIds);
+  const started = Date.now();
+  while (true) {
+    const pending = useClaudeChatStore
+      .getState()
+      .tabs.some(
+        (tab) =>
+          pendingIds.has(tab.id) &&
+          (tab.isStreaming || (tab.cancelledAttempts?.length ?? 0) > 0),
+      );
+    if (!pending) return;
+    if (Date.now() - started > PROJECT_RENAME_CHAT_STOP_TIMEOUT_MS) {
+      throw new Error(
+        "Runtime stop did not reach terminal completion. Project rename was cancelled.",
+      );
+    }
+    await sleep(PROJECT_RENAME_CHAT_STOP_POLL_MS);
+  }
+}
+
 // Auto-save: debounced save 2 seconds after last content change
 let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingAutoSaveOwner: ProjectOwner | null = null;
 // Store reference set after creation to avoid TDZ issues
 let storeRef: typeof useDocumentStore | null = null;
+let nextManualSaveRequest = 0;
+let activeManualSaveRequest: {
+  id: number;
+  owner: ProjectOwner;
+} | null = null;
 
-function scheduleAutoSave() {
+function scheduleAutoSave(retryOwner?: ProjectOwner) {
+  const store = storeRef;
+  const owner =
+    retryOwner ?? (store ? captureProjectOwner(store.getState()) : null);
+  if (!owner) return;
   if (autoSaveTimer) clearTimeout(autoSaveTimer);
+  pendingAutoSaveOwner = null;
   autoSaveTimer = setTimeout(async () => {
+    autoSaveTimer = null;
     const store = storeRef;
     if (!store) return;
     const state = store.getState();
+    if (!stillOwnsProject(state, owner)) return;
+    if (state.isProjectMutating) {
+      pendingAutoSaveOwner = owner;
+      return;
+    }
     const dirtyFiles = state.files.filter(
       (f) => f.isDirty && f.content != null,
     );
@@ -350,6 +473,50 @@ function scheduleAutoSave() {
       await state.saveAllFiles();
     }
   }, 2000);
+}
+
+function acquireProjectStructureMutation(
+  state: DocumentState,
+): ProjectOwner | null {
+  if (state.isProjectMutating) return null;
+  const owner = captureProjectOwner(state);
+  if (!owner) return null;
+
+  let acquired = false;
+  useDocumentStore.setState((current) => {
+    if (current.isProjectMutating || !stillOwnsProject(current, owner)) {
+      return {};
+    }
+    acquired = true;
+    return { isProjectMutating: true };
+  });
+  if (!acquired) return null;
+  bindHistoryToDocumentProject(useDocumentStore.getState());
+  return owner;
+}
+
+function releaseProjectStructureMutation(owner: ProjectOwner): void {
+  let released = false;
+  useDocumentStore.setState((current) => {
+    if (!current.isProjectMutating || !stillOwnsProject(current, owner)) {
+      return {};
+    }
+    released = true;
+    return { isProjectMutating: false };
+  });
+  if (released) {
+    const current = useDocumentStore.getState();
+    bindHistoryToDocumentProject(current);
+    const retryOwner = pendingAutoSaveOwner;
+    pendingAutoSaveOwner = null;
+    if (
+      retryOwner &&
+      stillOwnsProject(current, retryOwner) &&
+      current.files.some((file) => file.isDirty && file.content != null)
+    ) {
+      scheduleAutoSave(retryOwner);
+    }
+  }
 }
 
 export const useDocumentStore = create<DocumentState>()((set, get) => ({
@@ -364,6 +531,10 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
   pdfRevision: 0,
   compileError: null,
   isCompiling: false,
+  isProjectMutating: false,
+  projectGeneration: 0,
+  refreshRequestGeneration: 0,
+  fileTreeGeneration: 0,
   pendingRecompile: false,
   isSaving: false,
   initialized: false,
@@ -371,184 +542,406 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
   compileErrorCache: new Map(),
   lastCompiledGenerations: new Map(),
 
-  openProject: async (rootPath: string) => {
-    log.info(`Opening project: ${rootPath}`);
-    await invoke("allow_project_directory", { rootPath });
-    const { files: fsFiles, folders: fsFolders } =
-      await scanProjectFolder(rootPath);
-    const projectFiles: ProjectFile[] = [];
-
-    for (const f of fsFiles) {
-      const pf: ProjectFile = {
-        id: f.relativePath,
-        name: f.relativePath.split(/[/\\]/).pop() || f.relativePath,
-        relativePath: f.relativePath,
-        absolutePath: f.absolutePath,
-        type: f.type,
-        isDirty: false,
-        fileSize: f.fileSize,
-      };
-
-      // Load content for text-based files (skip large non-essential files)
-      if (
-        f.type === "tex" ||
-        f.type === "bib" ||
-        f.type === "style" ||
-        f.type === "other"
-      ) {
-        const isLargeNonEssential =
-          f.type === "other" && f.fileSize > LARGE_FILE_THRESHOLD;
-        if (!isLargeNonEssential) {
-          try {
-            pf.content = await readTexFileContent(f.absolutePath);
-          } catch {
-            pf.content = "";
-          }
-        }
-        // Large "other" files: content stays undefined, loaded on-demand via loadFileContent
-      }
-
-      // Load dataUrl for image files (skip very large images)
-      if (f.type === "image") {
-        if (f.fileSize <= LARGE_FILE_THRESHOLD) {
-          try {
-            pf.dataUrl = await readImageAsDataUrl(f.absolutePath);
-          } catch {
-            // Image loading failed, that's ok
-          }
-        }
-      }
-
-      // PDF files are loaded on-demand via readFile in InlinePdfContent
-
-      projectFiles.push(pf);
+  openProject: async (
+    rootPath: string,
+    options?: { allowDuringMutation?: boolean },
+  ) => {
+    const initialState = get();
+    const allowDuringMutation = options?.allowDuringMutation === true;
+    if (initialState.isProjectMutating && !allowDuringMutation) {
+      throw new Error("Another project change is already in progress.");
     }
-
-    // Find the main tex file
-    const mainTex =
-      projectFiles.find(
-        (f) => f.name === "main.tex" || f.name === "document.tex",
-      ) || projectFiles.find((f) => f.type === "tex");
-
-    clearPdfBytesCache();
-    set({
-      projectRoot: rootPath,
-      files: projectFiles,
-      folders: fsFolders,
-      activeFileId: mainTex?.id || projectFiles[0]?.id || "",
-      pdfRevision: 0,
-      compileError: null,
-      compileErrorCache: new Map(),
-      lastCompiledGenerations: new Map(),
-      initialized: true,
-      cursorPosition: 0,
-      selectionRange: null,
+    if (!allowDuringMutation && useClaudeChatStore.getState().anyStreaming()) {
+      throw new Error(
+        "Stop all runtime turns before opening or refreshing a project.",
+      );
+    }
+    const ownsMutationGuard = !initialState.isProjectMutating;
+    let openGeneration = 0;
+    set((state) => {
+      openGeneration = state.projectGeneration + 1;
+      return {
+        isProjectMutating: ownsMutationGuard ? true : state.isProjectMutating,
+        projectGeneration: openGeneration,
+        refreshRequestGeneration: state.refreshRequestGeneration + 1,
+      };
     });
+    bindHistoryToDocumentProject(get());
+    const stillOwnsOpen = () => get().projectGeneration === openGeneration;
 
-    // Initialize history system early so snapshots work before the panel is opened
-    const historyStore = useHistoryStore.getState();
-    historyStore
-      .init(rootPath)
-      .then(() => historyStore.loadSnapshots(rootPath))
-      .catch((err) => {
-        log.error("Failed to initialize history", { error: String(err) });
-      });
+    try {
+      if (autoSaveTimer) {
+        clearTimeout(autoSaveTimer);
+        autoSaveTimer = null;
+      }
+      pendingAutoSaveOwner = null;
+      const pendingOperations = drainProjectFsOperations([
+        initialState.projectRoot,
+        rootPath,
+      ]);
+      if (pendingOperations) {
+        await pendingOperations;
+        if (!stillOwnsOpen()) return;
+      }
+      log.info(`Opening project: ${rootPath}`);
+      await invoke("allow_project_directory", { rootPath });
+      if (!stillOwnsOpen()) return;
+      const { files: fsFiles, folders: fsFolders } =
+        await scanProjectFolder(rootPath);
+      if (!stillOwnsOpen()) return;
+      const projectFiles: ProjectFile[] = [];
+
+      for (const f of fsFiles) {
+        const pf: ProjectFile = {
+          id: f.relativePath,
+          name: f.relativePath.split(/[/\\]/).pop() || f.relativePath,
+          relativePath: f.relativePath,
+          absolutePath: f.absolutePath,
+          type: f.type,
+          isDirty: false,
+          fileSize: f.fileSize,
+        };
+
+        // Load content for text-based files (skip large non-essential files)
+        if (
+          f.type === "tex" ||
+          f.type === "bib" ||
+          f.type === "style" ||
+          f.type === "other"
+        ) {
+          const isLargeNonEssential =
+            f.type === "other" && f.fileSize > LARGE_FILE_THRESHOLD;
+          if (!isLargeNonEssential) {
+            try {
+              pf.content = await readTexFileContent(f.absolutePath);
+            } catch {
+              pf.content = "";
+            }
+            if (!stillOwnsOpen()) return;
+          }
+          // Large "other" files: content stays undefined, loaded on-demand via loadFileContent
+        }
+
+        // Load dataUrl for image files (skip very large images)
+        if (f.type === "image") {
+          if (f.fileSize <= LARGE_FILE_THRESHOLD) {
+            try {
+              pf.dataUrl = await readImageAsDataUrl(f.absolutePath);
+            } catch {
+              // Image loading failed, that's ok
+            }
+            if (!stillOwnsOpen()) return;
+          }
+        }
+
+        // PDF files are loaded on-demand via readFile in InlinePdfContent
+
+        projectFiles.push(pf);
+      }
+
+      // Find the main tex file
+      const mainTex =
+        projectFiles.find(
+          (f) => f.name === "main.tex" || f.name === "document.tex",
+        ) || projectFiles.find((f) => f.type === "tex");
+
+      if (!stillOwnsOpen()) return;
+      clearPdfBytesCache();
+      set((state) =>
+        state.projectGeneration === openGeneration
+          ? {
+              projectRoot: rootPath,
+              files: projectFiles,
+              folders: fsFolders,
+              activeFileId: mainTex?.id || projectFiles[0]?.id || "",
+              pdfRevision: 0,
+              compileError: null,
+              isCompiling: false,
+              compileErrorCache: new Map(),
+              lastCompiledGenerations: new Map(),
+              initialized: true,
+              cursorPosition: 0,
+              selectionRange: null,
+              fileTreeGeneration: state.fileTreeGeneration + 1,
+              contentGeneration: state.contentGeneration + 1,
+            }
+          : {},
+      );
+      if (!stillOwnsOpen()) return;
+      bindHistoryToDocumentProject(get());
+    } finally {
+      if (ownsMutationGuard) {
+        set((state) =>
+          state.projectGeneration === openGeneration
+            ? { isProjectMutating: false }
+            : {},
+        );
+      }
+      const finalState = get();
+      if (finalState.projectGeneration === openGeneration) {
+        bindHistoryToDocumentProject(finalState);
+        if (
+          ownsMutationGuard &&
+          finalState.projectRoot &&
+          finalState.initialized &&
+          !finalState.isProjectMutating
+        ) {
+          initializeHistoryForMountedProject(
+            finalState.projectRoot,
+            finalState.projectGeneration,
+          );
+        }
+      }
+    }
   },
 
   renameProject: async (newName: string) => {
-    const state = get();
+    let state = get();
     if (!state.projectRoot) throw new Error("No project open");
+    if (state.isProjectMutating) {
+      const waitingRoot = state.projectRoot;
+      const waitingGeneration = state.projectGeneration;
+      const pendingStructureMutation = drainProjectFsOperations([waitingRoot]);
+      if (!pendingStructureMutation) {
+        throw new Error("Another project change is already in progress.");
+      }
+      await pendingStructureMutation;
+      await Promise.resolve();
+      state = get();
+      if (
+        state.projectRoot !== waitingRoot ||
+        state.projectGeneration !== waitingGeneration ||
+        state.isProjectMutating
+      ) {
+        throw new Error("Another project change is already in progress.");
+      }
+    }
 
     const oldRoot = state.projectRoot;
     const newRoot = buildRenamedProjectRoot(oldRoot, newName);
     if (newRoot === normalizeProjectRoot(oldRoot)) return;
-
-    if (autoSaveTimer) {
-      clearTimeout(autoSaveTimer);
-      autoSaveTimer = null;
-    }
-    await waitForCompileToFinish(get);
-
-    const chatState = useClaudeChatStore.getState();
-    const streamingTabs =
-      "tabs" in chatState && Array.isArray(chatState.tabs)
-        ? chatState.tabs.filter((tab) => tab.isStreaming)
-        : [];
-    if (streamingTabs.length > 0) {
-      await Promise.all(
-        streamingTabs.map((tab) =>
-          invoke("cancel_claude_execution", { tabId: tab.id }).catch(() => {}),
-        ),
+    let mutationProjectGeneration = 0;
+    let mutationFileTreeGeneration = 0;
+    let mutationContentGeneration = 0;
+    set((current) => {
+      mutationProjectGeneration = current.projectGeneration + 1;
+      mutationFileTreeGeneration = current.fileTreeGeneration + 1;
+      mutationContentGeneration = current.contentGeneration + 1;
+      return {
+        isProjectMutating: true,
+        projectGeneration: mutationProjectGeneration,
+        refreshRequestGeneration: current.refreshRequestGeneration + 1,
+        fileTreeGeneration: mutationFileTreeGeneration,
+        contentGeneration: mutationContentGeneration,
+      };
+    });
+    bindHistoryToDocumentProject(get());
+    const stillOwnsRename = () => {
+      const current = get();
+      return (
+        current.isProjectMutating &&
+        current.projectRoot === oldRoot &&
+        current.projectGeneration === mutationProjectGeneration &&
+        current.fileTreeGeneration === mutationFileTreeGeneration &&
+        current.contentGeneration === mutationContentGeneration
       );
-      await sleep(250);
-    }
+    };
+    const assertOwnsRename = () => {
+      if (!stillOwnsRename()) {
+        throw new Error(
+          "Project files changed while rename was preparing. Rename was cancelled.",
+        );
+      }
+    };
+    let diskRenameCompleted = false;
 
-    await state.saveAllFiles();
-    const dirtyFiles = get().files.filter(
-      (f) => f.isDirty && f.content != null,
-    );
-    if (dirtyFiles.length > 0) {
-      throw new Error("Save failed. Please save changes before renaming.");
-    }
-
-    clearPdfBytesCache();
-    clearScrollPositionCache();
-    clearZoomCache();
-    clearEditorStateCache();
-    useHistoryStore.getState().reset();
-    set((s) => ({
-      pdfRevision: s.pdfRevision + 1,
-      compileError: null,
-      compileErrorCache: new Map(),
-      lastCompiledGenerations: new Map(),
-    }));
-    await clearDocCache();
-    await sleep(150);
-
-    await renameProjectRootWithRetry(oldRoot, newRoot);
     try {
-      await invoke("migrate_project_sessions", {
-        oldProjectPath: oldRoot,
-        newProjectPath: newRoot,
-      });
-    } catch (err) {
-      log.warn("Failed to migrate project sessions after rename", {
-        oldRoot,
-        newRoot,
-        error: String(err),
-      });
-    }
-    const projectStore = useProjectStore.getState();
-    projectStore.renameRecentProject(oldRoot, newRoot);
-    projectStore.setLastProjectFolder(splitProjectRoot(newRoot).parentPath);
+      if (autoSaveTimer) {
+        clearTimeout(autoSaveTimer);
+        autoSaveTimer = null;
+      }
+      pendingAutoSaveOwner = null;
+      const pendingOperations = drainProjectFsOperations([oldRoot, newRoot]);
+      if (pendingOperations) {
+        await pendingOperations;
+        assertOwnsRename();
+      }
+      await waitForCompileToFinish(get);
 
-    await get().openProject(newRoot);
+      const chatState = useClaudeChatStore.getState();
+      const streamingTabs =
+        "tabs" in chatState && Array.isArray(chatState.tabs)
+          ? chatState.tabs.filter(
+              (tab) =>
+                tab.isStreaming || (tab.cancelledAttempts?.length ?? 0) > 0,
+            )
+          : [];
+      if (streamingTabs.length > 0) {
+        const outcomes = await Promise.all(
+          streamingTabs.map((tab) => chatState.cancelExecution(tab.id)),
+        );
+        if (outcomes.some((outcome) => outcome === "uncertain")) {
+          throw new Error(
+            "Unable to confirm that all runtime turns stopped. Project rename was cancelled.",
+          );
+        }
+        await waitForChatTabsToSettle(streamingTabs.map((tab) => tab.id));
+      }
+
+      assertOwnsRename();
+      await get().saveAllFiles({ allowDuringMutation: true });
+      assertOwnsRename();
+      const dirtyFiles = get().files.filter(
+        (f) => f.isDirty && f.content != null,
+      );
+      if (dirtyFiles.length > 0) {
+        throw new Error("Save failed. Please save changes before renaming.");
+      }
+
+      clearPdfBytesCache();
+      clearScrollPositionCache();
+      clearZoomCache();
+      clearEditorStateCache();
+      set((s) => ({
+        pdfRevision: s.pdfRevision + 1,
+        compileError: null,
+        compileErrorCache: new Map(),
+        lastCompiledGenerations: new Map(),
+      }));
+      await clearDocCache();
+      await sleep(150);
+
+      assertOwnsRename();
+      await renameProjectRootWithRetry(oldRoot, newRoot);
+      diskRenameCompleted = true;
+      try {
+        await invoke("migrate_project_sessions", {
+          oldProjectPath: oldRoot,
+          newProjectPath: newRoot,
+        });
+      } catch (err) {
+        log.warn("Failed to migrate project sessions after rename", {
+          oldRoot,
+          newRoot,
+          error: String(err),
+        });
+      }
+      const projectStore = useProjectStore.getState();
+      projectStore.renameRecentProject(oldRoot, newRoot);
+      projectStore.setLastProjectFolder(splitProjectRoot(newRoot).parentPath);
+
+      await get().openProject(newRoot, { allowDuringMutation: true });
+      mutationProjectGeneration = get().projectGeneration;
+    } catch (error) {
+      if (diskRenameCompleted) {
+        clearPdfBytesCache();
+        set((current) => ({
+          projectRoot: null,
+          files: [],
+          folders: [],
+          activeFileId: "",
+          cursorPosition: 0,
+          selectionRange: null,
+          pdfRevision: current.pdfRevision + 1,
+          compileError: null,
+          isCompiling: false,
+          pendingRecompile: false,
+          isSaving: false,
+          compileErrorCache: new Map(),
+          lastCompiledGenerations: new Map(),
+          initialized: false,
+          projectGeneration: current.projectGeneration + 1,
+          refreshRequestGeneration: current.refreshRequestGeneration + 1,
+          fileTreeGeneration: current.fileTreeGeneration + 1,
+          contentGeneration: current.contentGeneration + 1,
+          isProjectMutating: false,
+        }));
+        bindHistoryToDocumentProject(get());
+        useClaudeChatStore.getState().resetForProject(null);
+      }
+      throw error;
+    } finally {
+      set((current) =>
+        current.projectGeneration === mutationProjectGeneration &&
+        current.isProjectMutating
+          ? { isProjectMutating: false }
+          : {},
+      );
+      const finalState = get();
+      if (finalState.projectGeneration === mutationProjectGeneration) {
+        bindHistoryToDocumentProject(finalState);
+        if (
+          finalState.projectRoot &&
+          finalState.initialized &&
+          !finalState.isProjectMutating
+        ) {
+          initializeHistoryForMountedProject(
+            finalState.projectRoot,
+            finalState.projectGeneration,
+          );
+        }
+      }
+    }
   },
 
   closeProject: () => {
-    log.info("Closing project");
-    if (autoSaveTimer) {
-      clearTimeout(autoSaveTimer);
-      autoSaveTimer = null;
+    const state = get();
+    const chatState = useClaudeChatStore.getState();
+    if (state.isProjectMutating || chatState.anyStreaming()) return false;
+    const owner = captureProjectOwner(state);
+    if (owner) {
+      set((current) =>
+        stillOwnsProject(current, owner) && !current.isProjectMutating
+          ? { isProjectMutating: true }
+          : {},
+      );
+      if (!get().isProjectMutating || !stillOwnsProject(get(), owner)) {
+        return false;
+      }
+      bindHistoryToDocumentProject(get());
     }
-    void clearDocCache();
-    clearScrollPositionCache();
-    clearZoomCache();
-    clearEditorStateCache();
-    clearPdfBytesCache();
-    set({
-      projectRoot: null,
-      files: [],
-      folders: [],
-      activeFileId: "",
-      pdfRevision: 0,
-      compileError: null,
-      compileErrorCache: new Map(),
-      lastCompiledGenerations: new Map(),
-      initialized: false,
-    });
-    // Reset chat session so stale messages don't leak into the next project
-    useClaudeChatStore.getState().newSession();
+
+    const finishClose = () => {
+      const current = get();
+      if (owner && !stillOwnsProject(current, owner)) return false;
+      log.info("Closing project");
+      if (autoSaveTimer) {
+        clearTimeout(autoSaveTimer);
+        autoSaveTimer = null;
+      }
+      pendingAutoSaveOwner = null;
+      void clearDocCache();
+      clearScrollPositionCache();
+      clearZoomCache();
+      clearEditorStateCache();
+      clearPdfBytesCache();
+      set((mounted) => ({
+        projectRoot: null,
+        files: [],
+        folders: [],
+        activeFileId: "",
+        pdfRevision: 0,
+        compileError: null,
+        isCompiling: false,
+        isProjectMutating: false,
+        isSaving: false,
+        compileErrorCache: new Map(),
+        lastCompiledGenerations: new Map(),
+        initialized: false,
+        projectGeneration: mounted.projectGeneration + 1,
+        refreshRequestGeneration: mounted.refreshRequestGeneration + 1,
+      }));
+      bindHistoryToDocumentProject(get());
+      // Reset chat session so stale messages don't leak into the next project
+      chatState.resetForProject(null);
+      return true;
+    };
+
+    const pendingOperations = owner
+      ? drainProjectFsOperations([owner.projectRoot])
+      : null;
+    if (!pendingOperations) return finishClose();
+    return pendingOperations.then(finishClose);
   },
 
   setActiveFile: (id) => {
@@ -583,166 +976,256 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
 
   addFile: (file) => {
     const id = file.relativePath;
+    if (get().isProjectMutating) return id;
     set((state) => ({
       files: [...state.files, { ...file, id, isDirty: false }],
       activeFileId: id,
+      fileTreeGeneration: state.fileTreeGeneration + 1,
     }));
     return id;
   },
 
   deleteFile: async (id) => {
     const state = get();
+    if (state.isProjectMutating) return;
     if (state.files.length <= 1) return;
     const file = state.files.find((f) => f.id === id);
-    if (file) {
+    if (!file) return;
+    const owner = acquireProjectStructureMutation(state);
+    if (!owner) return;
+    try {
       try {
-        await deleteFileFromDisk(file.absolutePath);
+        await runProjectFsOperationAfterDrain(owner, [owner.projectRoot], () =>
+          deleteFileFromDisk(file.absolutePath),
+        );
       } catch (e) {
         log.error("Failed to delete file from disk", { error: String(e) });
+        return;
       }
+      const current = get();
+      if (!stillOwnsProject(current, owner)) return;
+      const currentFile = current.files.find(
+        (candidate) => candidate.id === id,
+      );
+      if (currentFile?.absolutePath !== file.absolutePath) return;
+      const newFiles = current.files.filter((f) => f.id !== id);
+      if (newFiles.length === 0) return;
+      const newActiveId =
+        current.activeFileId === id ? newFiles[0].id : current.activeFileId;
+      const compileErrorCache = new Map(current.compileErrorCache);
+      const lastCompiledGenerations = new Map(current.lastCompiledGenerations);
+      _pdfBytesCache.delete(id);
+      compileErrorCache.delete(id);
+      lastCompiledGenerations.delete(id);
+      // If the deleted file was active, show the new active file's cached PDF
+      const switchingActive = current.activeFileId === id;
+      const newRootId = switchingActive
+        ? resolveTexRoot(newActiveId, newFiles)
+        : undefined;
+      if (switchingActive && newRootId) {
+        _currentPdfRootId = _pdfBytesCache.has(newRootId) ? newRootId : null;
+      }
+      set((s) =>
+        stillOwnsProject(s, owner) &&
+        s.files.some(
+          (candidate) =>
+            candidate.id === id && candidate.absolutePath === file.absolutePath,
+        )
+          ? {
+              files: newFiles,
+              activeFileId: newActiveId,
+              compileErrorCache,
+              lastCompiledGenerations,
+              fileTreeGeneration: s.fileTreeGeneration + 1,
+              ...(switchingActive ? { pdfRevision: s.pdfRevision + 1 } : {}),
+              ...(switchingActive && newRootId
+                ? {
+                    compileError: compileErrorCache.get(newRootId) ?? null,
+                  }
+                : {}),
+            }
+          : {},
+      );
+    } finally {
+      releaseProjectStructureMutation(owner);
     }
-    const newFiles = state.files.filter((f) => f.id !== id);
-    const newActiveId =
-      state.activeFileId === id ? newFiles[0].id : state.activeFileId;
-    const compileErrorCache = new Map(state.compileErrorCache);
-    const lastCompiledGenerations = new Map(state.lastCompiledGenerations);
-    _pdfBytesCache.delete(id);
-    compileErrorCache.delete(id);
-    lastCompiledGenerations.delete(id);
-    // If the deleted file was active, show the new active file's cached PDF
-    const switchingActive = state.activeFileId === id;
-    const newRootId = switchingActive
-      ? resolveTexRoot(newActiveId, newFiles)
-      : undefined;
-    if (switchingActive && newRootId) {
-      _currentPdfRootId = _pdfBytesCache.has(newRootId) ? newRootId : null;
-    }
-    set((s) => ({
-      files: newFiles,
-      activeFileId: newActiveId,
-      compileErrorCache,
-      lastCompiledGenerations,
-      ...(switchingActive ? { pdfRevision: s.pdfRevision + 1 } : {}),
-      ...(switchingActive && newRootId
-        ? {
-            compileError: compileErrorCache.get(newRootId) ?? null,
-          }
-        : {}),
-    }));
   },
 
   deleteFolder: async (folderPath) => {
     const state = get();
+    if (state.isProjectMutating) return;
     if (!state.projectRoot) return;
     const prefix = `${folderPath}/`;
-    const filesToRemove = state.files.filter((f) =>
-      f.relativePath.startsWith(prefix),
-    );
     const remainingFiles = state.files.filter(
       (f) => !f.relativePath.startsWith(prefix),
     );
     // Must keep at least one file
     if (remainingFiles.length === 0) return;
+    const owner = acquireProjectStructureMutation(state);
+    if (!owner) return;
 
-    // Delete folder from disk (recursive)
     try {
-      const absPath = await join(state.projectRoot, folderPath);
-      await deleteFolderFromDisk(absPath);
-    } catch (e) {
-      log.error("Failed to delete folder from disk", { error: String(e) });
+      // Delete folder from disk (recursive)
+      try {
+        await runProjectFsOperationAfterDrain(
+          owner,
+          [owner.projectRoot],
+          async () => {
+            const absPath = await join(state.projectRoot!, folderPath);
+            await deleteFolderFromDisk(absPath);
+          },
+        );
+      } catch (e) {
+        log.error("Failed to delete folder from disk", { error: String(e) });
+        return;
+      }
+
+      const current = get();
+      if (!stillOwnsProject(current, owner)) return;
+      const currentFilesToRemove = current.files.filter((f) =>
+        f.relativePath.startsWith(prefix),
+      );
+      const currentRemainingFiles = current.files.filter(
+        (f) => !f.relativePath.startsWith(prefix),
+      );
+      if (currentRemainingFiles.length === 0) return;
+
+      // Clean caches
+      const compileErrorCache = new Map(current.compileErrorCache);
+      const lastCompiledGenerations = new Map(current.lastCompiledGenerations);
+      for (const f of currentFilesToRemove) {
+        _pdfBytesCache.delete(f.id);
+        compileErrorCache.delete(f.id);
+        lastCompiledGenerations.delete(f.id);
+      }
+
+      const removedIds = new Set(currentFilesToRemove.map((f) => f.id));
+      const newActiveId = removedIds.has(current.activeFileId)
+        ? currentRemainingFiles[0].id
+        : current.activeFileId;
+      const switchingActive = newActiveId !== current.activeFileId;
+      const newRootId = switchingActive
+        ? resolveTexRoot(newActiveId, currentRemainingFiles)
+        : undefined;
+      if (switchingActive && newRootId) {
+        _currentPdfRootId = _pdfBytesCache.has(newRootId) ? newRootId : null;
+      }
+
+      // Remove folder from folders list
+      const newFolders = current.folders.filter(
+        (f) => f !== folderPath && !f.startsWith(prefix),
+      ); // include exact match since folders list contains folder paths directly
+
+      set((s) =>
+        stillOwnsProject(s, owner)
+          ? {
+              files: currentRemainingFiles,
+              folders: newFolders,
+              activeFileId: newActiveId,
+              compileErrorCache,
+              lastCompiledGenerations,
+              fileTreeGeneration: s.fileTreeGeneration + 1,
+              ...(switchingActive ? { pdfRevision: s.pdfRevision + 1 } : {}),
+              ...(switchingActive && newRootId
+                ? {
+                    compileError: compileErrorCache.get(newRootId) ?? null,
+                  }
+                : {}),
+            }
+          : {},
+      );
+    } finally {
+      releaseProjectStructureMutation(owner);
     }
-
-    // Clean caches
-    const compileErrorCache = new Map(state.compileErrorCache);
-    const lastCompiledGenerations = new Map(state.lastCompiledGenerations);
-    for (const f of filesToRemove) {
-      _pdfBytesCache.delete(f.id);
-      compileErrorCache.delete(f.id);
-      lastCompiledGenerations.delete(f.id);
-    }
-
-    const removedIds = new Set(filesToRemove.map((f) => f.id));
-    const newActiveId = removedIds.has(state.activeFileId)
-      ? remainingFiles[0].id
-      : state.activeFileId;
-    const switchingActive = newActiveId !== state.activeFileId;
-    const newRootId = switchingActive
-      ? resolveTexRoot(newActiveId, remainingFiles)
-      : undefined;
-    if (switchingActive && newRootId) {
-      _currentPdfRootId = _pdfBytesCache.has(newRootId) ? newRootId : null;
-    }
-
-    // Remove folder from folders list
-    const newFolders = state.folders.filter(
-      (f) => f !== folderPath && !f.startsWith(prefix),
-    ); // include exact match since folders list contains folder paths directly
-
-    set((s) => ({
-      files: remainingFiles,
-      folders: newFolders,
-      activeFileId: newActiveId,
-      compileErrorCache,
-      lastCompiledGenerations,
-      ...(switchingActive ? { pdfRevision: s.pdfRevision + 1 } : {}),
-      ...(switchingActive && newRootId
-        ? {
-            compileError: compileErrorCache.get(newRootId) ?? null,
-          }
-        : {}),
-    }));
   },
 
   renameFile: async (id, name) => {
     const state = get();
+    if (state.isProjectMutating) return;
     const file = state.files.find((f) => f.id === id);
     if (!file || !state.projectRoot) return;
+    const owner = acquireProjectStructureMutation(state);
+    if (!owner) return;
 
     const dir = file.relativePath.includes("/")
       ? file.relativePath.substring(0, file.relativePath.lastIndexOf("/"))
       : "";
     const newRelativePath = dir ? `${dir}/${name}` : name;
 
-    const newAbsPath = await join(state.projectRoot, newRelativePath);
     try {
-      await renameFileOnDisk(file.absolutePath, newAbsPath);
-    } catch (e) {
-      log.error("Failed to rename file on disk", { error: String(e) });
-      return;
+      let newAbsPath: string;
+      try {
+        newAbsPath = await runProjectFsOperationAfterDrain(
+          owner,
+          [owner.projectRoot],
+          async () => {
+            const path = await join(state.projectRoot!, newRelativePath);
+            await renameFileOnDisk(file.absolutePath, path);
+            return path;
+          },
+        );
+      } catch (e) {
+        log.error("Failed to rename file on disk", { error: String(e) });
+        return;
+      }
+      const current = get();
+      if (!stillOwnsProject(current, owner)) return;
+      if (
+        !current.files.some(
+          (candidate) =>
+            candidate.id === id && candidate.absolutePath === file.absolutePath,
+        )
+      ) {
+        return;
+      }
+      migratePdfBytesKey(id, newRelativePath);
+      set((s) => {
+        if (!stillOwnsProject(s, owner)) return {};
+        if (
+          !s.files.some(
+            (candidate) =>
+              candidate.id === id &&
+              candidate.absolutePath === file.absolutePath,
+          )
+        ) {
+          return {};
+        }
+        const compileErrorCache = migrateCacheKey(
+          s.compileErrorCache,
+          id,
+          newRelativePath,
+        );
+        const lastCompiledGenerations = migrateCacheKey(
+          s.lastCompiledGenerations,
+          id,
+          newRelativePath,
+        );
+        const isActive = s.activeFileId === id;
+        return {
+          files: s.files.map((f) =>
+            f.id === id
+              ? {
+                  ...f,
+                  name,
+                  relativePath: newRelativePath,
+                  absolutePath: newAbsPath,
+                  id: newRelativePath,
+                }
+              : f,
+          ),
+          activeFileId: isActive ? newRelativePath : s.activeFileId,
+          compileErrorCache,
+          lastCompiledGenerations,
+          fileTreeGeneration: s.fileTreeGeneration + 1,
+        };
+      });
+    } finally {
+      releaseProjectStructureMutation(owner);
     }
-    migratePdfBytesKey(id, newRelativePath);
-    set((s) => {
-      const compileErrorCache = migrateCacheKey(
-        s.compileErrorCache,
-        id,
-        newRelativePath,
-      );
-      const lastCompiledGenerations = migrateCacheKey(
-        s.lastCompiledGenerations,
-        id,
-        newRelativePath,
-      );
-      const isActive = s.activeFileId === id;
-      return {
-        files: s.files.map((f) =>
-          f.id === id
-            ? {
-                ...f,
-                name,
-                relativePath: newRelativePath,
-                absolutePath: newAbsPath,
-                id: newRelativePath,
-              }
-            : f,
-        ),
-        activeFileId: isActive ? newRelativePath : s.activeFileId,
-        compileErrorCache,
-        lastCompiledGenerations,
-      };
-    });
   },
 
   updateFileContent: (id, content) => {
+    if (get().isProjectMutating) return;
     set((state) => ({
       files: state.files.map((f) =>
         f.id === id ? { ...f, content, isDirty: true } : f,
@@ -753,8 +1236,10 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
   },
 
   updateImageDataUrl: (id, dataUrl) => {
+    if (get().isProjectMutating) return;
     set((state) => ({
       files: state.files.map((f) => (f.id === id ? { ...f, dataUrl } : f)),
+      contentGeneration: state.contentGeneration + 1,
     }));
   },
 
@@ -815,12 +1300,22 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
   setIsCompiling: (isCompiling) => set({ isCompiling }),
   setPendingRecompile: (pending) => set({ pendingRecompile: pending }),
 
-  setIsSaving: (isSaving) => set({ isSaving }),
+  setIsSaving: (isSaving) => {
+    if (
+      !isSaving &&
+      activeManualSaveRequest &&
+      stillOwnsProject(get(), activeManualSaveRequest.owner)
+    ) {
+      return;
+    }
+    set({ isSaving });
+  },
 
   setCursorPosition: (position) => set({ cursorPosition: position }),
 
   insertAtCursor: (text) => {
     const state = get();
+    if (state.isProjectMutating) return;
     const activeFile = getActiveFile(state);
     if (!activeFile || activeFile.type === "image" || activeFile.type === "pdf")
       return;
@@ -830,18 +1325,21 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
     const newContent =
       content.slice(0, cursorPosition) + text + content.slice(cursorPosition);
 
-    set({
-      files: state.files.map((f) =>
+    set((current) => ({
+      files: current.files.map((f) =>
         f.id === activeFile.id
           ? { ...f, content: newContent, isDirty: true }
           : f,
       ),
       cursorPosition: cursorPosition + text.length,
-    });
+      contentGeneration: current.contentGeneration + 1,
+    }));
+    scheduleAutoSave();
   },
 
   replaceSelection: (start, end, text) => {
     const state = get();
+    if (state.isProjectMutating) return;
     const activeFile = getActiveFile(state);
     if (!activeFile || activeFile.type === "image" || activeFile.type === "pdf")
       return;
@@ -849,18 +1347,21 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
     const content = activeFile.content ?? "";
     const newContent = content.slice(0, start) + text + content.slice(end);
 
-    set({
-      files: state.files.map((f) =>
+    set((current) => ({
+      files: current.files.map((f) =>
         f.id === activeFile.id
           ? { ...f, content: newContent, isDirty: true }
           : f,
       ),
       cursorPosition: start + text.length,
-    });
+      contentGeneration: current.contentGeneration + 1,
+    }));
+    scheduleAutoSave();
   },
 
   findAndReplace: (find, replace) => {
     const state = get();
+    if (state.isProjectMutating) return false;
     const activeFile = getActiveFile(state);
     if (!activeFile || activeFile.type === "image" || activeFile.type === "pdf")
       return false;
@@ -869,69 +1370,119 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
     if (!content.includes(find)) return false;
 
     const newContent = content.replace(find, replace);
-    set({
-      files: state.files.map((f) =>
+    set((current) => ({
+      files: current.files.map((f) =>
         f.id === activeFile.id
           ? { ...f, content: newContent, isDirty: true }
           : f,
       ),
-    });
+      contentGeneration: current.contentGeneration + 1,
+    }));
+    scheduleAutoSave();
     return true;
   },
 
   setInitialized: () => set({ initialized: true }),
 
-  saveFile: async (id) => {
+  saveFile: async (id, options) => {
     const state = get();
+    if (state.isProjectMutating && !options?.allowDuringMutation) return;
     const file = state.files.find((f) => f.id === id);
     if (!file || !file.isDirty || file.content == null) return;
+    const owner = captureProjectOwner(state);
+    if (!owner) return;
 
-    await writeTexFileContent(file.absolutePath, file.content);
-    set((s) => ({
-      files: s.files.map((f) => (f.id === id ? { ...f, isDirty: false } : f)),
-    }));
+    await writeProjectTextFileInOrder(owner, file.absolutePath, file.content!);
+    set((s) => {
+      if (!stillOwnsProject(s, owner)) return {};
+      const currentFile = s.files.find((candidate) => candidate.id === id);
+      if (
+        currentFile?.absolutePath !== file.absolutePath ||
+        currentFile.content !== file.content
+      ) {
+        return {};
+      }
+      return {
+        files: s.files.map((candidate) =>
+          candidate.id === id ? { ...candidate, isDirty: false } : candidate,
+        ),
+      };
+    });
   },
 
-  saveAllFiles: async () => {
+  saveAllFiles: async (options) => {
     const state = get();
+    if (state.isProjectMutating && !options?.allowDuringMutation) return;
+    const owner = captureProjectOwner(state);
+    if (!owner) return;
     const dirtyFiles = state.files.filter(
       (f) => f.isDirty && f.content != null,
     );
     const results = await Promise.allSettled(
-      dirtyFiles.map((f) => writeTexFileContent(f.absolutePath, f.content!)),
+      dirtyFiles.map((f) =>
+        writeProjectTextFileInOrder(owner, f.absolutePath, f.content!),
+      ),
     );
     // Only mark successfully saved files as clean
-    const savedIds = new Set<string>();
+    const savedFiles = new Map<string, ProjectFile>();
     results.forEach((r, i) => {
-      if (r.status === "fulfilled") savedIds.add(dirtyFiles[i].id);
+      if (r.status === "fulfilled") {
+        savedFiles.set(dirtyFiles[i].id, dirtyFiles[i]);
+      }
     });
-    if (savedIds.size > 0) {
-      set((s) => ({
-        files: s.files.map((f) =>
-          savedIds.has(f.id) ? { ...f, isDirty: false } : f,
-        ),
-      }));
+    if (savedFiles.size > 0) {
+      set((s) => {
+        if (!stillOwnsProject(s, owner)) return {};
+        return {
+          files: s.files.map((file) => {
+            const saved = savedFiles.get(file.id);
+            return saved &&
+              file.absolutePath === saved.absolutePath &&
+              file.content === saved.content
+              ? { ...file, isDirty: false }
+              : file;
+          }),
+        };
+      });
     }
   },
 
   saveCurrentFile: async () => {
     const state = get();
-    await state.saveFile(state.activeFileId);
-    // Manual save → immediate snapshot
-    if (state.projectRoot) {
-      try {
+    if (state.isProjectMutating) return;
+    const owner = captureProjectOwner(state);
+    if (!owner) return;
+    const requestId = ++nextManualSaveRequest;
+    activeManualSaveRequest = { id: requestId, owner };
+    set({ isSaving: true });
+    try {
+      await state.saveFile(state.activeFileId);
+      // Manual save → immediate snapshot
+      if (stillOwnsProject(get(), owner)) {
         await useHistoryStore
           .getState()
-          .createSnapshot(state.projectRoot, "[manual] Save");
-      } catch {
-        // Snapshot failure should not break save
+          .createSnapshot(owner.projectRoot, "[manual] Save");
       }
+    } catch {
+      // Save failures are already presented by the caller. Keep the file dirty
+      // and settle the transient indicator without an unhandled rejection.
+    } finally {
+      setTimeout(() => {
+        if (activeManualSaveRequest?.id !== requestId) return;
+        activeManualSaveRequest = null;
+        set((current) =>
+          stillOwnsProject(current, owner) ? { isSaving: false } : {},
+        );
+      }, MANUAL_SAVE_BUSY_DELAY_MS);
     }
   },
 
   createNewFile: async (name, type, folder) => {
     const state = get();
+    if (state.isProjectMutating) return;
     if (!state.projectRoot) return;
+    const owner = captureProjectOwner(state);
+    if (!owner) return;
 
     const relativePath = folder ? `${folder}/${name}` : name;
     const isTexFile = name.endsWith(".tex") || name.endsWith(".ltx");
@@ -939,66 +1490,89 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
       ? `\\documentclass{article}\n\n\\begin{document}\n\n% Your content here\n\n\\end{document}\n`
       : "";
 
-    const fullPath = await createFileOnDisk(
-      state.projectRoot,
-      relativePath,
-      content,
+    const fullPath = await runProjectFsOperation(owner, () =>
+      createFileOnDisk(state.projectRoot!, relativePath, content),
     );
 
-    set((s) => ({
-      files: [
-        ...s.files,
-        {
-          id: relativePath,
-          name,
-          relativePath,
-          absolutePath: fullPath,
-          type,
-          content: type !== "image" ? content : undefined,
-          isDirty: false,
-        },
-      ],
-      activeFileId: relativePath,
-    }));
+    set((s) =>
+      stillOwnsProject(s, owner) &&
+      !s.files.some((file) => file.id === relativePath)
+        ? {
+            files: [
+              ...s.files,
+              {
+                id: relativePath,
+                name,
+                relativePath,
+                absolutePath: fullPath,
+                type,
+                content: type !== "image" ? content : undefined,
+                isDirty: false,
+              },
+            ],
+            activeFileId: relativePath,
+            fileTreeGeneration: s.fileTreeGeneration + 1,
+          }
+        : {},
+    );
   },
 
   createFolder: async (name, parentFolder) => {
     const state = get();
+    if (state.isProjectMutating) return;
     if (!state.projectRoot) return;
+    const owner = captureProjectOwner(state);
+    if (!owner) return;
 
     const relativePath = parentFolder ? `${parentFolder}/${name}` : name;
-    const absolutePath = await join(state.projectRoot, relativePath);
-    await createDirectory(absolutePath);
-    set((s) => ({
-      folders: [...s.folders, relativePath],
-    }));
+    await runProjectFsOperation(owner, async () => {
+      const absolutePath = await join(state.projectRoot!, relativePath);
+      await createDirectory(absolutePath);
+    });
+    set((s) =>
+      stillOwnsProject(s, owner) && !s.folders.includes(relativePath)
+        ? {
+            folders: [...s.folders, relativePath],
+            fileTreeGeneration: s.fileTreeGeneration + 1,
+          }
+        : {},
+    );
   },
 
   importFiles: async (sourcePaths, targetFolder) => {
     const state = get();
+    if (state.isProjectMutating) return [];
     if (!state.projectRoot) return [];
+    const owner = captureProjectOwner(state);
+    if (!owner) return [];
 
-    const importedPaths: string[] = [];
-    for (const sourcePath of sourcePaths) {
-      // Handle both Unix (/) and Windows (\) path separators
-      const fileName = sourcePath.split(/[/\\]/).pop() || sourcePath;
-      const targetName = targetFolder
-        ? `${targetFolder}/${fileName}`
-        : fileName;
-      // copyFileToProject returns the actual (possibly deduplicated) relative path
-      const actualName = await copyFileToProject(
-        state.projectRoot,
-        sourcePath,
-        targetName,
-      );
-      importedPaths.push(actualName);
-    }
-    await state.refreshFiles();
-    return importedPaths;
+    return runProjectFsOperation(owner, async () => {
+      const importedPaths: string[] = [];
+      for (const sourcePath of sourcePaths) {
+        // Handle both Unix (/) and Windows (\) path separators
+        const fileName = sourcePath.split(/[/\\]/).pop() || sourcePath;
+        const targetName = targetFolder
+          ? `${targetFolder}/${fileName}`
+          : fileName;
+        // copyFileToProject returns the actual (possibly deduplicated) relative path
+        const actualName = await copyFileToProject(
+          state.projectRoot!,
+          sourcePath,
+          targetName,
+        );
+        importedPaths.push(actualName);
+        if (!stillOwnsProject(get(), owner)) return importedPaths;
+      }
+      if (stillOwnsProject(get(), owner)) {
+        await get().refreshFiles();
+      }
+      return importedPaths;
+    });
   },
 
   moveFile: async (fileId, targetFolder) => {
     const state = get();
+    if (state.isProjectMutating) return;
     const file = state.files.find((f) => f.id === fileId);
     if (!file || !state.projectRoot) return;
 
@@ -1006,50 +1580,90 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
       ? `${targetFolder}/${file.name}`
       : file.name;
     if (desiredPath === file.relativePath) return;
-
-    // Auto-deduplicate if a file with the same name exists in the target
-    const newRelativePath = await getUniqueTargetName(
-      state.projectRoot,
-      desiredPath,
-    );
-    const newAbsPath = await join(state.projectRoot, newRelativePath);
-    await renameFileOnDisk(file.absolutePath, newAbsPath);
-
-    const newName = newRelativePath.split(/[/\\]/).pop() || file.name;
-    migratePdfBytesKey(fileId, newRelativePath);
-    set((s) => {
-      const compileErrorCache = migrateCacheKey(
-        s.compileErrorCache,
-        fileId,
-        newRelativePath,
+    const owner = acquireProjectStructureMutation(state);
+    if (!owner) return;
+    const stillOwnsFile = () => {
+      const current = get();
+      return (
+        stillOwnsProject(current, owner) &&
+        current.files.some(
+          (candidate) =>
+            candidate.id === fileId &&
+            candidate.absolutePath === file.absolutePath,
+        )
       );
-      const lastCompiledGenerations = migrateCacheKey(
-        s.lastCompiledGenerations,
-        fileId,
-        newRelativePath,
+    };
+
+    try {
+      // Auto-deduplicate if a file with the same name exists in the target
+      const moveTarget = await runProjectFsOperationAfterDrain(
+        owner,
+        [owner.projectRoot],
+        async () => {
+          const newRelativePath = await getUniqueTargetName(
+            state.projectRoot!,
+            desiredPath,
+          );
+          if (!stillOwnsFile()) return null;
+          const newAbsPath = await join(state.projectRoot!, newRelativePath);
+          if (!stillOwnsFile()) return null;
+          await renameFileOnDisk(file.absolutePath, newAbsPath);
+          return { newRelativePath, newAbsPath };
+        },
       );
-      return {
-        files: s.files.map((f) =>
-          f.id === fileId
-            ? {
-                ...f,
-                name: newName,
-                relativePath: newRelativePath,
-                absolutePath: newAbsPath,
-                id: newRelativePath,
-              }
-            : f,
-        ),
-        activeFileId:
-          s.activeFileId === fileId ? newRelativePath : s.activeFileId,
-        compileErrorCache,
-        lastCompiledGenerations,
-      };
-    });
+      if (!moveTarget || !stillOwnsFile()) return;
+      const { newRelativePath, newAbsPath } = moveTarget;
+
+      const newName = newRelativePath.split(/[/\\]/).pop() || file.name;
+      migratePdfBytesKey(fileId, newRelativePath);
+      set((s) => {
+        if (
+          !stillOwnsProject(s, owner) ||
+          !s.files.some(
+            (candidate) =>
+              candidate.id === fileId &&
+              candidate.absolutePath === file.absolutePath,
+          )
+        ) {
+          return {};
+        }
+        const compileErrorCache = migrateCacheKey(
+          s.compileErrorCache,
+          fileId,
+          newRelativePath,
+        );
+        const lastCompiledGenerations = migrateCacheKey(
+          s.lastCompiledGenerations,
+          fileId,
+          newRelativePath,
+        );
+        return {
+          files: s.files.map((f) =>
+            f.id === fileId
+              ? {
+                  ...f,
+                  name: newName,
+                  relativePath: newRelativePath,
+                  absolutePath: newAbsPath,
+                  id: newRelativePath,
+                }
+              : f,
+          ),
+          activeFileId:
+            s.activeFileId === fileId ? newRelativePath : s.activeFileId,
+          compileErrorCache,
+          lastCompiledGenerations,
+          fileTreeGeneration: s.fileTreeGeneration + 1,
+        };
+      });
+    } finally {
+      releaseProjectStructureMutation(owner);
+    }
   },
 
   moveFolder: async (folderPath, targetFolder) => {
     const state = get();
+    if (state.isProjectMutating) return;
     if (!state.projectRoot) return;
 
     const folderName = folderPath.split(/[/\\]/).pop()!;
@@ -1059,37 +1673,171 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
     if (newFolderPath === folderPath) return;
     // Prevent moving a folder into itself
     if (newFolderPath.startsWith(`${folderPath}/`)) return;
+    const owner = acquireProjectStructureMutation(state);
+    if (!owner) return;
+    const oldPrefix = `${folderPath}/`;
+    const newPrefix = `${newFolderPath}/`;
 
-    const oldAbsPath = await join(state.projectRoot, folderPath);
-    const newAbsPath = await join(state.projectRoot, newFolderPath);
-    await renameFileOnDisk(oldAbsPath, newAbsPath);
+    try {
+      const movedFiles = await runProjectFsOperationAfterDrain(
+        owner,
+        [owner.projectRoot],
+        async () => {
+          const current = get();
+          if (!stillOwnsProject(current, owner)) return null;
+          const pathChanges = new Map<
+            string,
+            { relativePath: string; absolutePath: string }
+          >();
+          for (const file of current.files) {
+            if (!file.relativePath.startsWith(oldPrefix)) continue;
+            const relativePath = `${newPrefix}${file.relativePath.slice(oldPrefix.length)}`;
+            pathChanges.set(file.id, {
+              relativePath,
+              absolutePath: await join(owner.projectRoot, relativePath),
+            });
+          }
+          if (!stillOwnsProject(get(), owner)) return null;
+          const oldAbsPath = await join(owner.projectRoot, folderPath);
+          const newAbsPath = await join(owner.projectRoot, newFolderPath);
+          if (!stillOwnsProject(get(), owner)) return null;
+          await renameFileOnDisk(oldAbsPath, newAbsPath);
+          return pathChanges;
+        },
+      );
+      if (!movedFiles || !stillOwnsProject(get(), owner)) return;
 
-    // Reload project to pick up all new paths
-    await state.openProject(state.projectRoot);
+      for (const [oldId, moved] of movedFiles) {
+        migratePdfBytesKey(oldId, moved.relativePath);
+      }
+      set((current) => {
+        if (!stillOwnsProject(current, owner)) return {};
+        let compileErrorCache = current.compileErrorCache;
+        let lastCompiledGenerations = current.lastCompiledGenerations;
+        for (const [oldId, moved] of movedFiles) {
+          compileErrorCache = migrateCacheKey(
+            compileErrorCache,
+            oldId,
+            moved.relativePath,
+          );
+          lastCompiledGenerations = migrateCacheKey(
+            lastCompiledGenerations,
+            oldId,
+            moved.relativePath,
+          );
+        }
+        const activeFileId =
+          movedFiles.get(current.activeFileId)?.relativePath ??
+          current.activeFileId;
+        return {
+          files: current.files.map((file) => {
+            const moved = movedFiles.get(file.id);
+            return moved
+              ? {
+                  ...file,
+                  id: moved.relativePath,
+                  relativePath: moved.relativePath,
+                  absolutePath: moved.absolutePath,
+                }
+              : file;
+          }),
+          folders: current.folders.map((folder) =>
+            folder === folderPath
+              ? newFolderPath
+              : folder.startsWith(oldPrefix)
+                ? `${newPrefix}${folder.slice(oldPrefix.length)}`
+                : folder,
+          ),
+          activeFileId,
+          compileErrorCache,
+          lastCompiledGenerations,
+          fileTreeGeneration: current.fileTreeGeneration + 1,
+        };
+      });
+    } finally {
+      releaseProjectStructureMutation(owner);
+    }
   },
 
   reloadFile: async (relativePath) => {
     const state = get();
+    if (state.isProjectMutating) return;
     const file = state.files.find((f) => f.relativePath === relativePath);
     if (!file) return;
+    const projectRoot = state.projectRoot;
+    const projectGeneration = state.projectGeneration;
+    const refreshRequestGeneration = state.refreshRequestGeneration;
 
     if (file.type === "tex" || file.type === "bib") {
       const content = await readTexFileContent(file.absolutePath);
-      set((s) => ({
-        files: s.files.map((f) =>
-          f.id === file.id ? { ...f, content, isDirty: false } : f,
-        ),
-        contentGeneration: s.contentGeneration + 1,
-      }));
+      set((s) => {
+        if (
+          s.projectRoot !== projectRoot ||
+          s.projectGeneration !== projectGeneration ||
+          s.refreshRequestGeneration !== refreshRequestGeneration ||
+          !s.files.some(
+            (candidate) =>
+              candidate.id === file.id &&
+              candidate.absolutePath === file.absolutePath &&
+              candidate.content === file.content &&
+              candidate.isDirty === file.isDirty,
+          )
+        ) {
+          return {};
+        }
+        return {
+          files: s.files.map((candidate) =>
+            candidate.id === file.id
+              ? { ...candidate, content, isDirty: false }
+              : candidate,
+          ),
+          contentGeneration: s.contentGeneration + 1,
+        };
+      });
     }
   },
 
   refreshFiles: async () => {
-    const { projectRoot, files, activeFileId } = get();
+    const initialState = get();
+    if (initialState.isProjectMutating) return;
+    const {
+      projectRoot,
+      files,
+      folders,
+      activeFileId,
+      projectGeneration,
+      contentGeneration,
+      fileTreeGeneration,
+    } = initialState;
     if (!projectRoot) return;
+    let refreshRequestGeneration = 0;
+    set((state) => {
+      if (
+        state.projectRoot !== projectRoot ||
+        state.projectGeneration !== projectGeneration
+      ) {
+        return {};
+      }
+      refreshRequestGeneration = state.refreshRequestGeneration + 1;
+      return { refreshRequestGeneration };
+    });
+    if (refreshRequestGeneration === 0) return;
+    const stillOwnsRefresh = () => {
+      const state = get();
+      return (
+        state.projectRoot === projectRoot &&
+        state.projectGeneration === projectGeneration &&
+        state.refreshRequestGeneration === refreshRequestGeneration &&
+        state.contentGeneration === contentGeneration &&
+        state.fileTreeGeneration === fileTreeGeneration &&
+        state.files === files &&
+        state.folders === folders
+      );
+    };
 
     const { files: fsFiles, folders: fsFolders } =
       await scanProjectFolder(projectRoot);
+    if (!stillOwnsRefresh()) return;
     const existingMap = new Map(files.map((f) => [f.relativePath, f]));
     const diskPaths = new Set(fsFiles.map((f) => f.relativePath));
 
@@ -1122,6 +1870,7 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
               } catch {
                 /* keep previous content */
               }
+              if (!stillOwnsRefresh()) return;
             }
           }
           merged.push(updated);
@@ -1150,6 +1899,7 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
           } catch {
             /* skip unreadable */
           }
+          if (!stillOwnsRefresh()) return;
         } else if (
           pf.type === "image" &&
           fsFile.fileSize <= LARGE_FILE_THRESHOLD
@@ -1159,6 +1909,7 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
           } catch {
             /* skip unreadable */
           }
+          if (!stillOwnsRefresh()) return;
         }
         // PDF files and large files are loaded on-demand
         merged.push(pf);
@@ -1176,27 +1927,62 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
       ? activeFileId
       : (merged[0]?.id ?? "");
 
-    set((s) => ({
-      files: merged,
-      folders: fsFolders,
-      activeFileId: newActiveId,
-      contentGeneration: s.contentGeneration + 1,
-    }));
+    set((s) =>
+      s.projectRoot === projectRoot &&
+      s.projectGeneration === projectGeneration &&
+      s.refreshRequestGeneration === refreshRequestGeneration &&
+      s.contentGeneration === contentGeneration &&
+      s.fileTreeGeneration === fileTreeGeneration &&
+      s.files === files &&
+      s.folders === folders
+        ? {
+            files: merged,
+            folders: fsFolders,
+            activeFileId: merged.some((file) => file.id === s.activeFileId)
+              ? s.activeFileId
+              : newActiveId,
+            contentGeneration: s.contentGeneration + 1,
+            fileTreeGeneration: s.fileTreeGeneration + 1,
+          }
+        : {},
+    );
   },
 
   loadFileContent: async (id) => {
     const state = get();
+    if (state.isProjectMutating) return;
     const file = state.files.find((f) => f.id === id);
     if (!file || file.content !== undefined) return; // already loaded
+    const projectRoot = state.projectRoot;
+    const projectGeneration = state.projectGeneration;
+    const refreshRequestGeneration = state.refreshRequestGeneration;
+    const commitContent = (content: string) => {
+      set((current) => {
+        if (
+          current.projectRoot !== projectRoot ||
+          current.projectGeneration !== projectGeneration ||
+          current.refreshRequestGeneration !== refreshRequestGeneration ||
+          !current.files.some(
+            (candidate) =>
+              candidate.id === id &&
+              candidate.absolutePath === file.absolutePath &&
+              candidate.content === undefined,
+          )
+        ) {
+          return {};
+        }
+        return {
+          files: current.files.map((candidate) =>
+            candidate.id === id ? { ...candidate, content } : candidate,
+          ),
+        };
+      });
+    };
     try {
       const content = await readTexFileContent(file.absolutePath);
-      set((s) => ({
-        files: s.files.map((f) => (f.id === id ? { ...f, content } : f)),
-      }));
+      commitContent(content);
     } catch {
-      set((s) => ({
-        files: s.files.map((f) => (f.id === id ? { ...f, content: "" } : f)),
-      }));
+      commitContent("");
     }
   },
 
@@ -1212,15 +1998,18 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
 
   setFileName: (name) => {
     const state = get();
-    set({
-      files: state.files.map((f) =>
+    if (state.isProjectMutating) return;
+    set((current) => ({
+      files: current.files.map((f) =>
         f.id === state.activeFileId ? { ...f, name } : f,
       ),
-    });
+      fileTreeGeneration: current.fileTreeGeneration + 1,
+    }));
   },
 
   setContent: (content) => {
     const state = get();
+    if (state.isProjectMutating) return;
     set({
       files: state.files.map((f) =>
         f.id === state.activeFileId ? { ...f, content, isDirty: true } : f,

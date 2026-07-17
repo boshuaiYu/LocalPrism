@@ -492,6 +492,7 @@ where
     F: FnMut(&'static str, Value) -> Fut,
     Fut: Future<Output = Result<Value, String>>,
 {
+    let normalized_project_path = super::normalized_project_path(&project_path)?;
     let mut cursor = None;
     let mut seen_cursors = HashSet::new();
     let mut threads = Vec::new();
@@ -506,7 +507,10 @@ where
         let response: protocol::ThreadListResponse = serde_json::from_value(response)
             .map_err(|error| format!("Invalid Codex thread list response: {error}"))?;
         let next_cursor = response.next_cursor.clone();
-        threads.extend(response.data);
+        threads.extend(response.data.into_iter().filter(|thread| {
+            super::normalized_project_path(&thread.cwd)
+                .is_ok_and(|thread_path| thread_path == normalized_project_path)
+        }));
 
         let Some(next_cursor) = next_cursor else {
             return Ok(threads);
@@ -1816,6 +1820,36 @@ mod tests {
                     json!({ "threadId": "thread-1", "includeTurns": true })
                 )
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_turn_list_filters_threads_returned_for_a_different_project() {
+        let threads = list_threads_with_request(r"C:\work\paper".into(), 1, |_, _| async {
+            Ok(json!({
+                "data": [
+                    codex_turn_thread_fixture("thread-paper", "Paper"),
+                    {
+                        "id": "thread-other",
+                        "preview": "Other project",
+                        "cwd": r"C:\work\other",
+                        "updatedAt": 1_721_000_124,
+                        "status": { "type": "idle" },
+                        "turns": []
+                    }
+                ],
+                "nextCursor": null
+            }))
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            threads
+                .iter()
+                .map(|thread| thread.id.as_str())
+                .collect::<Vec<_>>(),
+            ["thread-paper"]
         );
     }
 

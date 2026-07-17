@@ -1,7 +1,6 @@
 import { useEffect, useRef } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { remove } from "@tauri-apps/plugin-fs";
 import {
   CLAUDE_CODE_PROVIDER_ID,
   useClaudeChatStore,
@@ -12,43 +11,29 @@ import { useHistoryStore } from "@/stores/history-store";
 import { useProposedChangesStore } from "@/stores/proposed-changes-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { readTexFileContent } from "@/lib/tauri/fs";
-import {
-  compileLatex,
-  resolveCompileTarget,
-  formatCompileError,
-} from "@/lib/latex-compiler";
+import { resolveCompileTarget } from "@/lib/latex-compiler";
+import { runOwnedProjectCompile } from "@/lib/project-compile";
 import { createLogger } from "@/lib/debug/logger";
+import type { RuntimeEventEnvelope } from "@/runtime/types";
 
 const log = createLogger("claude-event");
-
-async function cleanupTemporaryFiles(paths: string[]) {
-  await Promise.all(
-    paths.map(async (path) => {
-      try {
-        await remove(path);
-      } catch (err) {
-        log.warn("failed to remove temporary chat file", {
-          path,
-          error: String(err),
-        });
-      }
-    }),
-  );
-}
 
 /** Backend event payload shapes (include tab_id for routing) */
 interface ClaudeOutputPayload {
   tab_id: string;
+  attempt_id: string;
   data: string;
 }
 
 interface ClaudeCompletePayload {
   tab_id: string;
+  attempt_id: string;
   success: boolean;
 }
 
 interface ClaudeErrorPayload {
   tab_id: string;
+  attempt_id: string;
   data: string;
 }
 
@@ -70,6 +55,7 @@ export function useClaudeEvents() {
   const lastErrorRef = useRef(new Map<string, string>());
   const directProviderTabRef = useRef(new Map<string, boolean>());
   const listenersRef = useRef<UnlistenFn[]>([]);
+  const activeAttemptRef = useRef(new Map<string, string>());
   const msgCountRef = useRef(new Map<string, number>());
   const streamStartTimeRef = useRef(new Map<string, number>());
   const lastMsgTimeRef = useRef(new Map<string, number>());
@@ -78,7 +64,13 @@ export function useClaudeEvents() {
   const tabs = useClaudeChatStore((s) => s.tabs);
   useEffect(() => {
     for (const tab of tabs) {
-      if (tab.isStreaming && !msgCountRef.current.has(tab.id)) {
+      const attemptId = tab.activeAttemptId;
+      if (
+        tab.isStreaming &&
+        attemptId != null &&
+        activeAttemptRef.current.get(tab.id) !== attemptId
+      ) {
+        activeAttemptRef.current.set(tab.id, attemptId);
         // New stream detected for this tab — initialize state
         pendingToolUsesRef.current.set(tab.id, new Map());
         hasTexChangesRef.current.set(tab.id, false);
@@ -94,6 +86,12 @@ export function useClaudeEvents() {
         lastMsgTimeRef.current.delete(tab.id);
       } else if (!tab.isStreaming) {
         // Clean up finished tab state
+        activeAttemptRef.current.delete(tab.id);
+        pendingToolUsesRef.current.delete(tab.id);
+        hasTexChangesRef.current.delete(tab.id);
+        cancelledForAskRef.current.delete(tab.id);
+        lastErrorRef.current.delete(tab.id);
+        directProviderTabRef.current.delete(tab.id);
         msgCountRef.current.delete(tab.id);
         streamStartTimeRef.current.delete(tab.id);
         lastMsgTimeRef.current.delete(tab.id);
@@ -103,6 +101,29 @@ export function useClaudeEvents() {
 
   // ── One-time listener setup (mount only) ──
   useEffect(() => {
+    type ProjectOwner = {
+      projectRoot: string;
+      projectGeneration: number | undefined;
+    };
+
+    function captureProjectOwner(): ProjectOwner | null {
+      const state = useDocumentStore.getState();
+      return state.projectRoot
+        ? {
+            projectRoot: state.projectRoot,
+            projectGeneration: state.projectGeneration,
+          }
+        : null;
+    }
+
+    function stillOwnsProject(owner: ProjectOwner | null): boolean {
+      const state = useDocumentStore.getState();
+      return owner
+        ? state.projectRoot === owner.projectRoot &&
+            state.projectGeneration === owner.projectGeneration
+        : state.projectRoot == null;
+    }
+
     function setUserVisibleError(tabId: string, message: string) {
       lastErrorRef.current.set(tabId, message);
       useClaudeChatStore.getState()._setError(tabId, message);
@@ -134,6 +155,8 @@ export function useClaudeEvents() {
     }
 
     async function registerProposedChange(
+      tabId: string,
+      attemptId: string,
       filePath: string,
       toolUseId: string,
       toolName: string,
@@ -152,6 +175,15 @@ export function useClaudeEvents() {
       const oldContent = file.content ?? "";
       try {
         const newContent = await readTexFileContent(file.absolutePath);
+        const currentTab = useClaudeChatStore
+          .getState()
+          .tabs.find((candidate) => candidate.id === tabId);
+        if (
+          currentTab?.runtime !== "claude" ||
+          currentTab.activeAttemptId !== attemptId
+        ) {
+          return;
+        }
         if (oldContent !== newContent) {
           useProposedChangesStore.getState().addChange({
             id: toolUseId,
@@ -174,7 +206,7 @@ export function useClaudeEvents() {
     }
 
     function handleStreamMessage(payload: ClaudeOutputPayload) {
-      const { tab_id: tabId, data } = payload;
+      const { tab_id: tabId, attempt_id: attemptId, data } = payload;
 
       let msg: ClaudeStreamMessage;
       try {
@@ -187,7 +219,13 @@ export function useClaudeEvents() {
 
       // Only process messages if this tab is still streaming
       const tab = chatStore.tabs.find((t) => t.id === tabId);
-      if (!tab?.isStreaming) return;
+      if (
+        !tab?.isStreaming ||
+        tab.runtime !== "claude" ||
+        tab.activeAttemptId !== attemptId
+      ) {
+        return;
+      }
 
       const count = (msgCountRef.current.get(tabId) ?? 0) + 1;
       msgCountRef.current.set(tabId, count);
@@ -309,7 +347,13 @@ export function useClaudeEvents() {
             ) {
               const fp = toolUse.input?.file_path || toolUse.input?.path;
               if (fp) {
-                registerProposedChange(fp, block.tool_use_id!, toolUse.name);
+                registerProposedChange(
+                  tabId,
+                  attemptId,
+                  fp,
+                  block.tool_use_id!,
+                  toolUse.name,
+                );
                 if (/\.(tex|bib|sty|cls|dtx)$/i.test(fp)) {
                   hasTexChangesRef.current.set(tabId, true);
                 }
@@ -343,35 +387,80 @@ export function useClaudeEvents() {
             `[${tabId}] ${elapsed(tabId)} UI-pause tool detected - cancelling process for user input`,
           );
           cancelledForAskRef.current.set(tabId, true);
-          invoke("cancel_claude_execution", { tabId }).catch(() => {});
+          invoke("cancel_claude_execution", { tabId, attemptId }).catch(
+            () => {},
+          );
         }
       }
     }
 
     async function handleComplete(payload: ClaudeCompletePayload) {
-      const { tab_id: tabId, success } = payload;
+      const { tab_id: tabId, attempt_id: attemptId, success } = payload;
       const count = msgCountRef.current.get(tabId) ?? 0;
 
       log.info(
         `[${tabId}] complete success=${success} (${count} messages) cancelledForAsk=${cancelledForAskRef.current.get(tabId) ?? false}`,
       );
+      const initialTab = useClaudeChatStore
+        .getState()
+        .tabs.find((candidate) => candidate.id === tabId);
+      if (initialTab?.runtime !== "claude") return;
+      const hasMatchingCancellation = (initialTab.cancelledAttempts ?? []).some(
+        (candidate) => candidate.attemptId === attemptId,
+      );
+      if (
+        !hasMatchingCancellation &&
+        initialTab.activeAttemptId !== attemptId
+      ) {
+        return;
+      }
+
       const chatStore = useClaudeChatStore.getState();
+      const cancellation = chatStore._consumeAttemptCancellation(
+        tabId,
+        attemptId,
+      );
 
       // Guard against duplicate complete events
-      const tab = chatStore.tabs.find((t) => t.id === tabId);
+      const tab = useClaudeChatStore
+        .getState()
+        .tabs.find((candidate) => candidate.id === tabId);
+      if (cancellation?.mode === "terminate") {
+        if (
+          tab?.runtime === "claude" &&
+          (tab.attemptEpoch ?? 0) <= cancellation.attemptEpoch + 1
+        ) {
+          chatStore._setStreaming(tabId, false);
+        }
+        chatStore._cleanupTemporaryFilePaths(
+          cancellation.temporaryFilePaths ?? [],
+        );
+        return;
+      }
+      const isCurrentCompletionAttempt = () => {
+        const currentTab = useClaudeChatStore
+          .getState()
+          .tabs.find((candidate) => candidate.id === tabId);
+        return (
+          currentTab?.runtime === "claude" &&
+          currentTab.activeAttemptId === attemptId
+        );
+      };
+      if (!isCurrentCompletionAttempt()) return;
       if (!tab?.isStreaming) {
         log.warn(
           `[${tabId}] ignoring duplicate complete event (not streaming)`,
         );
         return;
       }
+      const completionProjectOwner = captureProjectOwner();
 
       if (
         !success &&
         !tab.error &&
         !lastErrorRef.current.get(tabId) &&
         !cancelledForAskRef.current.get(tabId) &&
-        !chatStore._cancelledByUser
+        cancellation?.mode !== "interrupt"
       ) {
         const isDirectProvider = directProviderTabRef.current.get(tabId);
         if (count === 0) {
@@ -395,18 +484,24 @@ export function useClaudeEvents() {
       }
 
       // Clean up per-tab state
-      pendingToolUsesRef.current.delete(tabId);
-      hasTexChangesRef.current.delete(tabId);
-      cancelledForAskRef.current.delete(tabId);
-      lastErrorRef.current.delete(tabId);
-      directProviderTabRef.current.delete(tabId);
+      if (activeAttemptRef.current.get(tabId) === attemptId) {
+        activeAttemptRef.current.delete(tabId);
+        pendingToolUsesRef.current.delete(tabId);
+        hasTexChangesRef.current.delete(tabId);
+        cancelledForAskRef.current.delete(tabId);
+        lastErrorRef.current.delete(tabId);
+        directProviderTabRef.current.delete(tabId);
+      }
 
       const completedSessionId = tab.sessionId;
       chatStore._setStreaming(tabId, false);
-      void cleanupTemporaryFiles(chatStore.consumeTemporaryFilePaths(tabId));
+      chatStore._cleanupTemporaryFilePaths(
+        chatStore.consumeTemporaryFilePaths(tabId),
+      );
 
       const forceQueuedGuidance = tab.forceQueuedGuidanceOnComplete === true;
       if (forceQueuedGuidance) {
+        if (!isCurrentCompletionAttempt()) return;
         const queuedGuidance = useClaudeChatStore
           .getState()
           .consumeQueuedGuidance(tabId, tab.forcedQueuedGuidanceId);
@@ -423,7 +518,7 @@ export function useClaudeEvents() {
       }
 
       // Snapshot after Claude edit
-      const projectPath = useDocumentStore.getState().projectRoot;
+      const projectPath = completionProjectOwner?.projectRoot ?? null;
       if (projectPath && completedSessionId) {
         void (async () => {
           try {
@@ -434,7 +529,11 @@ export function useClaudeEvents() {
                 sessionId: completedSessionId,
               },
             );
-            if (title) {
+            if (
+              title &&
+              stillOwnsProject(completionProjectOwner) &&
+              isCurrentCompletionAttempt()
+            ) {
               useClaudeChatStore
                 .getState()
                 ._setSessionTitle(completedSessionId, title);
@@ -456,9 +555,21 @@ export function useClaudeEvents() {
           // snapshot failure should not break the flow
         }
       }
+      if (
+        !stillOwnsProject(completionProjectOwner) ||
+        !isCurrentCompletionAttempt()
+      ) {
+        return;
+      }
 
       const docStore = useDocumentStore.getState();
       await docStore.refreshFiles();
+      if (
+        !stillOwnsProject(completionProjectOwner) ||
+        !isCurrentCompletionAttempt()
+      ) {
+        return;
+      }
 
       const queuedGuidance = success
         ? useClaudeChatStore.getState().consumeQueuedGuidance(tabId)
@@ -475,40 +586,206 @@ export function useClaudeEvents() {
       }
 
       // Auto-recompile after Claude finishes
-      const {
-        projectRoot,
-        files,
-        activeFileId,
-        isCompiling: alreadyCompiling,
-      } = useDocumentStore.getState();
-      if (projectRoot && !alreadyCompiling) {
+      if (
+        !stillOwnsProject(completionProjectOwner) ||
+        !isCurrentCompletionAttempt()
+      ) {
+        return;
+      }
+      const { projectRoot, projectGeneration, files, activeFileId } =
+        useDocumentStore.getState();
+      if (projectRoot) {
         const resolved = resolveCompileTarget(activeFileId, files);
         if (resolved) {
           const { rootId, targetPath } = resolved;
-          useDocumentStore.getState().setIsCompiling(true);
-          useDocumentStore.getState().setPendingRecompile(false);
-          try {
-            await useDocumentStore.getState().saveAllFiles();
-            const texlive =
-              useSettingsStore.getState().compilerBackend === "texlive";
-            const pdfData = await compileLatex(
-              projectRoot,
-              targetPath,
-              texlive,
-            );
-            useDocumentStore.getState().setPdfData(pdfData, rootId);
-          } catch (err) {
-            useDocumentStore
-              .getState()
-              .setCompileError(formatCompileError(err), rootId);
-          } finally {
-            useDocumentStore.getState().setIsCompiling(false);
-          }
+          await runOwnedProjectCompile({
+            owner: { projectRoot, projectGeneration },
+            rootFileId: rootId,
+            targetPath,
+            useTexlive:
+              useSettingsStore.getState().compilerBackend === "texlive",
+            minimumBusyMs: 0,
+            isStillValid: () =>
+              stillOwnsProject(completionProjectOwner) &&
+              isCurrentCompletionAttempt(),
+          });
         }
-      } else if (alreadyCompiling) {
-        // Queue recompile — it will run when the current compile finishes
-        useDocumentStore.getState().setPendingRecompile(true);
-        log.info("queued post-Claude recompile — already compiling");
+      }
+    }
+
+    async function handleRuntimeEvent(payload: RuntimeEventEnvelope) {
+      if (payload.runtime !== "codex" || !payload.attemptId) return;
+      const { tabId, attemptId, event } = payload;
+      const initialTab = useClaudeChatStore
+        .getState()
+        .tabs.find((candidate) => candidate.id === tabId);
+      if (initialTab?.runtime !== "codex") return;
+
+      const isCurrentAttempt = () => {
+        const currentTab = useClaudeChatStore
+          .getState()
+          .tabs.find((candidate) => candidate.id === tabId);
+        return (
+          currentTab?.runtime === "codex" &&
+          currentTab.activeAttemptId === attemptId
+        );
+      };
+      const terminal =
+        event.type === "turnCompleted" ||
+        event.type === "turnInterrupted" ||
+        event.type === "turnFailed";
+
+      if (terminal) {
+        const hasMatchingCancellation = (
+          initialTab.cancelledAttempts ?? []
+        ).some((candidate) => candidate.attemptId === attemptId);
+        if (
+          !hasMatchingCancellation &&
+          (!initialTab.isStreaming || !isCurrentAttempt())
+        ) {
+          return;
+        }
+
+        const chatStore = useClaudeChatStore.getState();
+        const cancellation = chatStore._consumeAttemptCancellation(
+          tabId,
+          attemptId,
+        );
+        if (cancellation?.mode === "terminate") {
+          const currentTab = useClaudeChatStore
+            .getState()
+            .tabs.find((candidate) => candidate.id === tabId);
+          if (
+            currentTab?.runtime === "codex" &&
+            (currentTab.attemptEpoch ?? 0) <= cancellation.attemptEpoch + 1
+          ) {
+            chatStore._setStreaming(tabId, false);
+          }
+          chatStore._cleanupTemporaryFilePaths(
+            cancellation.temporaryFilePaths ?? [],
+          );
+          return;
+        }
+        if (!isCurrentAttempt()) return;
+        const completionProjectOwner = captureProjectOwner();
+        chatStore._setStreaming(tabId, false);
+        if (event.type === "turnFailed") {
+          chatStore._setError(tabId, event.message);
+        }
+        chatStore._cleanupTemporaryFilePaths(
+          chatStore.consumeTemporaryFilePaths(tabId),
+        );
+
+        const completedTab = useClaudeChatStore
+          .getState()
+          .tabs.find((candidate) => candidate.id === tabId);
+        const queuedGuidance =
+          cancellation?.mode === "interrupt" &&
+          completedTab?.forceQueuedGuidanceOnComplete
+            ? useClaudeChatStore
+                .getState()
+                .consumeQueuedGuidance(
+                  tabId,
+                  completedTab.forcedQueuedGuidanceId,
+                )
+            : event.type === "turnCompleted"
+              ? useClaudeChatStore.getState().consumeQueuedGuidance(tabId)
+              : null;
+        if (queuedGuidance) {
+          void useClaudeChatStore
+            .getState()
+            .sendPrompt(queuedGuidance.prompt, queuedGuidance.contextOverride, {
+              tabId,
+              preserveTabProvider: true,
+            });
+          return;
+        }
+
+        const projectPath = completionProjectOwner?.projectRoot ?? null;
+        if (projectPath) {
+          try {
+            await useHistoryStore
+              .getState()
+              .createSnapshot(projectPath, "[codex] After Codex edit");
+          } catch {
+            // Snapshot failure should not block terminal cleanup.
+          }
+          if (
+            !stillOwnsProject(completionProjectOwner) ||
+            !isCurrentAttempt()
+          ) {
+            return;
+          }
+          await useDocumentStore.getState().refreshFiles();
+        }
+        return;
+      }
+
+      if (!initialTab.isStreaming || !isCurrentAttempt()) return;
+      const chatStore = useClaudeChatStore.getState();
+      switch (event.type) {
+        case "sessionStarted":
+          chatStore._setSessionId(tabId, event.sessionId);
+          break;
+        case "assistantDelta":
+          chatStore._appendMessage(tabId, {
+            type: "assistant",
+            subtype: "streaming_delta",
+            message: { content: [{ type: "text", text: event.delta }] },
+          });
+          break;
+        case "assistantCompleted":
+          chatStore._appendMessage(tabId, {
+            type: "assistant",
+            subtype: "streaming_final",
+            message: { content: [{ type: "text", text: event.content }] },
+          });
+          break;
+        case "reasoningSummaryDelta":
+          chatStore._appendMessage(tabId, {
+            type: "assistant",
+            subtype: "streaming_delta",
+            message: {
+              content: [{ type: "thinking", thinking: event.delta }],
+            },
+          });
+          break;
+        case "toolStarted":
+          chatStore._appendMessage(tabId, {
+            type: "assistant",
+            message: {
+              content: [
+                {
+                  type: "tool_use",
+                  id: event.itemId,
+                  name: event.name,
+                  input: event.input,
+                },
+              ],
+            },
+          });
+          break;
+        case "toolCompleted":
+          chatStore._appendMessage(tabId, {
+            type: "user",
+            message: {
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: event.itemId,
+                  content: event.output ?? "",
+                  is_error: !event.success,
+                },
+              ],
+            },
+          });
+          break;
+        case "usage":
+          chatStore._addUsage(tabId, event.inputTokens, event.outputTokens);
+          break;
+        case "warning":
+          chatStore._setError(tabId, event.message);
+          break;
       }
     }
 
@@ -545,7 +822,21 @@ export function useClaudeEvents() {
         "claude-error",
         (event) => {
           if (!cancelled) {
-            const { tab_id: tabId, data: payload } = event.payload;
+            const {
+              tab_id: tabId,
+              attempt_id: attemptId,
+              data: payload,
+            } = event.payload;
+            const tab = useClaudeChatStore
+              .getState()
+              .tabs.find((candidate) => candidate.id === tabId);
+            if (
+              !tab?.isStreaming ||
+              tab.runtime !== "claude" ||
+              tab.activeAttemptId !== attemptId
+            ) {
+              return;
+            }
             log.warn(`[${tabId}] stderr: ${payload}`);
             if (
               payload.includes("Error") ||
@@ -586,6 +877,18 @@ export function useClaudeEvents() {
         return;
       }
       listenersRef.current.push(unlistenError);
+
+      const unlistenRuntime = await listen<RuntimeEventEnvelope>(
+        "runtime-event",
+        (event) => {
+          if (!cancelled) void handleRuntimeEvent(event.payload);
+        },
+      );
+      if (cancelled) {
+        unlistenRuntime();
+        return;
+      }
+      listenersRef.current.push(unlistenRuntime);
     })();
 
     return () => {

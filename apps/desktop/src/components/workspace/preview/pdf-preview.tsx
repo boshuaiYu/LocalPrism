@@ -41,12 +41,12 @@ import {
   PopoverContent,
 } from "@/components/ui/popover";
 import { HistoryPanel } from "@/components/workspace/history-panel";
+import { synctexEdit, resolveCompileTarget } from "@/lib/latex-compiler";
+import { runOwnedProjectCompile } from "@/lib/project-compile";
 import {
-  compileLatex,
-  synctexEdit,
-  resolveCompileTarget,
-  formatCompileError,
-} from "@/lib/latex-compiler";
+  ownsProjectFsState,
+  runProjectFsOperation,
+} from "@/lib/project-fs-operations";
 import { ErrorBoundary } from "react-error-boundary";
 import {
   SelectionToolbar,
@@ -94,13 +94,11 @@ export function PdfPreview() {
   const compileError = useDocumentStore((s) => s.compileError);
   const isCompiling = useDocumentStore((s) => s.isCompiling);
   const isSaving = useDocumentStore((s) => s.isSaving);
-  const setPdfData = useDocumentStore((s) => s.setPdfData);
-  const setCompileError = useDocumentStore((s) => s.setCompileError);
-  const setIsCompiling = useDocumentStore((s) => s.setIsCompiling);
   const content = useDocumentStore((s) => s.content);
   const projectRoot = useDocumentStore((s) => s.projectRoot);
+  const projectGeneration = useDocumentStore((s) => s.projectGeneration);
+  const isProjectMutating = useDocumentStore((s) => s.isProjectMutating);
   const files = useDocumentStore((s) => s.files);
-  const saveAllFiles = useDocumentStore((s) => s.saveAllFiles);
   const setActiveFile = useDocumentStore((s) => s.setActiveFile);
   const activeFile = useDocumentStore((s) => {
     return s.files.find((f) => f.id === s.activeFileId) ?? null;
@@ -128,7 +126,7 @@ export function PdfPreview() {
     width: number;
     height: number;
   } | null>(null);
-  const hasInitialCompile = useRef(false);
+  const hasInitialCompile = useRef<string | null>(null);
   const initialized = useDocumentStore((s) => s.initialized);
 
   // Derive pdfData from external cache, re-read whenever pdfRevision bumps
@@ -404,46 +402,41 @@ export function PdfPreview() {
   })();
 
   useEffect(() => {
-    if (hasInitialCompile.current) return;
-    if (!initialized || !projectRoot) return;
+    if (!initialized || !projectRoot || isProjectMutating) return;
     if (pdfData || isCompiling || compileError) return;
+    const initialCompileKey = `${projectGeneration}:${projectRoot}`;
+    if (hasInitialCompile.current === initialCompileKey) return;
 
-    hasInitialCompile.current = true;
+    hasInitialCompile.current = initialCompileKey;
 
     const compile = async () => {
-      setIsCompiling(true);
-      try {
-        await saveAllFiles();
-        const { files: allFiles, activeFileId } = useDocumentStore.getState();
-        const resolved = resolveCompileTarget(activeFileId, allFiles);
-        if (!resolved) {
-          setCompileError(
-            "No .tex file found in this project. Create a main.tex file to compile.",
-          );
-          return;
-        }
-        const { rootId, targetPath } = resolved;
-        const texlive =
-          useSettingsStore.getState().compilerBackend === "texlive";
-        const data = await compileLatex(projectRoot, targetPath, texlive);
-        setPdfData(data, rootId);
-      } catch (error) {
-        setCompileError(formatCompileError(error));
-      } finally {
-        setIsCompiling(false);
+      const state = useDocumentStore.getState();
+      const owner = { projectRoot, projectGeneration };
+      if (state.isProjectMutating || !ownsProjectFsState(owner, state)) return;
+      const resolved = resolveCompileTarget(state.activeFileId, state.files);
+      if (!resolved) {
+        state.setCompileError(
+          "No .tex file found in this project. Create a main.tex file to compile.",
+        );
+        return;
       }
+      await runOwnedProjectCompile({
+        owner,
+        rootFileId: resolved.rootId,
+        targetPath: resolved.targetPath,
+        useTexlive: useSettingsStore.getState().compilerBackend === "texlive",
+        minimumBusyMs: 0,
+      });
     };
-    compile();
+    void compile();
   }, [
     initialized,
     projectRoot,
     pdfData,
     isCompiling,
     compileError,
-    setIsCompiling,
-    setPdfData,
-    setCompileError,
-    saveAllFiles,
+    projectGeneration,
+    isProjectMutating,
     files,
     activeFile,
   ]);
@@ -526,24 +519,23 @@ export function PdfPreview() {
   const handleCompile = async (force = false) => {
     // Read all guard values from the store to avoid stale closures
     const state = useDocumentStore.getState();
-    if (!state.projectRoot) return;
-    if (state.isCompiling) {
-      // Queue a recompile after the current one finishes
-      state.setPendingRecompile(true);
-      return;
-    }
+    if (!state.projectRoot || state.isProjectMutating) return;
     const allFiles = state.files;
     const activeFileId = state.activeFileId;
     const activeEntry = allFiles.find((f) => f.id === activeFileId);
     if (!activeEntry || activeEntry.type !== "tex") return;
     const resolved = resolveCompileTarget(activeFileId, allFiles);
     if (!resolved) {
-      setCompileError(
+      state.setCompileError(
         "No .tex file found in this project. Create a main.tex file to compile.",
       );
       return;
     }
     const { rootId, targetPath: targetFile } = resolved;
+    const owner = {
+      projectRoot: state.projectRoot,
+      projectGeneration: state.projectGeneration,
+    };
     // Skip recompile if no edits since last successful compile of this root
     // (unless force=true, e.g. user clicked Recompile button)
     if (!force) {
@@ -556,53 +548,50 @@ export function PdfPreview() {
         return;
     }
     useHistoryStore.getState().stopReview();
-    setIsCompiling(true);
-    state.setPendingRecompile(false);
     setPdfError(null);
-    const compileStart = Date.now();
-    try {
-      await saveAllFiles();
-      const texlive = useSettingsStore.getState().compilerBackend === "texlive";
-      const data = await compileLatex(state.projectRoot, targetFile, texlive);
-      setPdfData(data, rootId);
-    } catch (error) {
-      setCompileError(formatCompileError(error), rootId);
-    } finally {
-      // Ensure the spinner is visible for at least 500ms for visual feedback
-      const elapsed = Date.now() - compileStart;
-      if (elapsed < 500) {
-        await new Promise((r) => setTimeout(r, 500 - elapsed));
-      }
-      setIsCompiling(false);
-      // If a recompile was requested while we were compiling, trigger it now
-      // Use setTimeout to avoid unbounded recursion on the call stack
-      if (useDocumentStore.getState().pendingRecompile) {
-        setTimeout(() => handleCompile(), 0);
-      }
-    }
+    await runOwnedProjectCompile({
+      owner,
+      rootFileId: rootId,
+      targetPath: targetFile,
+      useTexlive: useSettingsStore.getState().compilerBackend === "texlive",
+    });
   };
 
   const handleCapture = async (result: CaptureResult) => {
     setCaptureMode(false);
-    if (!projectRoot) return;
+    const state = useDocumentStore.getState();
+    if (!state.projectRoot || state.isProjectMutating) return;
+    const owner = {
+      projectRoot: state.projectRoot,
+      projectGeneration: state.projectGeneration,
+    };
 
     const fileName = `capture-p${result.pageNumber}-${Date.now()}.png`;
     const relativePath = `attachments/${fileName}`;
 
     try {
-      const attachmentsDir = await join(projectRoot, "attachments");
-      if (!(await exists(attachmentsDir))) {
-        await mkdir(attachmentsDir, { recursive: true });
+      await runProjectFsOperation(owner, async () => {
+        const attachmentsDir = await join(owner.projectRoot, "attachments");
+        if (!(await exists(attachmentsDir))) {
+          await mkdir(attachmentsDir, { recursive: true });
+        }
+        const fullPath = await join(owner.projectRoot, relativePath);
+
+        const base64 = result.dataUrl.split(",")[1];
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        await writeFile(fullPath, bytes);
+      });
+
+      const current = useDocumentStore.getState();
+      if (current.isProjectMutating || !ownsProjectFsState(owner, current)) {
+        return;
       }
-      const fullPath = await join(projectRoot, relativePath);
-
-      const base64 = result.dataUrl.split(",")[1];
-      const binary = atob(base64);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      await writeFile(fullPath, bytes);
-
-      await useDocumentStore.getState().refreshFiles();
+      await current.refreshFiles();
+      if (!ownsProjectFsState(owner, useDocumentStore.getState())) return;
 
       useClaudeChatStore.getState().addPendingAttachment({
         label: `@${relativePath}`,

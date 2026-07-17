@@ -3,6 +3,7 @@ import { ErrorBoundary } from "react-error-boundary";
 import { Toaster } from "@/components/ui/sonner";
 import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
 import { useClaudeRuntimeSync } from "@/hooks/use-claude-runtime-sync";
+import { useClaudeEvents } from "@/hooks/use-claude-events";
 import { useRuntimeWarningEvents } from "@/hooks/use-runtime-warning-events";
 
 import { useDocumentStore } from "@/stores/document-store";
@@ -80,6 +81,12 @@ function NativeWindowThemeBridge() {
 function WorkspaceWithClaude() {
   const projectRoot = useDocumentStore((s) => s.projectRoot);
   const initialized = useDocumentStore((s) => s.initialized);
+  const stoppingAttemptCount = useClaudeChatStore((s) =>
+    s.tabs.reduce(
+      (count, tab) => count + (tab.cancelledAttempts?.length ?? 0),
+      0,
+    ),
+  );
   const autoResumedProjectRef = useRef<string | null>(null);
   const chatProjectRef = useRef<string | null>(null);
 
@@ -93,9 +100,13 @@ function WorkspaceWithClaude() {
 
   useEffect(() => {
     if (chatProjectRef.current === projectRoot) return;
-    chatProjectRef.current = projectRoot;
-    useClaudeChatStore.getState().resetForProject(projectRoot ?? null);
-  }, [projectRoot]);
+    const result = useClaudeChatStore
+      .getState()
+      .resetForProject(projectRoot ?? null);
+    if (result !== "blocked-stopping") {
+      chatProjectRef.current = projectRoot;
+    }
+  }, [projectRoot, stoppingAttemptCount]);
 
   // Auto-setup Python venv when project opens
   useEffect(() => {
@@ -191,6 +202,7 @@ export function App({ onReady }: { onReady?: () => void }) {
 
   // Register global keyboard shortcuts (Cmd+S, Cmd+N) at the app level
   useKeyboardShortcuts();
+  useClaudeEvents();
   useClaudeRuntimeSync();
   useRuntimeWarningEvents();
 

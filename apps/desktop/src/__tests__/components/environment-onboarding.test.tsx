@@ -178,7 +178,9 @@ describe("EnvironmentOnboarding", () => {
     await renderOnboarding();
 
     expect(refresh).toHaveBeenCalledTimes(1);
-    expect(mocks.runtimeSettingsProps.at(-1)).toEqual({
+    expect(
+      mocks.runtimeSettingsProps[mocks.runtimeSettingsProps.length - 1],
+    ).toEqual({
       refreshOnMount: false,
     });
   });

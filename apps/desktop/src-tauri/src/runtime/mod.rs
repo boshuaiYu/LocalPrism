@@ -272,6 +272,23 @@ fn validate_codex_thread_reference(
     Ok(())
 }
 
+fn validate_codex_runtime_turn_thread(
+    thread: &codex::protocol::Thread,
+    request: &RuntimeTurnRequest,
+) -> Result<(), String> {
+    validate_codex_thread_reference(
+        thread,
+        &ConversationRef {
+            runtime: request.runtime,
+            session_id: request
+                .session_id
+                .clone()
+                .unwrap_or_else(|| thread.id.clone()),
+            project_path: request.project_path.clone(),
+        },
+    )
+}
+
 fn codex_account_from_binary(binary: Option<&CodexBinary>) -> RuntimeAccount {
     RuntimeAccount {
         runtime: RuntimeKind::Codex,
@@ -574,6 +591,17 @@ async fn start_codex_runtime_turn(
             .await;
         }
     };
+    if let Err(error) = validate_codex_runtime_turn_thread(&thread, &request) {
+        return fail_codex_start_without_live_turn(
+            app,
+            codex_state,
+            routes,
+            &reservation,
+            true,
+            error,
+        )
+        .await;
+    }
     if let Err(error) = routes
         .bind_codex_thread_for_reservation(&reservation, &thread.id)
         .await
@@ -1530,6 +1558,37 @@ mod tests {
         codex.model = "gpt-5".into();
         codex.attempt_id = " ".into();
         assert!(validate_runtime_turn_identity(&codex).is_err());
+    }
+
+    #[test]
+    fn codex_resume_turn_rejects_a_same_id_thread_from_a_different_project() {
+        let request = RuntimeTurnRequest {
+            runtime: RuntimeKind::Codex,
+            project_path: "C:/work/project-a".into(),
+            tab_id: "tab-7".into(),
+            attempt_id: "tab-7:1".into(),
+            session_id: Some("thread-7".into()),
+            prompt: "Continue".into(),
+            model: "gpt-5".into(),
+            reasoning_effort: None,
+            agent_id: None,
+            provider_credential_id: None,
+            provider_model_override: None,
+        };
+        let thread: codex::protocol::Thread = serde_json::from_value(json!({
+            "id": "thread-7",
+            "preview": "Other project",
+            "cwd": "C:/work/project-b",
+            "updatedAt": 1,
+            "status": { "type": "idle" },
+            "turns": []
+        }))
+        .unwrap();
+
+        assert_eq!(
+            validate_codex_runtime_turn_thread(&thread, &request),
+            Err("Codex thread belongs to a different project".into())
+        );
     }
 
     #[test]

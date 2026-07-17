@@ -33,7 +33,44 @@ fn history_path(project_root: &str) -> PathBuf {
 
 fn open_repo(project_root: &str) -> Result<Repository, String> {
     let git_dir = history_path(project_root);
-    Repository::open(&git_dir).map_err(|e| format!("Failed to open history repo: {}", e))
+    let repo =
+        Repository::open(&git_dir).map_err(|e| format!("Failed to open history repo: {}", e))?;
+    bind_repo_workdir(project_root, &repo)?;
+    Ok(repo)
+}
+
+fn repo_workdir_matches(project_root: &Path, repo: &Repository) -> bool {
+    let Some(repo_workdir) = repo.workdir() else {
+        return false;
+    };
+    match (project_root.canonicalize(), repo_workdir.canonicalize()) {
+        (Ok(expected), Ok(actual)) => expected == actual,
+        _ => false,
+    }
+}
+
+fn bind_repo_workdir(project_root: &str, repo: &Repository) -> Result<(), String> {
+    let project_root = Path::new(project_root);
+    if !project_root.is_dir() {
+        return Err(format!(
+            "History workdir does not exist: {}",
+            project_root.display()
+        ));
+    }
+    if repo_workdir_matches(project_root, repo) {
+        return Ok(());
+    }
+
+    // The history gitdir moves with the project, but libgit2 stores this
+    // non-standard worktree as an absolute core.worktree path. Rebind both the
+    // live handle and persisted config after a project-directory rename. Do not
+    // update the gitlink because the project may have its own .git file.
+    repo.set_workdir(project_root, false)
+        .map_err(|e| format!("Failed to rebind history workdir: {}", e))?;
+    repo.config()
+        .and_then(|mut config| config.set_str("core.worktree", &project_root.to_string_lossy()))
+        .map_err(|e| format!("Failed to persist history workdir: {}", e))?;
+    Ok(())
 }
 
 fn default_signature() -> Result<Signature<'static>, String> {
@@ -118,8 +155,7 @@ pub fn history_init(project_root: String) -> Result<(), String> {
 
     if git_dir.exists() {
         // Already initialized — verify and ensure excludes
-        let repo =
-            Repository::open(&git_dir).map_err(|e| format!("Corrupt history repo: {}", e))?;
+        let repo = open_repo(&project_root)?;
         ensure_excludes(&project_root, &repo);
         return Ok(());
     }
@@ -137,6 +173,7 @@ pub fn history_init(project_root: String) -> Result<(), String> {
 
     let repo = Repository::init_opts(&git_dir, &opts)
         .map_err(|e| format!("Failed to init history repo: {}", e))?;
+    bind_repo_workdir(&project_root, &repo)?;
 
     // Set up excludes file
     ensure_excludes(&project_root, &repo);
@@ -570,6 +607,78 @@ mod tests {
         history_init(r.clone()).unwrap();
         // Second call should succeed without error
         history_init(r).unwrap();
+    }
+
+    #[test]
+    fn test_history_rebinds_workdir_after_project_directory_rename() {
+        let parent = TempDir::new().unwrap();
+        let old_root = parent.path().join("old-project");
+        let new_root = parent.path().join("renamed-project");
+        fs::create_dir_all(&old_root).unwrap();
+        fs::write(old_root.join("main.tex"), "version one").unwrap();
+
+        let old_root_string = old_root.to_string_lossy().to_string();
+        history_init(old_root_string.clone()).unwrap();
+        let initial_id = history_list(old_root_string.clone(), 1, 0).unwrap()[0]
+            .id
+            .clone();
+        let repo_before_rename = Repository::open(history_path(&old_root_string)).unwrap();
+        assert!(repo_workdir_matches(&old_root, &repo_before_rename));
+        drop(repo_before_rename);
+
+        fs::rename(&old_root, &new_root).unwrap();
+        let new_root_string = new_root.to_string_lossy().to_string();
+        let stale_repo = Repository::open(history_path(&new_root_string)).unwrap();
+        assert!(!repo_workdir_matches(&new_root, &stale_repo));
+        drop(stale_repo);
+        history_init(new_root_string.clone()).unwrap();
+
+        let repo = Repository::open(history_path(&new_root_string)).unwrap();
+        let actual_workdir = repo
+            .workdir()
+            .expect("history repository must have a workdir")
+            .canonicalize()
+            .expect("history workdir must point at the renamed project");
+        assert_eq!(actual_workdir, new_root.canonicalize().unwrap());
+        let configured_excludes = repo
+            .config()
+            .unwrap()
+            .get_path("core.excludesFile")
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        assert_eq!(
+            configured_excludes,
+            new_root
+                .join(".claudeprism")
+                .join("history-exclude")
+                .canonicalize()
+                .unwrap()
+        );
+        drop(repo);
+
+        fs::write(new_root.join("main.tex"), "version two").unwrap();
+        let snapshot = history_snapshot(new_root_string.clone(), "after rename".into())
+            .unwrap()
+            .expect("a change in the renamed project must be snapshotted");
+        let diffs = history_diff(new_root_string.clone(), initial_id.clone(), snapshot.id).unwrap();
+        assert_eq!(
+            diffs
+                .iter()
+                .find(|diff| diff.file_path == "main.tex")
+                .and_then(|diff| diff.new_content.as_deref()),
+            Some("version two")
+        );
+
+        history_restore(new_root_string, initial_id).unwrap();
+        assert_eq!(
+            fs::read_to_string(new_root.join("main.tex")).unwrap(),
+            "version one"
+        );
+        assert!(
+            !old_root.exists(),
+            "history operations must not recreate or write the old project root"
+        );
     }
 
     #[test]

@@ -1,9 +1,25 @@
 import { create } from "zustand";
-import { invoke } from "@tauri-apps/api/core";
 import { useDocumentStore } from "./document-store";
 import { useHistoryStore } from "./history-store";
 import { useClaudeSetupStore } from "./claude-setup-store";
 import { createLogger } from "@/lib/debug/logger";
+import { cleanupTemporaryChatFiles } from "@/lib/chat-temporary-files";
+import {
+  interruptRuntimeTurn,
+  runtimeReadConversation,
+  startRuntimeTurn,
+} from "@/runtime/commands";
+import type {
+  ChangeTabRuntimeResult,
+  ConversationRef,
+  RuntimeKind,
+  RuntimeStopMode,
+} from "@/runtime/types";
+import {
+  projectPersistedChat,
+  readPersistedChatForProject,
+  writePersistedChatForProject,
+} from "./chat-persistence";
 
 const log = createLogger("claude");
 export const CLAUDE_CODE_PROVIDER_ID = "__claude-code__";
@@ -116,11 +132,45 @@ export interface QueuedGuidance {
   displayedInChat?: boolean;
 }
 
+export interface AttemptCancellation {
+  attemptId: string;
+  attemptEpoch: number;
+  runtime: RuntimeKind;
+  mode: RuntimeStopMode;
+  temporaryFilePaths?: string[];
+}
+
+export type RuntimeStopOutcome = "stopped" | "not-found" | "uncertain";
+export type ProjectChatResetResult = "reset" | "unchanged" | "blocked-stopping";
+
+const rendererAttemptNonce = `${Date.now().toString(36)}-${Math.random()
+  .toString(36)
+  .slice(2)}`;
+let runtimeAttemptSequence = 0;
+let resumeRequestSequence = 0;
+
+function nextRuntimeAttemptId(tabId: string): string {
+  runtimeAttemptSequence += 1;
+  return `${rendererAttemptNonce}:${tabId}:${runtimeAttemptSequence}`;
+}
+
+function nextResumeRequestId(tabId: string): string {
+  resumeRequestSequence += 1;
+  return `${rendererAttemptNonce}:resume:${tabId}:${resumeRequestSequence}`;
+}
+
+const pendingRuntimeStarts = new Map<string, Promise<void>>();
+
 export interface TabState {
   id: string;
   title: string;
   projectPath: string | null;
+  runtime: RuntimeKind;
+  sessionRef: ConversationRef | null;
   sessionId: string | null;
+  runtimeModel: string | null;
+  reasoningEffort: string | null;
+  agentId: string | null;
   /** Provider currently selected in the tab UI. */
   providerKey: string | null;
   /** Provider that last executed this session, used for safe resume/switching. */
@@ -136,6 +186,16 @@ export interface TabState {
   forceQueuedGuidanceOnComplete?: boolean;
   forcedQueuedGuidanceId?: string | null;
   pendingTemporaryFilePaths?: string[];
+  /** Monotonic token used to invalidate deferred work for this tab. */
+  attemptEpoch?: number;
+  /** Opaque, renderer-lifetime-unique identity used on the runtime wire. */
+  activeAttemptId?: string | null;
+  /** Attempt that is still saving/snapshotting before its runtime starts. */
+  preflightAttemptEpoch?: number | null;
+  /** Latest history request allowed to populate this tab. Never persisted. */
+  resumeRequestId?: string | null;
+  /** Stop intents awaiting their corresponding legacy completion event. */
+  cancelledAttempts?: AttemptCancellation[];
 }
 
 /** Fields that are projected from the active tab to top-level state */
@@ -159,7 +219,12 @@ function makeDefaultTab(
     id,
     title: "New Chat",
     projectPath,
+    runtime: "claude",
+    sessionRef: null,
     sessionId: null,
+    runtimeModel: null,
+    reasoningEffort: null,
+    agentId: null,
     providerKey: providerKeyForSelectedCredential(selectedCredentialId),
     sessionProviderKey: null,
     messages: [],
@@ -173,6 +238,11 @@ function makeDefaultTab(
     forceQueuedGuidanceOnComplete: false,
     forcedQueuedGuidanceId: null,
     pendingTemporaryFilePaths: [],
+    attemptEpoch: 0,
+    activeAttemptId: null,
+    preflightAttemptEpoch: null,
+    resumeRequestId: null,
+    cancelledAttempts: [],
   };
 }
 
@@ -202,6 +272,45 @@ function providerCredentialIdFromSessionKey(
 function selectedCredentialForProviderKey(providerKey: string | null) {
   const credentialId = providerCredentialIdFromSessionKey(providerKey);
   return credentialId === undefined ? null : credentialId;
+}
+
+function sameAttemptCancellation(
+  left: AttemptCancellation,
+  right: AttemptCancellation,
+) {
+  return (
+    left.attemptId === right.attemptId &&
+    left.runtime === right.runtime &&
+    left.mode === right.mode
+  );
+}
+
+function sameAttemptIdentity(
+  left: AttemptCancellation,
+  right: AttemptCancellation,
+) {
+  return left.attemptId === right.attemptId && left.runtime === right.runtime;
+}
+
+function addAttemptCancellation(
+  tab: TabState | undefined,
+  cancellation: AttemptCancellation,
+) {
+  return [
+    ...(tab?.cancelledAttempts ?? []).filter(
+      (candidate) => !sameAttemptIdentity(candidate, cancellation),
+    ),
+    cancellation,
+  ];
+}
+
+function removeAttemptCancellation(
+  tab: TabState | undefined,
+  cancellation: AttemptCancellation,
+) {
+  return (tab?.cancelledAttempts ?? []).filter(
+    (candidate) => !sameAttemptCancellation(candidate, cancellation),
+  );
 }
 
 function inferProviderKeyFromHistory(history: any[]): string | null {
@@ -340,6 +449,93 @@ function sanitizeStoredUserMessageForDisplay(
     : message;
 }
 
+function sameConversationReference(
+  left: ConversationRef | null | undefined,
+  right: ConversationRef | null | undefined,
+): boolean {
+  if (!left || !right) return false;
+  return (
+    left.runtime === right.runtime &&
+    left.sessionId === right.sessionId &&
+    left.projectPath === right.projectPath
+  );
+}
+
+function codexTextFragments(value: unknown): string[] {
+  if (typeof value === "string") {
+    const text = value.trim();
+    return text ? [text] : [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap(codexTextFragments);
+  }
+  if (!value || typeof value !== "object") return [];
+
+  const record = value as Record<string, unknown>;
+  if (typeof record.text === "string") {
+    return codexTextFragments(record.text);
+  }
+  return [record.summary, record.content].flatMap(codexTextFragments);
+}
+
+function codexHistoryMessages(items: unknown[]): ClaudeStreamMessage[] {
+  const messages: ClaudeStreamMessage[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const type = typeof record.type === "string" ? record.type : "";
+    if (type === "userMessage") {
+      const text = codexTextFragments(record.text ?? record.content).join("\n");
+      if (text) {
+        messages.push({
+          type: "user",
+          message: { content: [{ type: "text", text }] },
+        });
+      }
+    } else if (type === "agentMessage") {
+      const text = codexTextFragments(record.text ?? record.content).join("\n");
+      if (text) {
+        messages.push({
+          type: "assistant",
+          message: { content: [{ type: "text", text }] },
+        });
+      }
+    } else if (type === "reasoning" || type === "reasoningSummary") {
+      const thinking = codexTextFragments(
+        record.summary ?? record.content ?? record.text,
+      ).join("\n");
+      if (thinking) {
+        messages.push({
+          type: "assistant",
+          subtype: "reasoning",
+          message: { content: [{ type: "thinking", thinking }] },
+        });
+      }
+    }
+  }
+  return messages;
+}
+
+function claudeHistoryMessages(items: unknown[]): ClaudeStreamMessage[] {
+  const messages: ClaudeStreamMessage[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    const type = (item as { type?: unknown }).type;
+    if (type === "user" || type === "assistant" || type === "result") {
+      messages.push(item as unknown as ClaudeStreamMessage);
+    }
+  }
+  return messages;
+}
+
+function conversationHistoryMessages(
+  runtime: RuntimeKind,
+  items: unknown[],
+): ClaudeStreamMessage[] {
+  if (runtime === "codex") return codexHistoryMessages(items);
+  return claudeHistoryMessages(items).map(sanitizeStoredUserMessageForDisplay);
+}
+
 function buildProviderSwitchContext(
   messages: ClaudeStreamMessage[],
   maxChars = 18000,
@@ -374,9 +570,22 @@ function buildProviderSwitchContext(
   ].join("\n");
 }
 
-let tabCounter = 0;
+let tabCounter = 0n;
 function nextTabId(): string {
   return `tab-${++tabCounter}`;
+}
+
+function reseedTabCounter(tabs: Pick<TabState, "id">[]) {
+  for (const tab of tabs) {
+    const match = /^tab-(\d+)$/.exec(tab.id);
+    if (!match) continue;
+    try {
+      const value = BigInt(match[1]);
+      if (value > tabCounter) tabCounter = value;
+    } catch {
+      // Ignore malformed persisted suffixes and continue from the safe counter.
+    }
+  }
 }
 
 function nextGuidanceId(): string {
@@ -492,18 +701,67 @@ function applyTabUpdate(
   tabId: string,
   updates: Partial<TabState>,
 ): Partial<ClaudeChatState> {
+  const currentTab = state.tabs.find((tab) => tab.id === tabId);
+  if (!currentTab) return {};
+  const normalizedUpdates = normalizeTabSessionProjection(currentTab, updates);
   const newTabs = state.tabs.map((t) =>
-    t.id === tabId ? { ...t, ...updates } : t,
+    t.id === tabId ? { ...t, ...normalizedUpdates } : t,
   );
   const result: Partial<ClaudeChatState> = { tabs: newTabs };
   if (tabId === state.activeTabId) {
     for (const key of TAB_FIELDS) {
-      if (key in updates) {
-        (result as any)[key] = (updates as any)[key];
+      if (key in normalizedUpdates) {
+        (result as any)[key] = (normalizedUpdates as any)[key];
       }
     }
   }
   return result;
+}
+
+export function normalizeTabSessionProjection(
+  tab: TabState,
+  updates: Partial<TabState>,
+): Partial<TabState> {
+  const affectsSession =
+    "sessionId" in updates ||
+    "sessionRef" in updates ||
+    "runtime" in updates ||
+    "projectPath" in updates;
+  if (!affectsSession) return updates;
+
+  const runtime = updates.runtime ?? tab.runtime;
+  const projectPath =
+    "projectPath" in updates ? (updates.projectPath ?? null) : tab.projectPath;
+  if ("sessionRef" in updates) {
+    const ref = updates.sessionRef;
+    const sessionRef =
+      ref && ref.runtime === runtime && ref.projectPath === projectPath
+        ? ref
+        : null;
+    return {
+      ...updates,
+      sessionId: sessionRef?.sessionId ?? null,
+      sessionRef,
+    };
+  }
+
+  if ("sessionId" in updates) {
+    const sessionId = updates.sessionId ?? null;
+    const sessionRef =
+      sessionId && projectPath ? { runtime, sessionId, projectPath } : null;
+    return { ...updates, sessionId, sessionRef };
+  }
+
+  const sessionRef =
+    tab.sessionRef?.runtime === runtime &&
+    tab.sessionRef.projectPath === projectPath
+      ? tab.sessionRef
+      : null;
+  return {
+    ...updates,
+    sessionId: sessionRef?.sessionId ?? null,
+    sessionRef,
+  };
 }
 
 // ─── State Interface ───
@@ -541,6 +799,47 @@ function mergeStreamingContent(
     }
   }
   return merged;
+}
+
+function finalizeStreamingContent(
+  existing: ContentBlock[],
+  finalContent: ContentBlock[],
+): ContentBlock[] {
+  const nonTextStreamingContent = existing.filter(
+    (block) => block.type !== "text",
+  );
+  return mergeStreamingContent(nonTextStreamingContent, finalContent);
+}
+
+function temporaryFilesOwnedByTab(tab: TabState | undefined): string[] {
+  if (!tab) return [];
+  return Array.from(
+    new Set([
+      ...(tab.pendingTemporaryFilePaths ?? []),
+      ...(tab.queuedGuidance ?? []).flatMap(
+        (guidance) => guidance.contextOverride?.temporaryFilePaths ?? [],
+      ),
+      ...(tab.cancelledAttempts ?? []).flatMap(
+        (cancellation) => cancellation.temporaryFilePaths ?? [],
+      ),
+    ]),
+  );
+}
+
+function cleanupDiscardedTemporaryFiles(paths: string[]) {
+  const candidates = Array.from(new Set(paths));
+  if (candidates.length === 0) return;
+
+  void Promise.resolve().then(() => {
+    const currentlyOwned = new Set(
+      useClaudeChatStore
+        .getState()
+        .tabs.flatMap((tab) => temporaryFilesOwnedByTab(tab)),
+    );
+    return cleanupTemporaryChatFiles(
+      candidates.filter((path) => !currentlyOwned.has(path)),
+    );
+  });
 }
 
 const DEFAULT_TAB_ID = nextTabId();
@@ -623,11 +922,20 @@ interface ClaudeChatState {
   clearQueuedGuidance: (tabId: string) => void;
   consumeTemporaryFilePaths: (tabId: string) => string[];
   forceQueuedGuidanceNow: (tabId: string, guidanceId?: string) => Promise<void>;
-  cancelExecution: (tabId?: string) => Promise<void>;
+  cancelExecution: (tabId?: string) => Promise<RuntimeStopOutcome>;
   clearMessages: () => void;
   newSession: () => void;
-  resetForProject: (projectPath: string | null) => void;
+  resetForProject: (projectPath: string | null) => ProjectChatResetResult;
+  resumeConversation: (
+    reference: ConversationRef,
+    title?: string,
+  ) => Promise<void>;
   resumeSession: (sessionId: string, title?: string) => Promise<void>;
+  changeTabRuntime: (
+    tabId: string,
+    nextRuntime: RuntimeKind,
+    options?: { confirmSessionReset?: boolean },
+  ) => ChangeTabRuntimeResult;
 
   // Tab actions
   createTab: () => string;
@@ -644,7 +952,12 @@ interface ClaudeChatState {
   _setSessionTitle: (sessionId: string, title: string) => void;
   _setStreaming: (tabId: string, streaming: boolean) => void;
   _setError: (tabId: string, error: string | null) => void;
-  _cancelledByUser: boolean;
+  _addUsage: (tabId: string, inputTokens: number, outputTokens: number) => void;
+  _consumeAttemptCancellation: (
+    tabId: string,
+    attemptId: string,
+  ) => AttemptCancellation | null;
+  _cleanupTemporaryFilePaths: (paths: string[]) => void;
 }
 
 // ─── Store ───
@@ -656,7 +969,6 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
   isStreaming: false,
   streamingStartedAt: null,
   error: null,
-  _cancelledByUser: false,
   totalInputTokens: 0,
   totalOutputTokens: 0,
 
@@ -734,7 +1046,10 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     return pendingPinnedContextRemovalLabels;
   },
 
-  anyStreaming: () => get().tabs.some((t) => t.isStreaming),
+  anyStreaming: () =>
+    get().tabs.some(
+      (tab) => tab.isStreaming || (tab.cancelledAttempts?.length ?? 0) > 0,
+    ),
 
   sendPrompt: async (
     userPrompt: string,
@@ -744,51 +1059,185 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     let state = get();
     let activeTabId = options?.tabId ?? state.activeTabId;
     let activeTab = state.tabs.find((t) => t.id === activeTabId);
-    if (!activeTab || activeTab.isStreaming) return;
-
-    const docState = useDocumentStore.getState();
-    const projectPath = docState.projectRoot;
-    if (!projectPath) {
-      set((s) => applyTabUpdate(s, activeTabId, { error: "No project open" }));
+    const directTemporaryFilePaths = [
+      ...(contextOverride?.temporaryFilePaths ?? []),
+    ];
+    const discardRejectedPrompt = (tabId: string) => {
+      const discarded = [...directTemporaryFilePaths];
+      set((current) => {
+        const tab = current.tabs.find((candidate) => candidate.id === tabId);
+        if (
+          !tab ||
+          tab.isStreaming ||
+          (tab.cancelledAttempts?.length ?? 0) > 0
+        ) {
+          return {};
+        }
+        discarded.push(...(tab.pendingTemporaryFilePaths ?? []));
+        return applyTabUpdate(current, tabId, {
+          pendingTemporaryFilePaths: [],
+        });
+      });
+      cleanupDiscardedTemporaryFiles(discarded);
+    };
+    if (!activeTab || activeTab.isStreaming) {
+      discardRejectedPrompt(activeTabId);
+      return;
+    }
+    if ((activeTab.cancelledAttempts?.length ?? 0) > 0) {
+      set((s) =>
+        applyTabUpdate(s, activeTabId, {
+          error: "Waiting for the previous runtime turn to stop.",
+        }),
+      );
+      discardRejectedPrompt(activeTabId);
       return;
     }
 
-    if (activeTab.projectPath && activeTab.projectPath !== projectPath) {
-      get().resetForProject(projectPath);
+    const docState = useDocumentStore.getState();
+    const projectPath = docState.projectRoot;
+    const projectGeneration = docState.projectGeneration;
+    const projectContentGeneration = docState.contentGeneration;
+    if (!projectPath) {
+      set((s) => applyTabUpdate(s, activeTabId, { error: "No project open" }));
+      discardRejectedPrompt(activeTabId);
+      return;
+    }
+    if (docState.isProjectMutating) {
+      set((s) =>
+        applyTabUpdate(s, activeTabId, {
+          error: "The project is being changed. Wait for it to finish.",
+        }),
+      );
+      discardRejectedPrompt(activeTabId);
+      return;
+    }
+
+    if (
+      state.activeProjectPath !== projectPath ||
+      activeTab.projectPath !== projectPath
+    ) {
+      const resetResult = get().resetForProject(projectPath);
+      if (resetResult === "blocked-stopping") {
+        discardRejectedPrompt(activeTabId);
+        return;
+      }
       state = get();
       activeTabId = state.activeTabId;
       activeTab = state.tabs.find((t) => t.id === activeTabId);
-      if (!activeTab || activeTab.isStreaming) return;
-    }
-
-    const { selectedModel, effortLevel, selectedProviderModels } = state;
-    const sessionId = activeTab.sessionId;
-    const tabSelectedProviderCredentialId =
-      selectedCredentialForProviderKey(activeTab.providerKey) ??
-      state.selectedProviderCredentialId;
-    let providerCredentialId =
-      tabSelectedProviderCredentialId &&
-      tabSelectedProviderCredentialId !== CLAUDE_CODE_PROVIDER_ID
-        ? tabSelectedProviderCredentialId
-        : null;
-
-    if (options?.preserveTabProvider && activeTab.providerKey) {
-      const tabProviderCredentialId = providerCredentialIdFromSessionKey(
-        activeTab.providerKey,
-      );
-      if (tabProviderCredentialId === CLAUDE_CODE_PROVIDER_ID) {
-        providerCredentialId = null;
-      } else if (tabProviderCredentialId !== undefined) {
-        providerCredentialId = tabProviderCredentialId;
+      if (
+        !activeTab ||
+        activeTab.isStreaming ||
+        activeTab.projectPath !== projectPath
+      ) {
+        discardRejectedPrompt(activeTabId);
+        return;
       }
     }
 
-    const providerModelOverride = providerCredentialId
-      ? selectedProviderModels[providerCredentialId] || null
-      : null;
-    const requestProviderKey = providerSessionKey(providerCredentialId);
-    const previousProviderKey = activeTab?.sessionProviderKey ?? null;
+    const runtime = activeTab.runtime;
+    const runtimeModel = activeTab.runtimeModel?.trim() ?? "";
+    const codexReasoningEffort = activeTab.reasoningEffort?.trim() || null;
+    const codexAgentId = activeTab.agentId?.trim() || null;
+    if (runtime === "codex" && !runtimeModel) {
+      set((s) =>
+        applyTabUpdate(s, activeTabId, {
+          error: "Select a Codex model before sending a message.",
+        }),
+      );
+      discardRejectedPrompt(activeTabId);
+      return;
+    }
+    const attemptEpoch = (activeTab.attemptEpoch ?? 0) + 1;
+    const attemptId = nextRuntimeAttemptId(activeTabId);
+    const isCurrentAttempt = () => {
+      const currentTab = get().tabs.find((tab) => tab.id === activeTabId);
+      return (
+        currentTab?.attemptEpoch === attemptEpoch &&
+        currentTab.activeAttemptId === attemptId
+      );
+    };
+    const isCurrentPreflight = () => {
+      const currentTab = get().tabs.find((tab) => tab.id === activeTabId);
+      return (
+        currentTab?.attemptEpoch === attemptEpoch &&
+        currentTab.preflightAttemptEpoch === attemptEpoch &&
+        currentTab.activeAttemptId === attemptId
+      );
+    };
+    const projectIsStable = () => {
+      const currentDocument = useDocumentStore.getState();
+      return (
+        currentDocument.projectRoot === projectPath &&
+        currentDocument.projectGeneration === projectGeneration &&
+        currentDocument.contentGeneration === projectContentGeneration &&
+        !currentDocument.files.some((file) => file.isDirty) &&
+        !currentDocument.isProjectMutating
+      );
+    };
+    const temporaryFilePathsForAttempt = Array.from(
+      new Set([
+        ...(activeTab.pendingTemporaryFilePaths ?? []),
+        ...(contextOverride?.temporaryFilePaths ?? []),
+      ]),
+    );
+    const abortUnstablePreflight = (message?: string) => {
+      if (!isCurrentPreflight()) return;
+      set((current) =>
+        applyTabUpdate(current, activeTabId, {
+          attemptEpoch: attemptEpoch + 1,
+          activeAttemptId: null,
+          preflightAttemptEpoch: null,
+          isStreaming: false,
+          streamingStartedAt: null,
+          pendingTemporaryFilePaths: [],
+          error:
+            message ??
+            "The project changed before the runtime turn could start.",
+        }),
+      );
+      cleanupDiscardedTemporaryFiles(temporaryFilePathsForAttempt);
+    };
+
+    const sessionRef =
+      activeTab.sessionRef?.runtime === runtime &&
+      activeTab.sessionRef.projectPath === projectPath
+        ? activeTab.sessionRef
+        : null;
+    const sessionId = sessionRef?.sessionId ?? null;
+    const { selectedModel, effortLevel, selectedProviderModels } = state;
+    let providerCredentialId: string | null = null;
+    if (runtime === "claude") {
+      const tabSelectedProviderCredentialId =
+        selectedCredentialForProviderKey(activeTab.providerKey) ??
+        state.selectedProviderCredentialId;
+      providerCredentialId =
+        tabSelectedProviderCredentialId &&
+        tabSelectedProviderCredentialId !== CLAUDE_CODE_PROVIDER_ID
+          ? tabSelectedProviderCredentialId
+          : null;
+
+      if (options?.preserveTabProvider && activeTab.providerKey) {
+        const tabProviderCredentialId = providerCredentialIdFromSessionKey(
+          activeTab.providerKey,
+        );
+        if (tabProviderCredentialId === CLAUDE_CODE_PROVIDER_ID) {
+          providerCredentialId = null;
+        } else if (tabProviderCredentialId !== undefined) {
+          providerCredentialId = tabProviderCredentialId;
+        }
+      }
+    }
+
+    const providerModelOverride =
+      runtime === "claude" && providerCredentialId
+        ? selectedProviderModels[providerCredentialId] || null
+        : null;
+    const requestProviderKey =
+      runtime === "claude" ? providerSessionKey(providerCredentialId) : null;
+    const previousProviderKey = activeTab.sessionProviderKey ?? null;
     const providerChanged =
+      runtime === "claude" &&
       !!sessionId &&
       !!previousProviderKey &&
       previousProviderKey !== requestProviderKey;
@@ -798,7 +1247,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       previousProviderKey !== CLAUDE_CODE_PROVIDER_ID;
     const resumeSessionId = switchingDirectProviderToClaudeCode
       ? null
-      : (sessionId ?? null);
+      : sessionId;
 
     const sendStart = performance.now();
     const streamingStartedAt = Date.now();
@@ -846,114 +1295,176 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
 
     set((s) => {
       const currentTab = s.tabs.find((t) => t.id === activeTabId);
-      const temporaryFilePaths = Array.from(
-        new Set([
-          ...(currentTab?.pendingTemporaryFilePaths ?? []),
-          ...(contextOverride?.temporaryFilePaths ?? []),
-        ]),
-      );
       const tabUpdates: Partial<TabState> = {
         messages: [...(currentTab?.messages ?? []), userMessage],
         projectPath,
         sessionId: resumeSessionId,
-        providerKey: requestProviderKey,
-        sessionProviderKey: requestProviderKey,
         isStreaming: true,
         streamingStartedAt,
         error: null,
-        pendingTemporaryFilePaths: temporaryFilePaths,
+        pendingTemporaryFilePaths: temporaryFilePathsForAttempt,
+        attemptEpoch,
+        activeAttemptId: attemptId,
+        preflightAttemptEpoch: attemptEpoch,
+        resumeRequestId: null,
       };
+      if (runtime === "claude") {
+        tabUpdates.providerKey = requestProviderKey;
+        tabUpdates.sessionProviderKey = requestProviderKey;
+      }
       if (tabTitle) tabUpdates.title = tabTitle;
       return {
         ...applyTabUpdate(s, activeTabId, tabUpdates),
         activeProjectPath: projectPath,
-        _cancelledByUser: false,
       };
     });
 
-    // Flush unsaved edits to disk so Claude reads the latest content
-    if (docState.files.some((f) => f.isDirty)) {
-      log.debug("saving dirty files...");
-      await docState.saveAllFiles();
-      log.debug("saveAllFiles done");
-    }
-
-    // Snapshot before Claude edit
-    if (projectPath) {
-      try {
-        log.debug("creating snapshot...");
-        await useHistoryStore
-          .getState()
-          .createSnapshot(projectPath, "[claude] Before Claude edit");
-        log.debug("snapshot done");
-      } catch {
-        /* snapshot failure should not block Claude */
-      }
-    }
-
-    // Build prompt with full context for Claude
-    let prompt = userPrompt;
-    if (activeFile) {
-      const selRange = docState.selectionRange;
-      const selectedText =
-        selRange && activeFile.content
-          ? activeFile.content.slice(selRange.start, selRange.end)
-          : null;
-      let ctx = `[Currently open file: ${activeFile.relativePath}]`;
-      if (contextOverride) {
-        ctx += `\n[Selection: ${contextOverride.label}]`;
-        ctx += `\n[Selected text:\n${contextOverride.selectedText}\n]`;
-      } else if (selectedText && selRange) {
-        const content = activeFile.content ?? "";
-        const startLC = offsetToLineCol(content, selRange.start);
-        const endLC = offsetToLineCol(content, selRange.end);
-        ctx += `\n[Selection: @${activeFile.relativePath}:${startLC.line}:${startLC.col}-${endLC.line}:${endLC.col}]`;
-        ctx += `\n[Selected text:\n${selectedText}\n]`;
-      }
-      prompt = `${ctx}\n\n${userPrompt}`;
-    }
-    if (switchingDirectProviderToClaudeCode) {
-      const priorContext = buildProviderSwitchContext(
-        activeTab?.messages ?? [],
-      );
-      if (priorContext) {
-        prompt = `${priorContext}\n\n${prompt}`;
-      }
-    }
-    log.info("invoking CLI", {
-      promptLength: prompt.length,
-      mode: resumeSessionId ? "resume" : "new",
-    });
-
     try {
-      if (resumeSessionId) {
-        // Resume existing session
-        await invoke("resume_claude_code", {
-          projectPath,
-          sessionId: resumeSessionId,
-          prompt,
-          tabId: activeTabId,
-          model: selectedModel,
-          effortLevel,
-          providerCredentialId,
-          providerModelOverride,
-        });
-      } else {
-        // New session
-        await invoke("execute_claude_code", {
-          projectPath,
-          prompt,
-          tabId: activeTabId,
-          model: selectedModel,
-          effortLevel,
-          providerCredentialId,
-          providerModelOverride,
-        });
+      // Flush unsaved edits to disk so the runtime reads the latest content.
+      if (docState.files.some((f) => f.isDirty)) {
+        log.debug("saving dirty files...");
+        await docState.saveAllFiles();
+        if (!isCurrentPreflight()) return;
+        if (!projectIsStable()) {
+          const currentDocument = useDocumentStore.getState();
+          abortUnstablePreflight(
+            currentDocument.files.some((file) => file.isDirty)
+              ? "Files changed while saving. Send the message again after the latest edits are saved."
+              : undefined,
+          );
+          return;
+        }
+        log.debug("saveAllFiles done");
       }
+
+      // Snapshot before the runtime edits files.
+      if (projectPath) {
+        try {
+          log.debug("creating snapshot...");
+          await useHistoryStore
+            .getState()
+            .createSnapshot(
+              projectPath,
+              runtime === "claude"
+                ? "[claude] Before Claude edit"
+                : "[codex] Before Codex edit",
+            );
+          log.debug("snapshot done");
+        } catch {
+          /* snapshot failure should not block the runtime */
+        }
+        if (!isCurrentPreflight()) return;
+        if (!projectIsStable()) {
+          abortUnstablePreflight();
+          return;
+        }
+      }
+
+      // Build prompt with full context for the selected runtime.
+      let prompt = userPrompt;
+      if (activeFile) {
+        const selRange = docState.selectionRange;
+        const selectedText =
+          selRange && activeFile.content
+            ? activeFile.content.slice(selRange.start, selRange.end)
+            : null;
+        let ctx = `[Currently open file: ${activeFile.relativePath}]`;
+        if (contextOverride) {
+          ctx += `\n[Selection: ${contextOverride.label}]`;
+          ctx += `\n[Selected text:\n${contextOverride.selectedText}\n]`;
+        } else if (selectedText && selRange) {
+          const content = activeFile.content ?? "";
+          const startLC = offsetToLineCol(content, selRange.start);
+          const endLC = offsetToLineCol(content, selRange.end);
+          ctx += `\n[Selection: @${activeFile.relativePath}:${startLC.line}:${startLC.col}-${endLC.line}:${endLC.col}]`;
+          ctx += `\n[Selected text:\n${selectedText}\n]`;
+        }
+        prompt = `${ctx}\n\n${userPrompt}`;
+      }
+      if (switchingDirectProviderToClaudeCode) {
+        const priorContext = buildProviderSwitchContext(
+          activeTab?.messages ?? [],
+        );
+        if (priorContext) {
+          prompt = `${priorContext}\n\n${prompt}`;
+        }
+      }
+      log.info("invoking CLI", {
+        promptLength: prompt.length,
+        mode: resumeSessionId ? "resume" : "new",
+      });
+
+      if (!isCurrentPreflight()) return;
+      if (!projectIsStable()) {
+        abortUnstablePreflight();
+        return;
+      }
+      const startPromise = startRuntimeTurn({
+        runtime,
+        projectPath,
+        tabId: activeTabId,
+        attemptId,
+        sessionId: resumeSessionId,
+        prompt,
+        model: runtime === "claude" ? selectedModel : runtimeModel,
+        reasoningEffort:
+          runtime === "claude" ? effortLevel : codexReasoningEffort,
+        agentId: runtime === "codex" ? codexAgentId : null,
+        providerCredentialId:
+          runtime === "claude" ? providerCredentialId : null,
+        providerModelOverride:
+          runtime === "claude" ? providerModelOverride : null,
+      });
+      pendingRuntimeStarts.set(attemptId, startPromise);
+      try {
+        await startPromise;
+      } finally {
+        if (pendingRuntimeStarts.get(attemptId) === startPromise) {
+          pendingRuntimeStarts.delete(attemptId);
+        }
+      }
+      if (!isCurrentPreflight()) return;
+      if (!projectIsStable()) {
+        await get().cancelExecution(activeTabId);
+        return;
+      }
+      set((current) =>
+        applyTabUpdate(current, activeTabId, {
+          preflightAttemptEpoch: null,
+        }),
+      );
       log.info(
         `sendPrompt complete in ${(performance.now() - sendStart).toFixed(0)}ms`,
       );
     } catch (err: any) {
+      const cancelledAttempt = get()
+        .tabs.find((tab) => tab.id === activeTabId)
+        ?.cancelledAttempts?.find(
+          (cancellation) =>
+            cancellation.attemptId === attemptId &&
+            cancellation.runtime === runtime,
+        );
+      if (cancelledAttempt) {
+        set((current) => {
+          const currentTab = current.tabs.find((tab) => tab.id === activeTabId);
+          if (
+            !(currentTab?.cancelledAttempts ?? []).some(
+              (cancellation) => cancellation.attemptId === attemptId,
+            )
+          ) {
+            return {};
+          }
+          return applyTabUpdate(current, activeTabId, {
+            isStreaming: true,
+            streamingStartedAt:
+              currentTab?.streamingStartedAt ?? streamingStartedAt,
+            error:
+              "Unable to confirm that the runtime stopped. Retry Stop before starting another turn.",
+          });
+        });
+        return;
+      }
+      if (!isCurrentAttempt() || !isCurrentPreflight()) return;
       log.error(
         `sendPrompt failed after ${(performance.now() - sendStart).toFixed(0)}ms`,
         { error: String(err) },
@@ -962,18 +1473,29 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         applyTabUpdate(s, activeTabId, {
           isStreaming: false,
           streamingStartedAt: null,
+          preflightAttemptEpoch: null,
+          activeAttemptId: null,
+          pendingTemporaryFilePaths: [],
           error: err?.message || String(err),
         }),
       );
+      cleanupDiscardedTemporaryFiles(temporaryFilePathsForAttempt);
     }
   },
 
   queueGuidance: (tabId, prompt, contextOverride) => {
     const trimmed = prompt.trim();
-    if (!trimmed) return;
+    const temporaryFilePaths = contextOverride?.temporaryFilePaths ?? [];
+    if (!trimmed) {
+      cleanupDiscardedTemporaryFiles(temporaryFilePaths);
+      return;
+    }
+    let accepted = false;
     set((state) => {
       const tab = state.tabs.find((t) => t.id === tabId);
       if (!tab) return {};
+      if ((tab.cancelledAttempts?.length ?? 0) > 0) return {};
+      accepted = true;
       const queuedGuidance = [
         ...(tab.queuedGuidance ?? []),
         {
@@ -985,6 +1507,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       ];
       return applyTabUpdate(state, tabId, { queuedGuidance });
     });
+    if (!accepted) cleanupDiscardedTemporaryFiles(temporaryFilePaths);
   },
 
   consumeQueuedGuidance: (tabId, guidanceId) => {
@@ -1041,9 +1564,16 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
   },
 
   removeQueuedGuidance: (tabId, guidanceId) => {
+    let discardedTemporaryFilePaths: string[] = [];
     set((state) => {
       const tab = state.tabs.find((t) => t.id === tabId);
       if (!tab) return {};
+      const removedGuidance = (tab.queuedGuidance ?? []).find(
+        (guidance) => guidance.id === guidanceId,
+      );
+      discardedTemporaryFilePaths = [
+        ...(removedGuidance?.contextOverride?.temporaryFilePaths ?? []),
+      ];
       const queuedGuidance = (tab.queuedGuidance ?? []).filter(
         (guidance) => guidance.id !== guidanceId,
       );
@@ -1062,9 +1592,16 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
           : {}),
       });
     });
+    cleanupDiscardedTemporaryFiles(discardedTemporaryFilePaths);
   },
 
   clearQueuedGuidance: (tabId) => {
+    const discardedTemporaryFilePaths =
+      get()
+        .tabs.find((tab) => tab.id === tabId)
+        ?.queuedGuidance?.flatMap(
+          (guidance) => guidance.contextOverride?.temporaryFilePaths ?? [],
+        ) ?? [];
     set((state) =>
       applyTabUpdate(state, tabId, {
         queuedGuidance: [],
@@ -1072,6 +1609,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         forcedQueuedGuidanceId: null,
       }),
     );
+    cleanupDiscardedTemporaryFiles(discardedTemporaryFilePaths);
   },
 
   consumeTemporaryFilePaths: (tabId) => {
@@ -1089,33 +1627,23 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
   forceQueuedGuidanceNow: async (tabId, guidanceId) => {
     const tab = get().tabs.find((t) => t.id === tabId);
     if (!tab?.isStreaming || !(tab.queuedGuidance?.length ?? 0)) return;
+    const cancellation: AttemptCancellation = {
+      attemptId: tab.activeAttemptId ?? "",
+      attemptEpoch: tab.attemptEpoch ?? 0,
+      runtime: tab.runtime,
+      mode: "interrupt",
+    };
+    if (!cancellation.attemptId) return;
+    if ((tab.cancelledAttempts?.length ?? 0) > 0) return;
     const targetId = get().displayQueuedGuidanceInChat(tabId, guidanceId);
     if (!targetId) return;
 
-    set((state) => {
-      const currentTab = state.tabs.find((t) => t.id === tabId);
-      const existingForcedId = currentTab?.forcedQueuedGuidanceId ?? null;
-      const existingForcedStillQueued = (currentTab?.queuedGuidance ?? []).some(
-        (guidance) => guidance.id === existingForcedId,
-      );
-      return applyTabUpdate(state, tabId, {
-        forceQueuedGuidanceOnComplete: true,
-        forcedQueuedGuidanceId: existingForcedStillQueued
-          ? existingForcedId
-          : targetId,
-      });
-    });
-
-    try {
-      const interrupted = await invoke<boolean>("interrupt_claude_execution", {
-        tabId,
-      });
-      if (interrupted) {
-        set({ _cancelledByUser: true });
-      }
-    } catch (err: any) {
+    const rollbackForcedStop = (error?: string) => {
       set((state) => {
-        const currentTab = state.tabs.find((t) => t.id === tabId);
+        const currentTab = state.tabs.find(
+          (candidate) => candidate.id === tabId,
+        );
+        if (currentTab?.attemptEpoch !== cancellation.attemptEpoch) return {};
         const existingForcedId = currentTab?.forcedQueuedGuidanceId ?? null;
         const nextForcedId =
           existingForcedId && existingForcedId !== targetId
@@ -1129,7 +1657,77 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
           ),
           forceQueuedGuidanceOnComplete: nextForcedId !== null,
           forcedQueuedGuidanceId: nextForcedId,
-          error: err?.message || String(err),
+          cancelledAttempts: removeAttemptCancellation(
+            currentTab,
+            cancellation,
+          ),
+          ...(error ? { error } : {}),
+        });
+      });
+    };
+
+    set((state) => {
+      const currentTab = state.tabs.find((t) => t.id === tabId);
+      const existingForcedId = currentTab?.forcedQueuedGuidanceId ?? null;
+      const existingForcedStillQueued = (currentTab?.queuedGuidance ?? []).some(
+        (guidance) => guidance.id === existingForcedId,
+      );
+      return applyTabUpdate(state, tabId, {
+        forceQueuedGuidanceOnComplete: true,
+        forcedQueuedGuidanceId: existingForcedStillQueued
+          ? existingForcedId
+          : targetId,
+        cancelledAttempts: addAttemptCancellation(currentTab, cancellation),
+      });
+    });
+
+    try {
+      let stopped = await interruptRuntimeTurn(
+        tab.runtime,
+        tabId,
+        cancellation.attemptId,
+        "interrupt",
+      );
+      if (!stopped) {
+        const pendingStart = pendingRuntimeStarts.get(cancellation.attemptId);
+        if (pendingStart) {
+          try {
+            await pendingStart;
+          } catch {
+            // The start failed, so there is no runtime turn left to interrupt.
+          }
+          const markerStillExists = (
+            get().tabs.find((candidate) => candidate.id === tabId)
+              ?.cancelledAttempts ?? []
+          ).some((candidate) =>
+            sameAttemptCancellation(candidate, cancellation),
+          );
+          if (!markerStillExists) return;
+          stopped = await interruptRuntimeTurn(
+            tab.runtime,
+            tabId,
+            cancellation.attemptId,
+            "interrupt",
+          );
+        }
+      }
+      if (!stopped) rollbackForcedStop();
+    } catch (err: any) {
+      set((state) => {
+        const currentTab = state.tabs.find(
+          (candidate) => candidate.id === tabId,
+        );
+        if (
+          !(currentTab?.cancelledAttempts ?? []).some((candidate) =>
+            sameAttemptCancellation(candidate, cancellation),
+          )
+        ) {
+          return {};
+        }
+        return applyTabUpdate(state, tabId, {
+          error:
+            err?.message ||
+            "Unable to confirm that the runtime was interrupted.",
         });
       });
     }
@@ -1138,26 +1736,195 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
   cancelExecution: async (tabId) => {
     const activeTabId = tabId ?? get().activeTabId;
     const tab = get().tabs.find((t) => t.id === activeTabId);
-    if (!tab?.isStreaming) return;
-    set({ _cancelledByUser: true });
-    set((s) =>
-      applyTabUpdate(s, activeTabId, {
-        isStreaming: false,
-        streamingStartedAt: null,
-        queuedGuidance: [],
-        forceQueuedGuidanceOnComplete: false,
-        forcedQueuedGuidanceId: null,
-      }),
+    if (!tab) return "not-found";
+    const existingTerminate = (tab.cancelledAttempts ?? []).find(
+      (candidate) =>
+        candidate.runtime === tab.runtime && candidate.mode === "terminate",
     );
+    if (!tab.isStreaming) {
+      return (tab.cancelledAttempts?.length ?? 0) > 0 ? "stopped" : "not-found";
+    }
+    const currentEpoch = tab.attemptEpoch ?? 0;
+    const currentAttemptId =
+      tab.activeAttemptId ?? nextRuntimeAttemptId(activeTabId);
+
+    // Saving and snapshotting are entirely local. Invalidate that preflight
+    // without creating a backend tombstone for a start that was never sent.
+    if (
+      !existingTerminate &&
+      (tab.cancelledAttempts?.length ?? 0) === 0 &&
+      tab.preflightAttemptEpoch === currentEpoch &&
+      !pendingRuntimeStarts.has(currentAttemptId)
+    ) {
+      const temporaryFilePaths = temporaryFilesOwnedByTab(tab);
+      set((state) =>
+        applyTabUpdate(state, activeTabId, {
+          attemptEpoch: currentEpoch + 1,
+          activeAttemptId: null,
+          preflightAttemptEpoch: null,
+          isStreaming: false,
+          streamingStartedAt: null,
+          queuedGuidance: [],
+          forceQueuedGuidanceOnComplete: false,
+          forcedQueuedGuidanceId: null,
+          pendingTemporaryFilePaths: [],
+        }),
+      );
+      cleanupDiscardedTemporaryFiles(temporaryFilePaths);
+      return "not-found";
+    }
+
+    const cancellation: AttemptCancellation = existingTerminate ?? {
+      attemptId: currentAttemptId,
+      attemptEpoch: currentEpoch,
+      runtime: tab.runtime,
+      mode: "terminate",
+      temporaryFilePaths: [...(tab.pendingTemporaryFilePaths ?? [])],
+    };
+    const isRetry = existingTerminate != null;
+    if (!isRetry) {
+      const discardedTemporaryFilePaths = temporaryFilesOwnedByTab(tab);
+      set((state) => {
+        const currentTab = state.tabs.find(
+          (candidate) => candidate.id === activeTabId,
+        );
+        return applyTabUpdate(state, activeTabId, {
+          attemptEpoch: cancellation.attemptEpoch + 1,
+          activeAttemptId: cancellation.attemptId,
+          preflightAttemptEpoch: null,
+          isStreaming: false,
+          streamingStartedAt: null,
+          queuedGuidance: [],
+          forceQueuedGuidanceOnComplete: false,
+          forcedQueuedGuidanceId: null,
+          pendingTemporaryFilePaths: [],
+          cancelledAttempts: addAttemptCancellation(currentTab, cancellation),
+        });
+      });
+      cleanupDiscardedTemporaryFiles(discardedTemporaryFilePaths);
+    }
+
+    const rollbackCancellation = () => {
+      set((state) => {
+        const currentTab = state.tabs.find(
+          (candidate) => candidate.id === activeTabId,
+        );
+        if (
+          currentTab?.attemptEpoch !== cancellation.attemptEpoch + 1 ||
+          !(currentTab.cancelledAttempts ?? []).some((candidate) =>
+            sameAttemptCancellation(candidate, cancellation),
+          )
+        ) {
+          return {};
+        }
+        return applyTabUpdate(state, activeTabId, {
+          cancelledAttempts: removeAttemptCancellation(
+            currentTab,
+            cancellation,
+          ),
+          isStreaming: false,
+          streamingStartedAt: null,
+        });
+      });
+    };
     try {
-      await invoke("cancel_claude_execution", { tabId: activeTabId });
+      let stopped = await interruptRuntimeTurn(
+        tab.runtime,
+        activeTabId,
+        cancellation.attemptId,
+        "terminate",
+      );
+      if (!stopped) {
+        const pendingStart = pendingRuntimeStarts.get(cancellation.attemptId);
+        if (pendingStart) {
+          try {
+            await pendingStart;
+          } catch {
+            // The failed start leaves nothing for the retry to terminate.
+          }
+          const markerStillExists = (
+            get().tabs.find((candidate) => candidate.id === activeTabId)
+              ?.cancelledAttempts ?? []
+          ).some((candidate) =>
+            sameAttemptCancellation(candidate, cancellation),
+          );
+          if (!markerStillExists) return "stopped";
+          stopped = await interruptRuntimeTurn(
+            tab.runtime,
+            activeTabId,
+            cancellation.attemptId,
+            "terminate",
+          );
+        }
+      }
+      if (!stopped) {
+        // Give a terminal event already queued by Tauri one microtask to
+        // consume its provisional marker before treating false as definitive.
+        await Promise.resolve();
+        const markerStillExists = (
+          get().tabs.find((candidate) => candidate.id === activeTabId)
+            ?.cancelledAttempts ?? []
+        ).some((candidate) => sameAttemptCancellation(candidate, cancellation));
+        if (!markerStillExists) return "stopped";
+        rollbackCancellation();
+        cleanupDiscardedTemporaryFiles(cancellation.temporaryFilePaths ?? []);
+        return "not-found";
+      }
+      set((state) => {
+        const currentTab = state.tabs.find(
+          (candidate) => candidate.id === activeTabId,
+        );
+        if (
+          !(currentTab?.cancelledAttempts ?? []).some((candidate) =>
+            sameAttemptCancellation(candidate, cancellation),
+          )
+        ) {
+          return {};
+        }
+        return applyTabUpdate(state, activeTabId, {
+          isStreaming: false,
+          streamingStartedAt: null,
+        });
+      });
+      return "stopped";
     } catch {
-      // The UI has already moved to a stopped state; stale output is ignored.
+      const message =
+        "Unable to confirm that the runtime stopped. Waiting for terminal completion before allowing another turn.";
+      set((state) => {
+        const currentTab = state.tabs.find(
+          (candidate) => candidate.id === activeTabId,
+        );
+        if (
+          !(currentTab?.cancelledAttempts ?? []).some((candidate) =>
+            sameAttemptCancellation(candidate, cancellation),
+          )
+        ) {
+          return {};
+        }
+        return applyTabUpdate(state, activeTabId, {
+          isStreaming: true,
+          streamingStartedAt:
+            currentTab?.streamingStartedAt ??
+            tab.streamingStartedAt ??
+            Date.now(),
+          error: message,
+        });
+      });
+      return "uncertain";
     }
   },
 
   clearMessages: () => {
-    const { activeTabId } = get();
+    const { activeTabId, tabs } = get();
+    const tab = tabs.find((candidate) => candidate.id === activeTabId);
+    const isBusy =
+      tab?.isStreaming || (tab?.cancelledAttempts?.length ?? 0) > 0;
+    const discardedTemporaryFilePaths = [
+      ...(tab?.queuedGuidance ?? []).flatMap(
+        (guidance) => guidance.contextOverride?.temporaryFilePaths ?? [],
+      ),
+      ...(!isBusy ? (tab?.pendingTemporaryFilePaths ?? []) : []),
+    ];
     set((s) =>
       applyTabUpdate(s, activeTabId, {
         messages: [],
@@ -1168,27 +1935,67 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
         forcedQueuedGuidanceId: null,
+        resumeRequestId: null,
+        ...(!isBusy ? { pendingTemporaryFilePaths: [] } : {}),
       }),
     );
+    cleanupDiscardedTemporaryFiles(discardedTemporaryFilePaths);
   },
 
   resetForProject: (projectPath) => {
     const state = get();
+    if (
+      state.tabs.some(
+        (tab) => tab.isStreaming || (tab.cancelledAttempts?.length ?? 0) > 0,
+      )
+    ) {
+      return "blocked-stopping";
+    }
     const tabsAlreadyScoped =
       state.activeProjectPath === projectPath &&
       state.tabs.every((tab) => tab.projectPath === projectPath);
-    if (tabsAlreadyScoped) return;
+    if (tabsAlreadyScoped) return "unchanged";
+    const discardedTemporaryFilePaths = state.tabs.flatMap((tab) =>
+      temporaryFilesOwnedByTab(tab),
+    );
 
-    const id = nextTabId();
-    const tab = makeDefaultTab(id, projectPath);
+    const persisted = projectPath
+      ? readPersistedChatForProject(projectPath)
+      : null;
+    const restoredTabs = (persisted?.tabs ?? []).filter(
+      (tab) => tab.projectPath === projectPath,
+    ) as TabState[];
+    const restoredActiveTabId = restoredTabs.find(
+      (tab) => tab.id === persisted?.activeTabId,
+    )?.id;
+    const fallbackTab = makeDefaultTab(nextTabId(), projectPath);
+    const tabs = (restoredTabs.length > 0 ? restoredTabs : [fallbackTab]).map(
+      (restoredTab) => {
+        const previousAttemptEpoch =
+          state.tabs.find((candidate) => candidate.id === restoredTab.id)
+            ?.attemptEpoch ?? 0;
+        return {
+          ...restoredTab,
+          attemptEpoch:
+            Math.max(previousAttemptEpoch, restoredTab.attemptEpoch ?? 0) + 1,
+          activeAttemptId: null,
+          preflightAttemptEpoch: null,
+          resumeRequestId: null,
+          cancelledAttempts: [],
+        };
+      },
+    );
+    const tab =
+      tabs.find((candidate) => candidate.id === restoredActiveTabId) ?? tabs[0];
+    reseedTabCounter(tabs);
     const nextSelectedProviderCredentialId =
       selectedCredentialForProviderKey(tab.providerKey) ??
       CLAUDE_CODE_PROVIDER_ID;
     persistSelectedProviderCredentialId(nextSelectedProviderCredentialId);
 
     set({
-      tabs: [tab],
-      activeTabId: id,
+      tabs,
+      activeTabId: tab.id,
       activeProjectPath: projectPath,
       messages: tab.messages,
       sessionId: tab.sessionId,
@@ -1200,8 +2007,9 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       pendingAttachments: [],
       pendingPinnedContextRemovalLabels: [],
       selectedProviderCredentialId: nextSelectedProviderCredentialId,
-      _cancelledByUser: false,
     });
+    cleanupDiscardedTemporaryFiles(discardedTemporaryFilePaths);
+    return "reset";
   },
 
   newSession: () => {
@@ -1212,7 +2020,10 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       get().activeProjectPath ??
       useDocumentStore.getState().projectRoot ??
       null;
-    if (activeTab?.isStreaming) {
+    if (
+      activeTab &&
+      (activeTab.isStreaming || (activeTab.cancelledAttempts?.length ?? 0) > 0)
+    ) {
       const id = nextTabId();
       const newTab = {
         ...makeDefaultTab(id, projectPath),
@@ -1238,6 +2049,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       return;
     }
 
+    const discardedTemporaryFilePaths = temporaryFilesOwnedByTab(activeTab);
     set((s) => ({
       ...applyTabUpdate(s, activeTabId, {
         messages: [],
@@ -1256,38 +2068,103 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
         forcedQueuedGuidanceId: null,
+        pendingTemporaryFilePaths: [],
+        attemptEpoch: (activeTab?.attemptEpoch ?? 0) + 1,
+        activeAttemptId: null,
+        preflightAttemptEpoch: null,
+        resumeRequestId: null,
       }),
       activeProjectPath: projectPath,
     }));
+    cleanupDiscardedTemporaryFiles(discardedTemporaryFilePaths);
   },
 
-  resumeSession: async (sessionId: string, title?: string) => {
-    log.info(`Resuming session: ${sessionId.slice(0, 8)}`);
+  changeTabRuntime: (tabId, nextRuntime, options) => {
+    const state = get();
+    const tab = state.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab) return "not-found";
+    if (tab.runtime === nextRuntime) return "unchanged";
+    if (tab.isStreaming) return "blocked-streaming";
+    if ((tab.cancelledAttempts?.length ?? 0) > 0) return "blocked-stopping";
+    if (
+      (tab.sessionRef !== null || tab.sessionId !== null) &&
+      !options?.confirmSessionReset
+    ) {
+      return "confirmation-required";
+    }
+    const discardedTemporaryFilePaths = temporaryFilesOwnedByTab(tab);
+
+    set((current) => ({
+      ...applyTabUpdate(current, tabId, {
+        runtime: nextRuntime,
+        sessionRef: null,
+        sessionId: null,
+        runtimeModel: null,
+        reasoningEffort: null,
+        agentId: null,
+        sessionProviderKey: null,
+        messages: [],
+        isStreaming: false,
+        streamingStartedAt: null,
+        error: null,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        title: "New Chat",
+        queuedGuidance: [],
+        forceQueuedGuidanceOnComplete: false,
+        forcedQueuedGuidanceId: null,
+        pendingTemporaryFilePaths: [],
+        attemptEpoch: (tab.attemptEpoch ?? 0) + 1,
+        activeAttemptId: null,
+        preflightAttemptEpoch: null,
+        resumeRequestId: null,
+      }),
+    }));
+    cleanupDiscardedTemporaryFiles(discardedTemporaryFilePaths);
+    return "changed";
+  },
+
+  resumeConversation: async (reference, title) => {
+    log.info(`Resuming ${reference.runtime} session`, {
+      session: reference.sessionId.slice(0, 8),
+    });
     const sessionTitle = title?.trim() || undefined;
     const projectPath = useDocumentStore.getState().projectRoot;
+    if (
+      !projectPath ||
+      projectPath !== reference.projectPath ||
+      !reference.sessionId.trim()
+    ) {
+      return;
+    }
     const state = get();
     let { activeTabId } = state;
     let { tabs } = state;
+    const isBusy = (tab: TabState) =>
+      tab.isStreaming || (tab.cancelledAttempts?.length ?? 0) > 0;
     const existingTab = tabs.find(
-      (tab) => tab.sessionId === sessionId && tab.projectPath === projectPath,
+      (tab) =>
+        tab.runtime === reference.runtime &&
+        tab.projectPath === reference.projectPath &&
+        tab.sessionId === reference.sessionId &&
+        sameConversationReference(tab.sessionRef, reference),
     );
 
     if (existingTab) {
-      const nextTitle = sessionTitle ?? existingTab.title;
       activeTabId = existingTab.id;
-      const nextTabs = tabs.map((tab) =>
-        tab.id === existingTab.id ? { ...tab, title: nextTitle } : tab,
-      );
       const nextSelectedProviderCredentialId =
-        selectedCredentialForProviderKey(existingTab.providerKey) ??
-        CLAUDE_CODE_PROVIDER_ID;
-      persistSelectedProviderCredentialId(nextSelectedProviderCredentialId);
+        reference.runtime === "claude"
+          ? (selectedCredentialForProviderKey(existingTab.providerKey) ??
+            CLAUDE_CODE_PROVIDER_ID)
+          : state.selectedProviderCredentialId;
+      if (reference.runtime === "claude") {
+        persistSelectedProviderCredentialId(nextSelectedProviderCredentialId);
+      }
       set({
-        tabs: nextTabs,
         activeTabId: existingTab.id,
-        activeProjectPath: projectPath ?? existingTab.projectPath,
+        activeProjectPath: reference.projectPath,
         messages: existingTab.messages,
-        sessionId: existingTab.sessionId,
+        sessionId: existingTab.sessionRef?.sessionId ?? null,
         isStreaming: existingTab.isStreaming,
         streamingStartedAt: existingTab.streamingStartedAt,
         error: existingTab.error,
@@ -1295,13 +2172,13 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         totalOutputTokens: existingTab.totalOutputTokens,
         selectedProviderCredentialId: nextSelectedProviderCredentialId,
       });
-      if (existingTab.isStreaming) return;
+      if (isBusy(existingTab)) return;
     } else {
       const activeTab = tabs.find((tab) => tab.id === activeTabId);
-      if (activeTab?.isStreaming) {
+      if (activeTab && isBusy(activeTab)) {
         const id = nextTabId();
         const newTab = {
-          ...makeDefaultTab(id, projectPath ?? state.activeProjectPath),
+          ...makeDefaultTab(id, reference.projectPath),
           providerKey:
             activeTab.providerKey ??
             providerKeyForSelectedCredential(
@@ -1313,7 +2190,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         set({
           tabs,
           activeTabId,
-          activeProjectPath: projectPath ?? newTab.projectPath,
+          activeProjectPath: reference.projectPath,
           messages: newTab.messages,
           sessionId: newTab.sessionId,
           isStreaming: newTab.isStreaming,
@@ -1328,12 +2205,21 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       }
     }
 
-    // Reset state with new session ID
+    const targetTab = get().tabs.find((tab) => tab.id === activeTabId);
+    if (!targetTab || isBusy(targetTab)) return;
+    const resumeRequestId = nextResumeRequestId(activeTabId);
+    const discardedTemporaryFilePaths = temporaryFilesOwnedByTab(targetTab);
+
     set((s) => ({
       ...applyTabUpdate(s, activeTabId, {
         messages: [],
-        projectPath: projectPath ?? null,
-        sessionId,
+        projectPath: reference.projectPath,
+        runtime: reference.runtime,
+        sessionRef: { ...reference },
+        sessionId: reference.sessionId,
+        runtimeModel: null,
+        reasoningEffort: null,
+        agentId: null,
         providerKey: null,
         sessionProviderKey: null,
         error: null,
@@ -1345,60 +2231,121 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
         forcedQueuedGuidanceId: null,
+        pendingTemporaryFilePaths: [],
+        attemptEpoch: (targetTab.attemptEpoch ?? 0) + 1,
+        activeAttemptId: null,
+        preflightAttemptEpoch: null,
+        resumeRequestId,
       }),
-      activeProjectPath: projectPath ?? null,
+      activeProjectPath: reference.projectPath,
     }));
+    cleanupDiscardedTemporaryFiles(discardedTemporaryFilePaths);
 
-    // Load session history from JSONL file
-    if (projectPath) {
-      try {
-        const history = await invoke<any[]>("load_session_history", {
-          projectPath,
-          sessionId,
-        });
+    const ownsHistoryRequest = (current: ClaudeChatState) => {
+      const tab = current.tabs.find(
+        (candidate) => candidate.id === activeTabId,
+      );
+      return (
+        useDocumentStore.getState().projectRoot === reference.projectPath &&
+        current.activeProjectPath === reference.projectPath &&
+        tab?.projectPath === reference.projectPath &&
+        tab.runtime === reference.runtime &&
+        tab.sessionId === reference.sessionId &&
+        sameConversationReference(tab.sessionRef, reference) &&
+        tab.resumeRequestId === resumeRequestId &&
+        !tab.isStreaming &&
+        (tab.cancelledAttempts?.length ?? 0) === 0 &&
+        tab.activeAttemptId == null
+      );
+    };
 
-        // Filter to displayable message types and map to ClaudeStreamMessage
-        const rawMessages: ClaudeStreamMessage[] = [];
-        for (const entry of history) {
-          const type = entry.type;
-          if (type === "user" || type === "assistant" || type === "result") {
-            rawMessages.push(entry as ClaudeStreamMessage);
-          }
-        }
+    try {
+      const history = await runtimeReadConversation(reference);
+      if (!ownsHistoryRequest(get())) return;
+      if (!sameConversationReference(history.reference, reference)) {
+        set((s) =>
+          ownsHistoryRequest(s)
+            ? applyTabUpdate(s, activeTabId, { resumeRequestId: null })
+            : {},
+        );
+        return;
+      }
 
-        const messages = rawMessages.map(sanitizeStoredUserMessageForDisplay);
-        const totals = usageTotalsForMessages(messages);
-        const providerKey = inferProviderKeyFromHistory(history);
+      const messages = conversationHistoryMessages(
+        reference.runtime,
+        history.items,
+      );
+      const titleMessages =
+        reference.runtime === "claude"
+          ? claudeHistoryMessages(history.items)
+          : messages;
+      const totals = usageTotalsForMessages(messages);
+      const providerKey =
+        reference.runtime === "claude"
+          ? inferProviderKeyFromHistory(history.items)
+          : null;
+      let nextSelectedProviderCredentialId: string | null =
+        CLAUDE_CODE_PROVIDER_ID;
+      if (reference.runtime === "claude") {
         const selectedProviderCredentialId =
           providerCredentialIdFromSessionKey(providerKey);
-        const nextSelectedProviderCredentialId =
+        nextSelectedProviderCredentialId =
           selectedProviderCredentialId === undefined
             ? CLAUDE_CODE_PROVIDER_ID
             : selectedProviderCredentialId;
-        persistSelectedProviderCredentialId(nextSelectedProviderCredentialId);
-        set((s) => ({
-          ...applyTabUpdate(s, activeTabId, {
-            messages,
-            providerKey:
-              providerKey ??
-              providerKeyForSelectedCredential(
-                nextSelectedProviderCredentialId,
-              ),
-            sessionProviderKey:
-              providerKey ??
-              providerKeyForSelectedCredential(
-                nextSelectedProviderCredentialId,
-              ),
-            title: sessionTitle ?? titleForMessages(rawMessages) ?? "New Chat",
-            totalInputTokens: totals.inputTokens,
-            totalOutputTokens: totals.outputTokens,
-          }),
-          selectedProviderCredentialId: nextSelectedProviderCredentialId,
-        }));
-      } catch (err) {
-        log.error("Failed to load session history", { error: String(err) });
+        if (get().activeTabId === activeTabId) {
+          persistSelectedProviderCredentialId(nextSelectedProviderCredentialId);
+        }
       }
+      set((s) => {
+        if (!ownsHistoryRequest(s)) return {};
+        const runtimeUpdates: Partial<TabState> =
+          reference.runtime === "claude"
+            ? {
+                providerKey:
+                  providerKey ??
+                  providerKeyForSelectedCredential(
+                    nextSelectedProviderCredentialId,
+                  ),
+                sessionProviderKey:
+                  providerKey ??
+                  providerKeyForSelectedCredential(
+                    nextSelectedProviderCredentialId,
+                  ),
+              }
+            : {};
+        const nextState = applyTabUpdate(s, activeTabId, {
+          messages,
+          ...runtimeUpdates,
+          title: sessionTitle ?? titleForMessages(titleMessages) ?? "New Chat",
+          totalInputTokens: totals.inputTokens,
+          totalOutputTokens: totals.outputTokens,
+          resumeRequestId: null,
+        });
+        return reference.runtime === "claude" && s.activeTabId === activeTabId
+          ? {
+              ...nextState,
+              selectedProviderCredentialId: nextSelectedProviderCredentialId,
+            }
+          : nextState;
+      });
+    } catch (err) {
+      log.error("Failed to load session history", { error: String(err) });
+      set((s) =>
+        ownsHistoryRequest(s)
+          ? applyTabUpdate(s, activeTabId, { resumeRequestId: null })
+          : {},
+      );
     }
+  },
+
+  resumeSession: async (sessionId, title) => {
+    const projectPath = useDocumentStore.getState().projectRoot;
+    if (!projectPath) return;
+    await get().resumeConversation(
+      { runtime: "claude", sessionId, projectPath },
+      title,
+    );
   },
 
   // ─── Tab Actions ───
@@ -1440,13 +2387,14 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
   closeTab: (tabId: string) => {
     const state = get();
     const tab = state.tabs.find((t) => t.id === tabId);
-    // Prevent closing a streaming tab
-    if (tab?.isStreaming) return;
+    // Prevent closing a streaming or stopping tab.
+    if (tab?.isStreaming || (tab?.cancelledAttempts?.length ?? 0) > 0) return;
     // Prevent closing the last tab
     if (state.tabs.length <= 1) return;
 
     const idx = state.tabs.findIndex((t) => t.id === tabId);
     if (idx === -1) return;
+    const discardedTemporaryFilePaths = temporaryFilesOwnedByTab(tab);
 
     const newTabs = state.tabs.filter((t) => t.id !== tabId);
 
@@ -1475,6 +2423,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     } else {
       set({ tabs: newTabs });
     }
+    cleanupDiscardedTemporaryFiles(discardedTemporaryFilePaths);
   },
 
   setActiveTab: (tabId: string) => {
@@ -1543,8 +2492,18 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       if (msg.type === "assistant" && msg.subtype === "streaming_final") {
         const last = tab.messages[tab.messages.length - 1];
         if (last?.type === "assistant" && last.subtype === "streaming_delta") {
+          const finalized: ClaudeStreamMessage = {
+            ...msg,
+            message: {
+              ...msg.message,
+              content: finalizeStreamingContent(
+                last.message?.content ?? [],
+                msg.message?.content ?? [],
+              ),
+            },
+          };
           return applyTabUpdate(state, tabId, {
-            messages: [...tab.messages.slice(0, -1), msg],
+            messages: [...tab.messages.slice(0, -1), finalized],
             totalInputTokens: tab.totalInputTokens + inputDelta,
             totalOutputTokens: tab.totalOutputTokens + outputDelta,
           });
@@ -1560,7 +2519,18 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
   },
 
   _setSessionId: (tabId: string, id: string) => {
-    set((state) => applyTabUpdate(state, tabId, { sessionId: id }));
+    set((state) => {
+      const tab = state.tabs.find((candidate) => candidate.id === tabId);
+      if (!tab?.projectPath) return {};
+      return applyTabUpdate(state, tabId, {
+        sessionId: id,
+        sessionRef: {
+          runtime: tab.runtime,
+          sessionId: id,
+          projectPath: tab.projectPath,
+        },
+      });
+    });
   },
 
   _setSessionTitle: (sessionId: string, title: string) => {
@@ -1591,4 +2561,61 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
   _setError: (tabId: string, error: string | null) => {
     set((state) => applyTabUpdate(state, tabId, { error }));
   },
+
+  _addUsage: (tabId: string, inputTokens: number, outputTokens: number) => {
+    set((state) => {
+      const tab = state.tabs.find((candidate) => candidate.id === tabId);
+      if (!tab) return {};
+      return applyTabUpdate(state, tabId, {
+        totalInputTokens: tab.totalInputTokens + inputTokens,
+        totalOutputTokens: tab.totalOutputTokens + outputTokens,
+      });
+    });
+  },
+
+  _consumeAttemptCancellation: (tabId: string, attemptId: string) => {
+    let consumed: AttemptCancellation | null = null;
+    set((state) => {
+      const tab = state.tabs.find((candidate) => candidate.id === tabId);
+      const cancellations = tab?.cancelledAttempts ?? [];
+      const next = cancellations.find(
+        (candidate) => candidate.attemptId === attemptId,
+      );
+      if (!next) return {};
+      consumed = next;
+      return applyTabUpdate(state, tabId, {
+        cancelledAttempts: cancellations.filter(
+          (candidate) => candidate.attemptId !== attemptId,
+        ),
+      });
+    });
+    pendingRuntimeStarts.delete(attemptId);
+    return consumed;
+  },
+
+  _cleanupTemporaryFilePaths: (paths: string[]) => {
+    cleanupDiscardedTemporaryFiles(paths);
+  },
 }));
+
+useClaudeChatStore.subscribe((state, previousState) => {
+  const projectPath = state.activeProjectPath;
+  if (projectPath === null) return;
+  const tabs = state.tabs.filter((tab) => tab.projectPath === projectPath);
+  if (tabs.length === 0) return;
+  const projected = projectPersistedChat({
+    activeTabId: state.activeTabId,
+    tabs,
+  });
+  const previousTabs = previousState.tabs.filter(
+    (tab) => tab.projectPath === projectPath,
+  );
+  if (previousTabs.length > 0) {
+    const previousProjected = projectPersistedChat({
+      activeTabId: previousState.activeTabId,
+      tabs: previousTabs,
+    });
+    if (JSON.stringify(projected) === JSON.stringify(previousProjected)) return;
+  }
+  writePersistedChatForProject(projectPath, projected);
+});

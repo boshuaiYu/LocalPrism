@@ -53,11 +53,9 @@ import {
   type PromptContextOverride,
 } from "@/stores/claude-chat-store";
 import { useHistoryStore, type FileDiff } from "@/stores/history-store";
-import {
-  compileLatex,
-  resolveCompileTarget,
-  formatCompileError,
-} from "@/lib/latex-compiler";
+import { resolveCompileTarget } from "@/lib/latex-compiler";
+import { runOwnedProjectCompile } from "@/lib/project-compile";
+import { completeProposedChangeAction } from "@/lib/proposed-change-resolution";
 import { useSettingsStore } from "@/stores/settings-store";
 import { EditorToolbar } from "./editor-toolbar";
 import { SelectionToolbar, type ToolbarAction } from "./selection-toolbar";
@@ -112,16 +110,12 @@ export function LatexEditor() {
   const files = useDocumentStore((s) => s.files);
   const activeFileId = useDocumentStore((s) => s.activeFileId);
   const projectRoot = useDocumentStore((s) => s.projectRoot);
+  const isProjectMutating = useDocumentStore((s) => s.isProjectMutating);
   const setContent = useDocumentStore((s) => s.setContent);
   const setCursorPosition = useDocumentStore((s) => s.setCursorPosition);
   const setSelectionRange = useDocumentStore((s) => s.setSelectionRange);
   const jumpToPosition = useDocumentStore((s) => s.jumpToPosition);
   const clearJumpRequest = useDocumentStore((s) => s.clearJumpRequest);
-
-  const setIsCompiling = useDocumentStore((s) => s.setIsCompiling);
-  const setPdfData = useDocumentStore((s) => s.setPdfData);
-  const setCompileError = useDocumentStore((s) => s.setCompileError);
-  const saveAllFiles = useDocumentStore((s) => s.saveAllFiles);
 
   const activeFile = files.find((f) => f.id === activeFileId);
   const isTextFile =
@@ -173,8 +167,10 @@ export function LatexEditor() {
   const themeCompartmentRef = useRef(new Compartment());
   const mergeCompartmentRef = useRef(new Compartment());
   const vimCompartmentRef = useRef(new Compartment());
+  const mutationCompartmentRef = useRef(new Compartment());
   const isMergeActiveRef = useRef(false);
   const pendingChangeRef = useRef<ProposedChange | null>(null);
+  const resolvingChangeRef = useRef<ProposedChange | null>(null);
   const handleKeepAllRef = useRef<() => void>(() => {});
   const handleUndoAllRef = useRef<() => void>(() => {});
   const diagnosticsRef = useRef<DiagnosticItem[]>([]);
@@ -193,28 +189,61 @@ export function LatexEditor() {
     );
   }, [proposedChanges, activeFile]);
 
+  const navigateToNextPendingChange = () => {
+    const remaining = useProposedChangesStore.getState().changes;
+    if (remaining.length === 0) return;
+    const docStore = useDocumentStore.getState();
+    const nextFile = remaining.find((change) =>
+      docStore.files.some((file) => file.relativePath === change.filePath),
+    );
+    if (nextFile) docStore.setActiveFile(nextFile.filePath);
+  };
+
+  const completeEditorChange = (
+    change: ProposedChange,
+    action: () => Promise<boolean>,
+    onResolved: () => void,
+  ) => {
+    if (resolvingChangeRef.current) return;
+    resolvingChangeRef.current = change;
+    void completeProposedChangeAction({
+      action,
+      isCurrent: () => pendingChangeRef.current === change,
+      onResolved,
+      onRejected: (error) => {
+        log.error("Failed to persist proposed change resolution", {
+          changeId: change.id,
+          error: String(error),
+        });
+      },
+    }).finally(() => {
+      if (resolvingChangeRef.current === change) {
+        resolvingChangeRef.current = null;
+      }
+    });
+  };
+
   // Keep all changes (⌘Y)
   handleKeepAllRef.current = () => {
     const view = viewRef.current;
     const change = pendingChangeRef.current;
     if (!view || !change) return;
-    isMergeActiveRef.current = false;
-    setMergeChunkInfo({ total: 0, current: 0 });
-    view.dispatch({ effects: mergeCompartmentRef.current.reconfigure([]) });
-    setContent(change.newContent);
-    useProposedChangesStore.getState().keepChange(change.id);
-    pendingChangeRef.current = null;
-    // Auto-navigate to next file with pending changes (only if file exists)
-    const remaining = useProposedChangesStore.getState().changes;
-    if (remaining.length > 0) {
-      const docStore = useDocumentStore.getState();
-      const nextFile = remaining.find((c) =>
-        docStore.files.some((f) => f.relativePath === c.filePath),
-      );
-      if (nextFile) {
-        docStore.setActiveFile(nextFile.filePath);
-      }
-    }
+    completeEditorChange(
+      change,
+      () =>
+        useProposedChangesStore
+          .getState()
+          .keepChange(change.id, change.newContent),
+      () => {
+        isMergeActiveRef.current = false;
+        setMergeChunkInfo({ total: 0, current: 0 });
+        view.dispatch({
+          effects: mergeCompartmentRef.current.reconfigure([]),
+        });
+        pendingChangeRef.current = null;
+        navigateToNextPendingChange();
+      },
+    );
   };
 
   // Undo all changes (⌘N)
@@ -222,31 +251,25 @@ export function LatexEditor() {
     const view = viewRef.current;
     const change = pendingChangeRef.current;
     if (!view || !change) return;
-    isMergeActiveRef.current = false;
-    setMergeChunkInfo({ total: 0, current: 0 });
-    view.dispatch({ effects: mergeCompartmentRef.current.reconfigure([]) });
-    view.dispatch({
-      changes: {
-        from: 0,
-        to: view.state.doc.length,
-        insert: change.oldContent,
+    completeEditorChange(
+      change,
+      () => useProposedChangesStore.getState().undoChange(change.id),
+      () => {
+        setMergeChunkInfo({ total: 0, current: 0 });
+        view.dispatch({
+          changes: {
+            from: 0,
+            to: view.state.doc.length,
+            insert: change.oldContent,
+          },
+          effects: mergeCompartmentRef.current.reconfigure([]),
+          annotations: Transaction.addToHistory.of(false),
+        });
+        isMergeActiveRef.current = false;
+        pendingChangeRef.current = null;
+        navigateToNextPendingChange();
       },
-      annotations: Transaction.addToHistory.of(false),
-    });
-    setContent(change.oldContent);
-    useProposedChangesStore.getState().undoChange(change.id);
-    pendingChangeRef.current = null;
-    // Auto-navigate to next file with pending changes (only if file exists)
-    const remaining = useProposedChangesStore.getState().changes;
-    if (remaining.length > 0) {
-      const docStore = useDocumentStore.getState();
-      const nextFile = remaining.find((c) =>
-        docStore.files.some((f) => f.relativePath === c.filePath),
-      );
-      if (nextFile) {
-        docStore.setActiveFile(nextFile.filePath);
-      }
-    }
+    );
   };
 
   // Navigate to a specific chunk by index
@@ -270,22 +293,25 @@ export function LatexEditor() {
       // All chunks resolved — clean up merge view
       const change = pendingChangeRef.current;
       if (change) {
-        isMergeActiveRef.current = false;
-        setMergeChunkInfo({ total: 0, current: 0 });
         const finalContent = view.state.doc.toString();
-        view.dispatch({ effects: mergeCompartmentRef.current.reconfigure([]) });
-        setContent(finalContent);
-        if (finalContent === change.oldContent) {
-          useProposedChangesStore.getState().undoChange(change.id);
-        } else {
-          useProposedChangesStore.getState().keepChange(change.id);
-        }
-        pendingChangeRef.current = null;
-        // Auto-navigate to next file with pending changes
-        const pendingChanges = useProposedChangesStore.getState().changes;
-        if (pendingChanges.length > 0) {
-          useDocumentStore.getState().setActiveFile(pendingChanges[0].filePath);
-        }
+        completeEditorChange(
+          change,
+          () =>
+            finalContent === change.oldContent
+              ? useProposedChangesStore.getState().undoChange(change.id)
+              : useProposedChangesStore
+                  .getState()
+                  .keepChange(change.id, finalContent),
+          () => {
+            isMergeActiveRef.current = false;
+            setMergeChunkInfo({ total: 0, current: 0 });
+            view.dispatch({
+              effects: mergeCompartmentRef.current.reconfigure([]),
+            });
+            pendingChangeRef.current = null;
+            navigateToNextPendingChange();
+          },
+        );
       }
     } else {
       // Focus the next remaining chunk
@@ -381,52 +407,40 @@ export function LatexEditor() {
   // Compile: save all files first, then compile via Tauri command
   compileRef.current = async () => {
     const state = useDocumentStore.getState();
-    if (!projectRoot || activeFile?.type !== "tex") return;
-    if (state.isCompiling) {
-      // Queue a recompile after the current one finishes
-      state.setPendingRecompile(true);
-      return;
-    }
-    const { files: allFiles } = state;
-    const resolved = resolveCompileTarget(activeFile.id, allFiles);
+    if (!state.projectRoot || state.isProjectMutating) return;
+    const activeEntry = state.files.find(
+      (file) => file.id === state.activeFileId,
+    );
+    if (!activeEntry || activeEntry.type !== "tex") return;
+    const resolved = resolveCompileTarget(activeEntry.id, state.files);
     if (!resolved) {
-      setCompileError(
+      state.setCompileError(
         "No .tex file found in this project. Create a main.tex file to compile.",
-        activeFile.id,
+        activeEntry.id,
       );
       return;
     }
     const { rootId, targetPath } = resolved;
+    const owner = {
+      projectRoot: state.projectRoot,
+      projectGeneration: state.projectGeneration,
+    };
     useHistoryStore.getState().stopReview();
-    setIsCompiling(true);
-    state.setPendingRecompile(false);
-    const compileStart = Date.now();
-    try {
-      await saveAllFiles();
-      // Pre-compile snapshot (fire-and-forget to avoid blocking compilation start)
-      useHistoryStore
-        .getState()
-        .createSnapshot(projectRoot, "[compile] Pre-compile")
-        .catch(() => {});
-      const useTexlive =
-        useSettingsStore.getState().compilerBackend === "texlive";
-      const data = await compileLatex(projectRoot, targetPath, useTexlive);
-      setPdfData(data, rootId);
-    } catch (error) {
-      setCompileError(formatCompileError(error), rootId);
-    } finally {
-      // Ensure the spinner is visible for at least 500ms for visual feedback
-      const elapsed = Date.now() - compileStart;
-      if (elapsed < 500) {
-        await new Promise((r) => setTimeout(r, 500 - elapsed));
-      }
-      setIsCompiling(false);
-      // If a recompile was requested while we were compiling, trigger it now
-      // Use setTimeout to avoid unbounded recursion on the call stack
-      if (useDocumentStore.getState().pendingRecompile) {
-        setTimeout(() => compileRef.current?.(), 0);
-      }
-    }
+    await runOwnedProjectCompile({
+      owner,
+      rootFileId: rootId,
+      targetPath,
+      useTexlive: useSettingsStore.getState().compilerBackend === "texlive",
+      beforeCompile: async () => {
+        try {
+          await useHistoryStore
+            .getState()
+            .createSnapshot(owner.projectRoot, "[compile] Pre-compile");
+        } catch {
+          // Snapshot failure should not prevent compilation.
+        }
+      },
+    });
   };
 
   useEffect(() => {
@@ -460,26 +474,25 @@ export function LatexEditor() {
                 if (!v || !isMergeActiveRef.current) return;
                 // Guard: bail if already resolved by afterChunkAction or a new stacked edit arrived
                 if (pendingChangeRef.current !== change) return;
-                isMergeActiveRef.current = false;
-                setMergeChunkInfo({ total: 0, current: 0 });
                 const finalContent = v.state.doc.toString();
-                v.dispatch({
-                  effects: mergeCompartmentRef.current.reconfigure([]),
-                });
-                setContent(finalContent);
-                if (finalContent === change.oldContent) {
-                  useProposedChangesStore.getState().undoChange(change.id);
-                } else {
-                  useProposedChangesStore.getState().keepChange(change.id);
-                }
-                pendingChangeRef.current = null;
-                // Auto-navigate to next file with pending changes
-                const remaining = useProposedChangesStore.getState().changes;
-                if (remaining.length > 0) {
-                  useDocumentStore
-                    .getState()
-                    .setActiveFile(remaining[0].filePath);
-                }
+                completeEditorChange(
+                  change,
+                  () =>
+                    finalContent === change.oldContent
+                      ? useProposedChangesStore.getState().undoChange(change.id)
+                      : useProposedChangesStore
+                          .getState()
+                          .keepChange(change.id, finalContent),
+                  () => {
+                    isMergeActiveRef.current = false;
+                    setMergeChunkInfo({ total: 0, current: 0 });
+                    v.dispatch({
+                      effects: mergeCompartmentRef.current.reconfigure([]),
+                    });
+                    pendingChangeRef.current = null;
+                    navigateToNextPendingChange();
+                  },
+                );
               }, 0);
             }
           }
@@ -684,6 +697,10 @@ export function LatexEditor() {
         highlightSelectionMatches(),
         mergeCompartmentRef.current.of([]),
         vimCompartmentRef.current.of([]),
+        mutationCompartmentRef.current.of([
+          EditorState.readOnly.of(isProjectMutating),
+          EditorView.editable.of(!isProjectMutating),
+        ]),
         updateListener,
         EditorView.lineWrapping,
         scrollPastEnd(),
@@ -851,6 +868,17 @@ export function LatexEditor() {
       });
     });
   }, [vimMode, activeFileId, isTextFile]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: mutationCompartmentRef.current.reconfigure([
+        EditorState.readOnly.of(isProjectMutating),
+        EditorView.editable.of(!isProjectMutating),
+      ]),
+    });
+  }, [isProjectMutating]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -1100,7 +1128,10 @@ export function LatexEditor() {
   const isImage = !isTextFile && !isPdf && !!activeFile;
 
   return (
-    <div className="flex h-full min-w-0 flex-col bg-background">
+    <div
+      className="relative flex h-full min-w-0 flex-col bg-background"
+      aria-busy={isProjectMutating}
+    >
       {/* Toolbar — adapts to file type */}
       <EditorToolbar
         editorView={viewRef}
@@ -1110,6 +1141,11 @@ export function LatexEditor() {
         cropMode={isImage ? cropMode : undefined}
         onCropToggle={isImage ? () => setCropMode((v) => !v) : undefined}
       />
+      {isProjectMutating && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/65 text-muted-foreground text-sm backdrop-blur-[1px]">
+          Updating project…
+        </div>
+      )}
       {/* Text-editor-only panels */}
       {!isPdf && !isImage && !isLargeFileNotLoaded && isSearchOpen && (
         <SearchPanel

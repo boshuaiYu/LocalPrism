@@ -16,6 +16,7 @@ import {
 import { useZoteroStore, type CollectionSyncInfo } from "@/stores/zotero-store";
 import { useDocumentStore } from "@/stores/document-store";
 import { cn } from "@/lib/utils";
+import { canonicalProjectPath } from "@/lib/project-fs-operations";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -44,7 +45,7 @@ export function ZoteroPanel() {
   const projectRoot = useDocumentStore((s) => s.projectRoot);
   const allSyncedCollections = useZoteroStore((s) => s.syncedCollections);
   const syncedCollections = projectRoot
-    ? (allSyncedCollections[projectRoot] ?? {})
+    ? (allSyncedCollections[canonicalProjectPath(projectRoot)] ?? {})
     : {};
   const error = useZoteroStore((s) => s.error);
   const collections = useZoteroStore((s) => s.collections);
