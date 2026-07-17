@@ -509,6 +509,7 @@ dependencies = [
  "dirs 5.0.1",
  "dotenvy",
  "flate2",
+ "fs2",
  "git2",
  "hmac",
  "libc",

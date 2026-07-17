@@ -4,6 +4,7 @@ use std::time::Duration;
 use tauri::{Emitter, Manager, WebviewWindow};
 
 pub mod domain;
+pub mod manifest;
 pub mod paths;
 
 const TARBALL_URLS: &[&str] = &[
