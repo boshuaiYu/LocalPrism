@@ -31,8 +31,47 @@ fn history_path(project_root: &str) -> PathBuf {
         .join("history.git")
 }
 
+fn rebind_persisted_workdir_before_open(
+    project_root: &Path,
+    repo_root: &Path,
+) -> Result<(), String> {
+    if !project_root.is_dir() {
+        return Err(format!(
+            "History workdir does not exist: {}",
+            project_root.display()
+        ));
+    }
+
+    // libgit2 resolves core.worktree while opening the repository. On Windows,
+    // opening fails before we receive a Repository handle when a moved project
+    // leaves that absolute path pointing at the old, now-missing directory.
+    // Repair only the persisted worktree entry in our known internal layout so
+    // the normal open + live-handle binding below can proceed.
+    let config_path = repo_root.join(".git").join("config");
+    if !config_path.is_file() {
+        return Ok(());
+    }
+
+    let mut config = git2::Config::open(&config_path)
+        .map_err(|e| format!("Failed to open history repo config: {}", e))?;
+    let Ok(configured_workdir) = config.get_path("core.worktree") else {
+        return Ok(());
+    };
+    if matches!(
+        (project_root.canonicalize(), configured_workdir.canonicalize()),
+        (Ok(expected), Ok(actual)) if expected == actual
+    ) {
+        return Ok(());
+    }
+
+    config
+        .set_str("core.worktree", &project_root.to_string_lossy())
+        .map_err(|e| format!("Failed to prebind history workdir: {}", e))
+}
+
 fn open_repo(project_root: &str) -> Result<Repository, String> {
     let git_dir = history_path(project_root);
+    rebind_persisted_workdir_before_open(Path::new(project_root), &git_dir)?;
     let repo =
         Repository::open(&git_dir).map_err(|e| format!("Failed to open history repo: {}", e))?;
     bind_repo_workdir(project_root, &repo)?;
@@ -628,9 +667,12 @@ mod tests {
 
         fs::rename(&old_root, &new_root).unwrap();
         let new_root_string = new_root.to_string_lossy().to_string();
-        let stale_repo = Repository::open(history_path(&new_root_string)).unwrap();
-        assert!(!repo_workdir_matches(&new_root, &stale_repo));
-        drop(stale_repo);
+        let stale_workdir =
+            git2::Config::open(&history_path(&new_root_string).join(".git").join("config"))
+                .unwrap()
+                .get_path("core.worktree")
+                .unwrap();
+        assert_eq!(stale_workdir, old_root);
         history_init(new_root_string.clone()).unwrap();
 
         let repo = Repository::open(history_path(&new_root_string)).unwrap();
