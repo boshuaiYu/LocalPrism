@@ -129,13 +129,50 @@ fn canonicalize(path: &Path) -> Result<PathBuf, SkillPathError> {
 }
 
 pub fn validate_skill_slug(folder: &str) -> Result<(), SkillPathError> {
-    let is_drive_path = folder.as_bytes().get(1) == Some(&b':');
+    let basename = folder.split('.').next().unwrap_or(folder);
+    let uppercase_basename = basename.trim_end_matches(' ').to_ascii_uppercase();
+    let is_windows_device_name = matches!(
+        uppercase_basename.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "COM¹"
+            | "COM²"
+            | "COM³"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+            | "LPT¹"
+            | "LPT²"
+            | "LPT³"
+            | "CONIN$"
+            | "CONOUT$"
+    );
     if folder.is_empty()
         || folder == "."
         || folder == ".."
         || folder.contains(['/', '\\'])
-        || folder.contains('\0')
-        || is_drive_path
+        || folder.contains(['<', '>', ':', '"', '|', '?', '*'])
+        || folder.chars().any(|character| character.is_ascii_control())
+        || folder.trim() != folder
+        || folder.ends_with('.')
+        || is_windows_device_name
         || Path::new(folder).is_absolute()
     {
         return Err(SkillPathError::InvalidFolder(folder.to_string()));
@@ -287,6 +324,83 @@ mod tests {
             project.join(".agents").join("skills")
         );
         assert_eq!(validate_skill_slug("valid-skill_01"), Ok(()));
+    }
+
+    #[test]
+    fn rejects_windows_unsafe_skill_folders_on_every_platform() {
+        let invalid = [
+            "foo:bar",
+            "name<",
+            "name>",
+            "name\"",
+            "name|",
+            "name?",
+            "name*",
+            "name\u{1f}",
+            "name.",
+            "name ",
+            " name",
+            "\tname",
+            "name\t",
+        ];
+
+        for folder in invalid {
+            assert!(
+                matches!(
+                    validate_skill_slug(folder),
+                    Err(SkillPathError::InvalidFolder(_))
+                ),
+                "folder should be rejected: {folder:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_windows_reserved_device_names_case_insensitively() {
+        let mut invalid = vec![
+            "CON".to_string(),
+            "con.txt".to_string(),
+            "CON .txt".to_string(),
+            "PRN".to_string(),
+            "prn .md".to_string(),
+            "AUX".to_string(),
+            "NUL".to_string(),
+            "CONIN$".to_string(),
+            "conout$".to_string(),
+            "COM¹".to_string(),
+            "com².txt".to_string(),
+            "CoM³.md".to_string(),
+            "LPT¹".to_string(),
+            "lpt².txt".to_string(),
+            "LpT³.md".to_string(),
+        ];
+        for number in 1..=9 {
+            invalid.push(format!("COM{number}"));
+            invalid.push(format!("com{number}.md"));
+            invalid.push(format!("LPT{number}"));
+            invalid.push(format!("lpt{number}.md"));
+        }
+
+        for folder in invalid {
+            assert!(
+                matches!(
+                    validate_skill_slug(&folder),
+                    Err(SkillPathError::InvalidFolder(_))
+                ),
+                "folder should be rejected: {folder:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_portable_unicode_and_non_reserved_device_like_names() {
+        for folder in ["valid-skill_01", "Writer-Ω", "com10", "lpt0"] {
+            assert_eq!(
+                validate_skill_slug(folder),
+                Ok(()),
+                "folder should be accepted: {folder:?}"
+            );
+        }
     }
 
     #[test]
