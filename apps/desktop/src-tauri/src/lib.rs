@@ -733,6 +733,11 @@ pub fn run() {
             runtime::runtime_login_cancel,
             runtime::runtime_logout,
             runtime::runtime_list_models,
+            runtime::runtime_start_turn,
+            runtime::runtime_interrupt_turn,
+            runtime::runtime_list_conversations,
+            runtime::runtime_read_conversation,
+            runtime::runtime_archive_conversation,
             zotero::zotero_start_oauth,
             zotero::zotero_complete_oauth,
             zotero::zotero_cancel_oauth,
@@ -833,9 +838,10 @@ pub fn run() {
                 let runtime_handle = app_handle.clone();
                 let runtime_label = label.clone();
                 tauri::async_runtime::spawn(async move {
-                    runtime_handle
-                        .state::<runtime::process::RuntimeProcessState>()
-                        .remove_window(&runtime_label)
+                    let routes = runtime_handle.state::<runtime::process::RuntimeProcessState>();
+                    let codex_state = runtime_handle.state::<runtime::codex::CodexAppServerState>();
+                    codex_state
+                        .remove_runtime_window(&routes, &runtime_label)
                         .await;
                 });
 

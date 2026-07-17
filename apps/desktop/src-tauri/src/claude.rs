@@ -1,8 +1,10 @@
 use crate::anthropic_proxy::{start_openai_anthropic_proxy, OpenAiProxyCredential};
-pub use crate::claude_process::{kill_process_for_window, ClaudeProcessState};
 use crate::claude_process::{
-    spawn_claude_process, stop_claude_process, ClaudeStopMode, SpawnProviderMetadata,
+    fail_claude_start, reserve_claude_start, spawn_claude_process, stop_claude_process,
+    stop_claude_process_silently_if_missing, ClaudeStartReservation, ClaudeStopMode,
+    SpawnProviderMetadata,
 };
+pub use crate::claude_process::{kill_process_for_window, ClaudeProcessState};
 use serde_json::{json, Value};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -2518,6 +2520,289 @@ pub async fn login_claude(window: WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClaudeLogoutRunError {
+    Spawn,
+    Wait,
+    Timeout,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClaudeLogoutCommandBuildError {
+    UnresolvedWindowsWrapper,
+}
+
+trait ClaudeLogoutCommandBuilder {
+    type Command;
+
+    fn new_command(&mut self, program: std::ffi::OsString) -> Self::Command;
+    fn args(&mut self, command: &mut Self::Command, args: Vec<std::ffi::OsString>);
+    fn clear_environment(&mut self, command: &mut Self::Command);
+    fn environment(
+        &mut self,
+        command: &mut Self::Command,
+        key: std::ffi::OsString,
+        value: std::ffi::OsString,
+    );
+    fn stdin_null(&mut self, command: &mut Self::Command);
+    fn stdout_null(&mut self, command: &mut Self::Command);
+    fn stderr_null(&mut self, command: &mut Self::Command);
+    fn kill_on_drop(&mut self, command: &mut Self::Command, enabled: bool);
+    fn windows_creation_flags(&mut self, command: &mut Self::Command, flags: u32);
+}
+
+struct TokioClaudeLogoutCommandBuilder;
+
+impl ClaudeLogoutCommandBuilder for TokioClaudeLogoutCommandBuilder {
+    type Command = Command;
+
+    fn new_command(&mut self, program: std::ffi::OsString) -> Self::Command {
+        Command::new(program)
+    }
+
+    fn args(&mut self, command: &mut Self::Command, args: Vec<std::ffi::OsString>) {
+        command.args(args);
+    }
+
+    fn clear_environment(&mut self, command: &mut Self::Command) {
+        command.env_clear();
+    }
+
+    fn environment(
+        &mut self,
+        command: &mut Self::Command,
+        key: std::ffi::OsString,
+        value: std::ffi::OsString,
+    ) {
+        command.env(key, value);
+    }
+
+    fn stdin_null(&mut self, command: &mut Self::Command) {
+        command.stdin(std::process::Stdio::null());
+    }
+
+    fn stdout_null(&mut self, command: &mut Self::Command) {
+        command.stdout(std::process::Stdio::null());
+    }
+
+    fn stderr_null(&mut self, command: &mut Self::Command) {
+        command.stderr(std::process::Stdio::null());
+    }
+
+    fn kill_on_drop(&mut self, command: &mut Self::Command, enabled: bool) {
+        command.kill_on_drop(enabled);
+    }
+
+    fn windows_creation_flags(&mut self, command: &mut Self::Command, flags: u32) {
+        #[cfg(target_os = "windows")]
+        command.creation_flags(flags);
+        #[cfg(not(target_os = "windows"))]
+        let _ = (command, flags);
+    }
+}
+
+#[cfg(any(not(target_os = "windows"), test))]
+fn direct_claude_logout_resolution(program: &str) -> (String, Vec<String>) {
+    (program.to_string(), Vec::<String>::new())
+}
+
+fn resolve_claude_logout_command(
+    program: &str,
+) -> Result<(String, Vec<String>), ClaudeLogoutCommandBuildError> {
+    #[cfg(target_os = "windows")]
+    {
+        let lower = program.to_ascii_lowercase();
+        let is_wrapper = lower.ends_with(".cmd") || lower.ends_with(".bat");
+        let (resolved, prefix) = resolve_cmd_to_node(program);
+        if is_wrapper
+            && (resolved.eq_ignore_ascii_case("cmd.exe")
+                || prefix.len() != 1
+                || !std::path::Path::new(&prefix[0]).is_file())
+        {
+            return Err(ClaudeLogoutCommandBuildError::UnresolvedWindowsWrapper);
+        }
+        Ok((resolved, prefix))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(direct_claude_logout_resolution(program))
+    }
+}
+
+fn try_create_claude_logout_command_with_builder<I, Builder>(
+    program: &str,
+    inherited_env: I,
+    builder: &mut Builder,
+) -> Result<Builder::Command, ClaudeLogoutCommandBuildError>
+where
+    I: IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    Builder: ClaudeLogoutCommandBuilder,
+{
+    let (resolved, prefix) = resolve_claude_logout_command(program)?;
+    let mut command = builder.new_command(resolved.into());
+    #[cfg(target_os = "windows")]
+    builder.windows_creation_flags(&mut command, CREATE_NO_WINDOW);
+
+    let mut args = prefix
+        .into_iter()
+        .map(std::ffi::OsString::from)
+        .collect::<Vec<_>>();
+    args.extend([
+        std::ffi::OsString::from("auth"),
+        std::ffi::OsString::from("logout"),
+    ]);
+    builder.args(&mut command, args);
+    builder.stdin_null(&mut command);
+    builder.stdout_null(&mut command);
+    builder.stderr_null(&mut command);
+    builder.kill_on_drop(&mut command, true);
+    builder.clear_environment(&mut command);
+    for (key, value) in inherited_env {
+        if !key
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("ANTHROPIC_")
+        {
+            builder.environment(&mut command, key, value);
+        }
+    }
+
+    Ok(command)
+}
+
+fn create_claude_logout_command_with_env<I, K, V>(
+    program: &str,
+    inherited_env: I,
+) -> Result<Command, ClaudeLogoutCommandBuildError>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<std::ffi::OsStr>,
+    V: AsRef<std::ffi::OsStr>,
+{
+    let inherited_env = inherited_env
+        .into_iter()
+        .map(|(key, value)| (key.as_ref().to_os_string(), value.as_ref().to_os_string()));
+    let mut builder = TokioClaudeLogoutCommandBuilder;
+    let command =
+        try_create_claude_logout_command_with_builder(program, inherited_env, &mut builder)?;
+
+    #[cfg(target_os = "linux")]
+    let command = {
+        let mut command = command;
+        sanitize_appimage_env(&mut command);
+        command
+    };
+
+    Ok(command)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClaudeLogoutWaitResult {
+    Exited(bool),
+    WaitFailed,
+    TimedOut,
+}
+
+trait ClaudeLogoutProcess {
+    fn wait_with_timeout(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ClaudeLogoutWaitResult> + Send + '_>>;
+    fn start_kill(&mut self) -> bool;
+    fn reap(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
+}
+
+struct TokioClaudeLogoutProcess {
+    child: tokio::process::Child,
+}
+
+impl ClaudeLogoutProcess for TokioClaudeLogoutProcess {
+    fn wait_with_timeout(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ClaudeLogoutWaitResult> + Send + '_>>
+    {
+        Box::pin(async move {
+            match tokio::time::timeout(timeout, self.child.wait()).await {
+                Ok(Ok(status)) => ClaudeLogoutWaitResult::Exited(status.success()),
+                Ok(Err(_)) => ClaudeLogoutWaitResult::WaitFailed,
+                Err(_) => ClaudeLogoutWaitResult::TimedOut,
+            }
+        })
+    }
+
+    fn start_kill(&mut self) -> bool {
+        self.child.start_kill().is_ok()
+    }
+
+    fn reap(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let _ = self.child.wait().await;
+        })
+    }
+}
+
+const CLAUDE_LOGOUT_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+async fn cleanup_claude_logout_process<Process>(process: &mut Process)
+where
+    Process: ClaudeLogoutProcess,
+{
+    if process.start_kill() {
+        let _ = tokio::time::timeout(CLAUDE_LOGOUT_CLEANUP_TIMEOUT, process.reap()).await;
+    }
+}
+
+async fn finish_claude_logout_process<Process>(
+    process: &mut Process,
+) -> Result<bool, ClaudeLogoutRunError>
+where
+    Process: ClaudeLogoutProcess,
+{
+    match process
+        .wait_with_timeout(std::time::Duration::from_secs(30))
+        .await
+    {
+        ClaudeLogoutWaitResult::Exited(success) => Ok(success),
+        ClaudeLogoutWaitResult::WaitFailed => {
+            cleanup_claude_logout_process(process).await;
+            Err(ClaudeLogoutRunError::Wait)
+        }
+        ClaudeLogoutWaitResult::TimedOut => {
+            cleanup_claude_logout_process(process).await;
+            Err(ClaudeLogoutRunError::Timeout)
+        }
+    }
+}
+
+async fn run_claude_logout_command(mut command: Command) -> Result<bool, ClaudeLogoutRunError> {
+    let child = command.spawn().map_err(|_| ClaudeLogoutRunError::Spawn)?;
+    let mut process = TokioClaudeLogoutProcess { child };
+    finish_claude_logout_process(&mut process).await
+}
+
+async fn logout_claude_with<Run, RunFuture>(program: &str, run: Run) -> Result<(), String>
+where
+    Run: FnOnce(Command) -> RunFuture,
+    RunFuture: std::future::Future<Output = Result<bool, ClaudeLogoutRunError>>,
+{
+    let command = create_claude_logout_command_with_env(program, std::env::vars_os())
+        .map_err(|_| "Claude logout command could not be resolved".to_string())?;
+    match run(command).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("Claude logout failed".to_string()),
+        Err(ClaudeLogoutRunError::Spawn) => Err("Claude logout could not be started".to_string()),
+        Err(ClaudeLogoutRunError::Wait) => Err("Claude logout process failed".to_string()),
+        Err(ClaudeLogoutRunError::Timeout) => Err("Claude logout timed out".to_string()),
+    }
+}
+
+pub async fn logout_claude() -> Result<(), String> {
+    let program = find_claude_binary().map_err(|_| "Claude CLI was not found".to_string())?;
+    logout_claude_with(&program, run_claude_logout_command).await
+}
+
 /// Common CLI flags shared across all Claude invocations.
 fn common_claude_args() -> Vec<String> {
     vec![
@@ -2943,6 +3228,7 @@ async fn execute_openai_compatible_via_claude_proxy(
     args_prefix: Vec<String>,
     effort_level: Option<String>,
     credential: StoredOpenAiCompatibleCredential,
+    reservation: ClaudeStartReservation,
 ) -> Result<(), String> {
     let model_transformers = credential
         .model_transformers
@@ -2974,6 +3260,7 @@ async fn execute_openai_compatible_via_claude_proxy(
         window,
         cmd,
         tab_id,
+        reservation,
         stdin_payload,
         Some(SpawnProviderMetadata {
             provider: PROVIDER_OPENAI_COMPATIBLE,
@@ -2992,6 +3279,7 @@ async fn execute_openai_compatible_provider(
     args_prefix: Vec<String>,
     effort_level: Option<String>,
     credential: StoredOpenAiCompatibleCredential,
+    reservation: ClaudeStartReservation,
 ) -> Result<(), String> {
     ensure_secure_known_provider_base_url(&credential.base_url)?;
 
@@ -3004,6 +3292,7 @@ async fn execute_openai_compatible_provider(
             args_prefix,
             effort_level,
             credential,
+            reservation,
         )
         .await;
     }
@@ -3016,6 +3305,7 @@ async fn execute_openai_compatible_provider(
         args_prefix,
         effort_level,
         credential,
+        reservation,
     )
     .await
 }
@@ -3028,6 +3318,7 @@ async fn execute_openai_compatible_via_native_anthropic(
     args_prefix: Vec<String>,
     effort_level: Option<String>,
     credential: StoredOpenAiCompatibleCredential,
+    reservation: ClaudeStartReservation,
 ) -> Result<(), String> {
     let anthropic_base_url = native_anthropic_base_url(&credential)
         .ok_or_else(|| "Provider does not expose a native Anthropic endpoint".to_string())?;
@@ -3043,6 +3334,7 @@ async fn execute_openai_compatible_via_native_anthropic(
         window,
         cmd,
         tab_id,
+        reservation,
         stdin_payload,
         Some(SpawnProviderMetadata {
             provider: PROVIDER_OPENAI_COMPATIBLE,
@@ -3192,37 +3484,53 @@ pub async fn execute_claude_code(
     effort_level: Option<String>,
     provider_credential_id: Option<String>,
     provider_model_override: Option<String>,
+    attempt_id: Option<String>,
 ) -> Result<(), String> {
-    if let Some(mut credential) =
-        stored_openai_compatible_credential_by_id(provider_credential_id.as_deref())?
-    {
-        if let Some(model) = normalize_provider_model_override(provider_model_override.as_deref())?
+    let Some(reservation) = reserve_claude_start(&window, &tab_id, attempt_id.as_deref()).await
+    else {
+        return Ok(());
+    };
+    let failure_window = window.clone();
+    let failure_reservation = reservation.clone();
+    let result = async move {
+        if let Some(mut credential) =
+            stored_openai_compatible_credential_by_id(provider_credential_id.as_deref())?
         {
-            credential.model = model;
+            if let Some(model) =
+                normalize_provider_model_override(provider_model_override.as_deref())?
+            {
+                credential.model = model;
+            }
+            return execute_openai_compatible_provider(
+                window,
+                project_path,
+                prompt,
+                tab_id,
+                Vec::new(),
+                effort_level,
+                credential,
+                reservation,
+            )
+            .await;
         }
-        return execute_openai_compatible_provider(
-            window,
-            project_path,
-            prompt,
-            tab_id,
-            Vec::new(),
-            effort_level,
-            credential,
-        )
-        .await;
+
+        let claude_path = find_claude_binary()?;
+
+        let (mut args, stdin_payload) = with_prompt_transport(Vec::new(), prompt);
+        if let Some(m) = model {
+            args.push("--model".to_string());
+            args.push(m);
+        }
+        args.extend(common_claude_args());
+
+        let cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
+        spawn_claude_process(window, cmd, tab_id, reservation, stdin_payload, None).await
     }
-
-    let claude_path = find_claude_binary()?;
-
-    let (mut args, stdin_payload) = with_prompt_transport(Vec::new(), prompt);
-    if let Some(m) = model {
-        args.push("--model".to_string());
-        args.push(m);
+    .await;
+    if result.is_err() {
+        fail_claude_start(&failure_window, &failure_reservation).await;
     }
-    args.extend(common_claude_args());
-
-    let cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
-    spawn_claude_process(window, cmd, tab_id, stdin_payload, None).await
+    result
 }
 
 #[tauri::command]
@@ -3235,37 +3543,53 @@ pub async fn continue_claude_code(
     effort_level: Option<String>,
     provider_credential_id: Option<String>,
     provider_model_override: Option<String>,
+    attempt_id: Option<String>,
 ) -> Result<(), String> {
-    if let Some(mut credential) =
-        stored_openai_compatible_credential_by_id(provider_credential_id.as_deref())?
-    {
-        if let Some(model) = normalize_provider_model_override(provider_model_override.as_deref())?
+    let Some(reservation) = reserve_claude_start(&window, &tab_id, attempt_id.as_deref()).await
+    else {
+        return Ok(());
+    };
+    let failure_window = window.clone();
+    let failure_reservation = reservation.clone();
+    let result = async move {
+        if let Some(mut credential) =
+            stored_openai_compatible_credential_by_id(provider_credential_id.as_deref())?
         {
-            credential.model = model;
+            if let Some(model) =
+                normalize_provider_model_override(provider_model_override.as_deref())?
+            {
+                credential.model = model;
+            }
+            return execute_openai_compatible_provider(
+                window,
+                project_path,
+                prompt,
+                tab_id,
+                vec!["-c".to_string()],
+                effort_level,
+                credential,
+                reservation,
+            )
+            .await;
         }
-        return execute_openai_compatible_provider(
-            window,
-            project_path,
-            prompt,
-            tab_id,
-            vec!["-c".to_string()],
-            effort_level,
-            credential,
-        )
-        .await;
+
+        let claude_path = find_claude_binary()?;
+
+        let (mut args, stdin_payload) = with_prompt_transport(vec!["-c".to_string()], prompt);
+        if let Some(m) = model {
+            args.push("--model".to_string());
+            args.push(m);
+        }
+        args.extend(common_claude_args());
+
+        let cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
+        spawn_claude_process(window, cmd, tab_id, reservation, stdin_payload, None).await
     }
-
-    let claude_path = find_claude_binary()?;
-
-    let (mut args, stdin_payload) = with_prompt_transport(vec!["-c".to_string()], prompt);
-    if let Some(m) = model {
-        args.push("--model".to_string());
-        args.push(m);
+    .await;
+    if result.is_err() {
+        fail_claude_start(&failure_window, &failure_reservation).await;
     }
-    args.extend(common_claude_args());
-
-    let cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
-    spawn_claude_process(window, cmd, tab_id, stdin_payload, None).await
+    result
 }
 
 #[tauri::command]
@@ -3279,43 +3603,63 @@ pub async fn resume_claude_code(
     effort_level: Option<String>,
     provider_credential_id: Option<String>,
     provider_model_override: Option<String>,
+    attempt_id: Option<String>,
 ) -> Result<(), String> {
-    if let Some(mut credential) =
-        stored_openai_compatible_credential_by_id(provider_credential_id.as_deref())?
-    {
-        if let Some(model) = normalize_provider_model_override(provider_model_override.as_deref())?
+    let Some(reservation) = reserve_claude_start(&window, &tab_id, attempt_id.as_deref()).await
+    else {
+        return Ok(());
+    };
+    let failure_window = window.clone();
+    let failure_reservation = reservation.clone();
+    let result = async move {
+        if let Some(mut credential) =
+            stored_openai_compatible_credential_by_id(provider_credential_id.as_deref())?
         {
-            credential.model = model;
+            if let Some(model) =
+                normalize_provider_model_override(provider_model_override.as_deref())?
+            {
+                credential.model = model;
+            }
+            return execute_openai_compatible_provider(
+                window,
+                project_path,
+                prompt,
+                tab_id,
+                vec!["--resume".to_string(), session_id],
+                effort_level,
+                credential,
+                reservation,
+            )
+            .await;
         }
-        return execute_openai_compatible_provider(
-            window,
-            project_path,
-            prompt,
-            tab_id,
-            vec!["--resume".to_string(), session_id],
-            effort_level,
-            credential,
-        )
-        .await;
+
+        let claude_path = find_claude_binary()?;
+
+        let (mut args, stdin_payload) =
+            with_prompt_transport(vec!["--resume".to_string(), session_id], prompt);
+        if let Some(m) = model {
+            args.push("--model".to_string());
+            args.push(m);
+        }
+        args.extend(common_claude_args());
+
+        let cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
+        spawn_claude_process(window, cmd, tab_id, reservation, stdin_payload, None).await
     }
-
-    let claude_path = find_claude_binary()?;
-
-    let (mut args, stdin_payload) =
-        with_prompt_transport(vec!["--resume".to_string(), session_id], prompt);
-    if let Some(m) = model {
-        args.push("--model".to_string());
-        args.push(m);
+    .await;
+    if result.is_err() {
+        fail_claude_start(&failure_window, &failure_reservation).await;
     }
-    args.extend(common_claude_args());
-
-    let cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
-    spawn_claude_process(window, cmd, tab_id, stdin_payload, None).await
+    result
 }
 
 #[tauri::command]
-pub async fn cancel_claude_execution(window: WebviewWindow, tab_id: String) -> Result<(), String> {
-    stop_claude_process(window, tab_id, ClaudeStopMode::Terminate)
+pub async fn cancel_claude_execution(
+    window: WebviewWindow,
+    tab_id: String,
+    attempt_id: Option<String>,
+) -> Result<(), String> {
+    stop_claude_process(window, tab_id, ClaudeStopMode::Terminate, attempt_id)
         .await
         .map(|_| ())
 }
@@ -3324,8 +3668,27 @@ pub async fn cancel_claude_execution(window: WebviewWindow, tab_id: String) -> R
 pub async fn interrupt_claude_execution(
     window: WebviewWindow,
     tab_id: String,
+    attempt_id: Option<String>,
 ) -> Result<bool, String> {
-    stop_claude_process(window, tab_id, ClaudeStopMode::Interrupt).await
+    stop_claude_process(window, tab_id, ClaudeStopMode::Interrupt, attempt_id).await
+}
+
+pub(crate) async fn cancel_claude_runtime_execution(
+    window: WebviewWindow,
+    tab_id: String,
+    attempt_id: String,
+) -> Result<bool, String> {
+    stop_claude_process_silently_if_missing(window, tab_id, ClaudeStopMode::Terminate, attempt_id)
+        .await
+}
+
+pub(crate) async fn interrupt_claude_runtime_execution(
+    window: WebviewWindow,
+    tab_id: String,
+    attempt_id: String,
+) -> Result<bool, String> {
+    stop_claude_process_silently_if_missing(window, tab_id, ClaudeStopMode::Interrupt, attempt_id)
+        .await
 }
 
 // 鈹€鈹€鈹€ Session Listing 鈹€鈹€鈹€
@@ -4213,6 +4576,108 @@ pub async fn set_claude_fast_mode(enabled: bool) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct RecordingClaudeLogoutCommand {
+        program: std::ffi::OsString,
+        args: Vec<std::ffi::OsString>,
+        environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+        environment_cleared: bool,
+        stdin_null: bool,
+        stdout_null: bool,
+        stderr_null: bool,
+        kill_on_drop: bool,
+        windows_creation_flags: Option<u32>,
+    }
+
+    #[derive(Default)]
+    struct RecordingClaudeLogoutCommandBuilder {
+        new_commands: usize,
+    }
+
+    impl ClaudeLogoutCommandBuilder for RecordingClaudeLogoutCommandBuilder {
+        type Command = RecordingClaudeLogoutCommand;
+
+        fn new_command(&mut self, program: std::ffi::OsString) -> Self::Command {
+            self.new_commands += 1;
+            RecordingClaudeLogoutCommand {
+                program,
+                ..Default::default()
+            }
+        }
+
+        fn args(&mut self, command: &mut Self::Command, args: Vec<std::ffi::OsString>) {
+            command.args.extend(args);
+        }
+
+        fn clear_environment(&mut self, command: &mut Self::Command) {
+            command.environment_cleared = true;
+        }
+
+        fn environment(
+            &mut self,
+            command: &mut Self::Command,
+            key: std::ffi::OsString,
+            value: std::ffi::OsString,
+        ) {
+            command.environment.push((key, value));
+        }
+
+        fn stdin_null(&mut self, command: &mut Self::Command) {
+            command.stdin_null = true;
+        }
+
+        fn stdout_null(&mut self, command: &mut Self::Command) {
+            command.stdout_null = true;
+        }
+
+        fn stderr_null(&mut self, command: &mut Self::Command) {
+            command.stderr_null = true;
+        }
+
+        fn kill_on_drop(&mut self, command: &mut Self::Command, enabled: bool) {
+            command.kill_on_drop = enabled;
+        }
+
+        fn windows_creation_flags(&mut self, command: &mut Self::Command, flags: u32) {
+            command.windows_creation_flags = Some(flags);
+        }
+    }
+
+    struct RecordingClaudeLogoutProcess {
+        wait_result: ClaudeLogoutWaitResult,
+        timeout: Option<std::time::Duration>,
+        calls: Vec<&'static str>,
+        reap_pending: bool,
+        kill_succeeds: bool,
+    }
+
+    impl ClaudeLogoutProcess for RecordingClaudeLogoutProcess {
+        fn wait_with_timeout(
+            &mut self,
+            timeout: std::time::Duration,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ClaudeLogoutWaitResult> + Send + '_>>
+        {
+            self.timeout = Some(timeout);
+            self.calls.push("wait");
+            let result = self.wait_result;
+            Box::pin(async move { result })
+        }
+
+        fn start_kill(&mut self) -> bool {
+            self.calls.push("kill");
+            self.kill_succeeds
+        }
+
+        fn reap(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            self.calls.push("reap");
+            if self.reap_pending {
+                Box::pin(std::future::pending())
+            } else {
+                Box::pin(async {})
+            }
+        }
+    }
+
     fn test_openai_compatible_auth_config() -> ClaudePrismAuthConfig {
         ClaudePrismAuthConfig {
             provider: Some(PROVIDER_OPENAI_COMPATIBLE.to_string()),
@@ -4250,6 +4715,289 @@ mod tests {
                 },
             ],
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn claude_logout_command_uses_exact_auth_logout_and_scrubs_anthropic_environment() {
+        #[cfg(target_os = "windows")]
+        let program = r"C:\tools\claude.exe";
+        #[cfg(not(target_os = "windows"))]
+        let program = "/opt/claude";
+        let command = create_claude_logout_command_with_env(
+            program,
+            [
+                (
+                    std::ffi::OsString::from("PATH"),
+                    std::ffi::OsString::from("/safe/bin"),
+                ),
+                (
+                    std::ffi::OsString::from("SAFE_LOGOUT_ENV"),
+                    std::ffi::OsString::from("kept"),
+                ),
+                (
+                    std::ffi::OsString::from("ANTHROPIC_API_KEY"),
+                    std::ffi::OsString::from("sk-must-not-leak"),
+                ),
+                (
+                    std::ffi::OsString::from("anthropic_experimental_secret"),
+                    std::ffi::OsString::from("must-not-leak"),
+                ),
+            ],
+        )
+        .unwrap();
+        let command = command.as_std();
+
+        assert_eq!(command.get_program().to_string_lossy(), program);
+        assert_eq!(
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            ["auth", "logout"]
+        );
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(key, _)| key.eq_ignore_ascii_case("SAFE_LOGOUT_ENV"))
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
+                .as_deref(),
+            Some("kept")
+        );
+        assert!(command.get_envs().all(|(key, _)| !key
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("ANTHROPIC_")));
+    }
+
+    #[test]
+    fn claude_logout_direct_resolution_has_a_typed_empty_string_prefix() {
+        let (resolved, prefix): (String, Vec<String>) =
+            direct_claude_logout_resolution("/opt/claude");
+
+        assert_eq!(resolved, "/opt/claude");
+        assert!(prefix.is_empty());
+    }
+
+    #[test]
+    fn claude_logout_recording_builder_applies_null_stdio_and_kill_on_drop() {
+        let mut builder = RecordingClaudeLogoutCommandBuilder::default();
+        let command = try_create_claude_logout_command_with_builder(
+            "claude",
+            [
+                (
+                    std::ffi::OsString::from("PATH"),
+                    std::ffi::OsString::from("/safe/bin"),
+                ),
+                (
+                    std::ffi::OsString::from("ANTHROPIC_API_KEY"),
+                    std::ffi::OsString::from("must-not-leak"),
+                ),
+            ],
+            &mut builder,
+        )
+        .unwrap();
+
+        assert_eq!(command.program, std::ffi::OsString::from("claude"));
+        assert_eq!(
+            command.args,
+            [
+                std::ffi::OsString::from("auth"),
+                std::ffi::OsString::from("logout")
+            ]
+        );
+        assert!(command.environment_cleared);
+        assert_eq!(
+            command.environment,
+            [(
+                std::ffi::OsString::from("PATH"),
+                std::ffi::OsString::from("/safe/bin")
+            )]
+        );
+        assert!(command.stdin_null);
+        assert!(command.stdout_null);
+        assert!(command.stderr_null);
+        assert!(command.kill_on_drop);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn claude_logout_windows_cmd_resolves_to_node_with_no_window_and_exact_arguments() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        let cli = bin
+            .join("node_modules")
+            .join("@anthropic-ai")
+            .join("claude-code")
+            .join("cli.js");
+        std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        let command_path = bin.join("claude.cmd");
+        let node_path = bin.join("node.exe");
+        std::fs::write(&command_path, "@node cli.js %*").unwrap();
+        std::fs::write(&node_path, []).unwrap();
+        std::fs::write(&cli, []).unwrap();
+        let mut builder = RecordingClaudeLogoutCommandBuilder::default();
+
+        let command = try_create_claude_logout_command_with_builder(
+            command_path.to_string_lossy().as_ref(),
+            std::iter::empty(),
+            &mut builder,
+        )
+        .unwrap();
+
+        assert_eq!(command.program, node_path.into_os_string());
+        assert_eq!(
+            command.args,
+            [
+                cli.into_os_string(),
+                std::ffi::OsString::from("auth"),
+                std::ffi::OsString::from("logout")
+            ]
+        );
+        assert_eq!(command.windows_creation_flags, Some(CREATE_NO_WINDOW));
+        assert!(command.stdin_null);
+        assert!(command.stdout_null);
+        assert!(command.stderr_null);
+        assert!(command.kill_on_drop);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn claude_logout_unresolved_wrapper_is_rejected_before_command_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        let command_path = temp.path().join("claude.cmd");
+        std::fs::write(&command_path, "@echo unsafe fallback").unwrap();
+        let mut builder = RecordingClaudeLogoutCommandBuilder::default();
+
+        let error = try_create_claude_logout_command_with_builder(
+            command_path.to_string_lossy().as_ref(),
+            std::iter::empty(),
+            &mut builder,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            ClaudeLogoutCommandBuildError::UnresolvedWindowsWrapper
+        );
+        assert_eq!(builder.new_commands, 0);
+    }
+
+    #[tokio::test]
+    async fn claude_logout_timeout_kills_then_reaps_the_child() {
+        let mut process = RecordingClaudeLogoutProcess {
+            wait_result: ClaudeLogoutWaitResult::TimedOut,
+            timeout: None,
+            calls: Vec::new(),
+            reap_pending: false,
+            kill_succeeds: true,
+        };
+
+        let result = finish_claude_logout_process(&mut process).await;
+
+        assert_eq!(result, Err(ClaudeLogoutRunError::Timeout));
+        assert_eq!(process.timeout, Some(std::time::Duration::from_secs(30)));
+        assert_eq!(process.calls, ["wait", "kill", "reap"]);
+    }
+
+    #[tokio::test]
+    async fn claude_logout_pending_reap_is_bounded_after_timeout() {
+        let mut process = RecordingClaudeLogoutProcess {
+            wait_result: ClaudeLogoutWaitResult::TimedOut,
+            timeout: None,
+            calls: Vec::new(),
+            reap_pending: true,
+            kill_succeeds: true,
+        };
+
+        let guarded = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            finish_claude_logout_process(&mut process),
+        )
+        .await;
+
+        assert_eq!(guarded, Ok(Err(ClaudeLogoutRunError::Timeout)));
+        assert_eq!(process.calls, ["wait", "kill", "reap"]);
+    }
+
+    #[tokio::test]
+    async fn claude_logout_failed_kill_uses_kill_on_drop_without_waiting_to_reap() {
+        let mut process = RecordingClaudeLogoutProcess {
+            wait_result: ClaudeLogoutWaitResult::TimedOut,
+            timeout: None,
+            calls: Vec::new(),
+            reap_pending: true,
+            kill_succeeds: false,
+        };
+
+        let result = finish_claude_logout_process(&mut process).await;
+
+        assert_eq!(result, Err(ClaudeLogoutRunError::Timeout));
+        assert_eq!(process.calls, ["wait", "kill"]);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn claude_logout_rejects_an_unresolved_cmd_without_running_it() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let command_path = temp.path().join("claude.cmd");
+        std::fs::write(&command_path, "@echo unsafe fallback").unwrap();
+        let runner_calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_runner = Arc::clone(&runner_calls);
+
+        let error = logout_claude_with(command_path.to_string_lossy().as_ref(), move |_| {
+            calls_for_runner.fetch_add(1, Ordering::SeqCst);
+            async { Ok(true) }
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "Claude logout command could not be resolved");
+        assert_eq!(runner_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn claude_logout_accepts_success_without_running_the_real_cli() {
+        let result = logout_claude_with("claude-secret-path", |_| async { Ok(true) }).await;
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn claude_logout_reports_safe_single_line_failures() {
+        let cases = [
+            (Ok(false), "Claude logout failed"),
+            (
+                Err(ClaudeLogoutRunError::Spawn),
+                "Claude logout could not be started",
+            ),
+            (
+                Err(ClaudeLogoutRunError::Wait),
+                "Claude logout process failed",
+            ),
+            (
+                Err(ClaudeLogoutRunError::Timeout),
+                "Claude logout timed out",
+            ),
+        ];
+
+        for (run_result, expected) in cases {
+            let error =
+                logout_claude_with("claude-secret-path", move |_| async move { run_result })
+                    .await
+                    .unwrap_err();
+
+            assert_eq!(error, expected);
+            assert_eq!(error.lines().count(), 1);
+            assert!(!error.contains("secret"));
+            assert!(!error.contains("stdout"));
+            assert!(!error.contains("stderr"));
         }
     }
 

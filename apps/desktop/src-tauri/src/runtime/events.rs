@@ -8,6 +8,7 @@ pub struct RuntimeEventEnvelope {
     pub runtime: RuntimeKind,
     pub window_label: String,
     pub tab_id: String,
+    pub attempt_id: String,
     pub session_id: Option<String>,
     pub turn_id: Option<String>,
     pub sequence: u64,
@@ -34,7 +35,7 @@ pub enum RuntimeEvent {
         turn_id: String,
     },
     TurnFailed {
-        turn_id: String,
+        turn_id: Option<String>,
         message: String,
     },
     AssistantDelta {
@@ -118,6 +119,7 @@ mod tests {
             runtime: RuntimeKind::Codex,
             window_label: "main".into(),
             tab_id: "tab-7".into(),
+            attempt_id: "tab-7:42".into(),
             session_id: None,
             turn_id: None,
             sequence: 42,
@@ -131,11 +133,25 @@ mod tests {
         assert_eq!(value["runtime"], "codex");
         assert_eq!(value["windowLabel"], "main");
         assert_eq!(value["tabId"], "tab-7");
+        assert_eq!(value["attemptId"], "tab-7:42");
         assert!(value["sessionId"].is_null());
         assert!(value["turnId"].is_null());
         assert_eq!(value["sequence"], 42);
         assert_eq!(value["event"]["type"], "assistantDelta");
         assert_eq!(value["event"]["itemId"], "item-1");
+    }
+
+    #[test]
+    fn pending_turn_failure_serializes_an_explicit_null_turn_id() {
+        let value = serde_json::to_value(RuntimeEvent::TurnFailed {
+            turn_id: None,
+            message: "transport closed".into(),
+        })
+        .unwrap();
+
+        assert_eq!(value["type"], "turnFailed");
+        assert!(value["turnId"].is_null());
+        assert_eq!(value["message"], "transport closed");
     }
 
     #[test]
@@ -167,7 +183,7 @@ mod tests {
             ),
             (
                 RuntimeEvent::TurnFailed {
-                    turn_id: "turn-1".into(),
+                    turn_id: Some("turn-1".into()),
                     message: "failed".into(),
                 },
                 "turnFailed",

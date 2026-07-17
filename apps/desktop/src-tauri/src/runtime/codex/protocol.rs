@@ -271,6 +271,204 @@ impl ModelListResponse {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ThreadStartParams {
+    cwd: String,
+    model: String,
+    approval_policy: &'static str,
+    sandbox: &'static str,
+    thread_source: &'static str,
+}
+
+impl ThreadStartParams {
+    pub(crate) fn new(cwd: String, model: String) -> Self {
+        Self {
+            cwd,
+            model,
+            approval_policy: "on-request",
+            sandbox: "workspace-write",
+            thread_source: "user",
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ThreadResumeParams {
+    thread_id: String,
+}
+
+impl ThreadResumeParams {
+    pub(crate) fn new(thread_id: String) -> Self {
+        Self { thread_id }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum UserInput {
+    Text { text: String },
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TurnStartParams {
+    thread_id: String,
+    input: Vec<UserInput>,
+    model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<String>,
+}
+
+impl TurnStartParams {
+    pub(crate) fn new(
+        thread_id: String,
+        prompt: String,
+        model: String,
+        effort: Option<String>,
+    ) -> Self {
+        Self {
+            thread_id,
+            input: vec![UserInput::Text { text: prompt }],
+            model,
+            effort,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TurnInterruptParams {
+    thread_id: String,
+    turn_id: String,
+}
+
+impl TurnInterruptParams {
+    pub(crate) fn new(thread_id: String, turn_id: String) -> Self {
+        Self { thread_id, turn_id }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ThreadReadParams {
+    thread_id: String,
+    include_turns: bool,
+}
+
+impl ThreadReadParams {
+    pub(crate) fn new(thread_id: String, include_turns: bool) -> Self {
+        Self {
+            thread_id,
+            include_turns,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ThreadArchiveParams {
+    thread_id: String,
+}
+
+impl ThreadArchiveParams {
+    pub(crate) fn new(thread_id: String) -> Self {
+        Self { thread_id }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ThreadListParams {
+    archived: bool,
+    cwd: String,
+    limit: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cursor: Option<String>,
+}
+
+impl ThreadListParams {
+    pub(crate) fn new(cwd: String, cursor: Option<String>) -> Self {
+        Self {
+            archived: false,
+            cwd,
+            limit: 100,
+            cursor,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct ThreadStatus {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Thread {
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) preview: String,
+    pub(crate) cwd: String,
+    pub(crate) updated_at: i64,
+    pub(crate) status: ThreadStatus,
+    #[serde(default)]
+    pub(crate) turns: Vec<Turn>,
+}
+
+impl Thread {
+    pub(crate) fn status_name(&self) -> &str {
+        &self.status.kind
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Turn {
+    pub(crate) id: String,
+    pub(crate) status: String,
+    #[serde(default)]
+    pub(crate) items: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub(crate) error: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub(crate) struct ThreadStartResponse {
+    pub(crate) thread: Thread,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub(crate) struct ThreadResumeResponse {
+    pub(crate) thread: Thread,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub(crate) struct TurnStartResponse {
+    pub(crate) turn: Turn,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ThreadListResponse {
+    pub(crate) data: Vec<Thread>,
+    #[serde(default)]
+    pub(crate) next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub(crate) struct ThreadReadResponse {
+    pub(crate) thread: Thread,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq, Default)]
+pub(crate) struct TurnInterruptResponse {}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq, Default)]
+pub(crate) struct ThreadArchiveResponse {}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -278,6 +476,10 @@ mod tests {
         CancelLoginAccountParams, CancelLoginAccountResponse, CancelLoginAccountStatus,
         GetAccountParams, GetAccountResponse, InitializeParams, LoginAccountParams,
         LoginAccountResponse, LogoutAccountResponse, ModelListParams, ModelListResponse,
+        ThreadArchiveParams, ThreadArchiveResponse, ThreadListParams, ThreadListResponse,
+        ThreadReadParams, ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse,
+        ThreadStartParams, ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse,
+        TurnStartParams, TurnStartResponse,
     };
     use crate::runtime::{RuntimeCapabilities, RuntimeKind};
     use serde_json::json;
@@ -624,6 +826,141 @@ mod tests {
         let models = response.into_visible_runtime_models();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].input_modalities, ["text", "image"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn codex_turn_payload_builders_use_exact_minimal_app_server_shapes(
+    ) -> Result<(), serde_json::Error> {
+        assert_eq!(
+            serde_json::to_value(ThreadStartParams::new(
+                r"C:\work\paper".into(),
+                "gpt-5.4".into(),
+            ))?,
+            json!({
+                "cwd": r"C:\work\paper",
+                "model": "gpt-5.4",
+                "approvalPolicy": "on-request",
+                "sandbox": "workspace-write",
+                "threadSource": "user"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(ThreadResumeParams::new("thread-7".into()))?,
+            json!({ "threadId": "thread-7" })
+        );
+        assert_eq!(
+            serde_json::to_value(TurnStartParams::new(
+                "thread-7".into(),
+                "Inspect the project".into(),
+                "gpt-5.4".into(),
+                Some("high".into()),
+            ))?,
+            json!({
+                "threadId": "thread-7",
+                "input": [{ "type": "text", "text": "Inspect the project" }],
+                "model": "gpt-5.4",
+                "effort": "high"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(TurnStartParams::new(
+                "thread-7".into(),
+                "Continue".into(),
+                "gpt-5.4".into(),
+                None,
+            ))?,
+            json!({
+                "threadId": "thread-7",
+                "input": [{ "type": "text", "text": "Continue" }],
+                "model": "gpt-5.4"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(TurnInterruptParams::new("thread-7".into(), "turn-3".into(),))?,
+            json!({ "threadId": "thread-7", "turnId": "turn-3" })
+        );
+        assert_eq!(
+            serde_json::to_value(ThreadReadParams::new("thread-7".into(), true))?,
+            json!({ "threadId": "thread-7", "includeTurns": true })
+        );
+        assert_eq!(
+            serde_json::to_value(ThreadArchiveParams::new("thread-7".into()))?,
+            json!({ "threadId": "thread-7" })
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn codex_turn_thread_and_turn_responses_preserve_routes_history_and_pagination(
+    ) -> Result<(), serde_json::Error> {
+        assert_eq!(
+            serde_json::to_value(ThreadListParams::new(r"C:\work\paper".into(), None,))?,
+            json!({
+                "archived": false,
+                "cwd": r"C:\work\paper",
+                "limit": 100
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(ThreadListParams::new(
+                r"C:\work\paper".into(),
+                Some("cursor-2".into()),
+            ))?,
+            json!({
+                "archived": false,
+                "cursor": "cursor-2",
+                "cwd": r"C:\work\paper",
+                "limit": 100
+            })
+        );
+
+        let thread = json!({
+            "id": "thread-7",
+            "preview": "Inspect the project",
+            "cwd": r"C:\work\paper",
+            "updatedAt": 1_721_000_123,
+            "status": { "type": "idle" },
+            "turns": [{
+                "id": "turn-3",
+                "status": "completed",
+                "items": [
+                    { "type": "userMessage", "id": "item-user", "content": [{"type":"text","text":"Hi"}] },
+                    { "type": "agentMessage", "id": "item-agent", "text": "Hello" }
+                ]
+            }]
+        });
+
+        let started: ThreadStartResponse =
+            serde_json::from_value(json!({ "thread": thread.clone() }))?;
+        assert_eq!(started.thread.id, "thread-7");
+        assert_eq!(started.thread.status_name(), "idle");
+
+        let resumed: ThreadResumeResponse =
+            serde_json::from_value(json!({ "thread": thread.clone() }))?;
+        assert_eq!(resumed.thread.id, "thread-7");
+
+        let started_turn: TurnStartResponse = serde_json::from_value(json!({
+            "turn": thread["turns"][0].clone()
+        }))?;
+        assert_eq!(started_turn.turn.id, "turn-3");
+        assert_eq!(started_turn.turn.items.len(), 2);
+
+        let list: ThreadListResponse = serde_json::from_value(json!({
+            "data": [thread.clone()],
+            "nextCursor": "cursor-2",
+            "backwardsCursor": null
+        }))?;
+        assert_eq!(list.data.len(), 1);
+        assert_eq!(list.next_cursor.as_deref(), Some("cursor-2"));
+
+        let read: ThreadReadResponse = serde_json::from_value(json!({ "thread": thread }))?;
+        assert_eq!(read.thread.turns[0].items.len(), 2);
+
+        let _: TurnInterruptResponse = serde_json::from_value(json!({}))?;
+        let _: ThreadArchiveResponse = serde_json::from_value(json!({}))?;
 
         Ok(())
     }

@@ -2,14 +2,20 @@ use super::discovery::{
     attach_process_tree, discover_codex_binary, isolate_process_tree, terminate_process_tree,
     ProcessTreeGuard,
 };
+use super::event_mapper::CodexEventMapper;
 use super::protocol::{
     AccountLoginCompletedNotification, AccountUpdatedNotification, InitializeParams,
 };
 use super::rpc::{RpcClient, RpcInbound};
 use super::sanitize_install_output;
+use crate::runtime::events::RuntimeEventEnvelope;
+use crate::runtime::process::{
+    CodexTurnBinding, CodexTurnReservation, CodexTurnStart, RuntimeProcessError,
+    RuntimeProcessState, TurnRoute,
+};
 use crate::runtime::RuntimeKind;
 use serde_json::Value;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -17,7 +23,7 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
@@ -30,6 +36,7 @@ const READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 const PROCESS_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 const WARNING_EVENT: &str = "runtime-warning";
 const ACCOUNT_UPDATED_EVENT: &str = "runtime-account-updated";
+const RUNTIME_EVENT: &str = "runtime-event";
 const WARNING_METHOD_LIMIT: usize = 256;
 const INBOUND_QUEUE_CAPACITY: usize = 32;
 const EARLY_LOGIN_COMPLETION_LIMIT: usize = 8;
@@ -303,18 +310,283 @@ fn safe_warning_method(method: &str) -> String {
     format!("{}...", &single_line[..end])
 }
 
+#[derive(Debug)]
+struct NotificationScope {
+    thread_id: String,
+    turn_id: Option<String>,
+}
+
+fn notification_scope(method: &str, params: &Value) -> Result<Option<NotificationScope>, String> {
+    let string = |field: &str| params.get(field).and_then(Value::as_str);
+    let nested = |first: &str, second: &str| {
+        params
+            .get(first)
+            .and_then(|value| value.get(second))
+            .and_then(Value::as_str)
+    };
+    let malformed = || {
+        format!(
+            "Malformed Codex `{}` notification",
+            safe_warning_method(method)
+        )
+    };
+
+    let scope = match method {
+        "thread/started" => NotificationScope {
+            thread_id: nested("thread", "id").ok_or_else(malformed)?.to_owned(),
+            turn_id: None,
+        },
+        "turn/started" | "turn/completed" => NotificationScope {
+            thread_id: string("threadId").ok_or_else(malformed)?.to_owned(),
+            turn_id: Some(nested("turn", "id").ok_or_else(malformed)?.to_owned()),
+        },
+        "item/agentMessage/delta" | "item/completed" | "error" => NotificationScope {
+            thread_id: string("threadId").ok_or_else(malformed)?.to_owned(),
+            turn_id: Some(string("turnId").ok_or_else(malformed)?.to_owned()),
+        },
+        "account/login/completed" | "account/updated" => return Ok(None),
+        _ => {
+            let Some(thread_id) = string("threadId").or_else(|| nested("thread", "id")) else {
+                return Ok(None);
+            };
+            NotificationScope {
+                thread_id: thread_id.to_owned(),
+                turn_id: string("turnId")
+                    .or_else(|| nested("turn", "id"))
+                    .map(str::to_owned),
+            }
+        }
+    };
+    Ok(Some(scope))
+}
+
+fn notification_is_terminal(method: &str, params: &Value) -> bool {
+    match method {
+        "turn/completed" => params
+            .pointer("/turn/status")
+            .and_then(Value::as_str)
+            .is_none_or(|status| status != "inProgress"),
+        "error" => params.get("willRetry").and_then(Value::as_bool) == Some(false),
+        _ => false,
+    }
+}
+
+async fn route_lifecycle_notification(
+    routes: &RuntimeProcessState,
+    mapper: &Mutex<CodexEventMapper>,
+    generation: u64,
+    method: &str,
+    params: &Value,
+    mut emit: impl FnMut(RuntimeEventEnvelope),
+) -> Result<usize, String> {
+    let scope = match notification_scope(method, params) {
+        Ok(scope) => scope,
+        Err(error) if method == "turn/completed" => {
+            let mut mapper = mapper.lock().await;
+            if routes.transport_generation().await != generation {
+                return Ok(0);
+            }
+            let advance = routes.advance_transport_generation().await;
+            for route in &advance.in_flight_turns {
+                if let Some(event) =
+                    mapper.map_transport_failure(advance.previous_generation, route, &error)
+                {
+                    emit(event);
+                }
+                routes.settle_codex_cancel(route, Ok(())).await;
+            }
+            mapper.set_generation(advance.generation);
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
+    let Some(scope) = scope else {
+        return Ok(0);
+    };
+
+    // The mapper lock is the lifecycle ordering gate shared by the reader and
+    // response-side synthetic notifications. Process-state mutations happen
+    // while this gate is held so sequence assignment cannot overtake binding.
+    let mut mapper = mapper.lock().await;
+    if routes.transport_generation().await != generation {
+        return Ok(0);
+    }
+
+    let notification_routes = if method == "turn/started" {
+        let Some(turn_id) = scope.turn_id.as_deref() else {
+            return Err("Malformed Codex `turn/started` notification".into());
+        };
+        match routes
+            .bind_pending_codex_turn(&scope.thread_id, turn_id, generation)
+            .await
+        {
+            Ok(CodexTurnBinding::Active(route)) | Ok(CodexTurnBinding::AlreadyFinished(route)) => {
+                vec![route]
+            }
+            Err(RuntimeProcessError::StaleTransportGeneration { .. }) => return Ok(0),
+            Err(_) => {
+                return Err(
+                    "Codex turn/started could not be correlated with a pending route".into(),
+                )
+            }
+        }
+    } else {
+        routes
+            .codex_notification_routes(&scope.thread_id, scope.turn_id.as_deref(), generation)
+            .await
+    };
+
+    let mut events = Vec::new();
+    for route in notification_routes {
+        events.extend(mapper.map_notification(generation, &route, method, params));
+    }
+    if notification_is_terminal(method, params) {
+        if let Some(turn_id) = scope.turn_id.as_deref() {
+            routes
+                .finish_codex_turn(&scope.thread_id, turn_id, generation)
+                .await;
+        }
+    }
+    let event_count = events.len();
+    for event in events {
+        // Delivery is part of the lifecycle ordering gate: a route identity
+        // cannot change after sequence assignment but before the event emit.
+        emit(event);
+    }
+    Ok(event_count)
+}
+
+#[derive(Debug, Default)]
+struct CodexLifecycleReset {
+    generation: u64,
+    subscriptions: Vec<TurnRoute>,
+}
+
+async fn reset_codex_lifecycle(
+    routes: &RuntimeProcessState,
+    mapper: &Mutex<CodexEventMapper>,
+    message: &str,
+    mut emit: impl FnMut(RuntimeEventEnvelope),
+) -> CodexLifecycleReset {
+    let mut mapper = mapper.lock().await;
+    let advance = routes.advance_transport_generation().await;
+    for route in &advance.in_flight_turns {
+        if let Some(event) =
+            mapper.map_transport_failure(advance.previous_generation, route, message)
+        {
+            // The registry generation is already sealed, but the mapper gate
+            // keeps failure delivery ordered before reconnect notifications.
+            emit(event);
+        }
+        routes.settle_codex_cancel(route, Ok(())).await;
+    }
+    mapper.set_generation(advance.generation);
+    CodexLifecycleReset {
+        generation: advance.generation,
+        subscriptions: advance.subscriptions,
+    }
+}
+
+async fn resume_codex_subscriptions_with<F, Fut>(
+    routes: &RuntimeProcessState,
+    reset: &CodexLifecycleReset,
+    mut request: F,
+) -> Vec<String>
+where
+    F: FnMut(String) -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
+    let mut by_thread = BTreeMap::<String, Vec<&TurnRoute>>::new();
+    for route in &reset.subscriptions {
+        if route.runtime != RuntimeKind::Codex {
+            continue;
+        }
+        if let Some(thread_id) = route.session_id.as_ref() {
+            by_thread.entry(thread_id.clone()).or_default().push(route);
+        }
+    }
+
+    let mut warnings = Vec::new();
+    for (thread_id, thread_routes) in by_thread {
+        if let Err(error) = request(thread_id.clone()).await {
+            warnings.push(format!(
+                "Failed to resume a Codex thread after restart: {}",
+                safe_warning_method(&error)
+            ));
+            continue;
+        }
+        for route in thread_routes {
+            if routes
+                .rebind_codex_subscription(
+                    &route.window_label,
+                    &route.tab_id,
+                    &thread_id,
+                    reset.generation,
+                )
+                .await
+                .is_err()
+            {
+                warnings.push(
+                    "A Codex thread resumed, but one closed or stale tab was not rebound"
+                        .to_string(),
+                );
+            }
+        }
+    }
+    warnings
+}
+
+fn validate_thread_resume_response(
+    expected_thread_id: &str,
+    response: &Value,
+) -> Result<(), String> {
+    match response.pointer("/thread/id").and_then(Value::as_str) {
+        Some(thread_id) if thread_id == expected_thread_id => Ok(()),
+        _ => Err("Invalid Codex thread/resume response".into()),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NotificationHandling {
+    Continue,
+    Poison(String),
+}
+
 trait WarningSink: Send + Sync {
     fn emit(&self, message: String);
 
-    fn handle_notification(&self, _client: Arc<RpcClient>, _method: String, _params: Value) {}
+    fn connection_generation(&self) -> ServerFuture<'_, u64> {
+        Box::pin(async { 0 })
+    }
 
-    fn transport_reset(&self) {}
+    fn handle_notification(
+        &self,
+        _client: Arc<RpcClient>,
+        _connection_generation: u64,
+        _method: String,
+        _params: Value,
+    ) -> ServerFuture<'_, NotificationHandling> {
+        Box::pin(async { NotificationHandling::Continue })
+    }
+
+    fn transport_reset(&self, _message: String) -> ServerFuture<'_, CodexLifecycleReset> {
+        Box::pin(async { CodexLifecycleReset::default() })
+    }
+
+    fn transport_reconnected(
+        &self,
+        _client: Arc<RpcClient>,
+        _reset: CodexLifecycleReset,
+    ) -> ServerFuture<'_, ()> {
+        Box::pin(async {})
+    }
 }
 
 #[derive(Clone)]
 struct TauriWarningSink {
     app: tauri::AppHandle,
     account_events: Arc<AccountEventState>,
+    mapper: Arc<Mutex<CodexEventMapper>>,
     codex_version: Option<String>,
 }
 
@@ -323,6 +595,13 @@ struct TauriWarningSink {
 struct RuntimeWarningPayload {
     runtime: RuntimeKind,
     message: String,
+}
+
+impl TauriWarningSink {
+    fn emit_runtime_event(&self, event: RuntimeEventEnvelope) {
+        let target = event.window_label.clone();
+        let _ = self.app.emit_to(target, RUNTIME_EVENT, event);
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -405,23 +684,100 @@ impl WarningSink for TauriWarningSink {
         );
     }
 
-    fn handle_notification(&self, client: Arc<RpcClient>, method: String, params: Value) {
-        let action = match classify_account_notification(&self.account_events, &method, params) {
-            Ok(action) => action,
-            Err(error) => {
-                self.emit(error);
-                return;
-            }
-        };
-        let AccountNotificationAction::Refresh { warning, sequence } = action else {
-            return;
-        };
-        let account_error = warning;
+    fn connection_generation(&self) -> ServerFuture<'_, u64> {
+        Box::pin(async move {
+            self.app
+                .state::<RuntimeProcessState>()
+                .transport_generation()
+                .await
+        })
+    }
 
-        let sink = self.clone();
-        tokio::spawn(async move {
-            let _refresh_guard = sink.account_events.refresh.lock().await;
+    fn handle_notification(
+        &self,
+        client: Arc<RpcClient>,
+        connection_generation: u64,
+        method: String,
+        params: Value,
+    ) -> ServerFuture<'_, NotificationHandling> {
+        Box::pin(async move {
+            let routes = self.app.state::<RuntimeProcessState>();
+            if let Err(error) = route_lifecycle_notification(
+                &routes,
+                &self.mapper,
+                connection_generation,
+                &method,
+                &params,
+                |event| self.emit_runtime_event(event),
+            )
+            .await
             {
+                self.emit(safe_warning_method(&error));
+                return NotificationHandling::Poison(error);
+            }
+
+            let action = match classify_account_notification(&self.account_events, &method, params)
+            {
+                Ok(action) => action,
+                Err(error) => {
+                    self.emit(error);
+                    return NotificationHandling::Continue;
+                }
+            };
+            let AccountNotificationAction::Refresh { warning, sequence } = action else {
+                return NotificationHandling::Continue;
+            };
+            let account_error = warning;
+
+            // Account refresh RPCs are independent of lifecycle ordering. The
+            // reader continues to service responses and lifecycle frames while
+            // this refresh is in flight.
+            let sink = self.clone();
+            tokio::spawn(async move {
+                let _refresh_guard = sink.account_events.refresh.lock().await;
+                {
+                    let _tracking = sink
+                        .account_events
+                        .login_tracking
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if sink.account_events.sequence.load(Ordering::Acquire) != sequence {
+                        return;
+                    }
+                    if let Some(warning) = account_error.as_ref() {
+                        sink.emit(warning.clone());
+                    }
+                }
+                let account = match super::read_account_with_request(
+                    true,
+                    sink.codex_version.clone(),
+                    |method, params| {
+                        let client = client.clone();
+                        async move {
+                            client
+                                .request(method, params, DEFAULT_REQUEST_TIMEOUT)
+                                .await
+                        }
+                    },
+                )
+                .await
+                {
+                    Ok(account) => account,
+                    Err(error) => {
+                        let _tracking = sink
+                            .account_events
+                            .login_tracking
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        if sink.account_events.sequence.load(Ordering::Acquire) == sequence {
+                            sink.emit(format!(
+                                "Failed to refresh Codex account: {}",
+                                safe_warning_method(&error)
+                            ));
+                        }
+                        return;
+                    }
+                };
                 let _tracking = sink
                     .account_events
                     .login_tracking
@@ -430,56 +786,51 @@ impl WarningSink for TauriWarningSink {
                 if sink.account_events.sequence.load(Ordering::Acquire) != sequence {
                     return;
                 }
-                if let Some(warning) = account_error.as_ref() {
-                    sink.emit(warning.clone());
-                }
-            }
-            let account = match super::read_account_with_request(
-                true,
-                sink.codex_version.clone(),
-                |method, params| {
-                    let client = client.clone();
-                    async move {
-                        client
-                            .request(method, params, DEFAULT_REQUEST_TIMEOUT)
-                            .await
-                    }
-                },
-            )
-            .await
-            {
-                Ok(account) => account,
-                Err(error) => {
-                    let _tracking = sink
-                        .account_events
-                        .login_tracking
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    if sink.account_events.sequence.load(Ordering::Acquire) == sequence {
-                        sink.emit(format!(
-                            "Failed to refresh Codex account: {}",
-                            safe_warning_method(&error)
-                        ));
-                    }
-                    return;
-                }
-            };
-            let _tracking = sink
-                .account_events
-                .login_tracking
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if sink.account_events.sequence.load(Ordering::Acquire) != sequence {
-                return;
-            }
-            let mut account = account;
-            account.error = account_error;
-            let _ = sink.app.emit(ACCOUNT_UPDATED_EVENT, account);
-        });
+                let mut account = account;
+                account.error = account_error;
+                let _ = sink.app.emit(ACCOUNT_UPDATED_EVENT, account);
+            });
+            NotificationHandling::Continue
+        })
     }
 
-    fn transport_reset(&self) {
-        self.account_events.reset_transport();
+    fn transport_reset(&self, message: String) -> ServerFuture<'_, CodexLifecycleReset> {
+        Box::pin(async move {
+            self.account_events.reset_transport();
+            let routes = self.app.state::<RuntimeProcessState>();
+            reset_codex_lifecycle(&routes, &self.mapper, &message, |event| {
+                self.emit_runtime_event(event)
+            })
+            .await
+        })
+    }
+
+    fn transport_reconnected(
+        &self,
+        client: Arc<RpcClient>,
+        reset: CodexLifecycleReset,
+    ) -> ServerFuture<'_, ()> {
+        Box::pin(async move {
+            let routes = self.app.state::<RuntimeProcessState>();
+            let warnings = resume_codex_subscriptions_with(&routes, &reset, |thread_id| {
+                let client = client.clone();
+                async move {
+                    let expected_thread_id = thread_id.clone();
+                    let response = client
+                        .request(
+                            "thread/resume",
+                            serde_json::json!({"threadId": thread_id}),
+                            DEFAULT_REQUEST_TIMEOUT,
+                        )
+                        .await?;
+                    validate_thread_resume_response(&expected_thread_id, &response)
+                }
+            })
+            .await;
+            for warning in warnings {
+                self.emit(warning);
+            }
+        })
     }
 }
 
@@ -487,11 +838,18 @@ async fn handle_inbound(
     client: Arc<RpcClient>,
     mut inbound: mpsc::Receiver<RpcInbound>,
     warnings: Arc<dyn WarningSink>,
+    connection_generation: u64,
 ) {
     while let Some(message) = inbound.recv().await {
         match message {
             RpcInbound::Notification { method, params } => {
-                warnings.handle_notification(client.clone(), method, params);
+                if let NotificationHandling::Poison(error) = warnings
+                    .handle_notification(client.clone(), connection_generation, method, params)
+                    .await
+                {
+                    client.poison_transport(&error).await;
+                    return;
+                }
             }
             RpcInbound::ServerRequest { id, method, .. }
                 if matches!(
@@ -601,6 +959,7 @@ async fn launch_running_server(
         .take_stderr()
         .ok_or_else(|| "Codex app-server did not provide the required stderr pipe".to_string())?;
 
+    let connection_generation = warnings.connection_generation().await;
     let client = Arc::new(RpcClient::new(stdin));
     let transport_failure = client.subscribe_transport_failures();
     let (inbound_tx, inbound_rx) = mpsc::channel(INBOUND_QUEUE_CAPACITY);
@@ -627,7 +986,12 @@ async fn launch_running_server(
             }
         }
     });
-    let inbound_task = tokio::spawn(handle_inbound(client.clone(), inbound_rx, warnings));
+    let inbound_task = tokio::spawn(handle_inbound(
+        client.clone(),
+        inbound_rx,
+        warnings,
+        connection_generation,
+    ));
 
     let params = serde_json::to_value(InitializeParams::new(version))
         .map_err(|error| format!("Failed to build Codex initialize request: {error}"))?;
@@ -902,7 +1266,7 @@ async fn run_supervisor(
             }
         };
 
-        warnings.transport_reset();
+        let reset = warnings.transport_reset(failure.clone()).await;
 
         if restart_used {
             let fatal = with_diagnostics(
@@ -927,7 +1291,12 @@ async fn run_supervisor(
         )
         .await
         {
-            Ok(restarted) => running = restarted,
+            Ok(restarted) => {
+                warnings
+                    .transport_reconnected(restarted.client.clone(), reset)
+                    .await;
+                running = restarted;
+            }
             Err(error) => {
                 let fatal = with_diagnostics(
                     &format!("Codex app-server automatic restart failed: {error}"),
@@ -1021,9 +1390,174 @@ pub struct CodexAppServerState {
     startup: Mutex<()>,
     shutting_down: AtomicBool,
     account_events: Arc<AccountEventState>,
+    mapper: Arc<Mutex<CodexEventMapper>>,
 }
 
 impl CodexAppServerState {
+    pub(crate) async fn emit_prestart_cancellation(
+        &self,
+        app: &tauri::AppHandle,
+        routes: &RuntimeProcessState,
+        route: &TurnRoute,
+    ) {
+        let generation = routes.transport_generation().await;
+        let event = self
+            .mapper
+            .lock()
+            .await
+            .map_prestart_cancellation(generation, route);
+        if let Some(event) = event {
+            let target = event.window_label.clone();
+            let _ = app.emit_to(target, RUNTIME_EVENT, event);
+        }
+    }
+
+    pub(crate) async fn emit_routed_notification(
+        &self,
+        app: &tauri::AppHandle,
+        method: &str,
+        params: Value,
+    ) -> Result<(), String> {
+        let routes = app.state::<RuntimeProcessState>();
+        let generation = routes.transport_generation().await;
+        route_lifecycle_notification(
+            &routes,
+            &self.mapper,
+            generation,
+            method,
+            &params,
+            |event| {
+                let target = event.window_label.clone();
+                let _ = app.emit_to(target, RUNTIME_EVENT, event);
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Atomically starts a response-side reservation with respect to lifecycle
+    /// mapping. Replacing a route identity also clears sequence/idempotence
+    /// state before any notification can observe the new route.
+    pub(crate) async fn begin_runtime_turn(
+        &self,
+        routes: &RuntimeProcessState,
+        desired: TurnRoute,
+    ) -> Result<CodexTurnStart, RuntimeProcessError> {
+        let mut mapper = self.mapper.lock().await;
+        let start = routes.begin_codex_turn(desired).await?;
+        if let CodexTurnStart::Reserved(reservation) = &start {
+            if reservation.route_identity_changed() {
+                mapper.remove_route(&reservation.route.window_label, &reservation.route.tab_id);
+            }
+        }
+        Ok(start)
+    }
+
+    /// Upserts a non-Codex-adapter route under the lifecycle gate. This keeps
+    /// legacy Claude delegation from replacing a Codex route between mapping
+    /// and event delivery.
+    pub(crate) async fn upsert_runtime_route(
+        &self,
+        routes: &RuntimeProcessState,
+        route: TurnRoute,
+    ) {
+        let mut mapper = self.mapper.lock().await;
+        let identity_changed = routes
+            .get(&route.window_label, &route.tab_id)
+            .await
+            .is_none_or(|previous| {
+                previous.runtime != route.runtime
+                    || previous.session_id != route.session_id
+                    || previous.attempt_id != route.attempt_id
+            });
+        routes.upsert(route.clone()).await;
+        if identity_changed {
+            mapper.remove_route(&route.window_label, &route.tab_id);
+        }
+    }
+
+    /// Removes one route while holding the same lifecycle ordering gate used
+    /// by inbound and response-side notifications. This keeps registry and
+    /// mapper state indivisible from the mapper's point of view.
+    pub(crate) async fn remove_runtime_route(
+        &self,
+        routes: &RuntimeProcessState,
+        window_label: &str,
+        tab_id: &str,
+    ) -> Option<TurnRoute> {
+        let mut mapper = self.mapper.lock().await;
+        let removed = routes.remove_tab(window_label, tab_id).await;
+        mapper.remove_route(window_label, tab_id);
+        removed
+    }
+
+    pub(crate) async fn remove_runtime_route_for_attempt(
+        &self,
+        routes: &RuntimeProcessState,
+        window_label: &str,
+        tab_id: &str,
+        attempt_id: &str,
+    ) -> Option<TurnRoute> {
+        let mut mapper = self.mapper.lock().await;
+        let removed = routes
+            .remove_tab_for_attempt(window_label, tab_id, attempt_id)
+            .await;
+        if removed.is_some() {
+            mapper.remove_route(window_label, tab_id);
+        }
+        removed
+    }
+
+    /// Removes every route owned by a window under the lifecycle ordering
+    /// gate, while leaving all other windows' idempotence state untouched.
+    pub(crate) async fn remove_runtime_window(
+        &self,
+        routes: &RuntimeProcessState,
+        window_label: &str,
+    ) -> Vec<TurnRoute> {
+        let mut mapper = self.mapper.lock().await;
+        let removed = routes.remove_window(window_label).await;
+        for route in &removed {
+            mapper.remove_route(&route.window_label, &route.tab_id);
+        }
+        removed
+    }
+
+    /// Rolls back a response-side reservation under the lifecycle gate. When
+    /// the rollback removes a newly-created route, any stale mapper state for
+    /// that route key is cleared before notifications can resume.
+    pub(crate) async fn abort_runtime_turn(
+        &self,
+        routes: &RuntimeProcessState,
+        reservation: &CodexTurnReservation,
+        rollback_route: bool,
+    ) -> bool {
+        self.abort_runtime_turn_outcome(routes, reservation, rollback_route)
+            .await
+            .is_some()
+    }
+
+    pub(crate) async fn abort_runtime_turn_outcome(
+        &self,
+        routes: &RuntimeProcessState,
+        reservation: &CodexTurnReservation,
+        rollback_route: bool,
+    ) -> Option<bool> {
+        let mut mapper = self.mapper.lock().await;
+        let outcome = routes
+            .abort_codex_turn_outcome(reservation, rollback_route)
+            .await;
+        if outcome.is_some()
+            && routes
+                .get(&reservation.route.window_label, &reservation.route.tab_id)
+                .await
+                .is_none()
+        {
+            mapper.remove_route(&reservation.route.window_label, &reservation.route.tab_id);
+        }
+        outcome
+    }
+
     #[cfg(test)]
     pub(crate) fn remember_active_login(&self, login_id: String) {
         let mut tracking = self
@@ -1287,10 +1821,16 @@ impl CodexAppServerState {
                 .codex_version
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = codex_version.clone();
+            let generation = app
+                .state::<RuntimeProcessState>()
+                .transport_generation()
+                .await;
+            self.mapper.lock().await.set_generation(generation);
             let spawner = Arc::new(ProcessSpawner::new(binary.path));
             let warnings = Arc::new(TauriWarningSink {
                 app: app.clone(),
                 account_events: self.account_events.clone(),
+                mapper: self.mapper.clone(),
                 codex_version,
             });
             let version = app.package_info().version.to_string();
@@ -1379,11 +1919,18 @@ impl CodexAppServerState {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_account_notification, handle_inbound, run_supervisor, start_supervisor,
-        AccountNotificationAction, AppServerProcess, AppServerSpawner, CodexAppServerState,
-        ProcessExit, RecentDiagnostics, ServerFuture, WarningSink, STDERR_LIMIT,
+        classify_account_notification, handle_inbound, route_lifecycle_notification,
+        run_supervisor, start_supervisor, AccountNotificationAction, AppServerProcess,
+        AppServerSpawner, CodexAppServerState, NotificationHandling, ProcessExit,
+        RecentDiagnostics, ServerFuture, WarningSink, STDERR_LIMIT,
     };
+    use crate::runtime::codex::event_mapper::CodexEventMapper;
     use crate::runtime::codex::rpc::{RpcClient, RpcInbound};
+    use crate::runtime::events::RuntimeEvent;
+    use crate::runtime::process::{
+        CodexCancelAction, CodexTurnReservation, CodexTurnStart, RuntimeProcessState, TurnRoute,
+    };
+    use crate::runtime::{settle_failed_codex_turn_start, RuntimeKind};
     use serde_json::{json, Value};
     use std::collections::VecDeque;
     use std::io;
@@ -1391,7 +1938,1176 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
     use tokio::io::{duplex, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-    use tokio::sync::{mpsc, oneshot, watch};
+    use tokio::sync::{mpsc, oneshot, watch, Notify};
+
+    fn reserved(start: CodexTurnStart) -> CodexTurnReservation {
+        match start {
+            CodexTurnStart::Reserved(reservation) => reservation,
+            CodexTurnStart::Cancelled(_) => panic!("attempt was unexpectedly cancelled"),
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_routes_turn_notifications_only_to_the_bound_owner() {
+        let routes = RuntimeProcessState::default();
+        for (window, tab) in [("window-a", "tab-a"), ("window-b", "tab-b")] {
+            routes
+                .upsert(TurnRoute {
+                    runtime: RuntimeKind::Codex,
+                    window_label: window.into(),
+                    tab_id: tab.into(),
+                    attempt_id: format!("attempt-{window}-{tab}"),
+                    session_id: Some("thread-1".into()),
+                    turn_id: None,
+                })
+                .await;
+        }
+        let generation = routes.transport_generation().await;
+        routes
+            .reserve_codex_turn("window-a", "tab-a", generation)
+            .await
+            .unwrap();
+        let mapper = tokio::sync::Mutex::new(CodexEventMapper::default());
+
+        let mut started = Vec::new();
+        route_lifecycle_notification(
+            &routes,
+            &mapper,
+            generation,
+            "turn/started",
+            &json!({
+                "threadId":"thread-1",
+                "turn":{"id":"turn-1","status":"inProgress"}
+            }),
+            |event| started.push(event),
+        )
+        .await
+        .unwrap();
+        let mut delta = Vec::new();
+        route_lifecycle_notification(
+            &routes,
+            &mapper,
+            generation,
+            "item/agentMessage/delta",
+            &json!({
+                "threadId":"thread-1",
+                "turnId":"turn-1",
+                "itemId":"item-1",
+                "delta":"hello"
+            }),
+            |event| delta.push(event),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(started.len(), 1);
+        assert_eq!(delta.len(), 1);
+        assert_eq!(started[0].window_label, "window-a");
+        assert_eq!(delta[0].window_label, "window-a");
+        assert_eq!(started[0].sequence, 1);
+        assert_eq!(delta[0].sequence, 2);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_broadcasts_thread_events_but_keeps_turn_events_owner_scoped() {
+        let routes = RuntimeProcessState::default();
+        for (window, tab) in [("window-a", "tab-a"), ("window-b", "tab-b")] {
+            routes
+                .upsert(TurnRoute {
+                    runtime: RuntimeKind::Codex,
+                    window_label: window.into(),
+                    tab_id: tab.into(),
+                    attempt_id: format!("attempt-{window}-{tab}"),
+                    session_id: Some("thread-1".into()),
+                    turn_id: None,
+                })
+                .await;
+        }
+        let generation = routes.transport_generation().await;
+        let mapper = tokio::sync::Mutex::new(CodexEventMapper::default());
+
+        let mut events = Vec::new();
+        route_lifecycle_notification(
+            &routes,
+            &mapper,
+            generation,
+            "thread/started",
+            &json!({"thread":{"id":"thread-1"}}),
+            |event| events.push(event),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].window_label, "window-a");
+        assert_eq!(events[1].window_label, "window-b");
+        assert!(events.iter().all(|event| event.sequence == 1));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_completion_before_start_response_is_terminal_and_idempotent() {
+        let routes = RuntimeProcessState::default();
+        routes
+            .upsert(TurnRoute {
+                runtime: RuntimeKind::Codex,
+                window_label: "window-a".into(),
+                tab_id: "tab-a".into(),
+                attempt_id: "attempt-a".into(),
+                session_id: Some("thread-1".into()),
+                turn_id: None,
+            })
+            .await;
+        let generation = routes.transport_generation().await;
+        routes
+            .reserve_codex_turn("window-a", "tab-a", generation)
+            .await
+            .unwrap();
+        let mapper = tokio::sync::Mutex::new(CodexEventMapper::default());
+        let started_params = json!({
+            "threadId":"thread-1",
+            "turn":{"id":"turn-1","status":"inProgress"}
+        });
+
+        let mut started = Vec::new();
+        route_lifecycle_notification(
+            &routes,
+            &mapper,
+            generation,
+            "turn/started",
+            &started_params,
+            |event| started.push(event),
+        )
+        .await
+        .unwrap();
+        assert_eq!(started.len(), 1);
+        let mut completed = Vec::new();
+        route_lifecycle_notification(
+            &routes,
+            &mapper,
+            generation,
+            "turn/completed",
+            &json!({
+                "threadId":"thread-1",
+                "turn":{"id":"turn-1","status":"completed"}
+            }),
+            |event| completed.push(event),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            completed[0].event,
+            RuntimeEvent::TurnCompleted { .. }
+        ));
+        assert!(routes
+            .codex_turn_owner("thread-1", "turn-1", generation)
+            .await
+            .is_none());
+
+        let mut synthetic_after_response = Vec::new();
+        route_lifecycle_notification(
+            &routes,
+            &mapper,
+            generation,
+            "turn/started",
+            &started_params,
+            |event| synthetic_after_response.push(event),
+        )
+        .await
+        .unwrap();
+        assert!(synthetic_after_response.is_empty());
+        assert!(routes
+            .codex_turn_owner("thread-1", "turn-1", generation)
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_drops_notifications_from_an_old_transport_generation() {
+        let routes = RuntimeProcessState::default();
+        routes
+            .upsert(TurnRoute {
+                runtime: RuntimeKind::Codex,
+                window_label: "window-a".into(),
+                tab_id: "tab-a".into(),
+                attempt_id: "attempt-a".into(),
+                session_id: Some("thread-1".into()),
+                turn_id: None,
+            })
+            .await;
+        let old_generation = routes.transport_generation().await;
+        let advanced = routes.advance_transport_generation().await;
+        let mapper = tokio::sync::Mutex::new(CodexEventMapper::default());
+        mapper.lock().await.set_generation(advanced.generation);
+
+        let mut events = Vec::new();
+        route_lifecycle_notification(
+            &routes,
+            &mapper,
+            old_generation,
+            "thread/started",
+            &json!({"thread":{"id":"thread-1"}}),
+            |event| events.push(event),
+        )
+        .await
+        .unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_transport_reset_fails_each_old_turn_once_then_advances() {
+        let routes = RuntimeProcessState::default();
+        routes
+            .upsert(TurnRoute {
+                runtime: RuntimeKind::Codex,
+                window_label: "window-a".into(),
+                tab_id: "tab-a".into(),
+                attempt_id: "attempt-a".into(),
+                session_id: Some("thread-1".into()),
+                turn_id: None,
+            })
+            .await;
+        let generation = routes.transport_generation().await;
+        routes
+            .reserve_codex_turn("window-a", "tab-a", generation)
+            .await
+            .unwrap();
+        let mapper = tokio::sync::Mutex::new(CodexEventMapper::default());
+        route_lifecycle_notification(
+            &routes,
+            &mapper,
+            generation,
+            "turn/started",
+            &json!({
+                "threadId":"thread-1",
+                "turn":{"id":"turn-1","status":"inProgress"}
+            }),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let mut emitted = Vec::new();
+
+        let reset = super::reset_codex_lifecycle(
+            &routes,
+            &mapper,
+            "Authorization: Bearer transport-secret",
+            |event| emitted.push(event),
+        )
+        .await;
+        let second = super::reset_codex_lifecycle(&routes, &mapper, "duplicate reset", |event| {
+            emitted.push(event)
+        })
+        .await;
+
+        assert_eq!(reset.generation, generation + 1);
+        assert_eq!(second.generation, generation + 2);
+        assert_eq!(emitted.len(), 1);
+        let RuntimeEvent::TurnFailed { message, .. } = &emitted[0].event else {
+            panic!("transport reset must fail the old turn");
+        };
+        assert!(!message.contains("transport-secret"));
+        assert_eq!(routes.transport_generation().await, generation + 2);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_transport_reset_fails_a_pending_turn_without_faking_a_turn_id() {
+        let routes = RuntimeProcessState::default();
+        routes
+            .begin_codex_turn(TurnRoute {
+                runtime: RuntimeKind::Codex,
+                window_label: "window-a".into(),
+                tab_id: "tab-a".into(),
+                attempt_id: "attempt-pending".into(),
+                session_id: Some("thread-1".into()),
+                turn_id: None,
+            })
+            .await
+            .unwrap();
+        let generation = routes.transport_generation().await;
+        assert_eq!(
+            routes
+                .request_codex_cancel("window-a", "tab-a", "attempt-pending", generation,)
+                .await,
+            CodexCancelAction::Accepted
+        );
+        let cancel_outcome = routes
+            .subscribe_codex_cancel("window-a", "tab-a", "attempt-pending")
+            .await
+            .unwrap();
+        let mapper = tokio::sync::Mutex::new(CodexEventMapper::default());
+        let mut emitted = Vec::new();
+
+        super::reset_codex_lifecycle(&routes, &mapper, "transport closed", |event| {
+            emitted.push(event)
+        })
+        .await;
+
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].attempt_id, "attempt-pending");
+        assert_eq!(emitted[0].session_id.as_deref(), Some("thread-1"));
+        assert!(emitted[0].turn_id.is_none());
+        let RuntimeEvent::TurnFailed { turn_id, message } = &emitted[0].event else {
+            panic!("pending transport reset must emit a failed turn");
+        };
+        assert!(turn_id.is_none());
+        assert_eq!(message, "transport closed");
+        assert!(!matches!(
+            emitted[0].event,
+            RuntimeEvent::TurnCompleted { .. }
+        ));
+        assert_eq!(*cancel_outcome.borrow(), Some(Ok(())));
+    }
+
+    #[tokio::test]
+    async fn unscoped_malformed_terminal_fails_the_generation_instead_of_guessing_a_route() {
+        let routes = RuntimeProcessState::default();
+        let CodexTurnStart::Reserved(reservation) = routes
+            .begin_codex_turn(TurnRoute {
+                runtime: RuntimeKind::Codex,
+                window_label: "window-a".into(),
+                tab_id: "tab-a".into(),
+                attempt_id: "attempt-a".into(),
+                session_id: Some("thread-a".into()),
+                turn_id: None,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("turn must reserve");
+        };
+        let generation = routes.transport_generation().await;
+        routes
+            .bind_codex_turn_for_reservation(&reservation, "thread-a", "turn-a")
+            .await
+            .unwrap();
+        assert!(matches!(
+            routes
+                .request_codex_cancel("window-a", "tab-a", "attempt-a", generation)
+                .await,
+            CodexCancelAction::Interrupt(_)
+        ));
+        let outcome = routes
+            .subscribe_codex_cancel("window-a", "tab-a", "attempt-a")
+            .await
+            .unwrap();
+        let mapper = tokio::sync::Mutex::new(CodexEventMapper::default());
+        let mut emitted = Vec::new();
+
+        let result = route_lifecycle_notification(
+            &routes,
+            &mapper,
+            generation,
+            "turn/completed",
+            &json!({"turn":{"id":"turn-a","status":"completed"}}),
+            |event| emitted.push(event),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].attempt_id, "attempt-a");
+        assert!(matches!(emitted[0].event, RuntimeEvent::TurnFailed { .. }));
+        assert_eq!(*outcome.borrow(), Some(Ok(())));
+        assert_eq!(routes.transport_generation().await, generation + 1);
+        assert!(routes.snapshot().await.codex_turn_owners.is_empty());
+    }
+
+    struct ConnectionScopedLifecycle {
+        routes: Arc<RuntimeProcessState>,
+        mapper: Arc<tokio::sync::Mutex<CodexEventMapper>>,
+        poisoned: Notify,
+        release_poison: Notify,
+        emitted: AtomicUsize,
+    }
+
+    impl WarningSink for ConnectionScopedLifecycle {
+        fn emit(&self, _message: String) {}
+
+        fn handle_notification(
+            &self,
+            _client: Arc<RpcClient>,
+            connection_generation: u64,
+            method: String,
+            params: Value,
+        ) -> ServerFuture<'_, NotificationHandling> {
+            Box::pin(async move {
+                let result = route_lifecycle_notification(
+                    &self.routes,
+                    &self.mapper,
+                    connection_generation,
+                    &method,
+                    &params,
+                    |_| {
+                        self.emitted.fetch_add(1, Ordering::AcqRel);
+                    },
+                )
+                .await;
+                match result {
+                    Ok(_) => NotificationHandling::Continue,
+                    Err(error) => {
+                        self.poisoned.notify_one();
+                        self.release_poison.notified().await;
+                        NotificationHandling::Poison(error)
+                    }
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_terminal_poisoning_rejects_late_frames_from_the_same_connection() {
+        let routes = Arc::new(RuntimeProcessState::default());
+        let old = reserved(
+            routes
+                .begin_codex_turn(TurnRoute {
+                    runtime: RuntimeKind::Codex,
+                    window_label: "window-a".into(),
+                    tab_id: "tab-a".into(),
+                    attempt_id: "attempt-old".into(),
+                    session_id: Some("thread-a".into()),
+                    turn_id: None,
+                })
+                .await
+                .unwrap(),
+        );
+        routes
+            .bind_codex_turn_for_reservation(&old, "thread-a", "turn-old")
+            .await
+            .unwrap();
+        let connection_generation = routes.transport_generation().await;
+        let mapper = Arc::new(tokio::sync::Mutex::new(CodexEventMapper::default()));
+        let sink = Arc::new(ConnectionScopedLifecycle {
+            routes: routes.clone(),
+            mapper,
+            poisoned: Notify::new(),
+            release_poison: Notify::new(),
+            emitted: AtomicUsize::new(0),
+        });
+        let (client_io, _server_io) = duplex(1024);
+        let (_reader, writer) = tokio::io::split(client_io);
+        let client = Arc::new(RpcClient::new(writer));
+        let mut transport_failure = client.subscribe_transport_failures();
+        let (tx, rx) = mpsc::channel(4);
+        let inbound = tokio::spawn(handle_inbound(
+            client.clone(),
+            rx,
+            sink.clone(),
+            connection_generation,
+        ));
+
+        let poisoned = sink.poisoned.notified();
+        tx.send(RpcInbound::Notification {
+            method: "turn/completed".into(),
+            params: json!({"turn":{"id":"turn-old","status":"completed"}}),
+        })
+        .await
+        .unwrap();
+        poisoned.await;
+        assert_eq!(
+            routes.transport_generation().await,
+            connection_generation + 1
+        );
+
+        let new = reserved(
+            routes
+                .begin_codex_turn(TurnRoute {
+                    runtime: RuntimeKind::Codex,
+                    window_label: "window-a".into(),
+                    tab_id: "tab-a".into(),
+                    attempt_id: "attempt-new".into(),
+                    session_id: Some("thread-a".into()),
+                    turn_id: None,
+                })
+                .await
+                .unwrap(),
+        );
+        tx.send(RpcInbound::Notification {
+            method: "turn/started".into(),
+            params: json!({
+                "threadId":"thread-a",
+                "turn":{"id":"turn-late","status":"inProgress"}
+            }),
+        })
+        .await
+        .unwrap();
+        tx.send(RpcInbound::Notification {
+            method: "item/agentMessage/delta".into(),
+            params: json!({
+                "threadId":"thread-a",
+                "turnId":"turn-late",
+                "itemId":"item-late",
+                "delta":"late"
+            }),
+        })
+        .await
+        .unwrap();
+        sink.release_poison.notify_one();
+        tokio::time::timeout(Duration::from_millis(100), transport_failure.changed())
+            .await
+            .expect("poisoning did not report a transport failure")
+            .unwrap();
+        inbound.await.unwrap();
+        assert!(tx
+            .send(RpcInbound::Malformed {
+                line: "late frame".into(),
+                error: "late frame".into(),
+            })
+            .await
+            .is_err());
+
+        assert_eq!(
+            routes
+                .get("window-a", "tab-a")
+                .await
+                .and_then(|route| route.turn_id),
+            None
+        );
+        assert_eq!(sink.emitted.load(Ordering::Acquire), 1);
+        assert!(routes.abort_codex_turn(&new, false).await);
+    }
+
+    #[tokio::test]
+    async fn scoped_terminal_with_missing_status_fails_and_finishes_the_exact_attempt() {
+        let routes = RuntimeProcessState::default();
+        let CodexTurnStart::Reserved(reservation) = routes
+            .begin_codex_turn(TurnRoute {
+                runtime: RuntimeKind::Codex,
+                window_label: "window-a".into(),
+                tab_id: "tab-a".into(),
+                attempt_id: "attempt-a".into(),
+                session_id: Some("thread-a".into()),
+                turn_id: None,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("turn must reserve");
+        };
+        let generation = routes.transport_generation().await;
+        routes
+            .bind_codex_turn_for_reservation(&reservation, "thread-a", "turn-a")
+            .await
+            .unwrap();
+        assert!(matches!(
+            routes
+                .request_codex_cancel("window-a", "tab-a", "attempt-a", generation)
+                .await,
+            CodexCancelAction::Interrupt(_)
+        ));
+        let outcome = routes
+            .subscribe_codex_cancel("window-a", "tab-a", "attempt-a")
+            .await
+            .unwrap();
+        let mapper = tokio::sync::Mutex::new(CodexEventMapper::default());
+        let mut emitted = Vec::new();
+
+        assert_eq!(
+            route_lifecycle_notification(
+                &routes,
+                &mapper,
+                generation,
+                "turn/completed",
+                &json!({"threadId":"thread-a","turn":{"id":"turn-a"}}),
+                |event| emitted.push(event),
+            )
+            .await
+            .unwrap(),
+            1
+        );
+        assert!(matches!(emitted[0].event, RuntimeEvent::TurnFailed { .. }));
+        assert_eq!(*outcome.borrow(), Some(Ok(())));
+        assert!(routes.snapshot().await.codex_turn_owners.is_empty());
+        assert_eq!(routes.get("window-a", "tab-a").await.unwrap().turn_id, None);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_resume_deduplicates_threads_and_rebinds_only_successes() {
+        let routes = RuntimeProcessState::default();
+        for (window, tab, thread) in [
+            ("window-a", "tab-a", "thread-ok"),
+            ("window-b", "tab-b", "thread-ok"),
+            ("window-c", "tab-c", "thread-fail"),
+        ] {
+            routes
+                .upsert(TurnRoute {
+                    runtime: RuntimeKind::Codex,
+                    window_label: window.into(),
+                    tab_id: tab.into(),
+                    attempt_id: format!("attempt-{window}-{tab}"),
+                    session_id: Some(thread.into()),
+                    turn_id: None,
+                })
+                .await;
+        }
+        let mapper = tokio::sync::Mutex::new(CodexEventMapper::default());
+        let reset = super::reset_codex_lifecycle(&routes, &mapper, "restart", |_| {}).await;
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let request_calls = calls.clone();
+
+        let warnings = super::resume_codex_subscriptions_with(&routes, &reset, move |thread_id| {
+            let calls = request_calls.clone();
+            async move {
+                calls
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(thread_id.clone());
+                if thread_id == "thread-fail" {
+                    Err("token=resume-secret".to_string())
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+
+        let mut calls = calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        calls.sort();
+        assert_eq!(calls, ["thread-fail", "thread-ok"]);
+        assert_eq!(
+            routes
+                .codex_thread_subscribers("thread-ok", reset.generation)
+                .await
+                .len(),
+            2
+        );
+        assert!(routes
+            .codex_thread_subscribers("thread-fail", reset.generation)
+            .await
+            .is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(!warnings[0].contains("resume-secret"));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_resume_never_rebinds_a_reused_tab_to_the_snapshot_thread() {
+        let routes = RuntimeProcessState::default();
+        routes
+            .upsert(TurnRoute {
+                runtime: RuntimeKind::Codex,
+                window_label: "window-a".into(),
+                tab_id: "tab-a".into(),
+                attempt_id: "attempt-old".into(),
+                session_id: Some("thread-old".into()),
+                turn_id: None,
+            })
+            .await;
+        let mapper = tokio::sync::Mutex::new(CodexEventMapper::default());
+        let reset = super::reset_codex_lifecycle(&routes, &mapper, "restart", |_| {}).await;
+
+        routes
+            .upsert(TurnRoute {
+                runtime: RuntimeKind::Codex,
+                window_label: "window-a".into(),
+                tab_id: "tab-a".into(),
+                attempt_id: "attempt-new".into(),
+                session_id: Some("thread-new".into()),
+                turn_id: None,
+            })
+            .await;
+
+        let warnings =
+            super::resume_codex_subscriptions_with(&routes, &reset, |_| async { Ok(()) }).await;
+
+        assert_eq!(warnings.len(), 1);
+        assert!(routes
+            .codex_thread_subscribers("thread-old", reset.generation)
+            .await
+            .is_empty());
+        assert_eq!(
+            routes
+                .codex_thread_subscribers("thread-new", reset.generation)
+                .await
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_route_removal_resets_mapper_state_before_route_reuse() {
+        let state = CodexAppServerState::default();
+        let routes = RuntimeProcessState::default();
+        let route = TurnRoute {
+            runtime: RuntimeKind::Codex,
+            window_label: "window-a".into(),
+            tab_id: "tab-a".into(),
+            attempt_id: "attempt-a".into(),
+            session_id: Some("thread-1".into()),
+            turn_id: Some("turn-1".into()),
+        };
+        let params = json!({
+            "threadId": "thread-1",
+            "turn": { "id": "turn-1", "status": "inProgress" }
+        });
+        routes.upsert(route.clone()).await;
+        assert_eq!(
+            state
+                .mapper
+                .lock()
+                .await
+                .map_notification(0, &route, "turn/started", &params)
+                .len(),
+            1
+        );
+
+        assert_eq!(
+            state
+                .remove_runtime_route(&routes, "window-a", "tab-a")
+                .await,
+            Some(route.clone())
+        );
+        routes.upsert(route.clone()).await;
+        let remapped =
+            state
+                .mapper
+                .lock()
+                .await
+                .map_notification(0, &route, "turn/started", &params);
+
+        assert_eq!(remapped.len(), 1);
+        assert_eq!(remapped[0].sequence, 1);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_window_removal_preserves_other_window_mapper_state() {
+        let state = CodexAppServerState::default();
+        let routes = RuntimeProcessState::default();
+        let route_a = TurnRoute {
+            runtime: RuntimeKind::Codex,
+            window_label: "window-a".into(),
+            tab_id: "tab-a".into(),
+            attempt_id: "attempt-a".into(),
+            session_id: Some("thread-a".into()),
+            turn_id: Some("turn-a".into()),
+        };
+        let route_b = TurnRoute {
+            runtime: RuntimeKind::Codex,
+            window_label: "window-b".into(),
+            tab_id: "tab-b".into(),
+            attempt_id: "attempt-b".into(),
+            session_id: Some("thread-b".into()),
+            turn_id: Some("turn-b".into()),
+        };
+        let params_a = json!({
+            "threadId": "thread-a",
+            "turn": { "id": "turn-a", "status": "inProgress" }
+        });
+        let params_b = json!({
+            "threadId": "thread-b",
+            "turn": { "id": "turn-b", "status": "inProgress" }
+        });
+        routes.upsert(route_a.clone()).await;
+        routes.upsert(route_b.clone()).await;
+        {
+            let mut mapper = state.mapper.lock().await;
+            assert_eq!(
+                mapper
+                    .map_notification(0, &route_a, "turn/started", &params_a)
+                    .len(),
+                1
+            );
+            assert_eq!(
+                mapper
+                    .map_notification(0, &route_b, "turn/started", &params_b)
+                    .len(),
+                1
+            );
+        }
+
+        let removed = state.remove_runtime_window(&routes, "window-a").await;
+        assert_eq!(removed, vec![route_a.clone()]);
+        assert_eq!(routes.get("window-a", "tab-a").await, None);
+        assert_eq!(routes.get("window-b", "tab-b").await, Some(route_b.clone()));
+
+        routes.upsert(route_a.clone()).await;
+        let mut mapper = state.mapper.lock().await;
+        assert_eq!(
+            mapper
+                .map_notification(0, &route_a, "turn/started", &params_a)
+                .len(),
+            1
+        );
+        assert!(mapper
+            .map_notification(0, &route_b, "turn/started", &params_b)
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_begin_waits_for_the_mapper_gate_and_resets_replaced_route_state() {
+        let state = Arc::new(CodexAppServerState::default());
+        let routes = Arc::new(RuntimeProcessState::default());
+        let old_route = TurnRoute {
+            runtime: RuntimeKind::Codex,
+            window_label: "window-a".into(),
+            tab_id: "tab-a".into(),
+            attempt_id: "attempt-old".into(),
+            session_id: Some("thread-old".into()),
+            turn_id: None,
+        };
+        let new_route = TurnRoute {
+            runtime: RuntimeKind::Codex,
+            window_label: "window-a".into(),
+            tab_id: "tab-a".into(),
+            attempt_id: "attempt-new".into(),
+            session_id: Some("thread-new".into()),
+            turn_id: None,
+        };
+        routes.upsert(old_route.clone()).await;
+        assert_eq!(
+            state
+                .mapper
+                .lock()
+                .await
+                .map_notification(
+                    0,
+                    &old_route,
+                    "thread/started",
+                    &json!({"thread":{"id":"thread-old"}}),
+                )
+                .len(),
+            1
+        );
+
+        let gate = state.mapper.lock().await;
+        let attempted = Arc::new(Notify::new());
+        let begin_state = state.clone();
+        let begin_routes = routes.clone();
+        let begin_attempted = attempted.clone();
+        let begin = tokio::spawn(async move {
+            begin_attempted.notify_one();
+            begin_state
+                .begin_runtime_turn(&begin_routes, new_route.clone())
+                .await
+                .map(|reservation| (reservation, new_route))
+        });
+        attempted.notified().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!begin.is_finished());
+
+        drop(gate);
+        let (_reservation, new_route) = begin.await.unwrap().unwrap();
+        let mapped = state.mapper.lock().await.map_notification(
+            0,
+            &new_route,
+            "thread/started",
+            &json!({"thread":{"id":"thread-new"}}),
+        );
+        assert_eq!(mapped.len(), 1);
+        assert_eq!(mapped[0].sequence, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lifecycle_route_replacement_waits_until_the_selected_event_is_emitted() {
+        let state = Arc::new(CodexAppServerState::default());
+        let routes = Arc::new(RuntimeProcessState::default());
+        routes
+            .upsert(TurnRoute {
+                runtime: RuntimeKind::Codex,
+                window_label: "window-a".into(),
+                tab_id: "tab-a".into(),
+                attempt_id: "attempt-old".into(),
+                session_id: Some("thread-old".into()),
+                turn_id: None,
+            })
+            .await;
+        let generation = routes.transport_generation().await;
+        let mapper = state.mapper.clone();
+        let notification_routes = routes.clone();
+        let emitted = Arc::new(StdMutex::new(Vec::new()));
+        let notification_emitted = emitted.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let notification = tokio::spawn(async move {
+            route_lifecycle_notification(
+                &notification_routes,
+                &mapper,
+                generation,
+                "thread/started",
+                &json!({"thread":{"id":"thread-old"}}),
+                move |event| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+                    notification_emitted
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push(event);
+                },
+            )
+            .await
+            .unwrap();
+        });
+        tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(1)))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let begin_state = state.clone();
+        let begin_routes = routes.clone();
+        let begin = tokio::spawn(async move {
+            begin_state
+                .begin_runtime_turn(
+                    &begin_routes,
+                    TurnRoute {
+                        runtime: RuntimeKind::Codex,
+                        window_label: "window-a".into(),
+                        tab_id: "tab-a".into(),
+                        attempt_id: "attempt-new".into(),
+                        session_id: Some("thread-new".into()),
+                        turn_id: None,
+                    },
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!begin.is_finished());
+
+        release_tx.send(()).unwrap();
+        notification.await.unwrap();
+        begin.await.unwrap().unwrap();
+        {
+            let emitted = emitted
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert_eq!(emitted.len(), 1);
+            assert_eq!(emitted[0].session_id.as_deref(), Some("thread-old"));
+        }
+        assert_eq!(
+            routes
+                .get("window-a", "tab-a")
+                .await
+                .and_then(|route| route.session_id),
+            Some("thread-new".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_turn_start_releases_unclaimed_reservation_and_preserves_error() {
+        let state = CodexAppServerState::default();
+        let routes = RuntimeProcessState::default();
+        let route = TurnRoute {
+            runtime: RuntimeKind::Codex,
+            window_label: "window-a".into(),
+            tab_id: "tab-a".into(),
+            attempt_id: "attempt-a".into(),
+            session_id: Some("thread-a".into()),
+            turn_id: None,
+        };
+        let reservation = reserved(
+            state
+                .begin_runtime_turn(&routes, route.clone())
+                .await
+                .unwrap(),
+        );
+
+        assert_eq!(
+            settle_failed_codex_turn_start(
+                &state,
+                &routes,
+                &reservation,
+                "turn/start transport error".into(),
+            )
+            .await,
+            Err("turn/start transport error".into())
+        );
+        assert!(routes.snapshot().await.pending_codex_turns.is_empty());
+        assert_eq!(routes.get("window-a", "tab-a").await, Some(route.clone()));
+
+        let retry = reserved(state.begin_runtime_turn(&routes, route).await.unwrap());
+        assert!(state.abort_runtime_turn(&routes, &retry, false).await);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_turn_start_waits_for_selected_lifecycle_and_preserves_its_claim() {
+        let state = Arc::new(CodexAppServerState::default());
+        let routes = Arc::new(RuntimeProcessState::default());
+        let reservation = reserved(
+            state
+                .begin_runtime_turn(
+                    &routes,
+                    TurnRoute {
+                        runtime: RuntimeKind::Codex,
+                        window_label: "window-a".into(),
+                        tab_id: "tab-a".into(),
+                        attempt_id: "attempt-a".into(),
+                        session_id: Some("thread-a".into()),
+                        turn_id: None,
+                    },
+                )
+                .await
+                .unwrap(),
+        );
+        routes
+            .bind_codex_thread_for_reservation(&reservation, "thread-a")
+            .await
+            .unwrap();
+        let generation = routes.transport_generation().await;
+
+        let lifecycle_routes = routes.clone();
+        let mapper = state.mapper.clone();
+        let (emit_entered_tx, emit_entered_rx) = std::sync::mpsc::channel();
+        let (release_emit_tx, release_emit_rx) = std::sync::mpsc::channel();
+        let lifecycle = tokio::spawn(async move {
+            route_lifecycle_notification(
+                &lifecycle_routes,
+                &mapper,
+                generation,
+                "turn/started",
+                &json!({
+                    "threadId": "thread-a",
+                    "turn": { "id": "turn-a", "status": "inProgress" }
+                }),
+                move |_| {
+                    emit_entered_tx.send(()).unwrap();
+                    release_emit_rx
+                        .recv_timeout(Duration::from_secs(1))
+                        .unwrap();
+                },
+            )
+            .await
+        });
+        tokio::task::spawn_blocking(move || emit_entered_rx.recv_timeout(Duration::from_secs(1)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(routes.snapshot().await.pending_codex_turns.is_empty());
+        assert_eq!(
+            routes
+                .get("window-a", "tab-a")
+                .await
+                .and_then(|route| route.turn_id),
+            Some("turn-a".into())
+        );
+
+        let settlement = settle_failed_codex_turn_start(
+            &state,
+            &routes,
+            &reservation,
+            "turn/start transport error".into(),
+        );
+        tokio::pin!(settlement);
+        tokio::select! {
+            biased;
+            result = &mut settlement => {
+                panic!("turn/start error settled before the selected lifecycle event: {result:?}");
+            }
+            _ = std::future::ready(()) => {}
+        }
+
+        release_emit_tx.send(()).unwrap();
+        assert_eq!(lifecycle.await.unwrap().unwrap(), 1);
+        assert_eq!(settlement.await, Ok(()));
+        assert_eq!(
+            routes
+                .get("window-a", "tab-a")
+                .await
+                .and_then(|route| route.turn_id),
+            Some("turn-a".into())
+        );
+        assert!(routes.snapshot().await.pending_codex_turns.is_empty());
+    }
+
+    #[test]
+    fn lifecycle_resume_response_must_confirm_the_requested_thread() {
+        assert!(super::validate_thread_resume_response(
+            "thread-1",
+            &json!({"thread":{"id":"thread-1"}}),
+        )
+        .is_ok());
+        assert!(super::validate_thread_resume_response(
+            "thread-1",
+            &json!({"thread":{"id":"thread-other"}}),
+        )
+        .is_err());
+        assert!(super::validate_thread_resume_response("thread-1", &json!({})).is_err());
+    }
+
+    #[derive(Default)]
+    struct OrderedNotifications {
+        order: StdMutex<Vec<String>>,
+        first_started: Notify,
+        release_first: Notify,
+    }
+
+    impl WarningSink for OrderedNotifications {
+        fn emit(&self, _message: String) {}
+
+        fn handle_notification(
+            &self,
+            _client: Arc<RpcClient>,
+            _connection_generation: u64,
+            method: String,
+            _params: Value,
+        ) -> ServerFuture<'_, NotificationHandling> {
+            Box::pin(async move {
+                self.order
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(format!("start:{method}"));
+                if method == "thread/started" {
+                    self.first_started.notify_one();
+                    self.release_first.notified().await;
+                }
+                self.order
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(format!("end:{method}"));
+                NotificationHandling::Continue
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn inbound_reader_awaits_lifecycle_notifications_in_wire_order() {
+        let (client_io, _server_io) = duplex(1024);
+        let (_reader, writer) = tokio::io::split(client_io);
+        let client = Arc::new(RpcClient::new(writer));
+        let (tx, rx) = mpsc::channel(4);
+        let sink = Arc::new(OrderedNotifications::default());
+        let task = tokio::spawn(handle_inbound(client, rx, sink.clone(), 0));
+
+        tx.send(RpcInbound::Notification {
+            method: "thread/started".into(),
+            params: json!({"thread":{"id":"thread-1"}}),
+        })
+        .await
+        .unwrap();
+        sink.first_started.notified().await;
+        tx.send(RpcInbound::Notification {
+            method: "turn/started".into(),
+            params: json!({
+                "threadId":"thread-1",
+                "turn":{"id":"turn-1","status":"inProgress"}
+            }),
+        })
+        .await
+        .unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(
+            sink.order
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            ["start:thread/started"]
+        );
+
+        sink.release_first.notify_one();
+        drop(tx);
+        task.await.unwrap();
+        assert_eq!(
+            sink.order
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            [
+                "start:thread/started",
+                "end:thread/started",
+                "start:turn/started",
+                "end:turn/started"
+            ]
+        );
+    }
 
     #[test]
     fn process_inspection_error_still_requires_best_effort_termination() {
@@ -1737,11 +3453,20 @@ mod tests {
     impl WarningSink for CollectNotifications {
         fn emit(&self, _message: String) {}
 
-        fn handle_notification(&self, _client: Arc<RpcClient>, method: String, params: Value) {
-            self.0
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push((method, params));
+        fn handle_notification(
+            &self,
+            _client: Arc<RpcClient>,
+            _connection_generation: u64,
+            method: String,
+            params: Value,
+        ) -> ServerFuture<'_, NotificationHandling> {
+            Box::pin(async move {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((method, params));
+                NotificationHandling::Continue
+            })
         }
     }
 
@@ -2338,7 +4063,7 @@ mod tests {
         let (inbound_tx, inbound_rx) = mpsc::channel::<RpcInbound>(16);
         let warnings = Arc::new(CollectWarnings::default());
         let reader = tokio::spawn(client.clone().read_loop(client_read, inbound_tx));
-        let handler = tokio::spawn(handle_inbound(client, inbound_rx, warnings.clone()));
+        let handler = tokio::spawn(handle_inbound(client, inbound_rx, warnings.clone(), 0));
         let mut responses = BufReader::new(server_read).lines();
         let malicious_method = format!(
             "future/request\nAuthorization: Bearer warning-secret {}",
@@ -2412,7 +4137,7 @@ mod tests {
         let (inbound_tx, inbound_rx) = mpsc::channel::<RpcInbound>(16);
         let notifications = Arc::new(CollectNotifications::default());
         let reader = tokio::spawn(client.clone().read_loop(client_read, inbound_tx));
-        let handler = tokio::spawn(handle_inbound(client, inbound_rx, notifications.clone()));
+        let handler = tokio::spawn(handle_inbound(client, inbound_rx, notifications.clone(), 0));
 
         server_io
             .write_all(

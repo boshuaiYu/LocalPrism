@@ -215,6 +215,10 @@ impl RpcClient {
         self.fail_pending(message).await;
     }
 
+    pub(crate) async fn poison_transport(&self, message: &str) {
+        self.fail_transport(message).await;
+    }
+
     pub(crate) async fn fail_pending(&self, message: &str) {
         let pending = {
             let mut pending = self.pending.lock().await;

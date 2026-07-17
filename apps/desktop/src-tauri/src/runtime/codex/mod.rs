@@ -15,6 +15,7 @@ use tokio::task::JoinHandle;
 
 pub mod app_server;
 pub mod discovery;
+pub mod event_mapper;
 pub mod protocol;
 pub mod rpc;
 
@@ -350,6 +351,239 @@ pub(super) async fn list_models(
     state: &CodexAppServerState,
 ) -> Result<Vec<RuntimeModel>, String> {
     list_models_with_request(MODEL_PAGE_LIMIT, |method, params| {
+        state.request(app, method, params)
+    })
+    .await
+}
+
+async fn start_thread_with_request<F, Fut>(
+    project_path: String,
+    model: String,
+    mut request: F,
+) -> Result<protocol::Thread, String>
+where
+    F: FnMut(&'static str, Value) -> Fut,
+    Fut: Future<Output = Result<Value, String>>,
+{
+    let params = serde_json::to_value(protocol::ThreadStartParams::new(project_path, model))
+        .map_err(|error| format!("Failed to serialize Codex thread start: {error}"))?;
+    let response = request("thread/start", params).await?;
+    let response: protocol::ThreadStartResponse = serde_json::from_value(response)
+        .map_err(|error| format!("Invalid Codex thread start response: {error}"))?;
+    Ok(response.thread)
+}
+
+pub(super) async fn start_thread(
+    app: &tauri::AppHandle,
+    state: &CodexAppServerState,
+    project_path: String,
+    model: String,
+) -> Result<protocol::Thread, String> {
+    start_thread_with_request(project_path, model, |method, params| {
+        state.request(app, method, params)
+    })
+    .await
+}
+
+async fn resume_thread_with_request<F, Fut>(
+    thread_id: String,
+    mut request: F,
+) -> Result<protocol::Thread, String>
+where
+    F: FnMut(&'static str, Value) -> Fut,
+    Fut: Future<Output = Result<Value, String>>,
+{
+    let params = serde_json::to_value(protocol::ThreadResumeParams::new(thread_id))
+        .map_err(|error| format!("Failed to serialize Codex thread resume: {error}"))?;
+    let response = request("thread/resume", params).await?;
+    let response: protocol::ThreadResumeResponse = serde_json::from_value(response)
+        .map_err(|error| format!("Invalid Codex thread resume response: {error}"))?;
+    Ok(response.thread)
+}
+
+pub(super) async fn resume_thread(
+    app: &tauri::AppHandle,
+    state: &CodexAppServerState,
+    thread_id: String,
+) -> Result<protocol::Thread, String> {
+    resume_thread_with_request(thread_id, |method, params| {
+        state.request(app, method, params)
+    })
+    .await
+}
+
+async fn start_turn_with_request<F, Fut>(
+    thread_id: String,
+    prompt: String,
+    model: String,
+    reasoning_effort: Option<String>,
+    mut request: F,
+) -> Result<protocol::Turn, String>
+where
+    F: FnMut(&'static str, Value) -> Fut,
+    Fut: Future<Output = Result<Value, String>>,
+{
+    let params = serde_json::to_value(protocol::TurnStartParams::new(
+        thread_id,
+        prompt,
+        model,
+        reasoning_effort,
+    ))
+    .map_err(|error| format!("Failed to serialize Codex turn start: {error}"))?;
+    let response = request("turn/start", params).await?;
+    let response: protocol::TurnStartResponse = serde_json::from_value(response)
+        .map_err(|error| format!("Invalid Codex turn start response: {error}"))?;
+    Ok(response.turn)
+}
+
+pub(super) async fn start_turn(
+    app: &tauri::AppHandle,
+    state: &CodexAppServerState,
+    thread_id: String,
+    prompt: String,
+    model: String,
+    reasoning_effort: Option<String>,
+) -> Result<protocol::Turn, String> {
+    start_turn_with_request(
+        thread_id,
+        prompt,
+        model,
+        reasoning_effort,
+        |method, params| state.request(app, method, params),
+    )
+    .await
+}
+
+async fn interrupt_turn_with_request<F, Fut>(
+    thread_id: String,
+    turn_id: String,
+    mut request: F,
+) -> Result<(), String>
+where
+    F: FnMut(&'static str, Value) -> Fut,
+    Fut: Future<Output = Result<Value, String>>,
+{
+    let params = serde_json::to_value(protocol::TurnInterruptParams::new(thread_id, turn_id))
+        .map_err(|error| format!("Failed to serialize Codex turn interruption: {error}"))?;
+    let response = request("turn/interrupt", params).await?;
+    serde_json::from_value::<protocol::TurnInterruptResponse>(response)
+        .map_err(|error| format!("Invalid Codex turn interruption response: {error}"))?;
+    Ok(())
+}
+
+pub(super) async fn interrupt_turn(
+    app: &tauri::AppHandle,
+    state: &CodexAppServerState,
+    thread_id: String,
+    turn_id: String,
+) -> Result<(), String> {
+    interrupt_turn_with_request(thread_id, turn_id, |method, params| {
+        state.request(app, method, params)
+    })
+    .await
+}
+
+async fn list_threads_with_request<F, Fut>(
+    project_path: String,
+    max_pages: usize,
+    mut request: F,
+) -> Result<Vec<protocol::Thread>, String>
+where
+    F: FnMut(&'static str, Value) -> Fut,
+    Fut: Future<Output = Result<Value, String>>,
+{
+    let mut cursor = None;
+    let mut seen_cursors = HashSet::new();
+    let mut threads = Vec::new();
+
+    for _ in 0..max_pages {
+        let params = serde_json::to_value(protocol::ThreadListParams::new(
+            project_path.clone(),
+            cursor,
+        ))
+        .map_err(|error| format!("Failed to serialize Codex thread list: {error}"))?;
+        let response = request("thread/list", params).await?;
+        let response: protocol::ThreadListResponse = serde_json::from_value(response)
+            .map_err(|error| format!("Invalid Codex thread list response: {error}"))?;
+        let next_cursor = response.next_cursor.clone();
+        threads.extend(response.data);
+
+        let Some(next_cursor) = next_cursor else {
+            return Ok(threads);
+        };
+        if !seen_cursors.insert(next_cursor.clone()) {
+            return Err("Codex thread pagination returned a repeated cursor".into());
+        }
+        cursor = Some(next_cursor);
+    }
+
+    Err(format!(
+        "Codex thread pagination exceeded the {max_pages}-page limit"
+    ))
+}
+
+const THREAD_PAGE_LIMIT: usize = 100;
+
+pub(super) async fn list_threads(
+    app: &tauri::AppHandle,
+    state: &CodexAppServerState,
+    project_path: String,
+) -> Result<Vec<protocol::Thread>, String> {
+    list_threads_with_request(project_path, THREAD_PAGE_LIMIT, |method, params| {
+        state.request(app, method, params)
+    })
+    .await
+}
+
+async fn read_thread_with_request<F, Fut>(
+    thread_id: String,
+    mut request: F,
+) -> Result<protocol::Thread, String>
+where
+    F: FnMut(&'static str, Value) -> Fut,
+    Fut: Future<Output = Result<Value, String>>,
+{
+    let params = serde_json::to_value(protocol::ThreadReadParams::new(thread_id, true))
+        .map_err(|error| format!("Failed to serialize Codex thread read: {error}"))?;
+    let response = request("thread/read", params).await?;
+    let response: protocol::ThreadReadResponse = serde_json::from_value(response)
+        .map_err(|error| format!("Invalid Codex thread read response: {error}"))?;
+    Ok(response.thread)
+}
+
+pub(super) async fn read_thread(
+    app: &tauri::AppHandle,
+    state: &CodexAppServerState,
+    thread_id: String,
+) -> Result<protocol::Thread, String> {
+    read_thread_with_request(thread_id, |method, params| {
+        state.request(app, method, params)
+    })
+    .await
+}
+
+async fn archive_thread_with_request<F, Fut>(
+    thread_id: String,
+    mut request: F,
+) -> Result<(), String>
+where
+    F: FnMut(&'static str, Value) -> Fut,
+    Fut: Future<Output = Result<Value, String>>,
+{
+    let params = serde_json::to_value(protocol::ThreadArchiveParams::new(thread_id))
+        .map_err(|error| format!("Failed to serialize Codex thread archive: {error}"))?;
+    let response = request("thread/archive", params).await?;
+    serde_json::from_value::<protocol::ThreadArchiveResponse>(response)
+        .map_err(|error| format!("Invalid Codex thread archive response: {error}"))?;
+    Ok(())
+}
+
+pub(super) async fn archive_thread(
+    app: &tauri::AppHandle,
+    state: &CodexAppServerState,
+    thread_id: String,
+) -> Result<(), String> {
+    archive_thread_with_request(thread_id, |method, params| {
         state.request(app, method, params)
     })
     .await
@@ -1371,6 +1605,219 @@ mod tests {
     use std::collections::VecDeque;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+
+    fn codex_turn_thread_fixture(id: &str, preview: &str) -> Value {
+        json!({
+            "id": id,
+            "preview": preview,
+            "cwd": r"C:\work\paper",
+            "updatedAt": 1_721_000_123,
+            "status": { "type": "idle" },
+            "turns": []
+        })
+    }
+
+    #[tokio::test]
+    async fn codex_turn_rpc_methods_use_exact_methods_and_payloads() {
+        let calls = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+
+        let started = start_thread_with_request(r"C:\work\paper".into(), "gpt-5.4".into(), {
+            let calls = calls.clone();
+            move |method, params| {
+                let calls = calls.clone();
+                async move {
+                    calls.lock().unwrap().push((method.into(), params));
+                    Ok(json!({
+                        "thread": codex_turn_thread_fixture("thread-new", "New thread")
+                    }))
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(started.id, "thread-new");
+
+        let resumed = resume_thread_with_request("thread-new".into(), {
+            let calls = calls.clone();
+            move |method, params| {
+                let calls = calls.clone();
+                async move {
+                    calls.lock().unwrap().push((method.into(), params));
+                    Ok(json!({
+                        "thread": codex_turn_thread_fixture("thread-new", "Resumed")
+                    }))
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(resumed.preview, "Resumed");
+
+        let turn = start_turn_with_request(
+            "thread-new".into(),
+            "Inspect the project".into(),
+            "gpt-5.4".into(),
+            Some("high".into()),
+            {
+                let calls = calls.clone();
+                move |method, params| {
+                    let calls = calls.clone();
+                    async move {
+                        calls.lock().unwrap().push((method.into(), params));
+                        Ok(json!({
+                            "turn": { "id": "turn-3", "status": "inProgress", "items": [] }
+                        }))
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(turn.id, "turn-3");
+
+        interrupt_turn_with_request("thread-new".into(), "turn-3".into(), {
+            let calls = calls.clone();
+            move |method, params| {
+                let calls = calls.clone();
+                async move {
+                    calls.lock().unwrap().push((method.into(), params));
+                    Ok(json!({}))
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        archive_thread_with_request("thread-new".into(), {
+            let calls = calls.clone();
+            move |method, params| {
+                let calls = calls.clone();
+                async move {
+                    calls.lock().unwrap().push((method.into(), params));
+                    Ok(json!({}))
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                (
+                    "thread/start".into(),
+                    json!({
+                        "cwd": r"C:\work\paper",
+                        "model": "gpt-5.4",
+                        "approvalPolicy": "on-request",
+                        "sandbox": "workspace-write",
+                        "threadSource": "user"
+                    })
+                ),
+                ("thread/resume".into(), json!({ "threadId": "thread-new" })),
+                (
+                    "turn/start".into(),
+                    json!({
+                        "threadId": "thread-new",
+                        "input": [{ "type": "text", "text": "Inspect the project" }],
+                        "model": "gpt-5.4",
+                        "effort": "high"
+                    })
+                ),
+                (
+                    "turn/interrupt".into(),
+                    json!({ "threadId": "thread-new", "turnId": "turn-3" })
+                ),
+                ("thread/archive".into(), json!({ "threadId": "thread-new" }))
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_turn_list_is_project_scoped_paginated_and_read_keeps_history() {
+        let calls = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let pages = Arc::new(Mutex::new(VecDeque::from([
+            json!({
+                "data": [codex_turn_thread_fixture("thread-1", "First")],
+                "nextCursor": "cursor-2"
+            }),
+            json!({
+                "data": [codex_turn_thread_fixture("thread-2", "Second")],
+                "nextCursor": null
+            }),
+        ])));
+        let threads = list_threads_with_request(r"C:\work\paper".into(), 4, {
+            let calls = calls.clone();
+            let pages = pages.clone();
+            move |method, params| {
+                let calls = calls.clone();
+                let pages = pages.clone();
+                async move {
+                    calls.lock().unwrap().push((method.into(), params));
+                    Ok(pages.lock().unwrap().pop_front().unwrap())
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            threads
+                .iter()
+                .map(|thread| thread.id.as_str())
+                .collect::<Vec<_>>(),
+            ["thread-1", "thread-2"]
+        );
+
+        let read = read_thread_with_request("thread-1".into(), {
+            let calls = calls.clone();
+            move |method, params| {
+                let calls = calls.clone();
+                async move {
+                    calls.lock().unwrap().push((method.into(), params));
+                    Ok(json!({
+                        "thread": {
+                            "id": "thread-1",
+                            "preview": "First",
+                            "cwd": r"C:\work\paper",
+                            "updatedAt": 1_721_000_123,
+                            "status": { "type": "idle" },
+                            "turns": [{
+                                "id": "turn-1",
+                                "status": "completed",
+                                "items": [{ "type": "agentMessage", "id": "item-1", "text": "Done" }]
+                            }]
+                        }
+                    }))
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(read.turns[0].items[0]["text"], "Done");
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                (
+                    "thread/list".into(),
+                    json!({ "archived": false, "cwd": r"C:\work\paper", "limit": 100 })
+                ),
+                (
+                    "thread/list".into(),
+                    json!({
+                        "archived": false,
+                        "cwd": r"C:\work\paper",
+                        "limit": 100,
+                        "cursor": "cursor-2"
+                    })
+                ),
+                (
+                    "thread/read".into(),
+                    json!({ "threadId": "thread-1", "includeTurns": true })
+                )
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn account_and_models_account_read_uses_no_refresh_and_converts_the_response() {
