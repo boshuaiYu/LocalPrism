@@ -18,7 +18,7 @@ import type {
 const RUNTIMES: RuntimeKind[] = ["claude", "codex"];
 const ACCOUNT_EVENT = "runtime-account-updated";
 const LOGIN_POLL_INTERVAL_MS = 1_000;
-const LOGIN_POLL_LIMIT = 30;
+const LOGIN_POLL_LIMIT = 180;
 
 type InteractiveLoginMode = "browser" | "device-code";
 

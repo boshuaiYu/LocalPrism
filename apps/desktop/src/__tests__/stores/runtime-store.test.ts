@@ -1152,15 +1152,15 @@ describe("bounded login polling", () => {
     expect(commandMocks.runtimeStatus).toHaveBeenCalledTimes(2);
   });
 
-  it("times out after exactly thirty status attempts", async () => {
+  it("times out after exactly one hundred eighty status attempts", async () => {
     commandMocks.runtimeStatus.mockResolvedValue(
       account("codex", { authenticated: false }),
     );
     await startBrowserLogin("timeout-login");
 
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(180_000);
 
-    expect(commandMocks.runtimeStatus).toHaveBeenCalledTimes(30);
+    expect(commandMocks.runtimeStatus).toHaveBeenCalledTimes(180);
     expect(useRuntimeStore.getState().login.codex).toEqual({
       mode: "browser",
       status: "error",
@@ -1168,7 +1168,34 @@ describe("bounded login polling", () => {
       message: "Login timed out",
     });
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(commandMocks.runtimeStatus).toHaveBeenCalledTimes(30);
+    expect(commandMocks.runtimeStatus).toHaveBeenCalledTimes(180);
+  });
+
+  it("clears a timed-out interactive login when authentication later completes", async () => {
+    let handler: RuntimeEventHandler | undefined;
+    eventMocks.listen.mockImplementation(async (_event, callback) => {
+      handler = callback;
+      return vi.fn<() => void>();
+    });
+    await ensureRuntimeAccountListener();
+    commandMocks.runtimeStatus.mockResolvedValue(
+      account("codex", { authenticated: false }),
+    );
+    await startBrowserLogin("late-auth");
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(useRuntimeStore.getState().login.codex?.message).toBe(
+      "Login timed out",
+    );
+
+    handler?.({
+      payload: account("codex", {
+        authenticated: true,
+        accountLabel: "late@example.com",
+      }),
+    });
+
+    expect(useRuntimeStore.getState().accounts.codex.authenticated).toBe(true);
+    expect(useRuntimeStore.getState().login.codex).toBeNull();
   });
 
   it("stops polling immediately when login is cancelled", async () => {
