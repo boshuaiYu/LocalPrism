@@ -1058,6 +1058,73 @@ describe("bounded login polling", () => {
     expect(commandMocks.runtimeStatus).not.toHaveBeenCalled();
   });
 
+  it("still enters waiting when a non-login account error is present after browser start", async () => {
+    commandMocks.runtimeLoginStart.mockImplementation(async () => {
+      useRuntimeStore.setState((state) => ({
+        accounts: {
+          ...state.accounts,
+          codex: {
+            ...state.accounts.codex,
+            authenticated: false,
+            error: "Failed to refresh Codex account: boom",
+          },
+        },
+      }));
+      return {
+        type: "chatgpt" as const,
+        authUrl: "https://auth.example/browser",
+        loginId: "login-stale-error",
+      };
+    });
+
+    await useRuntimeStore.getState().startLogin("codex", "browser");
+
+    expect(useRuntimeStore.getState().login.codex).toEqual({
+      mode: "browser",
+      status: "waiting",
+      loginId: "login-stale-error",
+      authUrl: "https://auth.example/browser",
+    });
+    expect(commandMocks.runtimeStatus).not.toHaveBeenCalled();
+  });
+
+  it("still treats a real Codex login failure event before waiting as terminal", async () => {
+    let handler: RuntimeEventHandler | undefined;
+    eventMocks.listen.mockImplementation(async (_event, callback) => {
+      handler = callback;
+      return vi.fn<() => void>();
+    });
+    await ensureRuntimeAccountListener();
+    let resolveStart: ((value: RuntimeLoginStartResult) => void) | undefined;
+    commandMocks.runtimeLoginStart.mockReturnValue(
+      new Promise<RuntimeLoginStartResult>((resolve) => {
+        resolveStart = resolve;
+      }),
+    );
+
+    const login = useRuntimeStore.getState().startLogin("codex", "browser");
+    handler?.({
+      payload: account("codex", {
+        authenticated: false,
+        error: "Codex login failed",
+      }),
+    });
+    resolveStart?.({
+      type: "chatgpt",
+      authUrl: "https://auth.example/browser",
+      loginId: "login-failed-early",
+    });
+    await login;
+
+    expect(useRuntimeStore.getState().login.codex).toEqual({
+      mode: "browser",
+      status: "error",
+      loginId: "login-failed-early",
+      message: "Codex login failed",
+    });
+    expect(commandMocks.runtimeStatus).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["browser", startBrowserLogin],
     ["device-code", startDeviceLogin],

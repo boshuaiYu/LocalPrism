@@ -99,6 +99,13 @@ function messageFrom(error: unknown, fallback: string): string {
   return fallback;
 }
 
+function isCodexLoginFailureMessage(message: string): boolean {
+  return (
+    message === "Codex login failed" ||
+    message.startsWith("Codex login failed:")
+  );
+}
+
 function isRuntimeKind(value: unknown): value is RuntimeKind {
   return value === "claude" || value === "codex";
 }
@@ -348,7 +355,10 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
           completeAuthenticatedLogin(runtime);
           return;
         }
-        if (currentAccount.error) {
+        if (
+          typeof currentAccount.error === "string" &&
+          isCodexLoginFailureMessage(currentAccount.error)
+        ) {
           const resultMode =
             result.type === "chatgpt" ? "browser" : "device-code";
           set((state) => ({
