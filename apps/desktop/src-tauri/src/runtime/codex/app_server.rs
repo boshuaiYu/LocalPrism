@@ -3586,6 +3586,37 @@ mod tests {
     }
 
     #[test]
+    fn account_and_models_exact_login_id_beats_null_early_completion() {
+        let state = CodexAppServerState::default();
+        let attempt = state.begin_login_attempt();
+
+        assert_eq!(
+            classify_account_notification(
+                &state.account_events,
+                "account/login/completed",
+                json!({"loginId":null,"success":false,"error":"stale"}),
+            )
+            .expect("null completion"),
+            AccountNotificationAction::Ignore
+        );
+        assert_eq!(
+            classify_account_notification(
+                &state.account_events,
+                "account/login/completed",
+                json!({"loginId":"login-exact","success":true,"error":null}),
+            )
+            .expect("exact completion"),
+            AccountNotificationAction::Ignore
+        );
+
+        let completion = state
+            .finish_login_attempt(attempt, "login-exact".into())
+            .expect("same-transport response")
+            .expect("exact match must win");
+        assert_eq!(completion.warning, None);
+    }
+
+    #[test]
     fn account_and_models_null_login_id_failed_completion_warns_for_active_login() {
         let state = CodexAppServerState::default();
         state.remember_active_login("login-active".to_string());
