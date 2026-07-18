@@ -337,6 +337,20 @@ describe("isolated runtime actions", () => {
     });
   });
 
+  it("supports silent refresh without flipping loading flags", async () => {
+    commandMocks.runtimeStatus.mockResolvedValue(
+      account("codex", { authenticated: true, accountLabel: "c@example.com" }),
+    );
+
+    const pending = useRuntimeStore
+      .getState()
+      .refresh("codex", { silent: true });
+    expect(useRuntimeStore.getState().loading.codex).toBeFalsy();
+    await pending;
+    expect(useRuntimeStore.getState().loading.codex).toBeFalsy();
+    expect(useRuntimeStore.getState().accounts.codex.authenticated).toBe(true);
+  });
+
   it("keeps Claude byte-for-byte unchanged when Codex authenticates", async () => {
     const claude = account("claude", {
       authenticated: true,
@@ -432,16 +446,18 @@ describe("isolated runtime actions", () => {
 
   it("stores a false installation result only on the requested runtime", async () => {
     const claude = account("claude", { authenticated: true });
+    const stillMissing = account("codex", { installed: false });
     useRuntimeStore.setState({
-      accounts: { claude, codex: account("codex", { installed: false }) },
+      accounts: { claude, codex: stillMissing },
     });
     commandMocks.runtimeInstall.mockResolvedValue(false);
+    commandMocks.runtimeStatus.mockResolvedValue(stillMissing);
 
     await expect(useRuntimeStore.getState().install("codex")).resolves.toBe(
       false,
     );
 
-    expect(commandMocks.runtimeStatus).not.toHaveBeenCalled();
+    expect(commandMocks.runtimeStatus).toHaveBeenCalledWith("codex");
     expect(useRuntimeStore.getState().accounts.codex.error).toBe(
       "Runtime installation failed",
     );
@@ -466,6 +482,7 @@ describe("isolated runtime actions", () => {
     await useRuntimeStore.getState().refresh("codex");
     resolveInstall?.(false);
 
+    // Stale install result must not clobber a newer refresh (epoch guard).
     await expect(installation).resolves.toBe(false);
     expect(useRuntimeStore.getState().accounts.codex).toBe(latest);
     expect(useRuntimeStore.getState().accounts.codex.error).toBeNull();
@@ -1183,9 +1200,12 @@ describe("bounded login polling", () => {
     );
     await startBrowserLogin("late-auth");
     await vi.advanceTimersByTimeAsync(180_000);
-    expect(useRuntimeStore.getState().login.codex?.message).toBe(
-      "Login timed out",
-    );
+    expect(useRuntimeStore.getState().login.codex).toEqual({
+      mode: "browser",
+      status: "error",
+      loginId: "late-auth",
+      message: "Login timed out",
+    });
 
     handler?.({
       payload: account("codex", {
