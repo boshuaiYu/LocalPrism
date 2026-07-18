@@ -624,14 +624,16 @@ fn classify_account_notification(
                 .map_err(|_| {
                     "Malformed Codex `account/login/completed` notification".to_string()
                 })?;
-            let Some(login_id) = notification.login_id.as_deref() else {
-                return Ok(AccountNotificationAction::Ignore);
-            };
             let mut tracking = account_events
                 .login_tracking
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if tracking.active_login_id.as_deref() == Some(login_id) {
+
+            let matches_active = match notification.login_id.as_deref() {
+                Some(login_id) => tracking.active_login_id.as_deref() == Some(login_id),
+                None => tracking.active_login_id.is_some(),
+            };
+            if matches_active {
                 tracking.active_login_id.take();
                 let sequence = account_events.reserve_refresh_locked();
                 drop(tracking);
@@ -640,6 +642,7 @@ fn classify_account_notification(
                     sequence,
                 });
             }
+
             if tracking.pending_attempt.is_some() {
                 if tracking.early_completions.len() == EARLY_LOGIN_COMPLETION_LIMIT {
                     tracking.early_completions.pop_front();
@@ -1608,10 +1611,16 @@ impl CodexAppServerState {
             );
         }
         tracking.pending_attempt = None;
-        let completion = tracking
+        let exact = tracking
             .early_completions
             .iter()
-            .position(|completion| completion.login_id.as_deref() == Some(login_id.as_str()))
+            .position(|completion| completion.login_id.as_deref() == Some(login_id.as_str()));
+        let wildcard = tracking
+            .early_completions
+            .iter()
+            .position(|completion| completion.login_id.is_none());
+        let completion = exact
+            .or(wildcard)
             .and_then(|position| tracking.early_completions.remove(position));
         tracking.early_completions.clear();
         if let Some(completion) = completion {
@@ -3532,6 +3541,71 @@ mod tests {
         state.begin_login_attempt();
         assert!(!state.is_login_attempt_current(completion.token));
         assert_eq!(state.active_login_id(), None);
+    }
+
+    #[test]
+    fn account_and_models_null_login_id_completion_refreshes_active_login() {
+        let state = CodexAppServerState::default();
+        state.remember_active_login("login-active".to_string());
+
+        let action = classify_account_notification(
+            &state.account_events,
+            "account/login/completed",
+            json!({"loginId":null,"success":true,"error":null}),
+        )
+        .expect("null loginId completion is valid");
+
+        match action {
+            AccountNotificationAction::Refresh { warning, .. } => assert_eq!(warning, None),
+            other => panic!("expected Refresh, got {other:?}"),
+        }
+        assert_eq!(state.active_login_id(), None);
+    }
+
+    #[test]
+    fn account_and_models_null_login_id_early_completion_is_consumed_after_login_response() {
+        let state = CodexAppServerState::default();
+        let attempt = state.begin_login_attempt();
+
+        assert_eq!(
+            classify_account_notification(
+                &state.account_events,
+                "account/login/completed",
+                json!({"loginId":null,"success":true,"error":null}),
+            )
+            .expect("valid null early completion"),
+            AccountNotificationAction::Ignore
+        );
+
+        let completion = state
+            .finish_login_attempt(attempt, "login-from-start".into())
+            .expect("same-transport response")
+            .expect("null-id early completion must match the pending attempt");
+        assert_eq!(completion.warning, None);
+        assert_eq!(state.active_login_id(), None);
+    }
+
+    #[test]
+    fn account_and_models_null_login_id_failed_completion_warns_for_active_login() {
+        let state = CodexAppServerState::default();
+        state.remember_active_login("login-active".to_string());
+
+        let action = classify_account_notification(
+            &state.account_events,
+            "account/login/completed",
+            json!({"loginId":null,"success":false,"error":"device denied"}),
+        )
+        .expect("null loginId failure is valid");
+
+        match action {
+            AccountNotificationAction::Refresh { warning, .. } => {
+                assert_eq!(
+                    warning.as_deref(),
+                    Some("Codex login failed: device denied")
+                );
+            }
+            other => panic!("expected Refresh, got {other:?}"),
+        }
     }
 
     #[test]
