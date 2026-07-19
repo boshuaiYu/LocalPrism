@@ -46,24 +46,41 @@ struct DiscoveryEnvironment {
 }
 
 impl DiscoveryEnvironment {
+    /// Full environment capture for complete candidate discovery.
+    /// Enumerates WindowsApps and registry PATH — can be slow on Windows.
     fn capture() -> Self {
+        Self::capture_inner(true)
+    }
+
+    /// Lightweight capture for known npm/override probes.
+    /// Skips WindowsApps enumeration and registry PATH (unused by known probe paths).
+    fn capture_for_known_probe() -> Self {
+        Self::capture_inner(false)
+    }
+
+    fn capture_inner(include_slow_sources: bool) -> Self {
         let path_dirs = std::env::var_os("PATH")
             .map(|value| std::env::split_paths(&value).collect())
             .unwrap_or_default();
-        let program_files = [
-            std::env::var_os("ProgramFiles").map(PathBuf::from),
-            std::env::var_os("ProgramW6432").map(PathBuf::from),
-        ];
-        let windows_apps = program_files
-            .into_iter()
-            .flatten()
-            .flat_map(|root| enumerate_windows_apps(&root))
-            .collect();
+        let (windows_apps, registry_path_dirs) = if include_slow_sources {
+            let program_files = [
+                std::env::var_os("ProgramFiles").map(PathBuf::from),
+                std::env::var_os("ProgramW6432").map(PathBuf::from),
+            ];
+            let windows_apps = program_files
+                .into_iter()
+                .flatten()
+                .flat_map(|root| enumerate_windows_apps(&root))
+                .collect();
+            (windows_apps, registry_path_dirs())
+        } else {
+            (Vec::new(), Vec::new())
+        };
 
         Self {
             exact_override: nonempty_env_path("CLAUDE_PRISM_CODEX_PATH"),
             path_dirs,
-            registry_path_dirs: registry_path_dirs(),
+            registry_path_dirs,
             app_data: nonempty_env_path("APPDATA"),
             local_app_data: nonempty_env_path("LOCALAPPDATA"),
             volta_home: nonempty_env_path("VOLTA_HOME"),
@@ -192,6 +209,134 @@ fn push_command_forms(paths: &mut Vec<PathBuf>, directory: &Path, windows: bool)
         paths.push(directory.join("codex.cmd"));
     }
     paths.push(directory.join("codex"));
+}
+
+fn is_script_wrapper(path: &Path) -> bool {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("cmd" | "bat" | "ps1" | "js" | "mjs" | "cjs") => true,
+        _ => false,
+    }
+}
+
+fn npm_package_vendor_roots(package_root: &Path) -> Vec<PathBuf> {
+    vec![
+        package_root
+            .join("node_modules")
+            .join("@openai")
+            .join("codex-win32-x64")
+            .join("vendor"),
+        package_root
+            .join("node_modules")
+            .join("@openai")
+            .join("codex-win32-arm64")
+            .join("vendor"),
+        package_root
+            .join("node_modules")
+            .join("@openai")
+            .join("codex-darwin-x64")
+            .join("vendor"),
+        package_root
+            .join("node_modules")
+            .join("@openai")
+            .join("codex-darwin-arm64")
+            .join("vendor"),
+        package_root
+            .join("node_modules")
+            .join("@openai")
+            .join("codex-linux-x64")
+            .join("vendor"),
+        package_root
+            .join("node_modules")
+            .join("@openai")
+            .join("codex-linux-arm64")
+            .join("vendor"),
+        package_root.join("vendor"),
+    ]
+}
+
+fn native_binary_name(windows: bool) -> &'static str {
+    if windows { "codex.exe" } else { "codex" }
+}
+
+fn native_codex_in_vendor_root(vendor_root: &Path, windows: bool) -> Option<PathBuf> {
+    let binary_name = native_binary_name(windows);
+    let targets = [
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl",
+    ];
+    for target in targets {
+        let modern = vendor_root.join(target).join("bin").join(binary_name);
+        if modern.is_file() {
+            return Some(modern);
+        }
+        let legacy = vendor_root.join(target).join("codex").join(binary_name);
+        if legacy.is_file() {
+            return Some(legacy);
+        }
+    }
+    None
+}
+
+fn native_codex_from_npm_package(package_root: &Path, windows: bool) -> Option<PathBuf> {
+    for vendor_root in npm_package_vendor_roots(package_root) {
+        if let Some(path) = native_codex_in_vendor_root(&vendor_root, windows) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Prefer the native Codex binary when discovery found an npm/cmd/PowerShell wrapper.
+/// App-server login binds `http://localhost:1455/auth/callback`; spawning through a
+/// `.cmd` → Node → native chain can exit the supervised parent early and tear down that
+/// listener before the browser OAuth redirect completes.
+fn resolve_launch_binary(path: &Path, windows: bool) -> PathBuf {
+    if !is_script_wrapper(path) {
+        if windows {
+            return path.to_path_buf();
+        }
+        // Unix npm shims are often extensionless scripts.
+        if path
+            .file_name()
+            .is_some_and(|name| name == "codex" || name == "codex.js")
+        {
+            // Fall through and try to unwrap common npm layouts.
+        } else {
+            return path.to_path_buf();
+        }
+    }
+
+    let Some(parent) = path.parent() else {
+        return path.to_path_buf();
+    };
+
+    // `<npm-prefix>/codex.cmd` → `<npm-prefix>/node_modules/@openai/codex/.../codex.exe`
+    if let Some(native) = native_codex_from_npm_package(
+        &parent.join("node_modules").join("@openai").join("codex"),
+        windows,
+    ) {
+        return native;
+    }
+
+    // Direct package bin: `.../@openai/codex/bin/codex.js`
+    if parent.file_name().is_some_and(|name| name == "bin") {
+        if let Some(package_root) = parent.parent() {
+            if let Some(native) = native_codex_from_npm_package(package_root, windows) {
+                return native;
+            }
+        }
+    }
+
+    path.to_path_buf()
 }
 
 fn collapse_lexical_components<'a>(
@@ -997,6 +1142,24 @@ async fn discover_from_candidates<R: CandidateRunner>(
         let Some(version) = parse_codex_version(&output.stdout) else {
             continue;
         };
+        let launch_path = resolve_launch_binary(path, cfg!(target_os = "windows"));
+        if launch_path != *path {
+            // Re-validate the unwrapped native binary so we never hand app-server a stale path.
+            match runner.run(&launch_path).await {
+                Ok(native_output)
+                    if native_output.success
+                        && parse_codex_version(&native_output.stdout).as_ref() == Some(&version) =>
+                {
+                    return Ok(CodexBinary {
+                        path: launch_path,
+                        version,
+                    });
+                }
+                _ => {
+                    // Keep the validated wrapper if the native sibling cannot be re-checked.
+                }
+            }
+        }
         return Ok(CodexBinary {
             path: path.clone(),
             version,
@@ -1005,7 +1168,72 @@ async fn discover_from_candidates<R: CandidateRunner>(
     Err(CODEX_NOT_FOUND.into())
 }
 
+/// Fast paths that avoid scanning WindowsApps / full PATH (those can stall UI).
+fn known_codex_probe_paths(environment: &DiscoveryEnvironment) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(path) = &environment.exact_override {
+        paths.push(path.clone());
+    }
+    if let Some(app_data) = &environment.app_data {
+        let npm = app_data.join("npm");
+        push_command_forms(&mut paths, &npm, environment.windows);
+        if let Some(native) = native_codex_from_npm_package(
+            &npm.join("node_modules").join("@openai").join("codex"),
+            environment.windows,
+        ) {
+            paths.push(native);
+        }
+    }
+    if let Some(npm_prefix) = &environment.npm_prefix {
+        push_command_forms(&mut paths, npm_prefix, environment.windows);
+        if let Some(native) = native_codex_from_npm_package(
+            &npm_prefix
+                .join("node_modules")
+                .join("@openai")
+                .join("codex"),
+            environment.windows,
+        ) {
+            paths.push(native);
+        }
+    }
+    for name in ["codex.exe", "codex.cmd", "codex"] {
+        if let Ok(path) = which::which(name) {
+            paths.push(path);
+        }
+    }
+    deduplicate(paths, environment.windows)
+}
+
+/// Prefer well-known npm / override locations before the expensive full scan.
+pub async fn discover_codex_binary_quick() -> Result<CodexBinary, String> {
+    let environment = DiscoveryEnvironment::capture_for_known_probe();
+    let candidates = known_codex_probe_paths(&environment);
+    discover_from_candidates(&candidates, &mut ProcessRunner).await
+}
+
+/// Filesystem-only probe — no process spawn. Used to unblock Install UI when the
+/// CLI is already on disk but `--version` validation is slow or stuck.
+pub fn probe_known_codex_binary_on_disk() -> Option<CodexBinary> {
+    let environment = DiscoveryEnvironment::capture_for_known_probe();
+    for path in known_codex_probe_paths(&environment) {
+        if !path.is_file() {
+            continue;
+        }
+        let launch = resolve_launch_binary(&path, environment.windows);
+        if launch.is_file() {
+            return Some(CodexBinary {
+                path: launch,
+                version: "detected".into(),
+            });
+        }
+    }
+    None
+}
+
 pub async fn discover_codex_binary() -> Result<CodexBinary, String> {
+    if let Ok(binary) = discover_codex_binary_quick().await {
+        return Ok(binary);
+    }
     let home = dirs::home_dir().unwrap_or_default();
     let candidates = candidate_paths(&home);
     discover_from_candidates(&candidates, &mut ProcessRunner).await
@@ -1059,6 +1287,140 @@ mod tests {
         assert_eq!(parse_codex_version("Codex-cli 0.135.0"), None);
         assert_eq!(parse_codex_version("prefix codex-cli 0.135.0"), None);
         assert_eq!(parse_codex_version("codex-cli 0.135.0 extra"), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn resolve_launch_binary_unwraps_npm_cmd_wrappers_to_native_vendor_exe() {
+        let temp = tempfile::tempdir().unwrap();
+        let npm_prefix = temp.path().join("npm");
+        let package_root = npm_prefix
+            .join("node_modules")
+            .join("@openai")
+            .join("codex");
+        let native = package_root
+            .join("node_modules")
+            .join("@openai")
+            .join("codex-win32-x64")
+            .join("vendor")
+            .join("x86_64-pc-windows-msvc")
+            .join("bin")
+            .join("codex.exe");
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        std::fs::write(&native, "native").unwrap();
+        let wrapper = npm_prefix.join("codex.cmd");
+        std::fs::create_dir_all(npm_prefix).unwrap();
+        std::fs::write(&wrapper, "@echo off\r\n").unwrap();
+
+        assert_eq!(resolve_launch_binary(&wrapper, true), native);
+        assert_eq!(
+            resolve_launch_binary(&native, true),
+            native,
+            "native binaries must stay unchanged"
+        );
+    }
+
+    #[test]
+    fn resolve_launch_binary_unwraps_package_bin_js_entrypoints() {
+        let temp = tempfile::tempdir().unwrap();
+        let package_root = temp.path().join("codex-package");
+        let bin = package_root.join("bin").join("codex.js");
+        let native = package_root
+            .join("vendor")
+            .join("x86_64-unknown-linux-musl")
+            .join("bin")
+            .join("codex");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        std::fs::write(&bin, "#!/usr/bin/env node\n").unwrap();
+        std::fs::write(&native, "native").unwrap();
+
+        assert_eq!(resolve_launch_binary(&bin, false), native);
+    }
+
+    #[tokio::test]
+    async fn discovery_prefers_a_revalidated_native_binary_over_an_npm_wrapper() {
+        let temp = tempfile::tempdir().unwrap();
+        let npm_prefix = temp.path().join("npm");
+        let package_root = npm_prefix
+            .join("node_modules")
+            .join("@openai")
+            .join("codex");
+        let native = package_root
+            .join("vendor")
+            .join("x86_64-pc-windows-msvc")
+            .join("bin")
+            .join(if cfg!(windows) { "codex.exe" } else { "codex" });
+        let wrapper = npm_prefix.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        std::fs::write(&native, "native").unwrap();
+        std::fs::write(&wrapper, "wrapper").unwrap();
+
+        let mut runner = FakeRunner::default();
+        runner.outputs.insert(
+            wrapper.clone(),
+            Ok(CandidateProcessOutput {
+                success: true,
+                stdout: "codex-cli 0.135.0\n".into(),
+                stderr: String::new(),
+            }),
+        );
+        runner.outputs.insert(
+            native.clone(),
+            Ok(CandidateProcessOutput {
+                success: true,
+                stdout: "codex-cli 0.135.0\n".into(),
+                stderr: String::new(),
+            }),
+        );
+
+        let binary = discover_from_candidates(&[wrapper.clone()], &mut runner)
+            .await
+            .unwrap();
+        assert_eq!(binary.path, native);
+        assert_eq!(binary.version, "0.135.0");
+        assert_eq!(runner.visited, vec![wrapper, native]);
+    }
+
+    #[test]
+    fn capture_for_known_probe_skips_windows_apps_and_registry_path() {
+        let environment = DiscoveryEnvironment::capture_for_known_probe();
+        assert!(
+            environment.windows_apps.is_empty(),
+            "fast probe must not enumerate WindowsApps"
+        );
+        assert!(
+            environment.registry_path_dirs.is_empty(),
+            "fast probe must not read registry PATH"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn known_probe_paths_include_appdata_npm_without_requiring_windows_apps() {
+        let mut environment = fake_windows_environment();
+        environment.windows_apps.clear();
+        environment.registry_path_dirs.clear();
+
+        let paths = known_codex_probe_paths(&environment);
+        assert!(
+            paths.contains(&PathBuf::from(
+                r"C:\Users\alice\AppData\Roaming\npm\codex.cmd"
+            )),
+            "known probe must still cover APPDATA\\npm\\codex.cmd"
+        );
+        assert!(
+            paths.contains(&PathBuf::from(
+                r"C:\Users\alice\AppData\Roaming\npm\codex.exe"
+            )),
+            "known probe must still cover APPDATA\\npm\\codex.exe"
+        );
+        assert!(
+            !paths
+                .iter()
+                .any(|path| path.to_string_lossy().contains("WindowsApps")),
+            "known probe paths must not depend on WindowsApps candidates"
+        );
     }
 
     #[cfg(target_os = "windows")]

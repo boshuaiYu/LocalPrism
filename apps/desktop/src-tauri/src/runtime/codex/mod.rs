@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tauri::{Emitter, WebviewWindow};
+use tauri::Emitter;
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 use tokio::task::JoinHandle;
 
@@ -619,6 +619,14 @@ fn select_windows_codex_install_command(
     winget_program: Option<PathBuf>,
     npm_program: Option<PathBuf>,
 ) -> Result<CodexInstallCommand, String> {
+    // Prefer npm: Microsoft Store / winget installs often hang waiting for UI even
+    // with --silent, which freezes the Accounts card on "Installing…".
+    if let Some(program) = npm_program {
+        return Ok(CodexInstallCommand {
+            program,
+            args: vec!["install", "--global", "@openai/codex"],
+        });
+    }
     if let Some(program) = winget_program {
         return Ok(CodexInstallCommand {
             program,
@@ -633,12 +641,6 @@ fn select_windows_codex_install_command(
                 "--disable-interactivity",
                 "--silent",
             ],
-        });
-    }
-    if let Some(program) = npm_program {
-        return Ok(CodexInstallCommand {
-            program,
-            args: vec!["install", "--global", "@openai/codex"],
         });
     }
     Err(concat!(
@@ -743,19 +745,20 @@ trait RuntimeInstallEventSink: Clone + Send + Sync + 'static {
     fn emit(&self, event: RuntimeInstallEvent);
 }
 
+/// App-wide emit so the frontend `listen()` always receives install progress.
 #[derive(Clone)]
-struct WindowInstallEventSink {
-    window: WebviewWindow,
+struct AppInstallEventSink {
+    app: tauri::AppHandle,
 }
 
-impl RuntimeInstallEventSink for WindowInstallEventSink {
+impl RuntimeInstallEventSink for AppInstallEventSink {
     fn emit(&self, event: RuntimeInstallEvent) {
         match event {
             RuntimeInstallEvent::Output(payload) => {
-                let _ = self.window.emit(RUNTIME_INSTALL_OUTPUT_EVENT, payload);
+                let _ = self.app.emit(RUNTIME_INSTALL_OUTPUT_EVENT, payload);
             }
             RuntimeInstallEvent::Complete(payload) => {
-                let _ = self.window.emit(RUNTIME_INSTALL_COMPLETE_EVENT, payload);
+                let _ = self.app.emit(RUNTIME_INSTALL_COMPLETE_EVENT, payload);
             }
         }
     }
@@ -1574,8 +1577,11 @@ where
     result
 }
 
-async fn install_codex_cli_inner(window: WebviewWindow) -> Result<bool, String> {
-    let sink = WindowInstallEventSink { window };
+async fn install_codex_cli_inner<S: RuntimeInstallEventSink>(sink: S) -> Result<bool, String> {
+    sink.emit(runtime_install_output_event(
+        RuntimeInstallStream::Stdout,
+        "Codex CLI not found — starting installer…",
+    ));
     let spec = match platform_codex_install_command(discover_winget(), discover_npm()) {
         Ok(spec) => spec,
         Err(message) => {
@@ -1587,6 +1593,17 @@ async fn install_codex_cli_inner(window: WebviewWindow) -> Result<bool, String> 
             return Err(sanitize_install_output(&message));
         }
     };
+    sink.emit(runtime_install_output_event(
+        RuntimeInstallStream::Stdout,
+        &format!(
+            "Running `{} {}`…",
+            spec.program
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("installer"),
+            spec.args.join(" ")
+        ),
+    ));
     orchestrate_codex_installation(
         &mut ProcessCodexInstallerLifecycle::default(),
         &mut ProcessCodexPostInstallDiscoverer,
@@ -1598,8 +1615,67 @@ async fn install_codex_cli_inner(window: WebviewWindow) -> Result<bool, String> 
     .await
 }
 
-pub(super) async fn install(window: WebviewWindow) -> Result<bool, String> {
-    run_with_codex_install_guard(&CODEX_INSTALL_GATE, || install_codex_cli_inner(window)).await
+fn emit_already_installed<S: RuntimeInstallEventSink>(sink: &S, detail: &str) {
+    sink.emit(runtime_install_output_event(
+        RuntimeInstallStream::Stdout,
+        detail,
+    ));
+    sink.emit(runtime_install_completion_event(true));
+}
+
+pub(super) async fn install(
+    app: tauri::AppHandle,
+    state: &CodexAppServerState,
+) -> Result<bool, String> {
+    let sink = AppInstallEventSink { app };
+
+    // Short-circuit OUTSIDE the install gate so a stuck prior npm/winget install
+    // cannot block "already installed" detection forever.
+    if state.is_running().await {
+        emit_already_installed(&sink, "Codex CLI is already running.");
+        return Ok(true);
+    }
+
+    sink.emit(runtime_install_output_event(
+        RuntimeInstallStream::Stdout,
+        "Checking for an existing Codex CLI on disk…",
+    ));
+    if let Some(binary) = tokio::task::spawn_blocking(discovery::probe_known_codex_binary_on_disk)
+        .await
+        .ok()
+        .flatten()
+    {
+        emit_already_installed(
+            &sink,
+            &format!(
+                "Codex CLI is already installed at {}.",
+                binary.path.display()
+            ),
+        );
+        return Ok(true);
+    }
+
+    sink.emit(runtime_install_output_event(
+        RuntimeInstallStream::Stdout,
+        "Validating Codex CLI…",
+    ));
+    if tokio::time::timeout(
+        Duration::from_secs(5),
+        discovery::discover_codex_binary_quick(),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .is_some()
+    {
+        emit_already_installed(&sink, "Codex CLI is already installed.");
+        return Ok(true);
+    }
+
+    run_with_codex_install_guard(&CODEX_INSTALL_GATE, || {
+        install_codex_cli_inner(sink.clone())
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -2325,19 +2401,19 @@ mod tests {
     }
 
     #[test]
-    fn windows_installer_selection_prefers_winget_then_falls_back_to_npm() {
+    fn windows_installer_selection_prefers_npm_then_falls_back_to_winget() {
         let winget = PathBuf::from("/tools/winget.exe");
         let npm = PathBuf::from("/tools/npm.cmd");
 
-        let store =
+        let preferred =
             select_windows_codex_install_command(Some(winget.clone()), Some(npm.clone())).unwrap();
+        assert_eq!(preferred.program, npm);
+        assert_eq!(preferred.args, ["install", "--global", "@openai/codex"]);
+
+        let store = select_windows_codex_install_command(Some(winget.clone()), None).unwrap();
         assert_eq!(store.program, winget);
         assert!(store.args.contains(&"--disable-interactivity"));
         assert!(store.args.contains(&"--silent"));
-
-        let fallback = select_windows_codex_install_command(None, Some(npm.clone())).unwrap();
-        assert_eq!(fallback.program, npm);
-        assert_eq!(fallback.args, ["install", "--global", "@openai/codex"]);
 
         let error = select_windows_codex_install_command(None, None).unwrap_err();
         assert!(error.contains("9PLM9XGG6VKS"));
