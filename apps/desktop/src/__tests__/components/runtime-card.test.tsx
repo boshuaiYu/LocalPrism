@@ -68,6 +68,7 @@ describe("RuntimeCard", () => {
       account?: RuntimeAccount;
       login?: RuntimeLoginState | null;
       loading?: boolean;
+      installInFlight?: boolean;
       onInstall?: () => Promise<unknown>;
       onLogin?: (
         mode: "browser" | "device-code" | "api-key",
@@ -86,6 +87,7 @@ describe("RuntimeCard", () => {
           account={options.account ?? account()}
           login={options.login}
           loading={options.loading}
+          installInFlight={options.installInFlight}
           onInstall={options.onInstall}
           onLogin={options.onLogin}
           onCancelLogin={options.onCancelLogin}
@@ -95,6 +97,32 @@ describe("RuntimeCard", () => {
       );
     });
   }
+
+  it("does not treat background loading as Installing without installInFlight", async () => {
+    await renderCard({
+      account: account({ installed: false, version: null }),
+      loading: true,
+      onInstall: vi.fn().mockResolvedValue(true),
+    });
+
+    expect(container.textContent).toContain("Working...");
+    expect(container.textContent).not.toContain("Installing...");
+    expect(container.textContent).not.toContain("Checking Codex");
+    expect(findButton(container, "Install").disabled).toBe(true);
+  });
+
+  it("shows Installing / Checking Codex only while installInFlight", async () => {
+    await renderCard({
+      account: account({ installed: false, version: null }),
+      loading: true,
+      installInFlight: true,
+      onInstall: vi.fn().mockResolvedValue(true),
+    });
+
+    expect(container.textContent).toContain("Installing...");
+    expect(container.textContent).toContain("Checking Codex");
+    expect(container.textContent).not.toContain("Working...");
+  });
 
   it("shows installation, authenticated metadata, and separate account errors", async () => {
     const onInstall = vi.fn().mockResolvedValue(true);

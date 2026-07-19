@@ -34,7 +34,7 @@ function initialCheckFor(
   let pending = checksForRefresh.get(checkClaudeStatus);
   if (!pending) {
     const operation = Promise.allSettled([
-      refreshRuntimes(),
+      refreshRuntimes(undefined, { silent: true }),
       checkClaudeStatus(),
     ]).then(() => undefined);
     const cached = operation.finally(() => {

@@ -377,6 +377,56 @@ describe("isolated runtime actions", () => {
     expect(useRuntimeStore.getState().accounts.codex.authenticated).toBe(true);
   });
 
+  it("sets installInFlight for install and clears it when finished", async () => {
+    let resolveInstall: ((installed: boolean) => void) | undefined;
+    commandMocks.runtimeInstall.mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        resolveInstall = resolve;
+      }),
+    );
+    commandMocks.runtimeStatus.mockResolvedValue(
+      account("codex", { installed: true, version: "2.0.0" }),
+    );
+
+    const pending = useRuntimeStore.getState().install("codex");
+    expect(useRuntimeStore.getState().installInFlight.codex).toBe(true);
+    expect(useRuntimeStore.getState().loading.codex).toBe(true);
+
+    resolveInstall?.(true);
+    await expect(pending).resolves.toBe(true);
+    expect(useRuntimeStore.getState().installInFlight.codex).toBe(false);
+    expect(useRuntimeStore.getState().loading.codex).toBe(false);
+  });
+
+  it("clears installInFlight even when installation fails", async () => {
+    commandMocks.runtimeInstall.mockRejectedValue(new Error("npm failed"));
+
+    await expect(useRuntimeStore.getState().install("codex")).resolves.toBe(
+      false,
+    );
+    expect(useRuntimeStore.getState().installInFlight.codex).toBe(false);
+    expect(useRuntimeStore.getState().loading.codex).toBe(false);
+  });
+
+  it("times out a hung non-silent refresh and clears loading", async () => {
+    vi.useFakeTimers();
+    commandMocks.runtimeStatus.mockReturnValue(new Promise(() => undefined));
+
+    const pending = useRuntimeStore.getState().refresh("codex");
+    expect(useRuntimeStore.getState().loading.codex).toBe(true);
+
+    const expectation = expect(pending).rejects.toThrow(
+      "Runtime status timed out",
+    );
+    await vi.advanceTimersByTimeAsync(10_000);
+    await expectation;
+
+    expect(useRuntimeStore.getState().loading.codex).toBe(false);
+    expect(useRuntimeStore.getState().accounts.codex.error).toBe(
+      "Runtime status timed out",
+    );
+  });
+
   it("keeps Claude byte-for-byte unchanged when Codex authenticates", async () => {
     const claude = account("claude", {
       authenticated: true,
@@ -483,12 +533,13 @@ describe("isolated runtime actions", () => {
       false,
     );
 
-    expect(commandMocks.runtimeStatus).toHaveBeenCalledWith("codex");
+    expect(commandMocks.runtimeStatus).not.toHaveBeenCalled();
     expect(useRuntimeStore.getState().accounts.codex.error).toBe(
       "Runtime installation failed",
     );
     expect(useRuntimeStore.getState().accounts.claude).toBe(claude);
     expect(useRuntimeStore.getState().loading.codex).toBe(false);
+    expect(useRuntimeStore.getState().installInFlight.codex).toBe(false);
   });
 
   it("does not let an old false installation overwrite a newer refresh", async () => {

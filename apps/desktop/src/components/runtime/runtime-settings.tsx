@@ -35,6 +35,7 @@ export function RuntimeSettings({
 }: RuntimeSettingsProps) {
   const accounts = useRuntimeStore((state) => state.accounts);
   const loading = useRuntimeStore((state) => state.loading);
+  const installInFlight = useRuntimeStore((state) => state.installInFlight);
   const login = useRuntimeStore((state) => state.login);
   const refresh = useRuntimeStore((state) => state.refresh);
   const install = useRuntimeStore((state) => state.install);
@@ -55,6 +56,7 @@ export function RuntimeSettings({
         description="Claude Code and OpenAI-compatible providers"
         account={accounts.claude}
         loading={loading.claude}
+        installInFlight={installInFlight.claude}
         onLogout={() =>
           consume(async () => {
             await logout("claude");
@@ -70,6 +72,7 @@ export function RuntimeSettings({
         description="OpenAI Codex runtime"
         account={accounts.codex}
         loading={loading.codex}
+        installInFlight={installInFlight.codex}
         login={login.codex}
         onInstall={() => consume(() => install("codex"))}
         onLogin={(mode, apiKey) =>

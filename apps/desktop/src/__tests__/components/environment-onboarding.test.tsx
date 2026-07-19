@@ -178,11 +178,19 @@ describe("EnvironmentOnboarding", () => {
     await renderOnboarding();
 
     expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledWith(undefined, { silent: true });
     expect(
       mocks.runtimeSettingsProps[mocks.runtimeSettingsProps.length - 1],
     ).toEqual({
       refreshOnMount: false,
     });
+  });
+
+  it("uses a silent startup refresh so hung status cannot fake Installing", async () => {
+    await renderOnboarding();
+
+    expect(refresh).toHaveBeenCalledWith(undefined, { silent: true });
+    expect(refresh.mock.calls[0]?.[1]).toEqual({ silent: true });
   });
 
   it.each([

@@ -41,8 +41,9 @@ export interface RuntimeState {
   accounts: Record<RuntimeKind, RuntimeAccount>;
   models: Record<RuntimeKind, RuntimeModel[]>;
   loading: Partial<Record<RuntimeKind, boolean>>;
+  installInFlight: Partial<Record<RuntimeKind, boolean>>;
   login: Partial<Record<RuntimeKind, RuntimeLoginState | null>>;
-  refresh(runtime?: RuntimeKind): Promise<void>;
+  refresh(runtime?: RuntimeKind, options?: { silent?: boolean }): Promise<void>;
   install(runtime: RuntimeKind): Promise<boolean>;
   startLogin(
     runtime: RuntimeKind,
@@ -81,9 +82,16 @@ function initialData() {
     },
     models: { claude: [], codex: [] },
     loading: {},
+    installInFlight: {},
     login: {},
-  } satisfies Pick<RuntimeState, "accounts" | "models" | "loading" | "login">;
+  } satisfies Pick<
+    RuntimeState,
+    "accounts" | "models" | "loading" | "installInFlight" | "login"
+  >;
 }
+
+/** Hung runtimeStatus must not freeze Accounts loading forever. */
+const STATUS_WATCHDOG_MS = 10_000;
 
 export function hasReadyRuntime(
   accounts: Record<RuntimeKind, RuntimeAccount>,
@@ -284,16 +292,29 @@ function startLoginPolling(
 export const useRuntimeStore = create<RuntimeState>((set, get) => ({
   ...initialData(),
 
-  refresh: async (runtime) => {
+  refresh: async (runtime, options) => {
+    const silent = options?.silent === true;
     if (runtime === undefined) {
-      await Promise.allSettled(RUNTIMES.map((kind) => get().refresh(kind)));
+      await Promise.allSettled(
+        RUNTIMES.map((kind) => get().refresh(kind, options)),
+      );
       return;
     }
 
     const accountEpoch = invalidateAccount(runtime);
-    setLoading(runtime, true);
+    if (!silent) setLoading(runtime, true);
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
     try {
-      const nextAccount = await runtimeStatus(runtime);
+      const nextAccount = silent
+        ? await runtimeStatus(runtime)
+        : await Promise.race([
+            runtimeStatus(runtime),
+            new Promise<RuntimeAccount>((_, reject) => {
+              watchdog = setTimeout(() => {
+                reject(new Error("Runtime status timed out"));
+              }, STATUS_WATCHDOG_MS);
+            }),
+          ]);
       if (!isCurrentAccount(runtime, accountEpoch)) return;
       set((state) => ({
         accounts: { ...state.accounts, [runtime]: nextAccount },
@@ -305,12 +326,16 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
       }
       throw error;
     } finally {
-      setLoading(runtime, false);
+      if (watchdog) clearTimeout(watchdog);
+      if (!silent) setLoading(runtime, false);
     }
   },
 
   install: async (runtime) => {
     const accountEpoch = invalidateAccount(runtime);
+    set((state) => ({
+      installInFlight: { ...state.installInFlight, [runtime]: true },
+    }));
     setLoading(runtime, true);
     try {
       const installed = await runtimeInstall(runtime);
@@ -333,6 +358,9 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
       return false;
     } finally {
       setLoading(runtime, false);
+      set((state) => ({
+        installInFlight: { ...state.installInFlight, [runtime]: false },
+      }));
     }
   },
 

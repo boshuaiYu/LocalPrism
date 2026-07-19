@@ -12,6 +12,8 @@ export interface RuntimeCardProps {
   account: RuntimeAccount;
   login?: RuntimeLoginState | null;
   loading?: boolean;
+  /** True only while store.install() is in progress ??not background refresh. */
+  installInFlight?: boolean;
   onInstall?: () => Promise<unknown> | unknown;
   onLogin?: (mode: RuntimeLoginMode, apiKey?: string) => Promise<void> | void;
   onCancelLogin?: () => Promise<void> | void;
@@ -33,6 +35,7 @@ export function RuntimeCard({
   account,
   login,
   loading = false,
+  installInFlight = false,
   onInstall,
   onLogin,
   onCancelLogin,
@@ -59,6 +62,9 @@ export function RuntimeCard({
   const loginError = login?.status === "error" ? login.message : null;
   const hasLiveLoginError = login?.status === "error" && login.loginId !== null;
   const loginStatus = login?.status ?? null;
+  const installing =
+    Boolean(installInFlight) && !account.installed && !!onInstall;
+  const controlsLocked = loading || installInFlight;
 
   useEffect(() => {
     if (!account.installed || account.authenticated || loginStatus !== null) {
@@ -86,7 +92,12 @@ export function RuntimeCard({
           )}
         </div>
         <div className="flex shrink-0 items-center gap-1.5 text-xs">
-          {loading ? (
+          {installing ? (
+            <>
+              <Loader2Icon className="size-3.5 animate-spin" />
+              Installing...
+            </>
+          ) : loading ? (
             <>
               <Loader2Icon className="size-3.5 animate-spin" />
               Working...
@@ -129,7 +140,7 @@ export function RuntimeCard({
                   type="button"
                   size="sm"
                   variant="outline"
-                  disabled={loading}
+                  disabled={controlsLocked}
                   onClick={() => consume(onCancelLogin)}
                 >
                   Cancel
@@ -142,10 +153,10 @@ export function RuntimeCard({
           onInstall && (
             <Button
               type="button"
-              disabled={loading}
+              disabled={controlsLocked}
               onClick={() => consume(onInstall)}
             >
-              {loading ? "Installing..." : "Install"}
+              {installing ? "Checking Codex\u2026" : "Install"}
             </Button>
           )
         ) : account.authenticated ? (
@@ -160,7 +171,7 @@ export function RuntimeCard({
                 type="button"
                 variant="outline"
                 size="sm"
-                disabled={loading}
+                disabled={controlsLocked}
                 onClick={() => consume(onLogout)}
               >
                 Log out
@@ -179,7 +190,7 @@ export function RuntimeCard({
               <Button
                 type="button"
                 size="sm"
-                disabled={loading || !onOpenExternal}
+                disabled={controlsLocked || !onOpenExternal}
                 onClick={() => consume(() => onOpenExternal?.(waiting.authUrl))}
               >
                 <ExternalLinkIcon className="size-3.5" />
@@ -190,7 +201,7 @@ export function RuntimeCard({
                   type="button"
                   size="sm"
                   variant="outline"
-                  disabled={loading}
+                  disabled={controlsLocked}
                   onClick={() => consume(onCancelLogin)}
                 >
                   Cancel
@@ -215,7 +226,7 @@ export function RuntimeCard({
               <Button
                 type="button"
                 size="sm"
-                disabled={loading || !onOpenExternal}
+                disabled={controlsLocked || !onOpenExternal}
                 onClick={() =>
                   consume(() => onOpenExternal?.(waiting.verificationUrl))
                 }
@@ -228,7 +239,7 @@ export function RuntimeCard({
                   type="button"
                   size="sm"
                   variant="outline"
-                  disabled={loading}
+                  disabled={controlsLocked}
                   onClick={() => consume(onCancelLogin)}
                 >
                   Cancel
@@ -247,7 +258,7 @@ export function RuntimeCard({
                 <Button
                   type="button"
                   size="sm"
-                  disabled={loading}
+                  disabled={controlsLocked}
                   onClick={() => startInteractiveLogin("browser")}
                 >
                   Continue in browser
@@ -256,7 +267,7 @@ export function RuntimeCard({
                   type="button"
                   size="sm"
                   variant="outline"
-                  disabled={loading}
+                  disabled={controlsLocked}
                   onClick={() => startInteractiveLogin("device-code")}
                 >
                   Use device code
@@ -268,14 +279,14 @@ export function RuntimeCard({
                   type="password"
                   autoComplete="off"
                   value={apiKey}
-                  disabled={loading}
+                  disabled={controlsLocked}
                   placeholder="Codex API key"
                   onChange={(event) => setApiKey(event.currentTarget.value)}
                 />
                 <Button
                   type="submit"
                   variant="outline"
-                  disabled={loading || !apiKey.trim()}
+                  disabled={controlsLocked || !apiKey.trim()}
                 >
                   Use API key
                 </Button>
