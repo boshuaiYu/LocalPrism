@@ -159,6 +159,34 @@ function setAccountError(runtime: RuntimeKind, message: string): void {
   }));
 }
 
+/** Surface Sign in immediately after a successful install, even if status is slow. */
+function markInstalledOptimistic(runtime: RuntimeKind): void {
+  useRuntimeStore.setState((state) => {
+    const current = state.accounts[runtime];
+    if (current.installed && current.error === null) return state;
+    return {
+      accounts: {
+        ...state.accounts,
+        [runtime]: {
+          ...current,
+          installed: true,
+          error: null,
+          capabilities:
+            runtime === "codex"
+              ? {
+                  models: true,
+                  skills: true,
+                  customAgents: true,
+                  subagents: true,
+                  approvals: true,
+                }
+              : current.capabilities,
+        },
+      },
+    };
+  });
+}
+
 function invalidateLogin(runtime: RuntimeKind): number {
   const poll = loginPolls[runtime];
   if (poll?.timer !== null && poll?.timer !== undefined) {
@@ -337,6 +365,7 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
       installInFlight: { ...state.installInFlight, [runtime]: true },
     }));
     setLoading(runtime, true);
+    let success = false;
     try {
       const installed = await runtimeInstall(runtime);
       if (!installed) {
@@ -345,9 +374,10 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
         }
         return false;
       }
-      if (!isCurrentAccount(runtime, accountEpoch)) return true;
-      await get().refresh(runtime);
-      return true;
+      if (isCurrentAccount(runtime, accountEpoch)) {
+        markInstalledOptimistic(runtime);
+      }
+      success = true;
     } catch (error) {
       if (isCurrentAccount(runtime, accountEpoch)) {
         setAccountError(
@@ -362,6 +392,16 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
         installInFlight: { ...state.installInFlight, [runtime]: false },
       }));
     }
+
+    // Clear Installing UI first; then probe status without re-arming the watchdog.
+    if (success && isCurrentAccount(runtime, accountEpoch)) {
+      try {
+        await get().refresh(runtime, { silent: true });
+      } catch {
+        // Optimistic installed already set; a slow/failed status must not undo install.
+      }
+    }
+    return success;
   },
 
   startLogin: async (runtime, mode, apiKey) => {

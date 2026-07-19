@@ -339,6 +339,28 @@ fn normalize_codex_login(
     }
 }
 
+/// Bound for `account/read` during status probes. The frontend watchdog is 10s;
+/// stay well under that so disk-detected installs can surface Sign in promptly.
+const CODEX_ACCOUNT_READ_TIMEOUT: Duration = Duration::from_secs(3);
+
+async fn codex_read_account_bounded(
+    app: &AppHandle,
+    codex_state: &codex::CodexAppServerState,
+    binary: &CodexBinary,
+) -> RuntimeAccount {
+    match tokio::time::timeout(
+        CODEX_ACCOUNT_READ_TIMEOUT,
+        codex::read_account(app, codex_state, binary.version.clone()),
+    )
+    .await
+    {
+        Ok(Ok(account)) => account,
+        Ok(Err(error)) => codex_account_with_error(binary, error),
+        // Timed out talking to app-server — still report installed so login UI appears.
+        Err(_) => codex_account_from_binary(Some(binary)),
+    }
+}
+
 #[tauri::command]
 pub async fn runtime_status(
     runtime: RuntimeKind,
@@ -350,14 +372,60 @@ pub async fn runtime_status(
             .await
             .map(claude::account_from_status),
         RuntimeKind::Codex => {
+            let probed = tokio::task::spawn_blocking(
+                codex::discovery::probe_known_codex_binary_on_disk,
+            )
+            .await
+            .ok()
+            .flatten();
+
+            // Prefer a short account/read when the app-server is already warm.
+            if codex_state.is_running().await {
+                let version = probed
+                    .as_ref()
+                    .map(|binary| binary.version.clone())
+                    .unwrap_or_else(|| "detected".into());
+                match tokio::time::timeout(
+                    CODEX_ACCOUNT_READ_TIMEOUT,
+                    codex::read_account(&app, &codex_state, version),
+                )
+                .await
+                {
+                    Ok(Ok(account)) => return Ok(account),
+                    Ok(Err(error)) => {
+                        if let Some(binary) = probed.as_ref() {
+                            return Ok(codex_account_with_error(binary, error));
+                        }
+                        let placeholder = CodexBinary {
+                            path: PathBuf::from("codex"),
+                            version: "detected".into(),
+                        };
+                        return Ok(codex_account_with_error(&placeholder, error));
+                    }
+                    Err(_) => {
+                        if let Some(binary) = probed.as_ref() {
+                            return Ok(codex_account_from_binary(Some(binary)));
+                        }
+                        let placeholder = CodexBinary {
+                            path: PathBuf::from("codex"),
+                            version: "detected".into(),
+                        };
+                        return Ok(codex_account_from_binary(Some(&placeholder)));
+                    }
+                }
+            }
+
+            // Fast path: disk-detect under APPDATA/npm (etc.) before full discover.
+            if let Some(binary) = probed {
+                return Ok(codex_read_account_bounded(&app, &codex_state, &binary).await);
+            }
+
+            // Fallback: full discover + bounded account/read.
             let binary = codex::discovery::discover_codex_binary().await.ok();
             let Some(binary) = binary else {
                 return Ok(codex_account_from_binary(None));
             };
-            match codex::read_account(&app, &codex_state, binary.version.clone()).await {
-                Ok(account) => Ok(account),
-                Err(error) => Ok(codex_account_with_error(&binary, error)),
-            }
+            Ok(codex_read_account_bounded(&app, &codex_state, &binary).await)
         }
     }
 }
@@ -1695,5 +1763,24 @@ mod tests {
         assert!(value.get("path").is_none());
         assert!(value.get("binaryPath").is_none());
         assert!(!value.to_string().contains("protected"));
+    }
+
+    #[test]
+    fn disk_detected_codex_without_account_read_still_reports_installed() {
+        // Contract for runtime_status: when account/read times out after a disk
+        // probe, return installed via codex_account_from_binary so Sign in shows.
+        let binary = CodexBinary {
+            path: PathBuf::from(r"C:\Users\example\AppData\Roaming\npm\codex.cmd"),
+            version: "detected".into(),
+        };
+        let account = codex_account_from_binary(Some(&binary));
+        assert!(account.installed);
+        assert!(!account.authenticated);
+        assert_eq!(account.version.as_deref(), Some("detected"));
+        assert_eq!(account.error, None);
+
+        let with_error = codex_account_with_error(&binary, "account/read failed".into());
+        assert!(with_error.installed);
+        assert_eq!(with_error.error.as_deref(), Some("account/read failed"));
     }
 }

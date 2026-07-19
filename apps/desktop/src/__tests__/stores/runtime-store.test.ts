@@ -398,6 +398,43 @@ describe("isolated runtime actions", () => {
     expect(useRuntimeStore.getState().loading.codex).toBe(false);
   });
 
+  it("clears installInFlight and marks installed before waiting on status", async () => {
+    let resolveStatus: ((value: RuntimeAccount) => void) | undefined;
+    commandMocks.runtimeInstall.mockResolvedValue(true);
+    commandMocks.runtimeStatus.mockImplementation(
+      () =>
+        new Promise<RuntimeAccount>((resolve) => {
+          resolveStatus = resolve;
+        }),
+    );
+
+    const pending = useRuntimeStore.getState().install("codex");
+    await vi.waitFor(() => {
+      expect(useRuntimeStore.getState().installInFlight.codex).toBe(false);
+    });
+    expect(useRuntimeStore.getState().loading.codex).toBe(false);
+    expect(useRuntimeStore.getState().accounts.codex.installed).toBe(true);
+    expect(commandMocks.runtimeStatus).toHaveBeenCalled();
+
+    resolveStatus?.(account("codex", { installed: true, version: "2.0.0" }));
+    await expect(pending).resolves.toBe(true);
+    expect(useRuntimeStore.getState().accounts.codex.version).toBe("2.0.0");
+  });
+
+  it("keeps installed true when post-install silent refresh fails", async () => {
+    commandMocks.runtimeInstall.mockResolvedValue(true);
+    commandMocks.runtimeStatus.mockRejectedValue(new Error("status offline"));
+
+    await expect(useRuntimeStore.getState().install("codex")).resolves.toBe(
+      true,
+    );
+    expect(useRuntimeStore.getState().installInFlight.codex).toBe(false);
+    expect(useRuntimeStore.getState().accounts.codex.installed).toBe(true);
+    expect(useRuntimeStore.getState().accounts.codex.error).toBe(
+      "status offline",
+    );
+  });
+
   it("clears installInFlight even when installation fails", async () => {
     commandMocks.runtimeInstall.mockRejectedValue(new Error("npm failed"));
 
@@ -500,7 +537,7 @@ describe("isolated runtime actions", () => {
     expect(useRuntimeStore.getState().loading.codex).toBe(false);
   });
 
-  it("installs and refreshes only the requested runtime", async () => {
+  it("installs and silently refreshes only the requested runtime", async () => {
     const claude = account("claude", { authenticated: true });
     const installedCodex = account("codex", { version: "2.0.0" });
     useRuntimeStore.setState({
@@ -518,6 +555,7 @@ describe("isolated runtime actions", () => {
     expect(useRuntimeStore.getState().accounts.claude).toBe(claude);
     expect(useRuntimeStore.getState().accounts.codex).toEqual(installedCodex);
     expect(useRuntimeStore.getState().loading.codex).toBe(false);
+    expect(useRuntimeStore.getState().installInFlight.codex).toBe(false);
   });
 
   it("stores a false installation result only on the requested runtime", async () => {
