@@ -201,6 +201,12 @@ function completeAuthenticatedLogin(runtime: RuntimeKind): void {
         ? { ...state.login, [runtime]: null }
         : state.login,
   }));
+  if (runtime === "codex") {
+    void useRuntimeStore
+      .getState()
+      .refreshModels("codex")
+      .catch(() => undefined);
+  }
 }
 
 function schedulePoll(poll: LoginPoll): void {

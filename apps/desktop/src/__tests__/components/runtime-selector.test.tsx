@@ -763,6 +763,37 @@ describe("RuntimeSelector", () => {
     }
   });
 
+  it("retries Codex model refresh after a failed one-shot fetch", async () => {
+    const onRefreshCodexModels = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("transient"))
+      .mockResolvedValueOnce(undefined);
+    const view = await mountSelector({
+      codexModels: [],
+      selectedModelId: null,
+      onRefreshCodexModels,
+    });
+    try {
+      expect(onRefreshCodexModels).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => {
+        expect(onRefreshCodexModels).toHaveBeenCalledTimes(1);
+      });
+      await view.rerender({
+        codexModels: [],
+        codexModelsLoading: true,
+      });
+      await view.rerender({
+        codexModels: [],
+        codexModelsLoading: false,
+      });
+      await vi.waitFor(() => {
+        expect(onRefreshCodexModels).toHaveBeenCalledTimes(2);
+      });
+    } finally {
+      await view.unmount();
+    }
+  });
+
   it("shows unavailable runtime status and a disabled future Agent control", async () => {
     const view = await mountSelector({ codexAvailable: false });
     try {

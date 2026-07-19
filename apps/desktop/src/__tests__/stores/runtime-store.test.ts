@@ -136,6 +136,7 @@ beforeEach(() => {
   resetRuntimeStoreForTests();
   vi.clearAllMocks();
   eventMocks.listen.mockResolvedValue(vi.fn<() => void>());
+  commandMocks.runtimeListModels.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -308,6 +309,31 @@ describe("runtime account listener lifecycle", () => {
       authenticatedCodex,
     );
     expect(useRuntimeStore.getState().accounts.claude).toBe(claude);
+  });
+
+  it("refreshes Codex models when authentication completes", async () => {
+    commandMocks.runtimeListModels.mockResolvedValue([
+      model("codex", "gpt-5.5"),
+    ]);
+    let handler: RuntimeEventHandler | undefined;
+    eventMocks.listen.mockImplementation(async (_event, callback) => {
+      handler = callback;
+      return vi.fn<() => void>();
+    });
+    await ensureRuntimeAccountListener();
+    handler?.({
+      payload: account("codex", {
+        authenticated: true,
+        accountLabel: "codex@example.com",
+        authMode: "chatgpt",
+      }),
+    });
+    await vi.waitFor(() => {
+      expect(commandMocks.runtimeListModels).toHaveBeenCalledWith("codex");
+    });
+    expect(useRuntimeStore.getState().models.codex.map((m) => m.id)).toEqual([
+      "gpt-5.5",
+    ]);
   });
 });
 

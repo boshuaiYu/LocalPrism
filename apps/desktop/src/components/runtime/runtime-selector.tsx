@@ -250,7 +250,9 @@ export function RuntimeSelector({
     }
 
     refreshRequestedRef.current = true;
-    void onRefreshCodexModels().catch(() => undefined);
+    void onRefreshCodexModels().catch(() => {
+      refreshRequestedRef.current = false;
+    });
   }, [
     codexAvailable,
     codexModelsLoading,
