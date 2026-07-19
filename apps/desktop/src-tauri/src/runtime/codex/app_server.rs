@@ -1,6 +1,6 @@
 use super::discovery::{
-    attach_process_tree, discover_codex_binary, isolate_process_tree, terminate_process_tree,
-    ProcessTreeGuard,
+    attach_process_tree, discover_codex_binary, isolate_process_tree,
+    probe_known_codex_binary_on_disk, terminate_process_tree, ProcessTreeGuard,
 };
 use super::event_mapper::CodexEventMapper;
 use super::protocol::{
@@ -30,7 +30,7 @@ use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
 
 const STDERR_LIMIT: usize = 64 * 1024;
-const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 const PROCESS_REAP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -1820,9 +1820,15 @@ impl CodexAppServerState {
         {
             handle
         } else {
-            let binary = tokio::time::timeout_at(deadline, discover_codex_binary())
-                .await
-                .map_err(|_| "Codex app-server startup timed out during discovery".to_string())??;
+            let binary = match tokio::task::spawn_blocking(probe_known_codex_binary_on_disk).await
+            {
+                Ok(Some(probed)) => probed,
+                _ => tokio::time::timeout_at(deadline, discover_codex_binary())
+                    .await
+                    .map_err(|_| {
+                        "Codex app-server startup timed out during discovery".to_string()
+                    })??,
+            };
             self.ensure_accepting_requests()?;
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
@@ -1935,7 +1941,7 @@ mod tests {
         classify_account_notification, handle_inbound, route_lifecycle_notification,
         run_supervisor, start_supervisor, AccountNotificationAction, AppServerProcess,
         AppServerSpawner, CodexAppServerState, NotificationHandling, ProcessExit,
-        RecentDiagnostics, ServerFuture, WarningSink, STDERR_LIMIT,
+        RecentDiagnostics, ServerFuture, WarningSink, DEFAULT_STARTUP_TIMEOUT, STDERR_LIMIT,
     };
     use crate::runtime::codex::event_mapper::CodexEventMapper;
     use crate::runtime::codex::rpc::{RpcClient, RpcInbound};
@@ -1958,6 +1964,13 @@ mod tests {
             CodexTurnStart::Reserved(reservation) => reservation,
             CodexTurnStart::Cancelled(_) => panic!("attempt was unexpectedly cancelled"),
         }
+    }
+
+    #[test]
+    fn cold_start_budget_leaves_room_after_disk_probe() {
+        // request() cold start prefers probe_known_codex_binary_on_disk (no --version)
+        // before falling back to discover_codex_binary under this deadline.
+        assert_eq!(DEFAULT_STARTUP_TIMEOUT, Duration::from_secs(10));
     }
 
     #[tokio::test]

@@ -1214,8 +1214,13 @@ pub async fn discover_codex_binary_quick() -> Result<CodexBinary, String> {
 /// Filesystem-only probe — no process spawn. Used to unblock Install UI when the
 /// CLI is already on disk but `--version` validation is slow or stuck.
 pub fn probe_known_codex_binary_on_disk() -> Option<CodexBinary> {
-    let environment = DiscoveryEnvironment::capture_for_known_probe();
-    for path in known_codex_probe_paths(&environment) {
+    probe_known_codex_binary_in_environment(&DiscoveryEnvironment::capture_for_known_probe())
+}
+
+fn probe_known_codex_binary_in_environment(
+    environment: &DiscoveryEnvironment,
+) -> Option<CodexBinary> {
+    for path in known_codex_probe_paths(environment) {
         if !path.is_file() {
             continue;
         }
@@ -1231,6 +1236,11 @@ pub fn probe_known_codex_binary_on_disk() -> Option<CodexBinary> {
 }
 
 pub async fn discover_codex_binary() -> Result<CodexBinary, String> {
+    // Prefer a filesystem-only hit so status/login/app-server cold start never
+    // blocks on slow npm `.cmd --version` validation when the native exe exists.
+    if let Some(binary) = probe_known_codex_binary_on_disk() {
+        return Ok(binary);
+    }
     if let Ok(binary) = discover_codex_binary_quick().await {
         return Ok(binary);
     }
@@ -1420,6 +1430,46 @@ mod tests {
                 .iter()
                 .any(|path| path.to_string_lossy().contains("WindowsApps")),
             "known probe paths must not depend on WindowsApps candidates"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn disk_probe_prefers_existing_override_and_unwraps_npm_cmd_to_native() {
+        let temp = tempfile::tempdir().unwrap();
+        let npm_prefix = temp.path().join("npm");
+        let package_root = npm_prefix
+            .join("node_modules")
+            .join("@openai")
+            .join("codex");
+        let native = package_root
+            .join("node_modules")
+            .join("@openai")
+            .join("codex-win32-x64")
+            .join("vendor")
+            .join("x86_64-pc-windows-msvc")
+            .join("bin")
+            .join("codex.exe");
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        std::fs::write(&native, "native").unwrap();
+        let wrapper = npm_prefix.join("codex.cmd");
+        std::fs::create_dir_all(&npm_prefix).unwrap();
+        std::fs::write(&wrapper, "@echo off\r\n").unwrap();
+
+        let mut environment = fake_windows_environment();
+        environment.exact_override = Some(wrapper);
+        environment.app_data = None;
+        environment.npm_prefix = Some(npm_prefix);
+        environment.path_dirs.clear();
+        environment.windows_apps.clear();
+        environment.registry_path_dirs.clear();
+
+        let binary = probe_known_codex_binary_in_environment(&environment)
+            .expect("disk probe should find the native launch binary");
+        assert_eq!(binary.path, native);
+        assert_eq!(
+            binary.version, "detected",
+            "disk probe must not spawn --version; version stays placeholder"
         );
     }
 
