@@ -363,10 +363,15 @@ pub async fn runtime_status(
 }
 
 #[tauri::command]
-pub async fn runtime_install(runtime: RuntimeKind, window: WebviewWindow) -> Result<bool, String> {
+pub async fn runtime_install(
+    runtime: RuntimeKind,
+    window: WebviewWindow,
+    app: AppHandle,
+    codex_state: State<'_, codex::CodexAppServerState>,
+) -> Result<bool, String> {
     match runtime {
         RuntimeKind::Claude => crate::claude::install_claude_cli(window).await,
-        RuntimeKind::Codex => codex::install(window).await,
+        RuntimeKind::Codex => codex::install(app, &codex_state).await,
     }
 }
 

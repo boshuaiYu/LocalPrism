@@ -1397,6 +1397,10 @@ pub struct CodexAppServerState {
 }
 
 impl CodexAppServerState {
+    pub(crate) async fn is_running(&self) -> bool {
+        self.inner.lock().await.is_some()
+    }
+
     pub(crate) async fn emit_prestart_cancellation(
         &self,
         app: &tauri::AppHandle,
