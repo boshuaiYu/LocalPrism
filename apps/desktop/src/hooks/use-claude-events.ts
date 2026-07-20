@@ -668,9 +668,13 @@ export function useClaudeEvents() {
         }
         if (!isCurrentAttempt()) return;
         const completionProjectOwner = captureProjectOwner();
+        // Terminal events must always leave the UI, even after reconnect warnings.
+        chatStore._setStreamingStatus(tabId, null);
         chatStore._setStreaming(tabId, false);
         if (event.type === "turnFailed") {
           chatStore._setError(tabId, event.message);
+        } else if (event.type === "turnCompleted") {
+          chatStore._setError(tabId, null);
         }
         chatStore._cleanupTemporaryFilePaths(
           chatStore.consumeTemporaryFilePaths(tabId),
@@ -728,6 +732,7 @@ export function useClaudeEvents() {
           chatStore._setSessionId(tabId, event.sessionId);
           break;
         case "assistantDelta":
+          chatStore._setStreamingStatus(tabId, null);
           chatStore._appendMessage(tabId, {
             type: "assistant",
             subtype: "streaming_delta",
@@ -735,6 +740,7 @@ export function useClaudeEvents() {
           });
           break;
         case "assistantCompleted":
+          chatStore._setStreamingStatus(tabId, null);
           chatStore._appendMessage(tabId, {
             type: "assistant",
             subtype: "streaming_final",
@@ -742,6 +748,7 @@ export function useClaudeEvents() {
           });
           break;
         case "reasoningSummaryDelta":
+          chatStore._setStreamingStatus(tabId, null);
           chatStore._appendMessage(tabId, {
             type: "assistant",
             subtype: "streaming_delta",
@@ -783,9 +790,28 @@ export function useClaudeEvents() {
         case "usage":
           chatStore._addUsage(tabId, event.inputTokens, event.outputTokens);
           break;
-        case "warning":
-          chatStore._setError(tabId, event.message);
+        case "warning": {
+          // Reconnect / retry warnings must not sticky-fail the tab or leave
+          // Thinking stuck; only surface non-retry warnings as tab errors.
+          const message = event.message.trim();
+          if (!message) break;
+          const reconnectMatch = message.match(
+            /Reconnecting\.\.\.\s*(\d+)\s*\/\s*(\d+)/i,
+          );
+          const isRetryWarning =
+            /will retry/i.test(message) || /reconnecting/i.test(message);
+          if (reconnectMatch) {
+            chatStore._setStreamingStatus(
+              tabId,
+              `Codex reconnecting ${reconnectMatch[1]}/${reconnectMatch[2]} (WebSocket timed out; falling back to HTTP)…`,
+            );
+          } else if (isRetryWarning) {
+            chatStore._setStreamingStatus(tabId, message);
+          } else {
+            chatStore._setError(tabId, message);
+          }
           break;
+        }
       }
     }
 

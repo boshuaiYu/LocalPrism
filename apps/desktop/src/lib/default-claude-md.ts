@@ -1,6 +1,8 @@
-export const DEFAULT_CLAUDE_MD = `# ClaudePrism LaTeX Project
+export const DEFAULT_PROJECT_INSTRUCTIONS = `# LocalPrism LaTeX Project
 
-Academic writing workspace powered by ClaudePrism. You are assisting with a LaTeX document project.
+Academic writing workspace powered by LocalPrism. You are assisting with a LaTeX document project.
+
+Claude Code and Codex can both assist in this workspace. Prefer project-local context in this folder over agent-specific conventions.
 
 ## Environment
 
@@ -27,12 +29,12 @@ Academic writing workspace powered by ClaudePrism. You are assisting with a LaTe
 uv pip install numpy matplotlib pandas scipy     # Install packages
 uv run python script.py                          # Run a script
 
-# LaTeX is compiled automatically by ClaudePrism — no manual build commands needed.
+# LaTeX is compiled automatically by LocalPrism — no manual build commands needed.
 \`\`\`
 
 ## Writing Guidelines
 
-- Edit \`.tex\` files directly. ClaudePrism auto-compiles and shows a live PDF preview.
+- Edit \`.tex\` files directly. LocalPrism auto-compiles and shows a live PDF preview.
 - Use \`\\input{filename}\` or \`\\include{filename}\` to split large documents into multiple files.
 - Place images in a \`figures/\` directory and reference with \`\\includegraphics{figures/name}\`.
 - For bibliography, add entries to \`references.bib\` and cite with \`\\cite{key}\`.
@@ -40,7 +42,7 @@ uv run python script.py                          # Run a script
 
 ## Scientific Skills
 
-If scientific skills are installed (\`~/.claude/skills/\` or \`.claude/skills/\`), you have access to 100+ domain-specific tools:
+If scientific skills or plugins are available, you may use domain-specific tools from common agent skill locations such as \`~/.claude/skills/\`, \`.claude/skills/\`, or Codex plugin/skill paths under \`~/.codex\`:
 
 - **Data Analysis**: pandas, numpy, scipy, statsmodels, scikit-learn, polars
 - **Visualization**: matplotlib, seaborn, plotly (save figures to \`figures/\` directory)
@@ -62,3 +64,6 @@ When generating figures with Python, always:
 - Large tables and figures should use \`\\begin{table}[htbp]\` / \`\\begin{figure}[htbp]\` for proper float placement.
 - If the user provides reference files in \`attachments/\`, review them before writing — they contain key context.
 `;
+
+/** @deprecated Prefer DEFAULT_PROJECT_INSTRUCTIONS; kept for compatibility. */
+export const DEFAULT_CLAUDE_MD = DEFAULT_PROJECT_INSTRUCTIONS;

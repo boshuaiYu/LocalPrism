@@ -36,7 +36,7 @@ import { join, tempDir } from "@tauri-apps/api/path";
 import { invoke } from "@tauri-apps/api/core";
 import {
   CLAUDE_CODE_PROVIDER_ID,
-  loadSelectedProviderCredentialId,
+  chatPeerForTab,
   offsetToLineCol,
   type PromptContextOverride,
   type QueuedGuidance,
@@ -264,12 +264,9 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
   const activeOpenAiCredentialId = useClaudeSetupStore(
     (s) => s.activeOpenAiCredentialId,
   );
-  const providerKind = useClaudeSetupStore((s) => s.providerKind);
   const setupStatus = useClaudeSetupStore((s) => s.status);
-  const claudeProviderConfigured = useClaudeSetupStore(
-    (s) => s.claudeProviderConfigured,
-  );
   const deleteApiCredential = useClaudeSetupStore((s) => s.deleteApiCredential);
+  const claudeAccount = useRuntimeStore((s) => s.accounts.claude);
   const codexAccount = useRuntimeStore((s) => s.accounts.codex);
   const codexModels = useRuntimeStore((s) => s.models.codex);
   const codexModelsLoading = useRuntimeStore((s) => !!s.loading.codex);
@@ -289,45 +286,43 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
       : null) ??
     openAiCredentials[0] ??
     null;
-  const showClaudeProvider =
-    claudeProviderConfigured ||
-    (openAiCredentials.length === 0 && setupStatus !== "checking");
+  // API peer never falls back to the built-in Claude Code provider — an
+  // explicit OpenAI-compatible credential (or none, prompting to add one).
   const selectedProviderCredential =
-    configuredOpenAiCredential ??
-    (!showClaudeProvider ? fallbackProviderCredential : null);
-  const claudeProviderActive =
-    showClaudeProvider && !selectedProviderCredential;
-  const providerSelectionReady =
-    claudeProviderActive || !!selectedProviderCredential;
-  const activeRuntime = activeTab?.runtime ?? "claude";
+    configuredOpenAiCredential ?? fallbackProviderCredential;
+  const chatPeer = activeTab ? chatPeerForTab(activeTab) : "claude";
+  const claudeAvailable =
+    claudeAccount.installed && claudeAccount.authenticated;
+  const apiAvailable = claudeAvailable && !!selectedProviderCredential;
   const selectedRuntimeModelId =
-    activeRuntime === "claude"
+    chatPeer !== "codex"
       ? (activeTab?.runtimeModel ?? selectedModel)
       : (activeTab?.runtimeModel ?? null);
   const selectedRuntimeEffort =
-    activeRuntime === "claude"
+    chatPeer !== "codex"
       ? (activeTab?.reasoningEffort ?? effortLevel)
       : (activeTab?.reasoningEffort ?? null);
   const selectedClaudeModel =
-    activeRuntime === "claude"
+    chatPeer !== "codex"
       ? (CLAUDE_MODEL_OPTIONS.find(
           (model) => model.id === selectedRuntimeModelId,
         )?.id ?? selectedModel)
       : selectedModel;
   const selectedClaudeEffort =
-    activeRuntime === "claude"
+    chatPeer !== "codex"
       ? (CLAUDE_REASONING_EFFORT_OPTIONS.find(
           (effort) => effort === selectedRuntimeEffort,
         ) ?? effortLevel)
       : effortLevel;
   const selectedCodexModel = getSelectedCodexModel(
     codexModels,
-    activeRuntime === "codex" ? selectedRuntimeModelId : null,
+    chatPeer === "codex" ? selectedRuntimeModelId : null,
   );
   const codexAvailable = codexAccount.installed && codexAccount.authenticated;
   const runtimeSelectionReady = isRuntimeSelectionReady(
-    activeRuntime,
-    providerSelectionReady,
+    chatPeer,
+    claudeAvailable,
+    apiAvailable,
     codexAvailable,
     selectedCodexModel,
     selectedRuntimeEffort,
@@ -384,10 +379,6 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
   const [input, setInput] = useState("");
   const hasInput = input.trim().length > 0;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const hadStoredProviderSelectionRef = useRef(
-    loadSelectedProviderCredentialId() !== null,
-  );
-  const initialProviderSyncDoneRef = useRef(false);
 
   // Model picker state
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
@@ -412,54 +403,23 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
     });
   }, [modelPickerOpen]);
 
+  // API peer's `selectedProviderCredentialId` only needs to keep pointing at
+  // a real credential — Claude peer never reads it (sendPrompt forces null).
   useEffect(() => {
-    if (
-      !initialProviderSyncDoneRef.current &&
-      setupStatus !== "checking" &&
-      setupStatus !== "error"
-    ) {
-      initialProviderSyncDoneRef.current = true;
-      if (
-        !hadStoredProviderSelectionRef.current &&
-        providerKind === "openai-compatible" &&
-        fallbackProviderCredential &&
-        selectedProviderCredentialId !== fallbackProviderCredential.id
-      ) {
-        setSelectedProviderCredentialId(fallbackProviderCredential.id);
-        return;
-      }
-    }
-
     const selectedOpenAiCredentialMissing =
       selectedProviderCredentialId &&
       selectedProviderCredentialId !== CLAUDE_CODE_PROVIDER_ID &&
       !openAiCredentials.some(
         (credential) => credential.id === selectedProviderCredentialId,
       );
-    const selectedClaudeUnavailable =
-      selectedProviderCredentialId === CLAUDE_CODE_PROVIDER_ID &&
-      !showClaudeProvider;
-    const noProviderSelected =
-      !selectedProviderCredentialId && !showClaudeProvider;
-
-    if (
-      selectedOpenAiCredentialMissing ||
-      selectedClaudeUnavailable ||
-      noProviderSelected
-    ) {
-      setSelectedProviderCredentialId(
-        fallbackProviderCredential?.id ??
-          (showClaudeProvider ? CLAUDE_CODE_PROVIDER_ID : null),
-      );
+    if (selectedOpenAiCredentialMissing) {
+      setSelectedProviderCredentialId(fallbackProviderCredential?.id ?? null);
     }
   }, [
     fallbackProviderCredential?.id,
     openAiCredentials,
-    providerKind,
     selectedProviderCredentialId,
     setSelectedProviderCredentialId,
-    setupStatus,
-    showClaudeProvider,
   ]);
 
   const handleDeleteProviderCredential = useCallback(
@@ -512,11 +472,7 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
   );
 
   useEffect(() => {
-    if (
-      !modelPickerOpen ||
-      activeRuntime !== "claude" ||
-      !selectedProviderCredential
-    )
+    if (!modelPickerOpen || chatPeer !== "api" || !selectedProviderCredential)
       return;
 
     const credentialId = selectedProviderCredential.id;
@@ -578,7 +534,7 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
       cancelled = true;
     };
   }, [
-    activeRuntime,
+    chatPeer,
     modelPickerOpen,
     providerModelOptions,
     selectedProviderCredential,
@@ -590,20 +546,24 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
     (context) => context.imageDataUrl,
   );
   const runtimeSupportsImages = runtimeSelectionSupportsImages(
-    activeRuntime,
+    chatPeer,
     selectedCodexModel,
     selectedProviderSupportsVision,
   );
   const imageCompatibilityError =
     hasPinnedImages &&
     !runtimeSupportsImages &&
-    (activeRuntime === "codex"
+    (chatPeer === "codex"
       ? selectedCodexModel !== null
-      : selectedProviderCredential !== null)
+      : chatPeer === "api"
+        ? selectedProviderCredential !== null
+        : true)
       ? `${
-          activeRuntime === "codex"
+          chatPeer === "codex"
             ? `Codex ${selectedCodexModel?.displayName ?? selectedRuntimeModelId}`
-            : `${selectedProviderDisplayName} ${directProviderModel}`
+            : chatPeer === "api"
+              ? `${selectedProviderDisplayName} ${directProviderModel}`
+              : `Claude ${claudeModelDisplayName(selectedClaudeModel)}`
         } does not support image input. Remove the pasted image or switch to a vision-capable model.`
       : null;
 
@@ -1014,7 +974,7 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
             const fileName = safePastedFileName(file, index);
             const tempRoot = await join(
               await tempDir(),
-              "ClaudePrism",
+              "LocalPrism",
               "chat-pastes",
             );
             if (!(await exists(tempRoot))) {
@@ -1383,7 +1343,8 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
       if (
         !node ||
         !modelPickerOpen ||
-        claudeProviderActive ||
+        chatPeer !== "api" ||
+        !selectedProviderCredential ||
         activeProviderModelsLoading
       ) {
         return;
@@ -1396,48 +1357,15 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
     [
       activeProviderModelOptionsKey,
       activeProviderModelsLoading,
-      claudeProviderActive,
+      chatPeer,
       directProviderModel,
       modelPickerOpen,
-      selectedProviderCredential?.id,
+      selectedProviderCredential,
     ],
   );
 
-  const claudeProviderControls = (
+  const apiProviderControls = (
     <>
-      {showClaudeProvider && (
-        <button
-          type="button"
-          className={cn(
-            "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-            claudeProviderActive
-              ? "bg-accent text-accent-foreground"
-              : "hover:bg-muted",
-          )}
-          disabled={runtimeBusy}
-          onClick={() => {
-            setSelectedProviderCredentialId(CLAUDE_CODE_PROVIDER_ID);
-          }}
-        >
-          {claudeCodeIconSrc ? (
-            <img
-              src={claudeCodeIconSrc}
-              alt=""
-              className="size-4 shrink-0 object-contain"
-            />
-          ) : (
-            <SparklesIcon className="size-3.5 shrink-0" />
-          )}
-          <div className="min-w-0 flex-1">
-            <div className="truncate font-medium text-xs">Claude Code</div>
-            <div className="truncate text-muted-foreground text-xs">
-              {claudeModelDisplayName(selectedClaudeModel)}
-            </div>
-          </div>
-          {claudeProviderActive && <CheckIcon className="size-3 shrink-0" />}
-        </button>
-      )}
-
       {openAiCredentials.map((credential) => {
         const active = selectedProviderCredential?.id === credential.id;
         const displayName = getProviderDisplayName({
@@ -1536,7 +1464,7 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
     </>
   );
 
-  const claudeProviderModelControls = selectedProviderCredential ? (
+  const apiModelControls = selectedProviderCredential ? (
     <>
       {activeProviderModelsLoading && (
         <div className="px-3 py-1.5 text-muted-foreground text-xs">
@@ -1629,21 +1557,22 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
           >
             <RuntimeSelector
               key={activeTabId}
-              runtime={activeRuntime}
-              claudeAvailable={providerSelectionReady}
+              peer={chatPeer}
+              claudeAvailable={claudeAvailable}
+              apiAvailable={apiAvailable}
               codexAvailable={codexAvailable}
               codexModels={codexModels}
               codexModelsLoading={codexModelsLoading}
               selectedModelId={selectedRuntimeModelId}
               reasoningEffort={selectedRuntimeEffort}
               busy={runtimeBusy}
-              claudeProviderControls={claudeProviderControls}
-              claudeModelControls={claudeProviderModelControls}
-              claudeModelListRef={setProviderModelListNode}
+              apiProviderControls={apiProviderControls}
+              apiModelControls={apiModelControls}
+              apiModelListRef={setProviderModelListNode}
               selectedClaudeModel={selectedClaudeModel}
               selectedClaudeEffort={selectedClaudeEffort}
-              onRuntimeChange={(nextRuntime, options) =>
-                changeTabRuntime(activeTabId, nextRuntime, options)
+              onPeerChange={(nextPeer, options) =>
+                changeTabRuntime(activeTabId, nextPeer, options)
               }
               onSelectionChange={(selection) =>
                 updateTabRuntimeSelection(activeTabId, selection)
@@ -1713,7 +1642,7 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
               <span className="font-mono text-foreground">
                 {providerDeleteTarget?.model || "unknown"}
               </span>
-              ? The API key will be removed from ClaudePrism.
+              ? The API key will be removed from LocalPrism.
             </DialogDescription>
           </DialogHeader>
           {providerDeleteError && (
@@ -1940,7 +1869,7 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
               disabled={runtimeBusy}
               className="flex h-7 items-center gap-1.5 rounded-full px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {activeRuntime === "codex" ? (
+              {chatPeer === "codex" ? (
                 <>
                   <SparklesIcon className="size-3" />
                   <span>Codex</span>
@@ -1952,7 +1881,7 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
                   </span>
                   <ChevronDownIcon className="size-3" />
                 </>
-              ) : selectedProviderCredential ? (
+              ) : chatPeer === "api" && selectedProviderCredential ? (
                 <>
                   {selectedProviderIconSrc ? (
                     <img
@@ -1963,7 +1892,7 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
                   ) : (
                     <SparklesIcon className="size-3" />
                   )}
-                  <span>Claude</span>
+                  <span>API</span>
                   <span className="max-w-28 truncate">
                     {selectedProviderDisplayName}
                   </span>
@@ -1975,7 +1904,18 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
                   </span>
                   <ChevronDownIcon className="size-3" />
                 </>
-              ) : showClaudeProvider ? (
+              ) : chatPeer === "api" ? (
+                <>
+                  <SparklesIcon className="size-3" />
+                  <span>API</span>
+                  <span className="text-muted-foreground/60">
+                    {setupStatus === "checking"
+                      ? "Loading"
+                      : "Add a connection"}
+                  </span>
+                  <ChevronDownIcon className="size-3" />
+                </>
+              ) : (
                 <>
                   {claudeCodeIconSrc ? (
                     <img
@@ -1987,7 +1927,6 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
                     <SparklesIcon className="size-3" />
                   )}
                   <span>Claude</span>
-                  <span>Claude Code</span>
                   <span className="max-w-32 truncate">
                     {claudeModelDisplayName(
                       selectedRuntimeModelId ?? selectedModel,
@@ -1995,15 +1934,6 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
                   </span>
                   <span className="text-muted-foreground/60">
                     {selectedRuntimeEffort ?? effortLevel}
-                  </span>
-                  <ChevronDownIcon className="size-3" />
-                </>
-              ) : (
-                <>
-                  <SparklesIcon className="size-3" />
-                  <span>Claude</span>
-                  <span className="text-muted-foreground/60">
-                    {setupStatus === "checking" ? "Loading" : "Select provider"}
                   </span>
                   <ChevronDownIcon className="size-3" />
                 </>

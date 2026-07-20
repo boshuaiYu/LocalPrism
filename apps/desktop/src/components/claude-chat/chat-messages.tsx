@@ -18,49 +18,56 @@ import { ThinkingWidget, ToolWidget } from "./tool-widgets";
 
 // ─── Streaming Indicator (isolated to prevent re-render storms) ───
 
-const StreamingIndicator: FC<{ startedAt: number | null }> = memo(
-  ({ startedAt }) => {
-    const calculateElapsed = () =>
-      startedAt ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000)) : 0;
+const StreamingIndicator: FC<{
+  startedAt: number | null;
+  status?: string | null;
+}> = memo(({ startedAt, status }) => {
+  const calculateElapsed = () =>
+    startedAt ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000)) : 0;
 
-    const [elapsed, setElapsed] = useState(calculateElapsed);
+  const [elapsed, setElapsed] = useState(calculateElapsed);
 
-    useEffect(() => {
+  useEffect(() => {
+    setElapsed(calculateElapsed());
+    const timer = setInterval(() => {
       setElapsed(calculateElapsed());
-      const timer = setInterval(() => {
-        setElapsed(calculateElapsed());
-      }, 1000);
-      return () => clearInterval(timer);
-    }, [startedAt]);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [startedAt]);
 
-    return (
-      <div className="flex items-center gap-1.5 px-1 py-1.5 text-muted-foreground">
-        <div className="flex gap-0.5">
-          <span
-            className="size-1.5 animate-bounce rounded-full bg-muted-foreground/50"
-            style={{ animationDelay: "0ms" }}
-          />
-          <span
-            className="size-1.5 animate-bounce rounded-full bg-muted-foreground/50"
-            style={{ animationDelay: "150ms" }}
-          />
-          <span
-            className="size-1.5 animate-bounce rounded-full bg-muted-foreground/50"
-            style={{ animationDelay: "300ms" }}
-          />
-        </div>
-        <span className="text-sm">
-          Thinking...
-          {elapsed >= 3 && (
-            <span className="ml-1 text-muted-foreground/60 text-xs">
-              {elapsed}s
-            </span>
-          )}
-        </span>
+  const label =
+    status?.trim() ||
+    (elapsed >= 45
+      ? "Still waiting on Codex (reconnects can take 1–2 minutes)…"
+      : "Thinking...");
+
+  return (
+    <div className="flex items-center gap-1.5 px-1 py-1.5 text-muted-foreground">
+      <div className="flex gap-0.5">
+        <span
+          className="size-1.5 animate-bounce rounded-full bg-muted-foreground/50"
+          style={{ animationDelay: "0ms" }}
+        />
+        <span
+          className="size-1.5 animate-bounce rounded-full bg-muted-foreground/50"
+          style={{ animationDelay: "150ms" }}
+        />
+        <span
+          className="size-1.5 animate-bounce rounded-full bg-muted-foreground/50"
+          style={{ animationDelay: "300ms" }}
+        />
       </div>
-    );
-  },
-);
+      <span className="text-sm">
+        {label}
+        {elapsed >= 3 && (
+          <span className="ml-1 text-muted-foreground/60 text-xs">
+            {elapsed}s
+          </span>
+        )}
+      </span>
+    </div>
+  );
+});
 
 const EMPTY_PENDING_GUIDANCE: QueuedGuidance[] = [];
 const THREAD_MAX_WIDTH = "max-w-[44rem]";
@@ -112,6 +119,7 @@ export const ChatMessages: FC = () => {
   const messages = useClaudeChatStore((s) => s.messages) ?? [];
   const isStreaming = useClaudeChatStore((s) => s.isStreaming);
   const streamingStartedAt = useClaudeChatStore((s) => s.streamingStartedAt);
+  const streamingStatus = useClaudeChatStore((s) => s.streamingStatus);
   const queuedGuidance =
     useClaudeChatStore(
       (s) => s.tabs.find((tab) => tab.id === s.activeTabId)?.queuedGuidance,
@@ -230,7 +238,10 @@ export const ChatMessages: FC = () => {
 
       {isStreaming && (
         <div className={cn("mx-auto w-full px-2", THREAD_MAX_WIDTH)}>
-          <StreamingIndicator startedAt={streamingStartedAt} />
+          <StreamingIndicator
+            startedAt={streamingStartedAt}
+            status={streamingStatus}
+          />
         </div>
       )}
 

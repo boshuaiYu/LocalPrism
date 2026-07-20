@@ -34,6 +34,7 @@ function resetClaudeChatStore() {
     sessionId: null,
     isStreaming: false,
     streamingStartedAt: null,
+    streamingStatus: null,
     error: null,
     totalInputTokens: 0,
     totalOutputTokens: 0,
@@ -53,6 +54,7 @@ function resetClaudeChatStore() {
         messages: [],
         isStreaming: false,
         streamingStartedAt: null,
+        streamingStatus: null,
         error: null,
         totalInputTokens: 0,
         totalOutputTokens: 0,
@@ -514,7 +516,7 @@ describe("useClaudeChatStore.resumeSession", () => {
   it("hides internal file and pasted-image context when restoring history", async () => {
     const tempImagePath = [
       "C:\\Temp",
-      "ClaudePrism",
+      "LocalPrism",
       "chat-pastes",
       "1781110224092-1-paste-1781110223586-1.png",
     ].join("\\");

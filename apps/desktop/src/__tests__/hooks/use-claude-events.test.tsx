@@ -122,6 +122,7 @@ function makeTab(base: TabState, id: string): TabState {
     messages: [],
     isStreaming: true,
     streamingStartedAt: 1,
+    streamingStatus: null,
     error: null,
     totalInputTokens: 0,
     totalOutputTokens: 0,
@@ -171,6 +172,7 @@ describe("useClaudeEvents cancellation isolation", () => {
       sessionId: null,
       isStreaming: true,
       streamingStartedAt: 1,
+      streamingStatus: null,
       error: null,
       totalInputTokens: 0,
       totalOutputTokens: 0,
@@ -1021,5 +1023,101 @@ describe("useClaudeEvents cancellation isolation", () => {
         },
       }),
     );
+  });
+
+  it("ignores Codex reconnect warnings and clears streaming on turnCompleted", async () => {
+    await act(async () => {
+      useClaudeChatStore.setState((state) => ({
+        tabs: state.tabs.map((tab) =>
+          tab.id === "tab-a"
+            ? {
+                ...tab,
+                runtime: "codex" as const,
+                error: null,
+                isStreaming: true,
+                streamingStatus: null,
+              }
+            : tab,
+        ),
+      }));
+    });
+
+    const runtime = callbacks.get("runtime-event");
+    await act(async () => {
+      runtime?.(
+        runtimeEvent("tab-a", "tab-a-attempt-1", {
+          type: "warning",
+          message: "Codex will retry after an error: Reconnecting... 2/5",
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    let tab = useClaudeChatStore
+      .getState()
+      .tabs.find((candidate) => candidate.id === "tab-a");
+    expect(tab?.error).toBeNull();
+    expect(tab?.isStreaming).toBe(true);
+    expect(tab?.streamingStatus).toMatch(/reconnecting 2\/5/i);
+
+    await act(async () => {
+      runtime?.(
+        runtimeEvent("tab-a", "tab-a-attempt-1", {
+          type: "assistantDelta",
+          delta: "hello",
+        }),
+      );
+      runtime?.(
+        runtimeEvent("tab-a", "tab-a-attempt-1", {
+          type: "turnCompleted",
+          turnId: "turn-a",
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    tab = useClaudeChatStore
+      .getState()
+      .tabs.find((candidate) => candidate.id === "tab-a");
+    expect(tab?.error).toBeNull();
+    expect(tab?.isStreaming).toBe(false);
+    expect(tab?.streamingStatus).toBeNull();
+    const lastMessage = tab?.messages[tab.messages.length - 1];
+    expect(lastMessage).toEqual(
+      expect.objectContaining({
+        subtype: "streaming_delta",
+        message: { content: [{ type: "text", text: "hello" }] },
+      }),
+    );
+  });
+
+  it("surfaces Codex turnFailed and clears streaming", async () => {
+    await act(async () => {
+      useClaudeChatStore.setState((state) => ({
+        tabs: state.tabs.map((tab) =>
+          tab.id === "tab-a"
+            ? { ...tab, runtime: "codex" as const, isStreaming: true }
+            : tab,
+        ),
+      }));
+    });
+
+    const runtime = callbacks.get("runtime-event");
+    await act(async () => {
+      runtime?.(
+        runtimeEvent("tab-a", "tab-a-attempt-1", {
+          type: "turnFailed",
+          turnId: "turn-a",
+          message: "Unsupported value: 'minimal'",
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    const tab = useClaudeChatStore
+      .getState()
+      .tabs.find((candidate) => candidate.id === "tab-a");
+    expect(tab?.isStreaming).toBe(false);
+    expect(tab?.error).toBe("Unsupported value: 'minimal'");
   });
 });

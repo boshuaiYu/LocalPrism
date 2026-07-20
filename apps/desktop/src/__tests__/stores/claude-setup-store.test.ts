@@ -197,7 +197,7 @@ describe("useClaudeSetupStore.saveApiKey", () => {
     });
   });
 
-  it("normalizes legacy DeepSeek root URLs to the native Anthropic endpoint", async () => {
+  it("preserves DeepSeek OpenAI-compatible root URLs when saving credentials", async () => {
     vi.mocked(invoke).mockResolvedValue(null);
 
     const success = await useClaudeSetupStore
@@ -215,20 +215,20 @@ describe("useClaudeSetupStore.saveApiKey", () => {
       "verify_openai_compatible_api_key",
       {
         apiKey: "sk-test",
-        baseUrl: "https://api.deepseek.com/anthropic",
+        baseUrl: "https://api.deepseek.com",
         model: "deepseek-v4-pro",
       },
     );
     expect(invoke).toHaveBeenNthCalledWith(2, "save_anthropic_api_key", {
       apiKey: "sk-test",
-      baseUrl: "https://api.deepseek.com/anthropic",
+      baseUrl: "https://api.deepseek.com",
       provider: "openai-compatible",
       model: "deepseek-v4-pro",
       credentialLabel: null,
     });
   });
 
-  it("normalizes legacy Qwen compatible URLs to the native Anthropic endpoint", async () => {
+  it("preserves Qwen OpenAI-compatible URLs when saving credentials", async () => {
     vi.mocked(invoke).mockResolvedValue(null);
 
     const success = await useClaudeSetupStore
@@ -246,13 +246,13 @@ describe("useClaudeSetupStore.saveApiKey", () => {
       "verify_openai_compatible_api_key",
       {
         apiKey: "sk-test",
-        baseUrl: "https://dashscope.aliyuncs.com/apps/anthropic",
+        baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
         model: "qwen3-max-2026-01-23",
       },
     );
     expect(invoke).toHaveBeenNthCalledWith(2, "save_anthropic_api_key", {
       apiKey: "sk-test",
-      baseUrl: "https://dashscope.aliyuncs.com/apps/anthropic",
+      baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
       provider: "openai-compatible",
       model: "qwen3-max-2026-01-23",
       credentialLabel: null,
@@ -290,7 +290,7 @@ describe("useClaudeSetupStore.saveApiKey", () => {
     });
   });
 
-  it("normalizes Moonshot compatible URLs to the native Anthropic endpoint", async () => {
+  it("preserves Moonshot OpenAI-compatible URLs when saving credentials", async () => {
     vi.mocked(invoke).mockResolvedValue(null);
 
     const success = await useClaudeSetupStore
@@ -308,13 +308,13 @@ describe("useClaudeSetupStore.saveApiKey", () => {
       "verify_openai_compatible_api_key",
       {
         apiKey: "sk-test",
-        baseUrl: "https://api.moonshot.ai/anthropic",
+        baseUrl: "https://api.moonshot.cn/v1",
         model: "kimi-k2.5",
       },
     );
     expect(invoke).toHaveBeenNthCalledWith(2, "save_anthropic_api_key", {
       apiKey: "sk-test",
-      baseUrl: "https://api.moonshot.ai/anthropic",
+      baseUrl: "https://api.moonshot.cn/v1",
       provider: "openai-compatible",
       model: "kimi-k2.5",
       credentialLabel: null,

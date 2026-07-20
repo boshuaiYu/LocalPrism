@@ -8,6 +8,7 @@ import {
 } from "react";
 import type {
   ChangeTabRuntimeResult,
+  ChatRuntimePeer,
   ConversationRef,
   RuntimeConversation,
   RuntimeKind,
@@ -64,42 +65,93 @@ export function getCodexModelOptions(
   return models.filter((model) => model.runtime === "codex");
 }
 
+/** Codex catalog may advertise max/ultra while the Responses API only accepts xhigh. */
+const CODEX_EFFORT_ALIASES: Record<string, string> = {
+  max: "xhigh",
+  ultra: "xhigh",
+};
+
+/** "claude" and "api" are both Claude-backed peers and share the same effort set. */
 export function getReasoningEffortOptions(
-  runtime: RuntimeKind,
+  peer: ChatRuntimePeer,
   selectedModel: RuntimeModel | null,
 ): readonly string[] {
-  if (runtime === "claude") {
+  if (peer !== "codex") {
     return CLAUDE_REASONING_EFFORT_OPTIONS;
   }
 
-  return selectedModel?.runtime === "codex"
-    ? selectedModel.reasoningEfforts
-    : [];
+  if (selectedModel?.runtime !== "codex") return [];
+  // Catalog may list max/ultra; expose the API-stable xhigh instead.
+  const seen = new Set<string>();
+  const options: string[] = [];
+  for (const effort of selectedModel.reasoningEfforts) {
+    const normalized = CODEX_EFFORT_ALIASES[effort] ?? effort;
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    options.push(normalized);
+  }
+  return options;
+}
+
+const CODEX_API_STABLE_EFFORTS = [
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+] as const;
+
+export function coerceCodexReasoningEffort(
+  effort: string | null | undefined,
+  selectedModel: RuntimeModel | null,
+): string | null {
+  if (selectedModel?.runtime !== "codex") return effort?.trim() || null;
+  const supported = selectedModel.reasoningEfforts;
+  if (supported.length === 0) return null;
+
+  const resolve = (value: string | null | undefined): string | null => {
+    const raw = value?.trim() || null;
+    if (!raw) return null;
+    return CODEX_EFFORT_ALIASES[raw] ?? raw;
+  };
+
+  const candidates = [
+    resolve(effort),
+    resolve(selectedModel.defaultReasoningEffort),
+    ...CODEX_API_STABLE_EFFORTS,
+    supported[0],
+  ];
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    // Accept catalog-listed efforts, or xhigh after max/ultra coercion even if
+    // the catalog omitted the stable name.
+    if (
+      supported.includes(candidate) ||
+      (candidate === "xhigh" &&
+        (supported.includes("max") || supported.includes("ultra")))
+    ) {
+      return candidate;
+    }
+  }
+  return supported.find((entry) => !(entry in CODEX_EFFORT_ALIASES)) ?? null;
 }
 
 export function normalizeReasoningEffort(
-  runtime: RuntimeKind,
+  peer: ChatRuntimePeer,
   currentEffort: string | null,
   selectedModel: RuntimeModel | null,
 ): string | null {
-  const supportedEfforts = getReasoningEffortOptions(runtime, selectedModel);
+  if (peer === "codex") {
+    return coerceCodexReasoningEffort(currentEffort, selectedModel);
+  }
+
+  const supportedEfforts = getReasoningEffortOptions(peer, selectedModel);
   if (currentEffort !== null && supportedEfforts.includes(currentEffort)) {
     return currentEffort;
   }
 
-  if (runtime === "claude") {
-    return CLAUDE_DEFAULT_REASONING_EFFORT;
-  }
-
-  const defaultEffort =
-    selectedModel?.runtime === "codex"
-      ? selectedModel.defaultReasoningEffort
-      : null;
-  if (defaultEffort !== null && supportedEfforts.includes(defaultEffort)) {
-    return defaultEffort;
-  }
-
-  return supportedEfforts[0] ?? null;
+  return CLAUDE_DEFAULT_REASONING_EFFORT;
 }
 
 export function getDefaultCodexModel(
@@ -122,19 +174,24 @@ export function getSelectedCodexModel(
 }
 
 export function isRuntimeSelectionReady(
-  runtime: RuntimeKind,
+  peer: ChatRuntimePeer,
   claudeAvailable: boolean,
+  apiAvailable: boolean,
   codexAvailable: boolean,
   selectedCodexModel: RuntimeModel | null,
   reasoningEffort: string | null,
 ): boolean {
-  if (runtime === "claude") return claudeAvailable;
+  if (peer === "claude") return claudeAvailable;
+  if (peer === "api") return apiAvailable;
   if (!codexAvailable || selectedCodexModel?.runtime !== "codex") return false;
 
-  return selectedCodexModel.reasoningEfforts.length === 0
+  const supportedEfforts = getReasoningEffortOptions(
+    "codex",
+    selectedCodexModel,
+  );
+  return supportedEfforts.length === 0
     ? reasoningEffort === null
-    : reasoningEffort !== null &&
-        selectedCodexModel.reasoningEfforts.includes(reasoningEffort);
+    : reasoningEffort !== null && supportedEfforts.includes(reasoningEffort);
 }
 
 export function isRuntimeSendDisabled(
@@ -146,11 +203,11 @@ export function isRuntimeSendDisabled(
 }
 
 export function runtimeSelectionSupportsImages(
-  runtime: RuntimeKind,
+  peer: ChatRuntimePeer,
   selectedCodexModel: RuntimeModel | null,
   claudeSupportsImages: boolean,
 ): boolean {
-  return runtime === "codex"
+  return peer === "codex"
     ? selectedCodexModel?.inputModalities.includes("image") === true
     : claudeSupportsImages;
 }
@@ -162,21 +219,22 @@ export interface RuntimeSelection {
 }
 
 export interface RuntimeSelectorProps {
-  runtime: RuntimeKind;
+  peer: ChatRuntimePeer;
   claudeAvailable: boolean;
+  apiAvailable: boolean;
   codexAvailable: boolean;
   codexModels: RuntimeModel[];
   codexModelsLoading: boolean;
   selectedModelId: string | null;
   reasoningEffort: string | null;
   busy: boolean;
-  claudeProviderControls: ReactNode;
-  claudeModelControls?: ReactNode;
-  claudeModelListRef?: Ref<HTMLDivElement>;
+  apiProviderControls: ReactNode;
+  apiModelControls?: ReactNode;
+  apiModelListRef?: Ref<HTMLDivElement>;
   selectedClaudeModel: ClaudeModelAlias;
   selectedClaudeEffort: ClaudeReasoningEffort;
-  onRuntimeChange: (
-    runtime: RuntimeKind,
+  onPeerChange: (
+    peer: ChatRuntimePeer,
     options?: { confirmSessionReset?: boolean },
   ) => ChangeTabRuntimeResult;
   onSelectionChange: (selection: RuntimeSelection) => unknown;
@@ -194,32 +252,37 @@ function optionButtonClass(active: boolean): string {
   );
 }
 
+function peerLabel(peer: ChatRuntimePeer): string {
+  if (peer === "api") return "API";
+  if (peer === "codex") return "Codex";
+  return "Claude";
+}
+
 export function RuntimeSelector({
-  runtime,
+  peer,
   claudeAvailable,
+  apiAvailable,
   codexAvailable,
   codexModels,
   codexModelsLoading,
   selectedModelId,
   reasoningEffort,
   busy,
-  claudeProviderControls,
-  claudeModelControls,
-  claudeModelListRef,
+  apiProviderControls,
+  apiModelControls,
+  apiModelListRef,
   selectedClaudeModel,
   selectedClaudeEffort,
-  onRuntimeChange,
+  onPeerChange,
   onSelectionChange,
   onClaudeModelChange,
   onClaudeEffortChange,
   onRefreshCodexModels,
 }: RuntimeSelectorProps) {
-  const [pendingRuntime, setPendingRuntime] = useState<RuntimeKind | null>(
-    null,
-  );
+  const [pendingPeer, setPendingPeer] = useState<ChatRuntimePeer | null>(null);
   const refreshRequestedRef = useRef(false);
-  const runtimeChangeTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const cancelRuntimeChangeRef = useRef<HTMLButtonElement | null>(null);
+  const peerChangeTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const cancelPeerChangeRef = useRef<HTMLButtonElement | null>(null);
   const codexOptions = useMemo(
     () => getCodexModelOptions(codexModels),
     [codexModels],
@@ -229,15 +292,16 @@ export function RuntimeSelector({
     [codexOptions, selectedModelId],
   );
   const runtimeReady = isRuntimeSelectionReady(
-    runtime,
+    peer,
     claudeAvailable,
+    apiAvailable,
     codexAvailable,
     selectedCodexModel,
     reasoningEffort,
   );
 
   useEffect(() => {
-    if (runtime !== "codex") {
+    if (peer !== "codex") {
       refreshRequestedRef.current = false;
       return;
     }
@@ -258,12 +322,12 @@ export function RuntimeSelector({
     codexModelsLoading,
     codexOptions.length,
     onRefreshCodexModels,
-    runtime,
+    peer,
   ]);
 
   useEffect(() => {
     if (
-      runtime !== "codex" ||
+      peer !== "codex" ||
       !codexAvailable ||
       busy ||
       codexModelsLoading ||
@@ -291,18 +355,18 @@ export function RuntimeSelector({
     codexOptions,
     onSelectionChange,
     reasoningEffort,
-    runtime,
+    peer,
     selectedCodexModel,
   ]);
 
   useEffect(() => {
-    if (pendingRuntime) {
-      cancelRuntimeChangeRef.current?.focus();
+    if (pendingPeer) {
+      cancelPeerChangeRef.current?.focus();
     }
-  }, [pendingRuntime]);
+  }, [pendingPeer]);
 
-  const writeRuntimeDefaults = (nextRuntime: RuntimeKind) => {
-    if (nextRuntime === "claude") {
+  const writePeerDefaults = (nextPeer: ChatRuntimePeer) => {
+    if (nextPeer !== "codex") {
       onClaudeModelChange(selectedClaudeModel);
       onClaudeEffortChange(selectedClaudeEffort);
       onSelectionChange({
@@ -323,39 +387,39 @@ export function RuntimeSelector({
     });
   };
 
-  const requestRuntimeChange = (
-    nextRuntime: RuntimeKind,
+  const requestPeerChange = (
+    nextPeer: ChatRuntimePeer,
     trigger: HTMLButtonElement,
   ) => {
-    if (busy || nextRuntime === runtime) return;
-    const result = onRuntimeChange(nextRuntime, undefined);
+    if (busy || nextPeer === peer) return;
+    const result = onPeerChange(nextPeer, undefined);
     if (result === "confirmation-required") {
-      runtimeChangeTriggerRef.current = trigger;
-      setPendingRuntime(nextRuntime);
+      peerChangeTriggerRef.current = trigger;
+      setPendingPeer(nextPeer);
       return;
     }
     if (result === "changed") {
-      writeRuntimeDefaults(nextRuntime);
+      writePeerDefaults(nextPeer);
     }
   };
 
-  const closeRuntimeConfirmation = () => {
-    setPendingRuntime(null);
-    runtimeChangeTriggerRef.current?.focus();
+  const closePeerConfirmation = () => {
+    setPendingPeer(null);
+    peerChangeTriggerRef.current?.focus();
   };
 
-  const confirmRuntimeChange = () => {
-    if (!pendingRuntime || busy) return;
-    const nextRuntime = pendingRuntime;
-    const result = onRuntimeChange(nextRuntime, { confirmSessionReset: true });
-    closeRuntimeConfirmation();
+  const confirmPeerChange = () => {
+    if (!pendingPeer || busy) return;
+    const nextPeer = pendingPeer;
+    const result = onPeerChange(nextPeer, { confirmSessionReset: true });
+    closePeerConfirmation();
     if (result === "changed") {
-      writeRuntimeDefaults(nextRuntime);
+      writePeerDefaults(nextPeer);
     }
   };
 
   const selectClaudeModel = (model: ClaudeModelAlias) => {
-    if (busy || !claudeAvailable) return;
+    if (busy || (peer === "claude" ? !claudeAvailable : !apiAvailable)) return;
     onClaudeModelChange(model);
     onSelectionChange({
       runtimeModel: model,
@@ -365,7 +429,7 @@ export function RuntimeSelector({
   };
 
   const selectClaudeEffort = (effort: ClaudeReasoningEffort) => {
-    if (busy || !claudeAvailable) return;
+    if (busy || (peer === "claude" ? !claudeAvailable : !apiAvailable)) return;
     onClaudeEffortChange(effort);
     onSelectionChange({
       runtimeModel: selectedClaudeModel,
@@ -396,7 +460,7 @@ export function RuntimeSelector({
     });
   };
 
-  const effortOptions = getReasoningEffortOptions(runtime, selectedCodexModel);
+  const effortOptions = getReasoningEffortOptions(peer, selectedCodexModel);
 
   return (
     <section
@@ -404,82 +468,118 @@ export function RuntimeSelector({
       data-runtime-ready={runtimeReady ? "true" : "false"}
       className="grid grid-cols-[minmax(0,11.5rem)_minmax(0,1fr)]"
     >
-      <div className="max-h-80 overflow-y-auto border-border border-r pr-1">
-        <div className="px-2 py-1 font-medium text-muted-foreground text-xs">
-          Runtime
-        </div>
+      <div className="col-span-2 flex items-center gap-1 border-border border-b px-2 pb-2">
         <button
           type="button"
-          aria-label="Claude runtime"
-          aria-pressed={runtime === "claude"}
-          className={optionButtonClass(runtime === "claude")}
+          aria-label="Claude peer"
+          aria-pressed={peer === "claude"}
+          className={cn(
+            "flex flex-1 items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 font-medium text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+            peer === "claude"
+              ? "bg-accent text-accent-foreground"
+              : "text-foreground hover:bg-muted",
+          )}
           disabled={busy || !claudeAvailable}
-          onClick={(event) =>
-            requestRuntimeChange("claude", event.currentTarget)
-          }
+          onClick={(event) => requestPeerChange("claude", event.currentTarget)}
         >
-          <span className="font-medium text-xs">Claude</span>
-          <span className="text-muted-foreground text-xs">
-            {claudeAvailable ? "Ready" : "Not authenticated"}
-          </span>
+          Claude
         </button>
         <button
           type="button"
-          aria-label="Codex runtime"
-          aria-pressed={runtime === "codex"}
-          className={optionButtonClass(runtime === "codex")}
-          disabled={busy || !codexAvailable}
-          onClick={(event) =>
-            requestRuntimeChange("codex", event.currentTarget)
-          }
+          aria-label="API peer"
+          aria-pressed={peer === "api"}
+          className={cn(
+            "flex flex-1 items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 font-medium text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+            peer === "api"
+              ? "bg-accent text-accent-foreground"
+              : "text-foreground hover:bg-muted",
+          )}
+          disabled={busy}
+          onClick={(event) => requestPeerChange("api", event.currentTarget)}
         >
-          <span className="font-medium text-xs">Codex</span>
-          <span className="text-muted-foreground text-xs">
-            {codexAvailable ? "Ready" : "Not authenticated"}
+          API
+        </button>
+        <button
+          type="button"
+          aria-label="Codex peer"
+          aria-pressed={peer === "codex"}
+          className={cn(
+            "flex flex-1 items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 font-medium text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+            peer === "codex"
+              ? "bg-accent text-accent-foreground"
+              : "text-foreground hover:bg-muted",
+          )}
+          disabled={busy || !codexAvailable}
+          onClick={(event) => requestPeerChange("codex", event.currentTarget)}
+        >
+          Codex
+          <span className="text-[10px] text-muted-foreground">
+            {codexAvailable ? "" : "Not authenticated"}
           </span>
         </button>
+      </div>
 
-        {runtime === "claude" && (
-          <div aria-disabled={busy ? "true" : undefined}>
-            <div className="mt-1 border-border border-t px-2 pt-2 pb-1 font-medium text-muted-foreground text-xs">
-              Provider
+      <div className="max-h-80 overflow-y-auto border-border border-r pr-1">
+        {peer === "api" && (
+          <>
+            <div className="px-2 py-1 font-medium text-muted-foreground text-xs">
+              API connections
             </div>
-            {claudeProviderControls}
-          </div>
+            {apiProviderControls}
+          </>
         )}
       </div>
 
       <div
-        ref={claudeModelListRef}
+        ref={peer === "api" ? apiModelListRef : undefined}
         className="flex max-h-80 min-w-0 flex-col overflow-y-auto pl-1"
       >
-        <div className="px-2 py-1 font-medium text-muted-foreground text-xs">
-          Model
-        </div>
-        {runtime === "claude" && claudeModelControls ? (
-          claudeModelControls
-        ) : runtime === "claude" ? (
-          CLAUDE_MODEL_OPTIONS.map((model) => (
+        <div className="flex items-center justify-between px-2 py-1">
+          <span className="font-medium text-muted-foreground text-xs">
+            Model
+          </span>
+          {peer === "codex" && (
             <button
               type="button"
-              key={model.id}
-              aria-label={`Select model ${model.displayName}`}
-              aria-pressed={selectedClaudeModel === model.id}
-              className={optionButtonClass(selectedClaudeModel === model.id)}
-              disabled={busy || !claudeAvailable}
-              onClick={() => selectClaudeModel(model.id)}
+              aria-label="Refresh Codex models"
+              className="rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={busy || !codexAvailable || codexModelsLoading}
+              onClick={() => void onRefreshCodexModels()}
             >
-              <span className="min-w-0">
-                <span className="block font-medium text-xs">
-                  {model.displayName}
-                </span>
-                <span className="block truncate text-muted-foreground text-xs">
-                  {model.description}
-                </span>
-              </span>
-              {selectedClaudeModel === model.id && <span aria-hidden>✓</span>}
+              Refresh models
             </button>
-          ))
+          )}
+        </div>
+        {peer !== "codex" ? (
+          peer === "api" && apiModelControls ? (
+            apiModelControls
+          ) : peer === "api" ? (
+            <div className="px-3 py-2 text-muted-foreground text-xs">
+              Select an API connection to see its models
+            </div>
+          ) : (
+            CLAUDE_MODEL_OPTIONS.map((model) => (
+              <button
+                type="button"
+                key={model.id}
+                aria-label={`Select model ${model.displayName}`}
+                aria-pressed={selectedClaudeModel === model.id}
+                className={optionButtonClass(selectedClaudeModel === model.id)}
+                disabled={busy || !claudeAvailable}
+                onClick={() => selectClaudeModel(model.id)}
+              >
+                <span className="min-w-0">
+                  <span className="block font-medium text-xs">
+                    {model.displayName}
+                  </span>
+                  <span className="block truncate text-muted-foreground text-xs">
+                    {model.description}
+                  </span>
+                </span>
+                {selectedClaudeModel === model.id && <span aria-hidden>✓</span>}
+              </button>
+            ))
+          )
         ) : codexModelsLoading && codexOptions.length === 0 ? (
           <div className="px-3 py-2 text-muted-foreground text-xs">
             Fetching Codex models...
@@ -520,7 +620,7 @@ export function RuntimeSelector({
           Reasoning effort
         </div>
         <div className="flex flex-wrap gap-1 px-2 pb-2">
-          {runtime === "claude"
+          {peer !== "codex"
             ? CLAUDE_REASONING_EFFORT_OPTIONS.map((effort) => (
                 <button
                   type="button"
@@ -533,7 +633,10 @@ export function RuntimeSelector({
                       ? "bg-primary text-primary-foreground"
                       : "bg-muted text-muted-foreground",
                   )}
-                  disabled={busy || !claudeAvailable}
+                  disabled={
+                    busy ||
+                    (peer === "claude" ? !claudeAvailable : !apiAvailable)
+                  }
                   onClick={() => selectClaudeEffort(effort)}
                 >
                   {effort}
@@ -573,39 +676,39 @@ export function RuntimeSelector({
         </button>
       </div>
 
-      {pendingRuntime && (
+      {pendingPeer && (
         <div
           role="alertdialog"
-          aria-label="Confirm runtime switch"
+          aria-label="Confirm peer switch"
           aria-modal="true"
           className="col-span-2 m-1 border-border border-t px-3 py-2"
           onKeyDown={(event) => {
             if (event.key !== "Escape") return;
             event.preventDefault();
             event.stopPropagation();
-            closeRuntimeConfirmation();
+            closePeerConfirmation();
           }}
         >
           <p className="text-xs">
-            Switching to {pendingRuntime === "codex" ? "Codex" : "Claude"}
-            will clear this tab&apos;s current session and messages.
+            Switching to {peerLabel(pendingPeer)} will clear this tab&apos;s
+            current session and messages.
           </p>
           <div className="mt-2 flex justify-end gap-2">
             <button
-              ref={cancelRuntimeChangeRef}
+              ref={cancelPeerChangeRef}
               type="button"
-              aria-label="Cancel runtime switch"
+              aria-label="Cancel peer switch"
               className="rounded-md px-2 py-1 text-xs hover:bg-muted"
-              onClick={closeRuntimeConfirmation}
+              onClick={closePeerConfirmation}
             >
               Cancel
             </button>
             <button
               type="button"
-              aria-label={`Confirm switch to ${pendingRuntime === "codex" ? "Codex" : "Claude"}`}
+              aria-label={`Confirm switch to ${peerLabel(pendingPeer)}`}
               className="rounded-md bg-primary px-2 py-1 text-primary-foreground text-xs"
               disabled={busy}
-              onClick={confirmRuntimeChange}
+              onClick={confirmPeerChange}
             >
               Switch and clear session
             </button>

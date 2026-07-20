@@ -52,8 +52,9 @@ export function RuntimeSettings({
   return (
     <div className="space-y-5 p-5">
       <RuntimeCard
-        title="Claude / Claude-backed providers"
-        description="Claude Code and OpenAI-compatible providers"
+        sectionId="claude"
+        title="Claude"
+        description="Claude Code login and Anthropic / Claude-compatible API keys"
         account={accounts.claude}
         loading={loading.claude}
         installInFlight={installInFlight.claude}
@@ -64,12 +65,13 @@ export function RuntimeSettings({
           })
         }
       >
-        <ClaudeSetup variant="embedded" />
+        <ClaudeSetup variant="embedded" scope="claude" />
       </RuntimeCard>
 
       <RuntimeCard
+        sectionId="codex"
         title="Codex"
-        description="OpenAI Codex runtime"
+        description="ChatGPT login or your own OpenAI / Codex API key"
         account={accounts.codex}
         loading={loading.codex}
         installInFlight={installInFlight.codex}
@@ -82,6 +84,16 @@ export function RuntimeSettings({
         onLogout={() => consume(() => logout("codex"))}
         onOpenExternal={openAuthorizationPage}
       />
+
+      <RuntimeCard
+        sectionId="third-party"
+        title="Third-party API"
+        description="OpenAI-compatible and Anthropic-compatible providers (SiliconFlow, DeepSeek, Xiaomi, Qwen, …)"
+        account={accounts.claude}
+        loading={loading.claude}
+      >
+        <ClaudeSetup variant="embedded" scope="third-party" />
+      </RuntimeCard>
     </div>
   );
 }

@@ -99,12 +99,12 @@ export function EnvironmentOnboarding() {
         <div className="flex flex-col items-center px-6 pt-6 pb-3 text-center">
           <img
             src="/icon-192.png"
-            alt="ClaudePrism"
+            alt="LocalPrism"
             className="size-14 object-contain"
           />
           <DialogHeader className="mt-3 items-center gap-1.5 text-center">
             <DialogTitle className="font-semibold text-xl">
-              ClaudePrism
+              LocalPrism
             </DialogTitle>
             <DialogDescription className="max-w-xl text-sm leading-relaxed">
               Install and sign in to at least one AI runtime before entering the

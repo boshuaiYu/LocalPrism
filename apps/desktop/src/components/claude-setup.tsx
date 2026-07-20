@@ -38,15 +38,6 @@ import {
 import { ModelCapabilityBadges } from "@/components/model-capability-badges";
 import { cn } from "@/lib/utils";
 
-type OpenAICompatiblePreset = {
-  id: string;
-  label: string;
-  baseUrl: string;
-  model: string;
-  note: string;
-  apiKeyOptional?: boolean;
-};
-
 type ClaudeCompatiblePreset = {
   id: string;
   label: string;
@@ -54,15 +45,34 @@ type ClaudeCompatiblePreset = {
   note: string;
 };
 
+type ProviderProtocol = "openai-compatible" | "anthropic-compatible";
+
 type ModelProviderCard = {
   id: string;
   label: string;
   provider: "claude-code" | "openai-compatible";
+  protocol: ProviderProtocol;
   baseUrl: string;
   model: string;
   badge: string;
   note: string;
   apiKeyOptional?: boolean;
+  vendorId: string;
+};
+
+type ThirdPartyVendorDef = {
+  vendorId: string;
+  vendorLabel: string;
+  openai: {
+    baseUrl: string;
+    note: string;
+    apiKeyOptional?: boolean;
+  };
+  anthropic: {
+    baseUrl: string;
+    note: string;
+    apiKeyOptional?: boolean;
+  };
 };
 
 const CLAUDE_COMPATIBLE_PRESETS: ClaudeCompatiblePreset[] = [
@@ -74,94 +84,191 @@ const CLAUDE_COMPATIBLE_PRESETS: ClaudeCompatiblePreset[] = [
   },
 ];
 
-const OPENAI_COMPATIBLE_PRESETS: OpenAICompatiblePreset[] = [
+const THIRD_PARTY_VENDORS: ThirdPartyVendorDef[] = [
   {
-    id: "openai",
-    label: "OpenAI",
-    baseUrl: "https://api.openai.com",
-    model: "",
-    note: "OpenAI chat completions endpoint.",
+    vendorId: "openai",
+    vendorLabel: "OpenAI",
+    openai: {
+      baseUrl: "https://api.openai.com/v1",
+      note: "OpenAI chat completions endpoint.",
+    },
+    anthropic: {
+      baseUrl: "https://api.openai.com",
+      note: "For Anthropic-compatible proxies fronting OpenAI.",
+    },
   },
   {
-    id: "qwen",
-    label: "Qwen",
-    baseUrl: "https://dashscope.aliyuncs.com/apps/anthropic",
-    model: "",
-    note: "Qwen Anthropic-compatible endpoint for Claude Code.",
+    vendorId: "siliconflow",
+    vendorLabel: "SiliconFlow",
+    openai: {
+      baseUrl: "https://api.siliconflow.cn/v1",
+      note: "SiliconFlow OpenAI-compatible endpoint.",
+    },
+    anthropic: {
+      baseUrl: "https://api.siliconflow.cn",
+      note: "SiliconFlow Anthropic-compatible endpoint.",
+    },
   },
   {
-    id: "deepseek",
-    label: "DeepSeek",
-    baseUrl: "https://api.deepseek.com/anthropic",
-    model: "",
-    note: "DeepSeek Anthropic-compatible endpoint for Claude Code.",
+    vendorId: "xiaomi",
+    vendorLabel: "Xiaomi MiMo",
+    openai: {
+      baseUrl: "https://api.xiaomimimo.com/v1",
+      note: "Xiaomi MiMo OpenAI-compatible endpoint.",
+    },
+    anthropic: {
+      baseUrl: "https://api.xiaomimimo.com/anthropic",
+      note: "Xiaomi MiMo Anthropic-compatible endpoint.",
+    },
   },
   {
-    id: "moonshot",
-    label: "Moonshot / Kimi",
-    baseUrl: "https://api.moonshot.ai/anthropic",
-    model: "",
-    note: "Kimi Anthropic-compatible endpoint for Claude Code.",
+    vendorId: "deepseek",
+    vendorLabel: "DeepSeek",
+    openai: {
+      baseUrl: "https://api.deepseek.com",
+      note: "DeepSeek OpenAI-compatible endpoint.",
+    },
+    anthropic: {
+      baseUrl: "https://api.deepseek.com/anthropic",
+      note: "DeepSeek Anthropic-compatible endpoint for Claude Code.",
+    },
   },
   {
-    id: "glm",
-    label: "GLM (BigModel)",
-    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
-    model: "",
-    note: "Zhipu BigModel chat completions endpoint.",
+    vendorId: "qwen",
+    vendorLabel: "Qwen",
+    openai: {
+      baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      note: "Qwen OpenAI-compatible DashScope endpoint.",
+    },
+    anthropic: {
+      baseUrl: "https://dashscope.aliyuncs.com/apps/anthropic",
+      note: "Qwen Anthropic-compatible endpoint for Claude Code.",
+    },
   },
   {
-    id: "ollama",
-    label: "Ollama",
-    baseUrl: "http://localhost:11434/v1",
-    model: "",
-    note: "Local Ollama OpenAI-compatible endpoint.",
-    apiKeyOptional: true,
+    vendorId: "moonshot",
+    vendorLabel: "Moonshot / Kimi",
+    openai: {
+      baseUrl: "https://api.moonshot.ai/v1",
+      note: "Moonshot / Kimi OpenAI-compatible endpoint.",
+    },
+    anthropic: {
+      baseUrl: "https://api.moonshot.ai/anthropic",
+      note: "Kimi Anthropic-compatible endpoint for Claude Code.",
+    },
   },
   {
-    id: "gemini",
-    label: "Gemini OpenAI",
-    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-    model: "",
-    note: "Google Gemini OpenAI-compatible endpoint.",
+    vendorId: "glm",
+    vendorLabel: "GLM",
+    openai: {
+      baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+      note: "Zhipu BigModel OpenAI-compatible endpoint.",
+    },
+    anthropic: {
+      baseUrl: "https://open.bigmodel.cn/api/anthropic",
+      note: "Zhipu BigModel Anthropic-compatible endpoint.",
+    },
+  },
+  {
+    vendorId: "ollama",
+    vendorLabel: "Ollama",
+    openai: {
+      baseUrl: "http://localhost:11434/v1",
+      note: "Local Ollama OpenAI-compatible endpoint.",
+      apiKeyOptional: true,
+    },
+    anthropic: {
+      baseUrl: "http://localhost:11434",
+      note: "Local Ollama Anthropic-compatible endpoint.",
+      apiKeyOptional: true,
+    },
+  },
+  {
+    vendorId: "gemini",
+    vendorLabel: "Gemini",
+    openai: {
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+      note: "Google Gemini OpenAI-compatible endpoint.",
+    },
+    anthropic: {
+      baseUrl: "https://generativelanguage.googleapis.com",
+      note: "Editable Gemini base URL for Anthropic-compatible proxies.",
+    },
   },
 ];
 
-const OPENAI_PROVIDER_CARDS: ModelProviderCard[] = [
-  ...OPENAI_COMPATIBLE_PRESETS.map((preset) => ({
-    ...preset,
-    provider: "openai-compatible" as const,
-    badge: preset.label
-      .split(/\s+/)
-      .slice(0, 2)
-      .map((part) => part[0])
-      .join("")
-      .toUpperCase(),
-  })),
-];
+function vendorBadge(label: string) {
+  return label
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase();
+}
+
+function buildThirdPartyVendorCards(
+  vendor: ThirdPartyVendorDef,
+): ModelProviderCard[] {
+  const badge = vendorBadge(vendor.vendorLabel);
+  return [
+    {
+      id: `${vendor.vendorId}-openai`,
+      label: `${vendor.vendorLabel} (OpenAI)`,
+      provider: "openai-compatible",
+      protocol: "openai-compatible",
+      baseUrl: vendor.openai.baseUrl,
+      model: "",
+      badge,
+      note: vendor.openai.note,
+      apiKeyOptional: vendor.openai.apiKeyOptional,
+      vendorId: vendor.vendorId,
+    },
+    {
+      id: `${vendor.vendorId}-anthropic`,
+      label: `${vendor.vendorLabel} (Anthropic)`,
+      provider: "openai-compatible",
+      protocol: "anthropic-compatible",
+      baseUrl: vendor.anthropic.baseUrl,
+      model: "",
+      badge,
+      note: vendor.anthropic.note,
+      apiKeyOptional: vendor.anthropic.apiKeyOptional,
+      vendorId: vendor.vendorId,
+    },
+  ];
+}
+
+export function getThirdPartyProviderCards(): ModelProviderCard[] {
+  return THIRD_PARTY_VENDORS.flatMap(buildThirdPartyVendorCards);
+}
+
+const THIRD_PARTY_PROVIDER_CARDS: ModelProviderCard[] =
+  getThirdPartyProviderCards();
 
 const CLAUDE_PROVIDER_CARDS: ModelProviderCard[] = [
   {
     id: "anthropic-direct",
     label: "Anthropic",
     provider: "claude-code",
+    protocol: "anthropic-compatible",
     baseUrl: "",
     model: "",
     badge: "A",
     note: "Use a direct Anthropic API key.",
+    vendorId: "anthropic",
   },
   ...CLAUDE_COMPATIBLE_PRESETS.map((preset) => ({
     ...preset,
     provider: "claude-code" as const,
+    protocol: "anthropic-compatible" as const,
     model: "",
     badge: "MG",
+    vendorId: "modelgate",
   })),
 ];
 
-const OPENAI_DEFAULT_PRESET_ID = OPENAI_PROVIDER_CARDS[0]?.id ?? "openai";
-const DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic";
-const QWEN_ANTHROPIC_BASE_URL = "https://dashscope.aliyuncs.com/apps/anthropic";
-const MOONSHOT_ANTHROPIC_BASE_URL = "https://api.moonshot.ai/anthropic";
+const OPENAI_DEFAULT_PRESET_ID =
+  THIRD_PARTY_PROVIDER_CARDS[0]?.id ?? "openai-openai";
 const MOONSHOT_OFFICIAL_ORIGIN = "https://api.moonshot.ai";
 
 function deepseekOrigin(url: string) {
@@ -186,71 +293,119 @@ function moonshotOrigin(url: string) {
   return match?.[1] ?? null;
 }
 
+function isAnthropicCompatiblePresetId(presetId?: string | null) {
+  if (!presetId) return false;
+  return (
+    presetId.endsWith("-anthropic") ||
+    presetId === "deepseek" ||
+    presetId === "qwen" ||
+    presetId === "moonshot"
+  );
+}
+
+function isOpenAiCompatiblePresetId(presetId?: string | null) {
+  return !!presetId?.endsWith("-openai");
+}
+
+function isDeepseekVendorPreset(presetId?: string | null) {
+  return (
+    presetId === "deepseek" ||
+    presetId === "deepseek-openai" ||
+    presetId === "deepseek-anthropic"
+  );
+}
+
+function isQwenVendorPreset(presetId?: string | null) {
+  return (
+    presetId === "qwen" ||
+    presetId === "qwen-openai" ||
+    presetId === "qwen-anthropic"
+  );
+}
+
+function isMoonshotVendorPreset(presetId?: string | null) {
+  return (
+    presetId === "moonshot" ||
+    presetId === "moonshot-openai" ||
+    presetId === "moonshot-anthropic"
+  );
+}
+
 function canonicalOpenAiCompatibleBaseUrl(
   url: string,
   presetId?: string | null,
 ) {
   const trimmed = url.trim();
+  const lower = trimmed.toLowerCase();
+
+  // OpenAI-compatible cards must keep their protocol URL as-is.
+  if (isOpenAiCompatiblePresetId(presetId)) {
+    return trimmed;
+  }
+
   const origin = deepseekOrigin(trimmed);
   if (
     origin &&
-    (presetId === "deepseek" || !trimmed.toLowerCase().includes("/anthropic"))
+    (isDeepseekVendorPreset(presetId) || lower.includes("/anthropic"))
   ) {
-    const lower = trimmed.toLowerCase();
-    const anthropicIndex = lower.indexOf("/anthropic");
-    if (anthropicIndex >= 0) {
-      return `${trimmed.slice(0, anthropicIndex)}/anthropic`;
+    const wantsAnthropic =
+      isAnthropicCompatiblePresetId(presetId) || lower.includes("/anthropic");
+    if (wantsAnthropic) {
+      const anthropicIndex = lower.indexOf("/anthropic");
+      if (anthropicIndex >= 0) {
+        return `${trimmed.slice(0, anthropicIndex)}/anthropic`;
+      }
+      if (isAnthropicCompatiblePresetId(presetId)) {
+        return `${origin}/anthropic`;
+      }
     }
-    return `${origin}/anthropic`;
+    return trimmed;
   }
 
   const qwenBaseOrigin = qwenOrigin(trimmed);
   if (
     qwenBaseOrigin &&
-    (presetId === "qwen" ||
-      trimmed.toLowerCase().includes("/apps/anthropic") ||
-      trimmed.toLowerCase().includes("/compatible-mode/") ||
-      normalizeOriginOnlyUrl(trimmed) ===
-        normalizeOriginOnlyUrl(qwenBaseOrigin))
+    (isQwenVendorPreset(presetId) || lower.includes("/apps/anthropic"))
   ) {
-    const lower = trimmed.toLowerCase();
-    const anthropicIndex = lower.indexOf("/apps/anthropic");
-    if (anthropicIndex >= 0) {
-      return `${trimmed.slice(0, anthropicIndex)}/apps/anthropic`;
+    const wantsAnthropic =
+      isAnthropicCompatiblePresetId(presetId) ||
+      lower.includes("/apps/anthropic");
+    if (wantsAnthropic) {
+      const anthropicIndex = lower.indexOf("/apps/anthropic");
+      if (anthropicIndex >= 0) {
+        return `${trimmed.slice(0, anthropicIndex)}/apps/anthropic`;
+      }
+      if (isAnthropicCompatiblePresetId(presetId)) {
+        return `${qwenBaseOrigin}/apps/anthropic`;
+      }
     }
-    return `${qwenBaseOrigin}/apps/anthropic`;
+    return trimmed;
   }
 
   const moonshotBaseOrigin = moonshotOrigin(trimmed);
   if (
     moonshotBaseOrigin &&
-    (presetId === "moonshot" ||
-      trimmed.toLowerCase().includes("/anthropic") ||
-      trimmed.toLowerCase().includes("/v1") ||
-      normalizeOriginOnlyUrl(trimmed) ===
-        normalizeOriginOnlyUrl(moonshotBaseOrigin))
+    (isMoonshotVendorPreset(presetId) || lower.includes("/anthropic"))
   ) {
-    const lower = trimmed.toLowerCase();
-    const anthropicIndex = lower.indexOf("/anthropic");
-    if (anthropicIndex >= 0) {
+    const wantsAnthropic =
+      isAnthropicCompatiblePresetId(presetId) || lower.includes("/anthropic");
+    if (wantsAnthropic) {
       return `${MOONSHOT_OFFICIAL_ORIGIN}/anthropic`;
     }
-    return `${MOONSHOT_OFFICIAL_ORIGIN}/anthropic`;
+    return trimmed;
   }
 
   return trimmed;
 }
 
-function normalizeOriginOnlyUrl(value: string) {
-  return value.trim().replace(/\/+$/, "").toLowerCase();
-}
-
 function isNativeAnthropicPreset(cardId?: string | null) {
+  if (!cardId) return false;
+  if (cardId.endsWith("-anthropic")) return true;
   return cardId === "deepseek" || cardId === "qwen" || cardId === "moonshot";
 }
 
-function normalizePresetBaseUrl(url: string) {
-  return canonicalOpenAiCompatibleBaseUrl(url)
+function normalizePresetBaseUrl(url: string, presetId?: string | null) {
+  return canonicalOpenAiCompatibleBaseUrl(url, presetId)
     .replace(/\/chat\/completions$/i, "")
     .replace(/\/+$/, "")
     .toLowerCase();
@@ -260,10 +415,13 @@ function findOpenAiPresetIdForBaseUrl(baseUrl?: string | null) {
   const normalized = normalizePresetBaseUrl(baseUrl ?? "");
   if (!normalized) return null;
 
+  // Prefer the longest exact match so openai vs anthropic roots stay distinct.
+  const matches = THIRD_PARTY_PROVIDER_CARDS.filter(
+    (card) => normalizePresetBaseUrl(card.baseUrl, card.id) === normalized,
+  );
+  if (matches.length === 0) return null;
   return (
-    OPENAI_COMPATIBLE_PRESETS.find(
-      (preset) => normalizePresetBaseUrl(preset.baseUrl) === normalized,
-    )?.id ?? null
+    matches.sort((a, b) => b.baseUrl.length - a.baseUrl.length)[0]?.id ?? null
   );
 }
 
@@ -280,6 +438,12 @@ function findClaudePresetIdForBaseUrl(baseUrl?: string | null) {
       (preset) => normalizePresetBaseUrl(preset.baseUrl) === normalized,
     )?.id ?? null
   );
+}
+
+function protocolLabel(protocol: ProviderProtocol) {
+  return protocol === "anthropic-compatible"
+    ? "Anthropic-compatible"
+    : "OpenAI-compatible";
 }
 
 // ─── Event Hooks ───
@@ -491,19 +655,24 @@ function InstallLogOutput() {
 
 interface ClaudeSetupProps {
   variant?: "default" | "provider-dialog" | "embedded";
+  /** Which provider cards to show. Defaults to "all" for backward compatibility. */
+  scope?: "claude" | "third-party" | "all";
   onSaved?: () => void;
   onCancel?: () => void;
 }
 
 export function ClaudeSetup({
   variant = "default",
+  scope = "all",
   onSaved,
   onCancel,
 }: ClaudeSetupProps = {}) {
   const [provider, setProvider] = useState<"claude-code" | "openai-compatible">(
-    "claude-code",
+    () => (scope === "third-party" ? "openai-compatible" : "claude-code"),
   );
-  const [providerPreset, setProviderPreset] = useState("anthropic-direct");
+  const [providerPreset, setProviderPreset] = useState(() =>
+    scope === "third-party" ? OPENAI_DEFAULT_PRESET_ID : "anthropic-direct",
+  );
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [model, setModel] = useState("");
@@ -539,6 +708,8 @@ export function ClaudeSetup({
   useLoginEvents();
 
   const isEmbedded = variant === "embedded";
+  const isThirdPartyScope = scope === "third-party";
+  const isClaudeScope = scope === "claude";
   const setupSurfaceClass = (
     tone: "default" | "error" | "warning" = "default",
   ) =>
@@ -553,22 +724,28 @@ export function ClaudeSetup({
             : "rounded-xl border border-border bg-muted/30 px-5 py-4",
     );
 
+  const defaultPresetForScope = () =>
+    isThirdPartyScope ? OPENAI_DEFAULT_PRESET_ID : "anthropic-direct";
+
   const handleSaveApiKey = async (
     selectedProvider: "claude-code" | "openai-compatible" = provider,
     credentialLabel?: string,
   ) => {
+    const effectiveProvider = isThirdPartyScope
+      ? "openai-compatible"
+      : selectedProvider;
     const savedBaseUrl =
-      selectedProvider === "openai-compatible"
+      effectiveProvider === "openai-compatible"
         ? canonicalOpenAiCompatibleBaseUrl(baseUrl, providerPreset)
         : baseUrl.trim();
     const savedPreset =
-      selectedProvider === "openai-compatible"
+      effectiveProvider === "openai-compatible"
         ? openAiPresetIdForBaseUrl(savedBaseUrl)
         : "anthropic-direct";
     const success = await saveApiKey(
       apiKey,
       savedBaseUrl,
-      selectedProvider,
+      effectiveProvider,
       model,
       credentialLabel,
     );
@@ -578,6 +755,7 @@ export function ClaudeSetup({
       setModel("");
       setModelOptions([]);
       setModelFetchError(null);
+      setProvider(effectiveProvider);
       setProviderPreset(savedPreset);
       setIsEditingProvider(false);
       onSaved?.();
@@ -591,12 +769,44 @@ export function ClaudeSetup({
     setModel("");
     setModelOptions([]);
     setModelFetchError(null);
-    setProviderPreset("anthropic-direct");
+    setProvider(isThirdPartyScope ? "openai-compatible" : "claude-code");
+    setProviderPreset(defaultPresetForScope());
   };
 
   const beginProviderEdit = (isDirectProvider: boolean) => {
+    if (isThirdPartyScope) {
+      const nextBaseUrl = canonicalOpenAiCompatibleBaseUrl(
+        providerBaseUrl || "",
+        openAiPresetIdForBaseUrl(providerBaseUrl || ""),
+      );
+      setProvider("openai-compatible");
+      setProviderPreset(openAiPresetIdForBaseUrl(nextBaseUrl));
+      setApiKey("");
+      setBaseUrl(nextBaseUrl);
+      setModel(providerModel || "");
+      setModelOptions([]);
+      setModelFetchError(null);
+      setIsEditingProvider(true);
+      return;
+    }
+
+    if (isClaudeScope) {
+      setProvider("claude-code");
+      setProviderPreset("anthropic-direct");
+      setApiKey("");
+      setBaseUrl("");
+      setModel("");
+      setModelOptions([]);
+      setModelFetchError(null);
+      setIsEditingProvider(true);
+      return;
+    }
+
     const nextBaseUrl = isDirectProvider
-      ? canonicalOpenAiCompatibleBaseUrl(providerBaseUrl || "")
+      ? canonicalOpenAiCompatibleBaseUrl(
+          providerBaseUrl || "",
+          openAiPresetIdForBaseUrl(providerBaseUrl || ""),
+        )
       : "";
     setProvider(isDirectProvider ? "openai-compatible" : "claude-code");
     setProviderPreset(
@@ -620,7 +830,8 @@ export function ClaudeSetup({
       setModel("");
       setModelOptions([]);
       setModelFetchError(null);
-      setProviderPreset("anthropic-direct");
+      setProvider(isThirdPartyScope ? "openai-compatible" : "claude-code");
+      setProviderPreset(defaultPresetForScope());
       setIsEditingProvider(false);
     }
   };
@@ -658,12 +869,17 @@ export function ClaudeSetup({
     forceOpenAiCompatible?: boolean;
     allowBrowserSignIn?: boolean;
   } = {}) => {
-    const selectedProvider = forceOpenAiCompatible
-      ? "openai-compatible"
-      : provider;
-    const providerCards = forceOpenAiCompatible
-      ? OPENAI_PROVIDER_CARDS
-      : [...CLAUDE_PROVIDER_CARDS, ...OPENAI_PROVIDER_CARDS];
+    const selectedProvider =
+      isThirdPartyScope || forceOpenAiCompatible
+        ? "openai-compatible"
+        : isClaudeScope
+          ? "claude-code"
+          : provider;
+    const providerCards = isClaudeScope
+      ? CLAUDE_PROVIDER_CARDS
+      : isThirdPartyScope || forceOpenAiCompatible
+        ? THIRD_PARTY_PROVIDER_CARDS
+        : [...CLAUDE_PROVIDER_CARDS, ...THIRD_PARTY_PROVIDER_CARDS];
     const providerCardIds = new Set(providerCards.map((card) => card.id));
     const fallbackCardId =
       selectedProvider === "openai-compatible"
@@ -678,8 +894,12 @@ export function ClaudeSetup({
     const apiKeyRequired = !apiKeyOptional;
     const showBrowserSignIn =
       allowBrowserSignIn &&
+      !isThirdPartyScope &&
       selectedProvider === "claude-code" &&
       activeCardId === "anthropic-direct";
+    const anthropicStyleCard =
+      activeCard?.protocol === "anthropic-compatible" ||
+      isNativeAnthropicPreset(activeCardId);
 
     return (
       <>
@@ -700,6 +920,10 @@ export function ClaudeSetup({
               {providerCards.map((card) => {
                 const iconSrc = getProviderIconSrc(card);
                 const active = activeCardId === card.id;
+                const subtitle =
+                  card.provider === "openai-compatible"
+                    ? protocolLabel(card.protocol)
+                    : card.note;
 
                 return (
                   <button
@@ -737,7 +961,7 @@ export function ClaudeSetup({
                         {card.label}
                       </span>
                       <span className="block truncate text-muted-foreground text-xs">
-                        {card.note}
+                        {subtitle}
                       </span>
                     </span>
                     {active && <CheckIcon className="size-3 shrink-0" />}
@@ -783,22 +1007,15 @@ export function ClaudeSetup({
 
           <div className="min-w-0 space-y-1.5">
             <Label htmlFor="anthropic-base-url" className="text-xs">
-              {isNativeAnthropicPreset(activeCardId)
-                ? "Base URL (Anthropic)"
-                : "Base URL"}
+              {anthropicStyleCard ? "Base URL (Anthropic)" : "Base URL"}
             </Label>
             <Input
               id="anthropic-base-url"
               type="url"
               placeholder={
                 selectedProvider === "openai-compatible"
-                  ? activeCardId === "deepseek"
-                    ? DEEPSEEK_ANTHROPIC_BASE_URL
-                    : activeCardId === "qwen"
-                      ? QWEN_ANTHROPIC_BASE_URL
-                      : activeCardId === "moonshot"
-                        ? MOONSHOT_ANTHROPIC_BASE_URL
-                        : "https://dashscope.aliyuncs.com/compatible-mode/v1"
+                  ? activeCard?.baseUrl ||
+                    "https://dashscope.aliyuncs.com/compatible-mode/v1"
                   : "https://mg.aid.pub/claude-proxy"
               }
               value={baseUrl}
@@ -836,13 +1053,8 @@ export function ClaudeSetup({
             />
             <p className="text-[11px] text-muted-foreground">
               {selectedProvider === "openai-compatible"
-                ? activeCardId === "deepseek"
-                  ? "DeepSeek runs through its native Anthropic-compatible Claude Code route."
-                  : activeCardId === "qwen"
-                    ? "Qwen runs through its native Anthropic-compatible Claude Code route."
-                    : activeCardId === "moonshot"
-                      ? "Kimi runs through its native Anthropic-compatible Claude Code route."
-                      : "Use either the API root or a full /chat/completions URL."
+                ? activeCard?.note ||
+                  "Use either the API root or a full /chat/completions URL."
                 : "Leave blank for Anthropic direct API."}
             </p>
           </div>
@@ -919,13 +1131,15 @@ export function ClaudeSetup({
                 </p>
               )}
               <p className="text-[11px] text-muted-foreground">
-                {activeCardId === "deepseek"
+                {activeCard?.vendorId === "deepseek"
                   ? "Fetches DeepSeek models from the matching provider model endpoint."
-                  : activeCardId === "qwen"
+                  : activeCard?.vendorId === "qwen"
                     ? "Fetches Qwen models from the matching DashScope model endpoint."
-                    : activeCardId === "moonshot"
+                    : activeCard?.vendorId === "moonshot"
                       ? "Fetches Kimi models from the matching Moonshot model endpoint."
-                      : "Fetches the provider's real /models list when available."}
+                      : anthropicStyleCard
+                        ? "Anthropic-compatible endpoint — model listing depends on the vendor."
+                        : "Fetches the provider's real /models list when available."}
               </p>
             </div>
           )}
@@ -1090,13 +1304,22 @@ export function ClaudeSetup({
       isDirectProvider && (providerModel || providerBaseUrl) ? 1 : 0,
     );
     const includesClaudeProvider =
-      claudeProviderConfigured || !isDirectProvider;
+      !isThirdPartyScope && (claudeProviderConfigured || !isDirectProvider);
+    const showOpenAiProviders = !isClaudeScope;
+    const visibleOpenAiCount = showOpenAiProviders ? openAiProviderCount : 0;
     const configuredProviderCount =
-      openAiProviderCount + (includesClaudeProvider ? 1 : 0);
+      visibleOpenAiCount + (includesClaudeProvider ? 1 : 0);
+    const listTitle = isClaudeScope
+      ? "Claude Providers"
+      : isThirdPartyScope
+        ? "Third-party Providers"
+        : "AI Providers";
     const readyDetail = [
       `${configuredProviderCount} provider${configuredProviderCount === 1 ? "" : "s"} configured`,
-      version ? `Claude Code ${version}` : null,
-      !isDirectProvider && accountEmail ? accountEmail : null,
+      !isThirdPartyScope && version ? `Claude Code ${version}` : null,
+      !isThirdPartyScope && !isDirectProvider && accountEmail
+        ? accountEmail
+        : null,
     ]
       .filter(Boolean)
       .join(" / ");
@@ -1109,7 +1332,9 @@ export function ClaudeSetup({
             <CheckCircle2Icon className="size-5 shrink-0 text-green-600" />
             <div className="min-w-0 flex-1">
               <p className="font-medium text-sm">
-                {isDirectProvider ? "Update AI Provider" : "Update Claude Code"}
+                {isThirdPartyScope || isDirectProvider
+                  ? "Update AI Provider"
+                  : "Update Claude Code"}
               </p>
               <p className="truncate text-muted-foreground text-xs">
                 {readyDetail}
@@ -1117,7 +1342,13 @@ export function ClaudeSetup({
             </div>
           </div>
 
-          {renderApiKeyForm({ allowBrowserSignIn: !isDirectProvider })}
+          {renderApiKeyForm({
+            forceOpenAiCompatible: isThirdPartyScope,
+            allowBrowserSignIn:
+              !isThirdPartyScope && !isDirectProvider && !isClaudeScope
+                ? true
+                : isClaudeScope,
+          })}
 
           <div className="grid grid-cols-2 gap-2">
             <Button
@@ -1165,7 +1396,7 @@ export function ClaudeSetup({
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 items-center gap-2">
               <span className="truncate font-semibold text-sm">
-                AI Providers
+                {listTitle}
               </span>
               <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
                 {configuredProviderCount}
@@ -1180,7 +1411,9 @@ export function ClaudeSetup({
             size="sm"
             variant="ghost"
             className="h-8 shrink-0 gap-1.5 rounded-md px-2.5 text-xs"
-            onClick={() => beginProviderEdit(isDirectProvider)}
+            onClick={() =>
+              beginProviderEdit(isThirdPartyScope || isDirectProvider)
+            }
           >
             <RefreshCwIcon className="size-3" />
             Add
@@ -1202,7 +1435,8 @@ export function ClaudeSetup({
           </Button>
         </div>
 
-        {(includesClaudeProvider || openAiCredentials.length > 0) && (
+        {(includesClaudeProvider ||
+          (showOpenAiProviders && openAiCredentials.length > 0)) && (
           <div className="space-y-1.5 border-border/60 border-t px-4 py-3">
             {includesClaudeProvider && (
               <div className="flex min-h-9 min-w-0 items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-xs transition-colors hover:bg-muted/50">
@@ -1227,54 +1461,73 @@ export function ClaudeSetup({
                 </div>
               </div>
             )}
-            {openAiCredentials.map((credential) => {
-              const displayName = getProviderDisplayName({
-                label: credential.label,
-                baseUrl: credential.base_url,
-                model: credential.model,
-              });
-              const iconSrc = getProviderIconSrc({
-                label: credential.label,
-                baseUrl: credential.base_url,
-                model: credential.model,
-              });
+            {showOpenAiProviders &&
+              openAiCredentials.map((credential) => {
+                const displayName = getProviderDisplayName({
+                  label: credential.label,
+                  baseUrl: credential.base_url,
+                  model: credential.model,
+                });
+                const iconSrc = getProviderIconSrc({
+                  label: credential.label,
+                  baseUrl: credential.base_url,
+                  model: credential.model,
+                });
 
-              return (
-                <div
-                  key={credential.id}
-                  className="flex min-h-9 min-w-0 items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-xs transition-colors hover:bg-muted/50"
-                >
-                  {iconSrc ? (
-                    <img
-                      src={iconSrc}
-                      alt=""
-                      className="size-4 shrink-0 object-contain"
-                    />
-                  ) : (
-                    <CircleIcon className="size-3 shrink-0 text-muted-foreground/50" />
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <div className="flex min-w-0 items-center gap-2">
-                      <span className="shrink-0 font-medium">
-                        {displayName}
-                      </span>
-                      <span className="min-w-0 truncate text-muted-foreground">
-                        {credential.model}
-                      </span>
+                return (
+                  <div
+                    key={credential.id}
+                    className="flex min-h-9 min-w-0 items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-xs transition-colors hover:bg-muted/50"
+                  >
+                    {iconSrc ? (
+                      <img
+                        src={iconSrc}
+                        alt=""
+                        className="size-4 shrink-0 object-contain"
+                      />
+                    ) : (
+                      <CircleIcon className="size-3 shrink-0 text-muted-foreground/50" />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="shrink-0 font-medium">
+                          {displayName}
+                        </span>
+                        <span className="min-w-0 truncate text-muted-foreground">
+                          {credential.model}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="shrink-0">
+                      <ModelCapabilityBadges
+                        label={credential.label}
+                        baseUrl={credential.base_url}
+                        model={credential.model}
+                      />
                     </div>
                   </div>
-                  <div className="shrink-0">
-                    <ModelCapabilityBadges
-                      label={credential.label}
-                      baseUrl={credential.base_url}
-                      model={credential.model}
-                    />
-                  </div>
-                </div>
-              );
-            })}
+                );
+              })}
           </div>
         )}
+      </div>
+    );
+  }
+
+  // Third-party embedded: skip Claude install/login chrome; only show API form.
+  if (isThirdPartyScope && isEmbedded) {
+    return (
+      <div className={setupSurfaceClass()}>
+        <div className="flex items-center gap-2">
+          <KeyRoundIcon className="size-5 shrink-0 text-muted-foreground" />
+          <div>
+            <p className="font-medium text-sm">Third-party API</p>
+            <p className="text-muted-foreground text-xs">
+              Add OpenAI-compatible or Anthropic-compatible provider keys.
+            </p>
+          </div>
+        </div>
+        {renderApiKeyForm({ forceOpenAiCompatible: true })}
       </div>
     );
   }

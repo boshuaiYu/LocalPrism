@@ -42,6 +42,7 @@ function makeTab(overrides: Partial<TabState> = {}): TabState {
     messages: [],
     isStreaming: false,
     streamingStartedAt: null,
+    streamingStatus: null,
     error: null,
     totalInputTokens: 0,
     totalOutputTokens: 0,
@@ -1011,7 +1012,9 @@ describe("dual-runtime chat dispatch", () => {
     const sending = useClaudeChatStore.getState().sendPrompt("Old prompt");
     useClaudeChatStore.getState()._setStreaming("tab-runtime", false);
     expect(
-      useClaudeChatStore.getState().changeTabRuntime("tab-runtime", "codex"),
+      useClaudeChatStore.getState().changeTabRuntime("tab-runtime", "codex", {
+        confirmSessionReset: true,
+      }),
     ).toBe("changed");
     save.resolve();
     await sending;
@@ -1032,7 +1035,9 @@ describe("dual-runtime chat dispatch", () => {
     await vi.waitFor(() => expect(createSnapshotMock).toHaveBeenCalledTimes(1));
     useClaudeChatStore.getState()._setStreaming("tab-runtime", false);
     expect(
-      useClaudeChatStore.getState().changeTabRuntime("tab-runtime", "codex"),
+      useClaudeChatStore.getState().changeTabRuntime("tab-runtime", "codex", {
+        confirmSessionReset: true,
+      }),
     ).toBe("changed");
     snapshot.resolve(null);
     await sending;
@@ -2234,6 +2239,24 @@ describe("changeTabRuntime", () => {
     const result = useClaudeChatStore
       .getState()
       .changeTabRuntime("tab-runtime", "codex");
+
+    expect(result).toBe("confirmation-required");
+    expect(useClaudeChatStore.getState()).toEqual(before);
+  });
+
+  it("requires confirmation when the tab already has messages", () => {
+    resetStore(
+      makeTab({
+        sessionId: null,
+        sessionRef: null,
+        messages: [{ type: "user", result: "keep me until confirmed" }],
+      }),
+    );
+    const before = useClaudeChatStore.getState();
+
+    const result = useClaudeChatStore
+      .getState()
+      .changeTabRuntime("tab-runtime", "api");
 
     expect(result).toBe("confirmation-required");
     expect(useClaudeChatStore.getState()).toEqual(before);

@@ -53,6 +53,18 @@ export function getProviderDisplayName(input: ProviderIconInput): string {
     return "DeepSeek";
   }
 
+  if (haystack.includes("siliconflow")) {
+    return "SiliconFlow";
+  }
+
+  if (
+    haystack.includes("xiaomimimo") ||
+    haystack.includes("xiaomi mimo") ||
+    haystack.includes("xiaomi")
+  ) {
+    return "Xiaomi MiMo";
+  }
+
   if (
     haystack.includes("glm") ||
     haystack.includes("zhipu") ||
@@ -118,6 +130,18 @@ export function getProviderIconSrc(input: ProviderIconInput): string | null {
 
   if (haystack.includes("deepseek")) {
     return deepseekIcon;
+  }
+
+  if (haystack.includes("siliconflow")) {
+    return openaiIcon;
+  }
+
+  if (
+    haystack.includes("xiaomimimo") ||
+    haystack.includes("xiaomi mimo") ||
+    haystack.includes("xiaomi")
+  ) {
+    return openaiIcon;
   }
 
   if (

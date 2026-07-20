@@ -9,6 +9,7 @@ import {
   type Mock,
   vi,
 } from "vitest";
+import { getThirdPartyProviderCards } from "@/components/claude-setup";
 import type { RuntimeCardProps } from "@/components/runtime/runtime-card";
 import { RuntimeSettings } from "@/components/runtime/runtime-settings";
 import type { RuntimeAccount, RuntimeKind } from "@/runtime/types";
@@ -22,7 +23,7 @@ import {
 type ClaudeSetupState = ReturnType<typeof useClaudeSetupStore.getState>;
 
 const mocks = vi.hoisted(() => ({
-  cards: new Map<RuntimeKind, RuntimeCardProps>(),
+  cards: new Map<string, RuntimeCardProps>(),
   shellOpen: vi.fn(),
   toastError: vi.fn(),
 }));
@@ -35,17 +36,27 @@ vi.mock("sonner", () => ({
   toast: { error: mocks.toastError },
 }));
 
-vi.mock("@/components/claude-setup", () => ({
-  ClaudeSetup: ({ variant }: { variant: string }) => (
-    <div data-testid="claude-setup">ClaudeSetup:{variant}</div>
-  ),
-}));
+vi.mock("@/components/claude-setup", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/components/claude-setup")>();
+  return {
+    ...actual,
+    ClaudeSetup: ({ variant, scope }: { variant: string; scope?: string }) => (
+      <div data-testid="claude-setup">
+        ClaudeSetup:{variant}:{scope ?? "all"}
+      </div>
+    ),
+  };
+});
 
 vi.mock("@/components/runtime/runtime-card", () => ({
   RuntimeCard: (props: RuntimeCardProps) => {
-    mocks.cards.set(props.account.runtime, props);
+    mocks.cards.set(props.sectionId ?? props.title, props);
     return (
-      <section data-runtime={props.account.runtime}>
+      <section
+        data-runtime={props.account.runtime}
+        data-section={props.sectionId}
+      >
         <h2>{props.title}</h2>
         <p>{props.description}</p>
         {props.account.error && <p role="alert">{props.account.error}</p>}
@@ -77,6 +88,16 @@ function account(
     ...overrides,
   };
 }
+
+describe("third-party provider presets", () => {
+  it("exposes both OpenAI and Anthropic cards for dual-protocol vendors", () => {
+    const ids = getThirdPartyProviderCards().map((card) => card.id);
+    for (const vendor of ["deepseek", "siliconflow", "xiaomi", "qwen"]) {
+      expect(ids).toContain(`${vendor}-openai`);
+      expect(ids).toContain(`${vendor}-anthropic`);
+    }
+  });
+});
 
 describe("RuntimeSettings", () => {
   let container: HTMLDivElement;
@@ -145,7 +166,7 @@ describe("RuntimeSettings", () => {
     });
   }
 
-  it("keeps both runtimes visible and nests the full Claude setup in the Claude card", async () => {
+  it("renders Claude, Codex, and Third-party API sections", async () => {
     useRuntimeStore.setState((state) => ({
       accounts: {
         ...state.accounts,
@@ -155,15 +176,28 @@ describe("RuntimeSettings", () => {
 
     await renderSettings();
 
-    expect(container.querySelector('[data-runtime="claude"]')).not.toBeNull();
-    expect(container.querySelector('[data-runtime="codex"]')).not.toBeNull();
-    expect(container.textContent).toContain("Claude / Claude-backed providers");
-    expect(container.textContent).toContain("Codex status unavailable");
-    const claudeSetup = container.querySelector('[data-testid="claude-setup"]');
-    expect(claudeSetup?.textContent).toBe("ClaudeSetup:embedded");
+    expect(container.querySelector('[data-section="claude"]')).not.toBeNull();
+    expect(container.querySelector('[data-section="codex"]')).not.toBeNull();
     expect(
-      claudeSetup?.closest("[data-runtime]")?.getAttribute("data-runtime"),
+      container.querySelector('[data-section="third-party"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain("Claude");
+    expect(container.textContent).toContain("Codex");
+    expect(container.textContent).toContain("Third-party API");
+    expect(container.textContent).toContain("Codex status unavailable");
+
+    const setups = Array.from(
+      container.querySelectorAll('[data-testid="claude-setup"]'),
+    );
+    expect(setups).toHaveLength(2);
+    expect(setups[0]?.textContent).toBe("ClaudeSetup:embedded:claude");
+    expect(setups[1]?.textContent).toBe("ClaudeSetup:embedded:third-party");
+    expect(
+      setups[0]?.closest("[data-section]")?.getAttribute("data-section"),
     ).toBe("claude");
+    expect(
+      setups[1]?.closest("[data-section]")?.getAttribute("data-section"),
+    ).toBe("third-party");
   });
 
   it("refreshes shared status on mount", async () => {
@@ -235,6 +269,16 @@ describe("RuntimeSettings", () => {
     expect(mocks.toastError).not.toHaveBeenCalled();
     expect(logout).toHaveBeenCalledWith("codex");
     expect(checkClaudeStatus).not.toHaveBeenCalled();
+  });
+
+  it("keeps Third-party API card free of login/install actions", async () => {
+    await renderSettings();
+    const thirdParty = mocks.cards.get("third-party");
+    expect(thirdParty).toBeDefined();
+    expect(thirdParty?.onLogin).toBeUndefined();
+    expect(thirdParty?.onInstall).toBeUndefined();
+    expect(thirdParty?.onLogout).toBeUndefined();
+    expect(thirdParty?.description).toMatch(/OpenAI-compatible/i);
   });
 
   it("consumes rejected Codex actions", async () => {

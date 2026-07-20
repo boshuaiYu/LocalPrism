@@ -24,7 +24,7 @@ TARGET="aarch64-apple-darwin"
 VERSION=$(node -p "require('./package.json').version")
 TAG="v${VERSION}"
 
-echo "==> Building ClaudePrism $TAG for macOS ($TARGET)"
+echo "==> Building LocalPrism $TAG for macOS ($TARGET)"
 
 # Build
 export TECTONIC_DEP_BACKEND=vcpkg
@@ -36,7 +36,7 @@ pnpm --filter @claude-prism/desktop tauri build --target "$TARGET"
 
 # Notarize DMG
 DMG_PATH=$(find "apps/desktop/src-tauri/target/$TARGET/release/bundle/dmg" -name '*.dmg' | head -1)
-APP_PATH="apps/desktop/src-tauri/target/$TARGET/release/bundle/macos/ClaudePrism.app"
+APP_PATH="apps/desktop/src-tauri/target/$TARGET/release/bundle/macos/LocalPrism.app"
 
 if [ -z "$DMG_PATH" ]; then
   echo "Error: DMG not found"
@@ -76,7 +76,7 @@ else
       const data = JSON.parse(fs.readFileSync('$LATEST_JSON', 'utf8'));
       data.platforms['darwin-aarch64'] = {
         signature: \`$SIGNATURE\`,
-        url: 'https://github.com/delibae/claude-prism/releases/download/$TAG/ClaudePrism-macOS.app.tar.gz'
+        url: 'https://github.com/delibae/claude-prism/releases/download/$TAG/LocalPrism-macOS.app.tar.gz'
       };
       fs.writeFileSync('$LATEST_JSON', JSON.stringify(data, null, 2));
     "
@@ -84,12 +84,12 @@ else
     cat > "$LATEST_JSON" <<EOF
 {
   "version": "$VERSION",
-  "notes": "ClaudePrism $TAG",
+  "notes": "LocalPrism $TAG",
   "pub_date": "$PUB_DATE",
   "platforms": {
     "darwin-aarch64": {
       "signature": "$SIGNATURE",
-      "url": "https://github.com/delibae/claude-prism/releases/download/$TAG/ClaudePrism-macOS.app.tar.gz"
+      "url": "https://github.com/delibae/claude-prism/releases/download/$TAG/LocalPrism-macOS.app.tar.gz"
     }
   }
 }
@@ -101,15 +101,15 @@ fi
 # Upload to GitHub Release
 echo "==> Uploading to GitHub Release $TAG"
 gh release view "$TAG" --repo delibae/claude-prism >/dev/null 2>&1 || \
-  gh release create "$TAG" --repo delibae/claude-prism --title "ClaudePrism $TAG" --generate-notes
+  gh release create "$TAG" --repo delibae/claude-prism --title "LocalPrism $TAG" --generate-notes
 
 # Rename to version-free names
-RENAMED_DMG="apps/desktop/src-tauri/target/ClaudePrism-macOS.dmg"
+RENAMED_DMG="apps/desktop/src-tauri/target/LocalPrism-macOS.dmg"
 cp "$DMG_PATH" "$RENAMED_DMG"
 UPLOAD_ASSETS=("$RENAMED_DMG")
 
 if [ -n "${UPDATE_TAR:-}" ]; then
-  RENAMED_TAR="apps/desktop/src-tauri/target/ClaudePrism-macOS.app.tar.gz"
+  RENAMED_TAR="apps/desktop/src-tauri/target/LocalPrism-macOS.app.tar.gz"
   cp "$UPDATE_TAR" "$RENAMED_TAR"
   UPLOAD_ASSETS+=("$RENAMED_TAR")
 fi

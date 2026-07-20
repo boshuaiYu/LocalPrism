@@ -125,14 +125,15 @@ const STEP_ORDER_LOGIN = ["opening-browser", "waiting-auth", "complete"];
 function canonicalOpenAiCompatibleBaseUrl(url: string) {
   const trimmed = url.trim();
   const lower = trimmed.toLowerCase();
+
+  // Only normalize Anthropic-style vendor URLs. OpenAI-compatible roots
+  // (including DeepSeek / Qwen / Moonshot /v1) must stay untouched so dual
+  // protocol presets can save both endpoint types.
   const deepseekMatch = trimmed.match(
     /^(https?:\/\/api\.deepseek\.com)(?:\/|$)/i,
   );
   const deepseekOrigin = deepseekMatch?.[1];
-  if (deepseekOrigin && !lower.includes("/anthropic")) {
-    return `${deepseekOrigin}/anthropic`;
-  }
-  if (deepseekOrigin) {
+  if (deepseekOrigin && lower.includes("/anthropic")) {
     const anthropicIndex = lower.indexOf("/anthropic");
     return `${trimmed.slice(0, anthropicIndex)}/anthropic`;
   }
@@ -141,34 +142,16 @@ function canonicalOpenAiCompatibleBaseUrl(url: string) {
     /^(https?:\/\/dashscope(?:-intl)?\.aliyuncs\.com)(?:\/|$)/i,
   );
   const qwenOrigin = qwenMatch?.[1];
-  if (
-    qwenOrigin &&
-    (lower.includes("/apps/anthropic") ||
-      lower.includes("/compatible-mode/") ||
-      trimmed.replace(/\/+$/, "").toLowerCase() === qwenOrigin.toLowerCase())
-  ) {
+  if (qwenOrigin && lower.includes("/apps/anthropic")) {
     const anthropicIndex = lower.indexOf("/apps/anthropic");
-    if (anthropicIndex >= 0) {
-      return `${trimmed.slice(0, anthropicIndex)}/apps/anthropic`;
-    }
-    return `${qwenOrigin}/apps/anthropic`;
+    return `${trimmed.slice(0, anthropicIndex)}/apps/anthropic`;
   }
 
   const moonshotMatch = trimmed.match(
     /^(https?:\/\/api\.moonshot\.(?:cn|ai))(?:\/|$)/i,
   );
   const moonshotOrigin = moonshotMatch?.[1];
-  if (
-    moonshotOrigin &&
-    (lower.includes("/anthropic") ||
-      lower.includes("/v1") ||
-      trimmed.replace(/\/+$/, "").toLowerCase() ===
-        moonshotOrigin.toLowerCase())
-  ) {
-    const anthropicIndex = lower.indexOf("/anthropic");
-    if (anthropicIndex >= 0) {
-      return `${MOONSHOT_OFFICIAL_ORIGIN}/anthropic`;
-    }
+  if (moonshotOrigin && lower.includes("/anthropic")) {
     return `${MOONSHOT_OFFICIAL_ORIGIN}/anthropic`;
   }
 

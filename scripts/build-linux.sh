@@ -21,7 +21,7 @@ TARGET="x86_64-unknown-linux-gnu"
 VERSION=$(node -p "require('./package.json').version")
 TAG="v${VERSION}"
 
-echo "==> Building ClaudePrism $TAG for Linux ($TARGET)"
+echo "==> Building LocalPrism $TAG for Linux ($TARGET)"
 
 # Build
 export TECTONIC_DEP_BACKEND=pkg-config
@@ -66,7 +66,7 @@ if [ -n "$APPIMAGE_PATH" ] && [ -n "$APPIMAGE_SIG" ]; then
       const data = JSON.parse(fs.readFileSync('$LATEST_JSON', 'utf8'));
       data.platforms['linux-x86_64'] = {
         signature: \`$SIGNATURE\`,
-        url: 'https://github.com/delibae/claude-prism/releases/download/$TAG/ClaudePrism-Linux.AppImage'
+        url: 'https://github.com/delibae/claude-prism/releases/download/$TAG/LocalPrism-Linux.AppImage'
       };
       fs.writeFileSync('$LATEST_JSON', JSON.stringify(data, null, 2));
     "
@@ -74,12 +74,12 @@ if [ -n "$APPIMAGE_PATH" ] && [ -n "$APPIMAGE_SIG" ]; then
     cat > "$LATEST_JSON" <<EOF
 {
   "version": "$VERSION",
-  "notes": "ClaudePrism $TAG",
+  "notes": "LocalPrism $TAG",
   "pub_date": "$PUB_DATE",
   "platforms": {
     "linux-x86_64": {
       "signature": "$SIGNATURE",
-      "url": "https://github.com/delibae/claude-prism/releases/download/$TAG/ClaudePrism-Linux.AppImage"
+      "url": "https://github.com/delibae/claude-prism/releases/download/$TAG/LocalPrism-Linux.AppImage"
     }
   }
 }
@@ -94,7 +94,7 @@ fi
 # Upload to GitHub Release
 echo "==> Uploading to GitHub Release $TAG"
 gh release view "$TAG" --repo delibae/claude-prism >/dev/null 2>&1 || \
-  gh release create "$TAG" --repo delibae/claude-prism --title "ClaudePrism $TAG" --generate-notes
+  gh release create "$TAG" --repo delibae/claude-prism --title "LocalPrism $TAG" --generate-notes
 
 gh release upload "$TAG" \
   --repo delibae/claude-prism \

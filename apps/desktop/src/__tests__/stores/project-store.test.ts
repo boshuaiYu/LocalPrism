@@ -32,12 +32,12 @@ describe("useProjectStore", () => {
 
     it("normalizes trailing separators when deduplicating", () => {
       const store = useProjectStore.getState();
-      store.addRecentProject("C:\\Projects\\ClaudePrism\\paper\\");
-      store.addRecentProject("C:\\Projects\\ClaudePrism\\paper");
+      store.addRecentProject("C:\\Projects\\LocalPrism\\paper\\");
+      store.addRecentProject("C:\\Projects\\LocalPrism\\paper");
       const { recentProjects } = useProjectStore.getState();
       expect(recentProjects).toHaveLength(1);
       expect(recentProjects[0]).toMatchObject({
-        path: "C:\\Projects\\ClaudePrism\\paper",
+        path: "C:\\Projects\\LocalPrism\\paper",
         name: "paper",
       });
     });

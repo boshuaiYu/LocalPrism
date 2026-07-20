@@ -29,7 +29,7 @@ import {
   BIB_TEMPLATE,
 } from "@/lib/template-registry";
 import { TemplateGallery } from "@/components/template-gallery";
-import { DEFAULT_CLAUDE_MD } from "@/lib/default-claude-md";
+import { DEFAULT_PROJECT_INSTRUCTIONS } from "@/lib/default-claude-md";
 import {
   buildReferenceFilesSection,
   importReferenceFiles,
@@ -109,7 +109,7 @@ function ScratchForm({ onBack }: { onBack: () => void }) {
       setProjectFolder(lastProjectFolder);
     } else {
       homeDir()
-        .then((home) => join(home, "Documents", "ClaudePrism"))
+        .then((home) => join(home, "Documents", "LocalPrism"))
         .then(async (dir) => {
           await mkdir(dir, { recursive: true }).catch(() => {});
           setProjectFolder(dir);
@@ -204,11 +204,14 @@ function ScratchForm({ onBack }: { onBack: () => void }) {
       }
       await mkdir(projectPath, { recursive: true });
 
-      // Create CLAUDE.md for Claude Code context
+      // Neutral project instructions for Claude Code (CLAUDE.md) and Codex (AGENTS.md)
       const claudeMdPath = await join(projectPath, "CLAUDE.md");
-      const claudeMdExists = await exists(claudeMdPath);
-      if (!claudeMdExists) {
-        await writeTextFile(claudeMdPath, DEFAULT_CLAUDE_MD);
+      if (!(await exists(claudeMdPath))) {
+        await writeTextFile(claudeMdPath, DEFAULT_PROJECT_INSTRUCTIONS);
+      }
+      const agentsMdPath = await join(projectPath, "AGENTS.md");
+      if (!(await exists(agentsMdPath))) {
+        await writeTextFile(agentsMdPath, DEFAULT_PROJECT_INSTRUCTIONS);
       }
 
       const mainTexPath = await join(projectPath, template.mainFileName);

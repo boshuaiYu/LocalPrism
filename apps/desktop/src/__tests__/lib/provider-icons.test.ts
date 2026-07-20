@@ -43,4 +43,25 @@ describe("getProviderDisplayName", () => {
     expect(getProviderDisplayName(provider)).toBe("Ollama");
     expect(getProviderIconSrc(provider)).toContain("ollama");
   });
+
+  it("matches dual-protocol vendor labels", () => {
+    expect(
+      getProviderDisplayName({
+        id: "deepseek-openai",
+        label: "DeepSeek (OpenAI)",
+      }),
+    ).toBe("DeepSeek");
+    expect(
+      getProviderDisplayName({
+        id: "siliconflow-anthropic",
+        label: "SiliconFlow (Anthropic)",
+      }),
+    ).toBe("SiliconFlow");
+    expect(
+      getProviderDisplayName({
+        id: "xiaomi-openai",
+        label: "Xiaomi MiMo (OpenAI)",
+      }),
+    ).toBe("Xiaomi MiMo");
+  });
 });

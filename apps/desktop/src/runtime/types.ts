@@ -1,5 +1,33 @@
 export type RuntimeKind = "claude" | "codex";
 
+/**
+ * UI-level chat peer. The wire protocol only ever speaks `RuntimeKind`
+ * ("claude" | "codex"); "api" is a Claude-backed peer that additionally
+ * carries a `providerCredentialId` pointing at an OpenAI-compatible
+ * provider. Do NOT add a Rust-side `RuntimeKind::Api` — the distinction
+ * lives entirely in the desktop UI/store layer.
+ */
+export type ChatRuntimePeer = "claude" | "api" | "codex";
+
+/** Maps a UI peer to the wire runtime used for `RuntimeTurnRequest.runtime`. */
+export function wireRuntimeFromPeer(peer: ChatRuntimePeer): RuntimeKind {
+  return peer === "codex" ? "codex" : "claude";
+}
+
+/**
+ * Derives the peer for a tab that has no explicit `chatPeer` stored yet
+ * (e.g. persisted data from before this field existed). Codex tabs are
+ * always the Codex peer; a Claude-runtime tab with an OpenAI-compatible
+ * provider credential selected is the API peer; otherwise it's Claude.
+ */
+export function peerFromTab(input: {
+  runtime: RuntimeKind;
+  providerKey?: string | null;
+}): ChatRuntimePeer {
+  if (input.runtime === "codex") return "codex";
+  return input.providerKey?.startsWith("openai-compatible:") ? "api" : "claude";
+}
+
 export type SkillScope = "user" | "project";
 
 export interface SkillTarget {

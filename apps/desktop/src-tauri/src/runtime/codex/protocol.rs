@@ -11,8 +11,8 @@ impl InitializeParams {
     pub(crate) fn new(version: &str) -> Self {
         Self {
             client_info: ClientInfo {
-                name: "claude-prism",
-                title: "ClaudePrism",
+                name: "local-prism",
+                title: "LocalPrism",
                 version: version.to_owned(),
             },
             capabilities: InitializeCapabilities {
@@ -225,29 +225,46 @@ fn default_input_modalities() -> Vec<String> {
 pub(crate) struct Model {
     pub(crate) id: String,
     pub(crate) model: String,
+    #[serde(default)]
     pub(crate) display_name: String,
+    #[serde(default)]
     pub(crate) description: String,
+    #[serde(default)]
     pub(crate) hidden: bool,
+    #[serde(default)]
     pub(crate) supported_reasoning_efforts: Vec<ReasoningEffortOption>,
+    #[serde(default)]
     pub(crate) default_reasoning_effort: String,
     #[serde(default = "default_input_modalities")]
     pub(crate) input_modalities: Vec<String>,
+    #[serde(default)]
     pub(crate) is_default: bool,
 }
 
 impl Model {
     pub(crate) fn into_runtime_model(self) -> RuntimeModel {
+        let display_name = if self.display_name.is_empty() {
+            self.model.clone()
+        } else {
+            self.display_name
+        };
+        let default_reasoning_effort = if self.default_reasoning_effort.is_empty() {
+            None
+        } else {
+            Some(self.default_reasoning_effort)
+        };
+
         RuntimeModel {
             runtime: RuntimeKind::Codex,
             id: self.model,
-            display_name: self.display_name,
+            display_name,
             description: Some(self.description),
             reasoning_efforts: self
                 .supported_reasoning_efforts
                 .into_iter()
                 .map(|option| option.reasoning_effort)
                 .collect(),
-            default_reasoning_effort: Some(self.default_reasoning_effort),
+            default_reasoning_effort,
             input_modalities: self.input_modalities,
             is_default: self.is_default,
         }
@@ -261,11 +278,20 @@ pub(crate) struct ModelListResponse {
     pub(crate) next_cursor: Option<String>,
 }
 
+fn is_internal_codex_model(model: &Model) -> bool {
+    // Codex marks some useful chat models as hidden (e.g. gpt-5.4), while a few
+    // entries are internal-only tool backends that should stay out of the picker.
+    matches!(
+        model.model.as_str(),
+        "codex-auto-review" | "codex-auto-review-mini"
+    ) || model.id.starts_with("codex-auto-review")
+}
+
 impl ModelListResponse {
     pub(crate) fn into_visible_runtime_models(self) -> Vec<RuntimeModel> {
         self.data
             .into_iter()
-            .filter(|model| !model.hidden)
+            .filter(|model| !is_internal_codex_model(model) && !model.model.trim().is_empty())
             .map(Model::into_runtime_model)
             .collect()
     }
@@ -286,7 +312,10 @@ impl ThreadStartParams {
         Self {
             cwd,
             model,
-            approval_policy: "on-request",
+            // Local desktop writing trusts the open project workspace. Using
+            // on-request without a UI approval bridge leaves turns stuck or
+            // auto-declined, so Codex cannot edit LaTeX/files for the user.
+            approval_policy: "never",
             sandbox: "workspace-write",
             thread_source: "user",
         }
@@ -493,8 +522,8 @@ mod tests {
             value,
             json!({
                 "clientInfo": {
-                    "name": "claude-prism",
-                    "title": "ClaudePrism",
+                    "name": "local-prism",
+                    "title": "LocalPrism",
                     "version": "1.3.0"
                 },
                 "capabilities": {
@@ -698,18 +727,18 @@ mod tests {
     }
 
     #[test]
-    fn account_and_models_paginated_catalog_preserves_order_filters_hidden_and_has_no_fallback(
+    fn account_and_models_paginated_catalog_preserves_order_keeps_hidden_chat_models_and_filters_internal(
     ) -> Result<(), serde_json::Error> {
         assert_eq!(
             serde_json::to_value(ModelListParams {
                 cursor: Some("cursor-2".into()),
                 limit: Some(2),
-                include_hidden: Some(false),
+                include_hidden: Some(true),
             })?,
             json!({
                 "cursor": "cursor-2",
                 "limit": 2,
-                "includeHidden": false
+                "includeHidden": true
             })
         );
 
@@ -735,9 +764,20 @@ mod tests {
                 },
                 {
                     "id": "catalog-row-hidden",
-                    "model": "gpt-hidden-wire-id",
-                    "displayName": "Hidden",
-                    "description": "Not picker-visible",
+                    "model": "gpt-5.4",
+                    "displayName": "GPT-5.4",
+                    "description": "Hidden but picker-visible",
+                    "hidden": true,
+                    "supportedReasoningEfforts": [],
+                    "defaultReasoningEffort": "medium",
+                    "inputModalities": ["text"],
+                    "isDefault": false
+                },
+                {
+                    "id": "codex-auto-review",
+                    "model": "codex-auto-review",
+                    "displayName": "Codex Auto Review",
+                    "description": "Internal only",
                     "hidden": true,
                     "supportedReasoningEfforts": [],
                     "defaultReasoningEffort": "medium",
@@ -780,7 +820,7 @@ mod tests {
 
         let mut models = page_one.into_visible_runtime_models();
         models.extend(page_two.into_visible_runtime_models());
-        assert_eq!(models.len(), 2);
+        assert_eq!(models.len(), 3);
         assert_eq!(models[0].runtime, RuntimeKind::Codex);
         assert_eq!(models[0].id, "gpt-main-wire-id");
         assert_eq!(models[0].display_name, "GPT Main");
@@ -795,7 +835,8 @@ mod tests {
         );
         assert_eq!(models[0].input_modalities, vec!["text", "image"]);
         assert!(models[0].is_default);
-        assert_eq!(models[1].id, "gpt-secondary-wire-id");
+        assert_eq!(models[1].id, "gpt-5.4");
+        assert_eq!(models[2].id, "gpt-secondary-wire-id");
 
         let empty: ModelListResponse = serde_json::from_value(json!({
             "data": [],
@@ -831,6 +872,59 @@ mod tests {
     }
 
     #[test]
+    fn account_and_models_model_with_missing_optional_fields_still_produces_a_picker_model(
+    ) -> Result<(), serde_json::Error> {
+        let response: ModelListResponse = serde_json::from_value(json!({
+            "data": [{
+                "id": "catalog-minimal",
+                "model": "gpt-minimal"
+            }],
+            "nextCursor": null
+        }))?;
+
+        let models = response.into_visible_runtime_models();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gpt-minimal");
+        assert_eq!(models[0].display_name, "gpt-minimal");
+        assert_eq!(models[0].description.as_deref(), Some(""));
+        assert!(models[0].reasoning_efforts.is_empty());
+        assert_eq!(models[0].default_reasoning_effort, None);
+        assert_eq!(models[0].input_modalities, vec!["text", "image"]);
+        assert!(!models[0].is_default);
+
+        Ok(())
+    }
+
+    #[test]
+    fn account_and_models_model_with_empty_model_wire_id_is_filtered_and_internal_stays_filtered(
+    ) -> Result<(), serde_json::Error> {
+        let response: ModelListResponse = serde_json::from_value(json!({
+            "data": [
+                {
+                    "id": "catalog-empty-model",
+                    "model": "   "
+                },
+                {
+                    "id": "codex-auto-review",
+                    "model": "codex-auto-review"
+                },
+                {
+                    "id": "catalog-hidden-gpt",
+                    "model": "gpt-5.4",
+                    "hidden": true
+                }
+            ],
+            "nextCursor": null
+        }))?;
+
+        let models = response.into_visible_runtime_models();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gpt-5.4");
+
+        Ok(())
+    }
+
+    #[test]
     fn codex_turn_payload_builders_use_exact_minimal_app_server_shapes(
     ) -> Result<(), serde_json::Error> {
         assert_eq!(
@@ -841,7 +935,7 @@ mod tests {
             json!({
                 "cwd": r"C:\work\paper",
                 "model": "gpt-5.4",
-                "approvalPolicy": "on-request",
+                "approvalPolicy": "never",
                 "sandbox": "workspace-write",
                 "threadSource": "user"
             })

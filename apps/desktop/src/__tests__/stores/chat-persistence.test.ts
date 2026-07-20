@@ -339,6 +339,7 @@ describe("chat persistence I/O", () => {
     expect(Object.keys(projected.tabs[0]).sort()).toEqual(
       [
         "agentId",
+        "chatPeer",
         "id",
         "projectPath",
         "providerKey",

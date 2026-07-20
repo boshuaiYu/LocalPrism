@@ -848,7 +848,7 @@ async fn download_tarball_once(
 
     let mut response = client
         .get(url)
-        .header(reqwest::header::USER_AGENT, "ClaudePrism skills installer")
+        .header(reqwest::header::USER_AGENT, "LocalPrism skills installer")
         .send()
         .await
         .map_err(|e| format!("Failed to start download: {}", e))?;
@@ -1570,7 +1570,7 @@ pub async fn get_skill_content(
             let url = format!("{}/{}/{}", base_url, skill_folder, skill_file);
             let response = match client
                 .get(&url)
-                .header(reqwest::header::USER_AGENT, "ClaudePrism skills viewer")
+                .header(reqwest::header::USER_AGENT, "LocalPrism skills viewer")
                 .send()
                 .await
             {

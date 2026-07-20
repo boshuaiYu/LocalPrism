@@ -9,12 +9,16 @@ import {
   runtimeReadConversation,
   startRuntimeTurn,
 } from "@/runtime/commands";
+import { coerceCodexReasoningEffort } from "@/components/runtime/runtime-selector";
 import type {
   ChangeTabRuntimeResult,
+  ChatRuntimePeer,
   ConversationRef,
   RuntimeKind,
   RuntimeStopMode,
 } from "@/runtime/types";
+import { peerFromTab, wireRuntimeFromPeer } from "@/runtime/types";
+import { useRuntimeStore } from "./runtime-store";
 import {
   projectPersistedChat,
   readPersistedChatForProject,
@@ -166,6 +170,12 @@ export interface TabState {
   title: string;
   projectPath: string | null;
   runtime: RuntimeKind;
+  /**
+   * UI-level peer selection ("claude" | "api" | "codex"). Optional so that
+   * legacy/persisted tabs and test doubles built before this field existed
+   * keep working — read access should always go through `chatPeerForTab`.
+   */
+  chatPeer?: ChatRuntimePeer;
   sessionRef: ConversationRef | null;
   sessionId: string | null;
   runtimeModel: string | null;
@@ -178,6 +188,8 @@ export interface TabState {
   messages: ClaudeStreamMessage[];
   isStreaming: boolean;
   streamingStartedAt: number | null;
+  /** Ephemeral Codex reconnect / progress text shown while streaming. */
+  streamingStatus?: string | null;
   error: string | null;
   totalInputTokens: number;
   totalOutputTokens: number;
@@ -216,10 +228,25 @@ const TAB_FIELDS = [
   "messages",
   "isStreaming",
   "streamingStartedAt",
+  "streamingStatus",
   "error",
   "totalInputTokens",
   "totalOutputTokens",
 ] as const;
+
+/**
+ * Reads the effective peer for a tab, deriving it when unset. The wire
+ * `runtime` always wins for Codex (a tab can never present as Codex while
+ * running the Claude wire runtime, or vice versa) — this guards against
+ * code paths that update `runtime` without also updating `chatPeer`.
+ */
+export function chatPeerForTab(
+  tab: Pick<TabState, "runtime" | "providerKey" | "chatPeer">,
+): ChatRuntimePeer {
+  if (tab.runtime === "codex") return "codex";
+  if (tab.chatPeer === "claude" || tab.chatPeer === "api") return tab.chatPeer;
+  return peerFromTab(tab);
+}
 
 function makeDefaultTab(
   id: string,
@@ -227,21 +254,24 @@ function makeDefaultTab(
 ): TabState {
   const selectedCredentialId =
     loadSelectedProviderCredentialId() ?? CLAUDE_CODE_PROVIDER_ID;
+  const providerKey = providerKeyForSelectedCredential(selectedCredentialId);
   return {
     id,
     title: "New Chat",
     projectPath,
     runtime: "claude",
+    chatPeer: peerFromTab({ runtime: "claude", providerKey }),
     sessionRef: null,
     sessionId: null,
     runtimeModel: null,
     reasoningEffort: null,
     agentId: null,
-    providerKey: providerKeyForSelectedCredential(selectedCredentialId),
+    providerKey,
     sessionProviderKey: null,
     messages: [],
     isStreaming: false,
     streamingStartedAt: null,
+    streamingStatus: null,
     error: null,
     totalInputTokens: 0,
     totalOutputTokens: 0,
@@ -574,7 +604,7 @@ function buildProviderSwitchContext(
 
   return [
     "[Provider switch context]",
-    "The conversation below happened earlier in this same ClaudePrism chat before switching model providers.",
+    "The conversation below happened earlier in this same LocalPrism chat before switching model providers.",
     "Use it as prior context. Do not repeat it; answer only the user's latest request after this block.",
     "",
     selected.join("\n\n"),
@@ -862,6 +892,7 @@ interface ClaudeChatState {
   sessionId: string | null;
   isStreaming: boolean;
   streamingStartedAt: number | null;
+  streamingStatus?: string | null;
   error: string | null;
   totalInputTokens: number;
   totalOutputTokens: number;
@@ -945,7 +976,7 @@ interface ClaudeChatState {
   resumeSession: (sessionId: string, title?: string) => Promise<void>;
   changeTabRuntime: (
     tabId: string,
-    nextRuntime: RuntimeKind,
+    nextPeer: ChatRuntimePeer,
     options?: { confirmSessionReset?: boolean },
   ) => ChangeTabRuntimeResult;
   updateTabRuntimeSelection: (
@@ -968,6 +999,7 @@ interface ClaudeChatState {
   _setSessionTitle: (sessionId: string, title: string) => void;
   _setConversationTitle: (reference: ConversationRef, title: string) => void;
   _setStreaming: (tabId: string, streaming: boolean) => void;
+  _setStreamingStatus: (tabId: string, status: string | null) => void;
   _setError: (tabId: string, error: string | null) => void;
   _addUsage: (tabId: string, inputTokens: number, outputTokens: number) => void;
   _consumeAttemptCancellation: (
@@ -985,6 +1017,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
   sessionId: null,
   isStreaming: false,
   streamingStartedAt: null,
+  streamingStatus: null,
   error: null,
   totalInputTokens: 0,
   totalOutputTokens: 0,
@@ -1154,7 +1187,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
 
     const runtime = activeTab.runtime;
     const runtimeModel = activeTab.runtimeModel?.trim() || null;
-    const tabReasoningEffort = activeTab.reasoningEffort?.trim() || null;
+    let tabReasoningEffort = activeTab.reasoningEffort?.trim() || null;
     const codexAgentId = activeTab.agentId?.trim() || null;
     if (runtime === "codex" && !runtimeModel) {
       set((s) =>
@@ -1164,6 +1197,46 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       );
       discardRejectedPrompt(activeTabId);
       return;
+    }
+    if (runtime === "codex" && runtimeModel) {
+      const selectedCodexModel =
+        useRuntimeStore
+          .getState()
+          .models.codex.find((model) => model.id === runtimeModel) ?? null;
+      if (selectedCodexModel) {
+        const coercedEffort = coerceCodexReasoningEffort(
+          tabReasoningEffort,
+          selectedCodexModel,
+        );
+        if (!coercedEffort) {
+          set((s) =>
+            applyTabUpdate(s, activeTabId, {
+              error:
+                "Select a supported reasoning effort for this Codex model before sending.",
+            }),
+          );
+          discardRejectedPrompt(activeTabId);
+          return;
+        }
+        if (tabReasoningEffort !== coercedEffort) {
+          set((s) =>
+            applyTabUpdate(s, activeTabId, {
+              reasoningEffort: coercedEffort,
+            }),
+          );
+        }
+        tabReasoningEffort = coercedEffort;
+      } else if (
+        tabReasoningEffort === "max" ||
+        tabReasoningEffort === "ultra"
+      ) {
+        tabReasoningEffort = "xhigh";
+        set((s) =>
+          applyTabUpdate(s, activeTabId, {
+            reasoningEffort: "xhigh",
+          }),
+        );
+      }
     }
     const requestModel = runtimeModel ?? state.selectedModel;
     const attemptEpoch = (activeTab.attemptEpoch ?? 0) + 1;
@@ -1224,8 +1297,9 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         : null;
     const sessionId = sessionRef?.sessionId ?? null;
     const { effortLevel, selectedProviderModels } = state;
+    const chatPeer = chatPeerForTab(activeTab);
     let providerCredentialId: string | null = null;
-    if (runtime === "claude") {
+    if (runtime === "claude" && chatPeer === "api") {
       const tabSelectedProviderCredentialId =
         selectedCredentialForProviderKey(activeTab.providerKey) ??
         state.selectedProviderCredentialId;
@@ -1319,6 +1393,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         sessionId: resumeSessionId,
         isStreaming: true,
         streamingStartedAt,
+        streamingStatus: runtime === "codex" ? "Waiting for Codex…" : null,
         error: null,
         pendingTemporaryFilePaths: temporaryFilePathsForAttempt,
         attemptEpoch,
@@ -1996,6 +2071,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
             ?.attemptEpoch ?? 0;
         return {
           ...restoredTab,
+          streamingStatus: null,
           attemptEpoch:
             Math.max(previousAttemptEpoch, restoredTab.attemptEpoch ?? 0) + 1,
           activeAttemptId: null,
@@ -2048,6 +2124,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       const newTab = {
         ...makeDefaultTab(id, projectPath),
         runtime: activeTab.runtime,
+        chatPeer: chatPeerForTab(activeTab),
         runtimeModel: activeTab.runtimeModel,
         reasoningEffort: activeTab.reasoningEffort,
         agentId: activeTab.agentId,
@@ -2101,24 +2178,36 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     cleanupDiscardedTemporaryFiles(discardedTemporaryFilePaths);
   },
 
-  changeTabRuntime: (tabId, nextRuntime, options) => {
+  changeTabRuntime: (tabId, nextPeer, options) => {
     const state = get();
     const tab = state.tabs.find((candidate) => candidate.id === tabId);
     if (!tab) return "not-found";
-    if (tab.runtime === nextRuntime) return "unchanged";
+    if (chatPeerForTab(tab) === nextPeer) return "unchanged";
     if (tab.isStreaming) return "blocked-streaming";
     if ((tab.cancelledAttempts?.length ?? 0) > 0) return "blocked-stopping";
-    if (
-      (tab.sessionRef !== null || tab.sessionId !== null) &&
-      !options?.confirmSessionReset
-    ) {
+    const hasConversationState =
+      tab.sessionRef !== null ||
+      tab.sessionId !== null ||
+      tab.messages.length > 0;
+    if (hasConversationState && !options?.confirmSessionReset) {
       return "confirmation-required";
     }
+    const nextRuntime = wireRuntimeFromPeer(nextPeer);
     const discardedTemporaryFilePaths = temporaryFilesOwnedByTab(tab);
+    // Keep an API connection selected when entering the API peer so users can
+    // switch Claude ↔ API without re-picking a credential every time.
+    const nextProviderKey =
+      nextPeer === "api" &&
+      tab.providerKey &&
+      tab.providerKey !== CLAUDE_CODE_PROVIDER_ID
+        ? tab.providerKey
+        : null;
 
     set((current) => ({
       ...applyTabUpdate(current, tabId, {
+        chatPeer: nextPeer,
         runtime: nextRuntime,
+        providerKey: nextProviderKey,
         sessionRef: null,
         sessionId: null,
         runtimeModel: null,
@@ -2232,6 +2321,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
           ...(activeTab.runtime === reference.runtime
             ? {
                 runtime: activeTab.runtime,
+                chatPeer: chatPeerForTab(activeTab),
                 runtimeModel: activeTab.runtimeModel,
                 reasoningEffort: activeTab.reasoningEffort,
                 agentId: activeTab.agentId,
@@ -2274,6 +2364,10 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         messages: [],
         projectPath: reference.projectPath,
         runtime: reference.runtime,
+        chatPeer: peerFromTab({
+          runtime: reference.runtime,
+          providerKey: null,
+        }),
         sessionRef: { ...reference },
         sessionId: reference.sessionId,
         ...(runtimeChanged
@@ -2362,21 +2456,20 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       }
       set((s) => {
         if (!ownsHistoryRequest(s)) return {};
-        const runtimeUpdates: Partial<TabState> =
-          reference.runtime === "claude"
-            ? {
-                providerKey:
-                  providerKey ??
-                  providerKeyForSelectedCredential(
-                    nextSelectedProviderCredentialId,
-                  ),
-                sessionProviderKey:
-                  providerKey ??
-                  providerKeyForSelectedCredential(
-                    nextSelectedProviderCredentialId,
-                  ),
-              }
-            : {};
+        const runtimeUpdates: Partial<TabState> = (() => {
+          if (reference.runtime !== "claude") return {};
+          const resolvedProviderKey =
+            providerKey ??
+            providerKeyForSelectedCredential(nextSelectedProviderCredentialId);
+          return {
+            providerKey: resolvedProviderKey,
+            sessionProviderKey: resolvedProviderKey,
+            chatPeer: peerFromTab({
+              runtime: "claude",
+              providerKey: resolvedProviderKey,
+            }),
+          };
+        })();
         const nextState = applyTabUpdate(s, activeTabId, {
           messages,
           ...runtimeUpdates,
@@ -2422,24 +2515,26 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       state.activeProjectPath ??
       useDocumentStore.getState().projectRoot ??
       null;
+    const inheritedProviderKey = activeTab
+      ? (activeTab.providerKey ??
+        providerKeyForSelectedCredential(state.selectedProviderCredentialId))
+      : providerKeyForSelectedCredential(state.selectedProviderCredentialId);
     const newTab = {
       ...makeDefaultTab(id, projectPath),
       ...(activeTab
         ? {
             runtime: activeTab.runtime,
+            chatPeer: peerFromTab({
+              runtime: activeTab.runtime,
+              providerKey: inheritedProviderKey,
+            }),
             runtimeModel: activeTab.runtimeModel,
             reasoningEffort: activeTab.reasoningEffort,
             agentId: activeTab.agentId,
-            providerKey:
-              activeTab.providerKey ??
-              providerKeyForSelectedCredential(
-                state.selectedProviderCredentialId,
-              ),
+            providerKey: inheritedProviderKey,
           }
         : {
-            providerKey: providerKeyForSelectedCredential(
-              state.selectedProviderCredentialId,
-            ),
+            providerKey: inheritedProviderKey,
           }),
     };
     set((s) => ({
@@ -2652,8 +2747,13 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         streamingStartedAt: streaming
           ? (tab?.streamingStartedAt ?? Date.now())
           : null,
+        streamingStatus: streaming ? (tab?.streamingStatus ?? null) : null,
       });
     });
+  },
+
+  _setStreamingStatus: (tabId: string, status: string | null) => {
+    set((state) => applyTabUpdate(state, tabId, { streamingStatus: status }));
   },
 
   _setError: (tabId: string, error: string | null) => {

@@ -16,6 +16,7 @@ use tokio::task::JoinHandle;
 pub mod app_server;
 pub mod discovery;
 pub mod event_mapper;
+pub mod models_cache;
 pub mod protocol;
 pub mod rpc;
 
@@ -307,6 +308,26 @@ pub(super) async fn logout(
 
 const MODEL_PAGE_LIMIT: usize = 100;
 
+fn parse_model_list_response_item_by_item(
+    response: Value,
+) -> Result<protocol::ModelListResponse, String> {
+    let items = response
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Codex model response is missing a data array".to_string())?;
+
+    let data = items
+        .iter()
+        .filter_map(|item| serde_json::from_value::<protocol::Model>(item.clone()).ok())
+        .collect();
+    let next_cursor = response
+        .get("nextCursor")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+
+    Ok(protocol::ModelListResponse { data, next_cursor })
+}
+
 async fn list_models_with_request<F, Fut>(
     max_pages: usize,
     mut request: F,
@@ -323,12 +344,23 @@ where
         let params = serde_json::to_value(protocol::ModelListParams {
             cursor,
             limit: None,
-            include_hidden: Some(false),
+            // Codex hides everyday models such as gpt-5.4 behind includeHidden.
+            // We still filter out internal-only backends in the protocol mapper.
+            include_hidden: Some(true),
         })
         .map_err(|error| format!("Failed to serialize Codex model request: {error}"))?;
         let response = request("model/list", params).await?;
-        let response: protocol::ModelListResponse = serde_json::from_value(response)
-            .map_err(|error| format!("Invalid Codex model response: {error}"))?;
+        let response: protocol::ModelListResponse = match serde_json::from_value(response.clone())
+        {
+            Ok(parsed) => parsed,
+            // One malformed entry in the catalog page shouldn't take down the
+            // whole model list; fall back to parsing each item individually
+            // and drop only the entries that fail to deserialize.
+            Err(whole_page_error) => parse_model_list_response_item_by_item(response)
+                .map_err(|error| {
+                    format!("Invalid Codex model response: {whole_page_error}; {error}")
+                })?,
+        };
         let next_cursor = response.next_cursor.clone();
         models.extend(response.into_visible_runtime_models());
 
@@ -350,10 +382,16 @@ pub(super) async fn list_models(
     app: &tauri::AppHandle,
     state: &CodexAppServerState,
 ) -> Result<Vec<RuntimeModel>, String> {
-    list_models_with_request(MODEL_PAGE_LIMIT, |method, params| {
+    let live_result = list_models_with_request(MODEL_PAGE_LIMIT, |method, params| {
         state.request(app, method, params)
     })
-    .await
+    .await;
+    let cached = models_cache::read_models_cache_catalog();
+    match live_result {
+        Ok(live) => Ok(models_cache::merge_codex_models(live, cached)),
+        Err(error) if cached.is_empty() => Err(error),
+        Err(_) => Ok(cached),
+    }
 }
 
 async fn start_thread_with_request<F, Fut>(
@@ -412,6 +450,18 @@ pub(super) async fn resume_thread(
     .await
 }
 
+fn coerce_codex_reasoning_effort(effort: Option<String>) -> Option<String> {
+    let raw = effort?.trim().to_owned();
+    if raw.is_empty() {
+        return None;
+    }
+    // Catalog may advertise max/ultra; the Responses API accepts xhigh instead.
+    Some(match raw.as_str() {
+        "max" | "ultra" => "xhigh".to_owned(),
+        other => other.to_owned(),
+    })
+}
+
 async fn start_turn_with_request<F, Fut>(
     thread_id: String,
     prompt: String,
@@ -427,7 +477,7 @@ where
         thread_id,
         prompt,
         model,
-        reasoning_effort,
+        coerce_codex_reasoning_effort(reasoning_effort),
     ))
     .map_err(|error| format!("Failed to serialize Codex turn start: {error}"))?;
     let response = request("turn/start", params).await?;
@@ -1789,7 +1839,7 @@ mod tests {
                     json!({
                         "cwd": r"C:\work\paper",
                         "model": "gpt-5.4",
-                        "approvalPolicy": "on-request",
+                        "approvalPolicy": "never",
                         "sandbox": "workspace-write",
                         "threadSource": "user"
                     })
@@ -2251,14 +2301,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn account_and_models_model_list_paginates_in_order_filters_hidden_and_has_no_fallback() {
+    async fn account_and_models_model_list_paginates_in_order_keeps_hidden_chat_models_and_filters_internal(
+    ) {
         let calls = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
         let recorded = calls.clone();
         let responses = Arc::new(Mutex::new(VecDeque::from([
             json!({
                 "data": [
                     model_page_entry("gpt-first", false),
-                    model_page_entry("gpt-hidden", true)
+                    model_page_entry("gpt-5.4", true),
+                    model_page_entry("codex-auto-review", true)
                 ],
                 "nextCursor": "cursor-2"
             }),
@@ -2292,10 +2344,10 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
             vec![
-                ("model/list".into(), json!({ "includeHidden": false })),
+                ("model/list".into(), json!({ "includeHidden": true })),
                 (
                     "model/list".into(),
-                    json!({ "cursor": "cursor-2", "includeHidden": false })
+                    json!({ "cursor": "cursor-2", "includeHidden": true })
                 )
             ]
         );
@@ -2304,7 +2356,7 @@ mod tests {
                 .iter()
                 .map(|model| model.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["gpt-first", "gpt-second"]
+            vec!["gpt-first", "gpt-5.4", "gpt-second"]
         );
         assert!(responses
             .lock()
@@ -2317,6 +2369,40 @@ mod tests {
         .await
         .unwrap();
         assert!(empty.is_empty());
+    }
+
+    #[tokio::test]
+    async fn account_and_models_model_list_recovers_via_per_item_parsing_when_whole_page_fails() {
+        let responses = Arc::new(Mutex::new(VecDeque::from([json!({
+            "data": [
+                model_page_entry("gpt-first", false),
+                { "id": "catalog-broken" },
+                model_page_entry("gpt-second", false)
+            ],
+            "nextCursor": null
+        })])));
+        let queued = responses.clone();
+
+        let models = list_models_with_request(8, move |_, _| {
+            let queued = queued.clone();
+            async move {
+                queued
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .pop_front()
+                    .ok_or_else(|| "unexpected extra page".to_string())
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-first", "gpt-second"]
+        );
     }
 
     #[tokio::test]

@@ -19,28 +19,10 @@ pub fn account_from_status(status: crate::claude::ClaudeStatus) -> RuntimeAccoun
     }
 }
 
-pub fn models_from_status(status: &crate::claude::ClaudeStatus) -> Vec<RuntimeModel> {
-    if status.provider_kind == "openai-compatible" {
-        return status
-            .provider_model
-            .as_deref()
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-            .map(|model| {
-                vec![RuntimeModel {
-                    runtime: RuntimeKind::Claude,
-                    id: model.to_string(),
-                    display_name: model.to_string(),
-                    description: Some("Configured OpenAI-compatible provider model".into()),
-                    reasoning_efforts: Vec::new(),
-                    default_reasoning_effort: None,
-                    input_modalities: vec!["text".into()],
-                    is_default: true,
-                }]
-            })
-            .unwrap_or_default();
-    }
-
+pub fn models_from_status(_status: &crate::claude::ClaudeStatus) -> Vec<RuntimeModel> {
+    // The Claude Code CLI always exposes the sonnet/opus/haiku/opusplan aliases
+    // regardless of which provider (including openai-compatible) backs it, so
+    // the picker catalog must never collapse to a single configured model.
     [
         ("sonnet", "Sonnet", "Fast, efficient for most tasks", false),
         ("opus", "Opus", "Most capable, complex reasoning", true),
@@ -155,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn account_and_models_openai_compatible_keeps_its_configured_model_under_claude() {
+    fn account_and_models_openai_compatible_keeps_the_claude_alias_catalog() {
         let status = crate::claude::ClaudeStatus {
             installed: true,
             authenticated: true,
@@ -171,9 +153,16 @@ mod tests {
 
         let models = models_from_status(&status);
 
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].runtime, RuntimeKind::Claude);
-        assert_eq!(models[0].id, "deepseek-chat");
-        assert_eq!(models[0].display_name, "deepseek-chat");
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sonnet", "opus", "haiku", "opusplan"]
+        );
+        assert!(models
+            .iter()
+            .all(|model| model.runtime == RuntimeKind::Claude));
+        assert!(models.iter().all(|model| model.id != "deepseek-chat"));
     }
 }

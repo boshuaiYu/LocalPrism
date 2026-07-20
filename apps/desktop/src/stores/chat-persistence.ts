@@ -1,4 +1,9 @@
-import type { ConversationRef, RuntimeKind } from "@/runtime/types";
+import type {
+  ChatRuntimePeer,
+  ConversationRef,
+  RuntimeKind,
+} from "@/runtime/types";
+import { peerFromTab } from "@/runtime/types";
 
 export const CHAT_TABS_STORAGE_KEY = "claude-prism.chat-tabs.v2";
 
@@ -41,6 +46,7 @@ export interface PersistedChatTab {
   title: string;
   projectPath: string | null;
   runtime: RuntimeKind;
+  chatPeer: ChatRuntimePeer;
   sessionRef: ConversationRef | null;
   providerKey: string | null;
   sessionProviderKey: string | null;
@@ -94,6 +100,17 @@ function runtimeKind(value: unknown): RuntimeKind {
   return value === "codex" ? "codex" : "claude";
 }
 
+function chatPeerKind(
+  value: unknown,
+  runtime: RuntimeKind,
+  providerKey: string | null,
+): ChatRuntimePeer {
+  if (value === "claude" || value === "api" || value === "codex") {
+    return value;
+  }
+  return peerFromTab({ runtime, providerKey });
+}
+
 function idleTab(tab: PersistedChatTab, legacySessionId?: string | null) {
   return {
     ...tab,
@@ -120,6 +137,7 @@ function defaultDocument(): HydratedChatDocument {
     title: "New Chat",
     projectPath: null,
     runtime: "claude",
+    chatPeer: "claude",
     sessionRef: null,
     providerKey: null,
     sessionProviderKey: null,
@@ -176,13 +194,15 @@ function migrateV2Tab(
     runtime,
     projectPath,
   );
+  const providerKey = nullableString(value.providerKey);
   return idleTab({
     id: uniqueTabId(value.id, usedIds),
     title: nullableString(value.title) ?? "New Chat",
     projectPath,
     runtime,
+    chatPeer: chatPeerKind(value.chatPeer, runtime, providerKey),
     sessionRef,
-    providerKey: nullableString(value.providerKey),
+    providerKey,
     sessionProviderKey: nullableString(value.sessionProviderKey),
     runtimeModel: nullableString(value.runtimeModel),
     reasoningEffort: nullableString(value.reasoningEffort),
@@ -201,14 +221,16 @@ function migrateV1Tab(
     projectPath && sessionId
       ? { runtime: "claude" as const, sessionId, projectPath }
       : null;
+  const providerKey = nullableString(value.providerKey);
   return idleTab(
     {
       id: uniqueTabId(value.id, usedIds),
       title: nullableString(value.title) ?? "New Chat",
       projectPath,
       runtime: "claude",
+      chatPeer: peerFromTab({ runtime: "claude", providerKey }),
       sessionRef,
-      providerKey: nullableString(value.providerKey),
+      providerKey,
       sessionProviderKey: nullableString(value.sessionProviderKey),
       runtimeModel: null,
       reasoningEffort: null,
@@ -258,6 +280,7 @@ export function projectPersistedChat(input: unknown): PersistedChatDocument {
       title: tab.title,
       projectPath: tab.projectPath,
       runtime: tab.runtime,
+      chatPeer: tab.chatPeer,
       sessionRef: tab.sessionRef,
       providerKey: tab.providerKey,
       sessionProviderKey: tab.sessionProviderKey,

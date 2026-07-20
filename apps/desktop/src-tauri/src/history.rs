@@ -113,7 +113,7 @@ fn bind_repo_workdir(project_root: &str, repo: &Repository) -> Result<(), String
 }
 
 fn default_signature() -> Result<Signature<'static>, String> {
-    Signature::now("ClaudePrism", "history@claudeprism.local")
+    Signature::now("LocalPrism", "history@claudeprism.local")
         .map_err(|e| format!("Failed to create signature: {}", e))
 }
 
@@ -166,7 +166,7 @@ Thumbs.db
 # Git
 .git/
 
-# ClaudePrism internal
+# LocalPrism internal
 .claudeprism/
 .prism/
 "#;

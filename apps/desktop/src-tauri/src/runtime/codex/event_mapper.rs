@@ -88,6 +88,9 @@ impl CodexEventMapper {
             "thread/started" => self.map_thread_started(generation, route, params),
             "turn/started" => self.map_turn_started(generation, route, params),
             "item/agentMessage/delta" => self.map_agent_message_delta(generation, route, params),
+            "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
+                self.map_reasoning_delta(generation, route, params)
+            }
             "item/completed" => self.map_item_completed(generation, route, params),
             "turn/completed" => self.map_turn_completed(generation, route, params),
             "error" => self.map_error(generation, route, params),
@@ -271,17 +274,58 @@ impl CodexEventMapper {
         ))
     }
 
+    fn map_reasoning_delta(
+        &mut self,
+        generation: u64,
+        route: &TurnRoute,
+        params: &Value,
+    ) -> Option<RuntimeEventEnvelope> {
+        let (Some(thread_id), Some(turn_id), Some(item_id), Some(delta)) = (
+            string_field(params, "threadId"),
+            string_field(params, "turnId"),
+            string_field(params, "itemId"),
+            string_field(params, "delta"),
+        ) else {
+            return Some(self.malformed(route, "item/reasoning/delta"));
+        };
+        if !route_matches(route, thread_id, Some(turn_id)) {
+            return None;
+        }
+
+        let turn = scoped_turn(generation, route, thread_id, turn_id);
+        let item = ScopedItem {
+            turn: turn.clone(),
+            item_id: item_id.to_owned(),
+        };
+        if self.terminal_turns.contains(&turn) || self.completed_items.contains(&item) {
+            return None;
+        }
+        if delta.is_empty() {
+            return None;
+        }
+
+        Some(self.envelope(
+            route,
+            Some(thread_id.to_owned()),
+            Some(turn_id.to_owned()),
+            RuntimeEvent::ReasoningSummaryDelta {
+                item_id: item_id.to_owned(),
+                delta: sanitize_install_output(delta),
+            },
+        ))
+    }
+
     fn map_item_completed(
         &mut self,
         generation: u64,
         route: &TurnRoute,
         params: &Value,
     ) -> Option<RuntimeEventEnvelope> {
-        let (Some(thread_id), Some(turn_id), Some(item), Some(_completed_at_ms)) = (
+        // completedAtMs is optional on newer Codex builds.
+        let (Some(thread_id), Some(turn_id), Some(item)) = (
             string_field(params, "threadId"),
             string_field(params, "turnId"),
             params.get("item").and_then(Value::as_object),
-            params.get("completedAtMs").and_then(Value::as_i64),
         ) else {
             return Some(self.malformed(route, "item/completed"));
         };
@@ -306,12 +350,28 @@ impl CodexEventMapper {
 
         let event = match item_type {
             "agentMessage" => {
-                let Some(content) = item.get("text").and_then(Value::as_str) else {
-                    return Some(self.malformed(route, "item/completed"));
-                };
+                let content = item
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .or_else(|| item.get("content").and_then(Value::as_str))
+                    .unwrap_or("");
                 RuntimeEvent::AssistantCompleted {
                     item_id: item_id.to_owned(),
                     content: sanitize_install_output(content),
+                }
+            }
+            "reasoning" => {
+                let summary = reasoning_summary_text(item);
+                if summary.is_empty() {
+                    // Empty reasoning must not block the turn; degrade quietly.
+                    RuntimeEvent::Unknown {
+                        native_type: "reasoning".into(),
+                    }
+                } else {
+                    RuntimeEvent::ReasoningSummaryDelta {
+                        item_id: item_id.to_owned(),
+                        delta: sanitize_install_output(&summary),
+                    }
                 }
             }
             native_type => RuntimeEvent::Unknown {
@@ -592,6 +652,68 @@ fn scoped_turn(generation: u64, route: &TurnRoute, thread_id: &str, turn_id: &st
     }
 }
 
+fn reasoning_summary_text(item: &serde_json::Map<String, Value>) -> String {
+    if let Some(text) = item.get("text").and_then(Value::as_str) {
+        if !text.trim().is_empty() {
+            return text.to_owned();
+        }
+    }
+
+    for key in ["summary", "content"] {
+        let Some(value) = item.get(key) else {
+            continue;
+        };
+        if let Some(text) = value.as_str() {
+            if !text.trim().is_empty() {
+                return text.to_owned();
+            }
+            continue;
+        }
+        let Some(entries) = value.as_array() else {
+            continue;
+        };
+        let mut parts = Vec::new();
+        for entry in entries {
+            if let Some(text) = entry.as_str() {
+                if !text.trim().is_empty() {
+                    parts.push(text.to_owned());
+                }
+                continue;
+            }
+            if let Some(text) = entry.get("text").and_then(Value::as_str) {
+                if !text.trim().is_empty() {
+                    parts.push(text.to_owned());
+                }
+                continue;
+            }
+            if let Some(text) = entry.get("summary").and_then(Value::as_str) {
+                if !text.trim().is_empty() {
+                    parts.push(text.to_owned());
+                }
+            }
+        }
+        if !parts.is_empty() {
+            return parts.join("\n");
+        }
+    }
+    String::new()
+}
+
+fn nested_json_error_message(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if !(trimmed.starts_with('{') && trimmed.contains("\"message\"")) {
+        return None;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+        return None;
+    };
+    value
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("message").and_then(Value::as_str))
+        .map(str::to_owned)
+}
+
 fn sanitized_error_message(error: Option<&Value>, fallback: &str) -> String {
     let message = error
         .and_then(|error| {
@@ -601,7 +723,8 @@ fn sanitized_error_message(error: Option<&Value>, fallback: &str) -> String {
                 .or_else(|| error.get("additionalDetails").and_then(Value::as_str))
         })
         .unwrap_or(fallback);
-    sanitize_install_output(message)
+    let message = nested_json_error_message(message).unwrap_or_else(|| message.to_owned());
+    sanitize_install_output(&message)
 }
 
 #[cfg(test)]
@@ -1065,21 +1188,24 @@ mod tests {
     }
 
     #[test]
-    fn codex_turn_corrected_completed_item_is_accepted_after_a_malformed_copy() {
+    fn codex_turn_agent_message_without_text_completes_empty_and_is_idempotent() {
         let mut mapper = CodexEventMapper::default();
         let route = route("main", "tab-a", "thread-a", Some("turn-a"));
-        let malformed = map(
+        let empty = map(
             &mut mapper,
             &route,
             "item/completed",
             json!({
-                "threadId":"thread-a","turnId":"turn-a","completedAtMs":10,
+                "threadId":"thread-a","turnId":"turn-a",
                 "item":{"type":"agentMessage","id":"item-a"}
             }),
         );
-        assert!(matches!(malformed[0].event, RuntimeEvent::Warning { .. }));
+        assert!(matches!(
+            &empty[0].event,
+            RuntimeEvent::AssistantCompleted { content, .. } if content.is_empty()
+        ));
 
-        let corrected = map(
+        assert!(map(
             &mut mapper,
             &route,
             "item/completed",
@@ -1087,10 +1213,70 @@ mod tests {
                 "threadId":"thread-a","turnId":"turn-a","completedAtMs":10,
                 "item":{"type":"agentMessage","id":"item-a","text":"complete"}
             }),
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn codex_reasoning_item_maps_to_summary_delta_without_blocking_turn() {
+        let mut mapper = CodexEventMapper::default();
+        let route = route("main", "tab-a", "thread-a", Some("turn-a"));
+        let reasoning = map(
+            &mut mapper,
+            &route,
+            "item/completed",
+            json!({
+                "threadId":"thread-a","turnId":"turn-a",
+                "item":{
+                    "type":"reasoning",
+                    "id":"reason-a",
+                    "summary":[{"text":"Checking the file"}],
+                    "content":[]
+                }
+            }),
         );
         assert!(matches!(
-            &corrected[0].event,
-            RuntimeEvent::AssistantCompleted { content, .. } if content == "complete"
+            &reasoning[0].event,
+            RuntimeEvent::ReasoningSummaryDelta { item_id, delta }
+                if item_id == "reason-a" && delta == "Checking the file"
+        ));
+
+        let completed = map(
+            &mut mapper,
+            &route,
+            "turn/completed",
+            json!({"threadId":"thread-a","turn":{"id":"turn-a","status":"completed"}}),
+        );
+        assert!(matches!(
+            completed[0].event,
+            RuntimeEvent::TurnCompleted { .. }
+        ));
+    }
+
+    #[test]
+    fn nested_json_turn_failure_message_is_unwrapped() {
+        let mut mapper = CodexEventMapper::default();
+        let route = route("main", "tab-a", "thread-a", Some("turn-a"));
+        let failed = map(
+            &mut mapper,
+            &route,
+            "turn/completed",
+            json!({
+                "threadId":"thread-a",
+                "turn":{
+                    "id":"turn-a",
+                    "status":"failed",
+                    "error":{
+                        "message":"{\n  \"error\": {\n    \"message\": \"Unsupported value: 'minimal'\",\n    \"type\": \"invalid_request_error\"\n  }\n}"
+                    }
+                }
+            }),
+        );
+        assert!(matches!(
+            &failed[0].event,
+            RuntimeEvent::TurnFailed { message, .. }
+                if message.contains("Unsupported value: 'minimal'")
+                    && !message.contains("invalid_request_error")
         ));
     }
 

@@ -9,6 +9,8 @@ export type RuntimeLoginMode = "browser" | "device-code" | "api-key";
 export interface RuntimeCardProps {
   title: string;
   description?: string;
+  /** Stable section key for tests/UI (avoids collisions when multiple cards share a runtime). */
+  sectionId?: string;
   account: RuntimeAccount;
   login?: RuntimeLoginState | null;
   loading?: boolean;
@@ -32,6 +34,7 @@ function consume(action: (() => Promise<unknown> | unknown) | undefined) {
 export function RuntimeCard({
   title,
   description,
+  sectionId,
   account,
   login,
   loading = false,
@@ -81,6 +84,7 @@ export function RuntimeCard({
     <section
       className="overflow-hidden rounded-xl border border-border/70 bg-background"
       data-runtime={account.runtime}
+      data-section={sectionId}
     >
       <div className="flex items-start justify-between gap-4 border-border/60 border-b px-5 py-4">
         <div className="min-w-0">

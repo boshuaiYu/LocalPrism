@@ -554,6 +554,18 @@ pub fn parse_codex_version(stdout: &str) -> Option<String> {
     Some(version.to_owned())
 }
 
+fn parse_semver_tuple(version: &str) -> Vec<u64> {
+    version
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u64>().ok())
+        .collect()
+}
+
+fn version_is_newer(candidate: &str, current: &str) -> bool {
+    parse_semver_tuple(candidate) > parse_semver_tuple(current)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CandidateProcessOutput {
     success: bool,
@@ -1132,6 +1144,8 @@ async fn discover_from_candidates<R: CandidateRunner>(
     candidates: &[PathBuf],
     runner: &mut R,
 ) -> Result<CodexBinary, String> {
+    let mut best: Option<CodexBinary> = None;
+
     for path in candidates {
         let Ok(output) = runner.run(path).await else {
             continue;
@@ -1142,6 +1156,7 @@ async fn discover_from_candidates<R: CandidateRunner>(
         let Some(version) = parse_codex_version(&output.stdout) else {
             continue;
         };
+        let mut chosen_path = path.clone();
         let launch_path = resolve_launch_binary(path, cfg!(target_os = "windows"));
         if launch_path != *path {
             // Re-validate the unwrapped native binary so we never hand app-server a stale path.
@@ -1150,22 +1165,28 @@ async fn discover_from_candidates<R: CandidateRunner>(
                     if native_output.success
                         && parse_codex_version(&native_output.stdout).as_ref() == Some(&version) =>
                 {
-                    return Ok(CodexBinary {
-                        path: launch_path,
-                        version,
-                    });
+                    chosen_path = launch_path;
                 }
                 _ => {
                     // Keep the validated wrapper if the native sibling cannot be re-checked.
                 }
             }
         }
-        return Ok(CodexBinary {
-            path: path.clone(),
+
+        let binary = CodexBinary {
+            path: chosen_path,
             version,
-        });
+        };
+        let take = match &best {
+            None => true,
+            Some(current) => version_is_newer(&binary.version, &current.version),
+        };
+        if take {
+            best = Some(binary);
+        }
     }
-    Err(CODEX_NOT_FOUND.into())
+
+    best.ok_or_else(|| CODEX_NOT_FOUND.into())
 }
 
 /// Fast paths that avoid scanning WindowsApps / full PATH (those can stall UI).
@@ -1390,6 +1411,45 @@ mod tests {
         assert_eq!(binary.path, native);
         assert_eq!(binary.version, "0.135.0");
         assert_eq!(runner.visited, vec![wrapper, native]);
+    }
+
+    #[tokio::test]
+    async fn discovery_prefers_higher_semver_when_multiple_candidates_validate() {
+        let older = PathBuf::from(if cfg!(windows) {
+            r"C:\tools\codex-old.exe"
+        } else {
+            "/usr/local/bin/codex-old"
+        });
+        let newer = PathBuf::from(if cfg!(windows) {
+            r"C:\tools\codex-new.exe"
+        } else {
+            "/usr/local/bin/codex-new"
+        });
+
+        let mut runner = FakeRunner::default();
+        runner.outputs.insert(
+            older.clone(),
+            Ok(CandidateProcessOutput {
+                success: true,
+                stdout: "codex-cli 0.135.0\n".into(),
+                stderr: String::new(),
+            }),
+        );
+        runner.outputs.insert(
+            newer.clone(),
+            Ok(CandidateProcessOutput {
+                success: true,
+                stdout: "codex-cli 0.140.0\n".into(),
+                stderr: String::new(),
+            }),
+        );
+
+        let binary = discover_from_candidates(&[older.clone(), newer.clone()], &mut runner)
+            .await
+            .unwrap();
+        assert_eq!(binary.path, newer);
+        assert_eq!(binary.version, "0.140.0");
+        assert_eq!(runner.visited, vec![older, newer]);
     }
 
     #[test]
@@ -1736,7 +1796,7 @@ mod tests {
                 wrong_prefix.clone(),
                 failed_exit.clone(),
                 valid.clone(),
-                never_reached,
+                never_reached.clone(),
             ],
             &mut runner,
         )
@@ -1750,9 +1810,11 @@ mod tests {
                 version: "0.135.0".into(),
             }
         );
+        // Probe every candidate so a later higher-semver binary can win; invalid
+        // trailing candidates are skipped without changing the winner.
         assert_eq!(
             runner.visited,
-            vec![wrong_prefix, failed_exit, PathBuf::from("valid")]
+            vec![wrong_prefix, failed_exit, PathBuf::from("valid"), never_reached]
         );
     }
 

@@ -310,6 +310,31 @@ fn safe_warning_method(method: &str) -> String {
     format!("{}...", &single_line[..end])
 }
 
+fn is_codex_approval_request(method: &str) -> bool {
+    matches!(
+        method,
+        "item/commandExecution/requestApproval"
+            | "item/fileChange/requestApproval"
+            | "item/permissions/requestApproval"
+    )
+}
+
+fn codex_approval_accept_response(method: &str, params: &Value) -> Value {
+    if method == "item/permissions/requestApproval" {
+        let permissions = params
+            .get("permissions")
+            .or_else(|| params.get("requestedPermissions"))
+            .or_else(|| params.get("grantedPermissions"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        return serde_json::json!({
+            "permissions": permissions,
+            "scope": "turn"
+        });
+    }
+    serde_json::json!({ "decision": "accept" })
+}
+
 #[derive(Debug)]
 struct NotificationScope {
     thread_id: String,
@@ -340,7 +365,11 @@ fn notification_scope(method: &str, params: &Value) -> Result<Option<Notificatio
             thread_id: string("threadId").ok_or_else(malformed)?.to_owned(),
             turn_id: Some(nested("turn", "id").ok_or_else(malformed)?.to_owned()),
         },
-        "item/agentMessage/delta" | "item/completed" | "error" => NotificationScope {
+        "item/agentMessage/delta"
+        | "item/reasoning/summaryTextDelta"
+        | "item/reasoning/textDelta"
+        | "item/completed"
+        | "error" => NotificationScope {
             thread_id: string("threadId").ok_or_else(malformed)?.to_owned(),
             turn_id: Some(string("turnId").ok_or_else(malformed)?.to_owned()),
         },
@@ -597,10 +626,15 @@ struct RuntimeWarningPayload {
     message: String,
 }
 
+fn emit_runtime_event(app: &tauri::AppHandle, event: RuntimeEventEnvelope) {
+    // Global emit keeps long-running Codex turns (gpt-5.6 reconnect storms)
+    // visible even if the webview label used for emit_to does not match.
+    let _ = app.emit(RUNTIME_EVENT, &event);
+}
+
 impl TauriWarningSink {
     fn emit_runtime_event(&self, event: RuntimeEventEnvelope) {
-        let target = event.window_label.clone();
-        let _ = self.app.emit_to(target, RUNTIME_EVENT, event);
+        emit_runtime_event(&self.app, event);
     }
 }
 
@@ -854,18 +888,12 @@ async fn handle_inbound(
                     return;
                 }
             }
-            RpcInbound::ServerRequest { id, method, .. }
-                if matches!(
-                    method.as_str(),
-                    "item/commandExecution/requestApproval" | "item/fileChange/requestApproval"
-                ) =>
+            RpcInbound::ServerRequest { id, method, params } if is_codex_approval_request(&method) =>
             {
-                if let Err(error) = client
-                    .respond(id, serde_json::json!({"decision": "decline"}))
-                    .await
-                {
+                let response = codex_approval_accept_response(&method, &params);
+                if let Err(error) = client.respond(id, response).await {
                     warnings.emit(format!(
-                        "Failed to decline Codex approval request safely: {error}"
+                        "Failed to accept Codex approval request safely: {error}"
                     ));
                 }
             }
@@ -877,7 +905,7 @@ async fn handle_inbound(
                     ));
                 } else {
                     warnings.emit(format!(
-                        "Unsupported Codex server request `{safe_method}` was rejected. Update Codex or ClaudePrism if this request is required."
+                        "Unsupported Codex server request `{safe_method}` was rejected. Update Codex or LocalPrism if this request is required."
                     ));
                 }
             }
@@ -1414,8 +1442,7 @@ impl CodexAppServerState {
             .await
             .map_prestart_cancellation(generation, route);
         if let Some(event) = event {
-            let target = event.window_label.clone();
-            let _ = app.emit_to(target, RUNTIME_EVENT, event);
+            emit_runtime_event(app, event);
         }
     }
 
@@ -1434,8 +1461,7 @@ impl CodexAppServerState {
             method,
             &params,
             |event| {
-                let target = event.window_label.clone();
-                let _ = app.emit_to(target, RUNTIME_EVENT, event);
+                emit_runtime_event(app, event);
             },
         )
         .await?;
@@ -1794,13 +1820,18 @@ impl CodexAppServerState {
         params: Value,
     ) -> Result<Value, String> {
         self.ensure_accepting_requests()?;
-        if let Some(handle) = self
-            .inner
-            .lock()
-            .await
-            .as_ref()
-            .map(|server| server.handle.clone())
-        {
+        // Clone the handle in a nested block so the `inner` mutex guard cannot
+        // extend across later awaits (Rust keeps `if let`/`match` scrutinee
+        // temporaries alive for the whole expression — that previously deadlocked
+        // cold start when `install_started_server` tried to re-lock `inner`).
+        let running = {
+            self.inner
+                .lock()
+                .await
+                .as_ref()
+                .map(|server| server.handle.clone())
+        };
+        if let Some(handle) = running {
             self.ensure_accepting_requests()?;
             return handle.request(method, params).await;
         }
@@ -1811,13 +1842,14 @@ impl CodexAppServerState {
             .map_err(|_| "Codex app-server startup timed out".to_string())?;
         self.ensure_accepting_requests()?;
 
-        let handle = if let Some(handle) = self
-            .inner
-            .lock()
-            .await
-            .as_ref()
-            .map(|server| server.handle.clone())
-        {
+        let running = {
+            self.inner
+                .lock()
+                .await
+                .as_ref()
+                .map(|server| server.handle.clone())
+        };
+        let handle = if let Some(handle) = running {
             handle
         } else {
             let binary = match tokio::task::spawn_blocking(probe_known_codex_binary_on_disk).await
@@ -1971,6 +2003,43 @@ mod tests {
         // request() cold start prefers probe_known_codex_binary_on_disk (no --version)
         // before falling back to discover_codex_binary under this deadline.
         assert_eq!(DEFAULT_STARTUP_TIMEOUT, Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn installing_a_started_server_does_not_self_deadlock_on_inner_mutex(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Regression: `if let Some(_) = state.inner.lock().await...` kept the guard
+        // alive across the cold-start else-branch, so install_started_server's
+        // second `inner.lock()` hung until the status timeout cancelled it.
+        let state = CodexAppServerState::default();
+        let spawner = Arc::new(FakeSpawner::new([FakeBehavior::Serve]));
+        let warnings = Arc::new(CollectWarnings::default());
+        let server = start_supervisor(
+            spawner,
+            "1.3.0".into(),
+            warnings,
+            Duration::from_millis(200),
+            Duration::from_millis(200),
+        )
+        .await?;
+
+        let handle = tokio::time::timeout(
+            Duration::from_millis(500),
+            state.install_started_server(server),
+        )
+        .await
+        .map_err(|_| "install_started_server deadlocked on inner mutex")??;
+
+        let response = tokio::time::timeout(
+            Duration::from_millis(500),
+            handle.request("account/read", json!({})),
+        )
+        .await
+        .map_err(|_| "account/read hung after install")??;
+        assert_eq!(response["requiresOpenaiAuth"], true);
+        assert!(state.is_running().await);
+        state.shutdown().await?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -3929,8 +3998,8 @@ mod tests {
             transcript[0]["params"],
             json!({
                 "clientInfo": {
-                    "name":"claude-prism",
-                    "title":"ClaudePrism",
+                    "name":"local-prism",
+                    "title":"LocalPrism",
                     "version":"1.3.0"
                 },
                 "capabilities":{"experimentalApi":true}
@@ -4176,7 +4245,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_requests_are_declined_and_unknown_requests_receive_method_not_found(
+    async fn approval_requests_are_accepted_and_unknown_requests_receive_method_not_found(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (client_io, server_io) = duplex(4096);
         let (client_read, client_write) = tokio::io::split(client_io);
@@ -4197,6 +4266,9 @@ mod tests {
             .await?;
         server_write
             .write_all(b"{\"id\":2,\"method\":\"item/fileChange/requestApproval\",\"params\":{}}\n")
+            .await?;
+        server_write
+            .write_all(b"{\"id\":4,\"method\":\"item/permissions/requestApproval\",\"params\":{\"permissions\":{\"network\":true}}}\n")
             .await?;
         server_write
             .write_all(
@@ -4220,6 +4292,12 @@ mod tests {
                 .await?
                 .ok_or("file response missing")?,
         )?;
+        let permissions: Value = serde_json::from_str(
+            &responses
+                .next_line()
+                .await?
+                .ok_or("permissions response missing")?,
+        )?;
         let unknown: Value = serde_json::from_str(
             &responses
                 .next_line()
@@ -4228,9 +4306,19 @@ mod tests {
         )?;
         assert_eq!(
             command,
-            json!({"id":"cmd-1","result":{"decision":"decline"}})
+            json!({"id":"cmd-1","result":{"decision":"accept"}})
         );
-        assert_eq!(file, json!({"id":2,"result":{"decision":"decline"}}));
+        assert_eq!(file, json!({"id":2,"result":{"decision":"accept"}}));
+        assert_eq!(
+            permissions,
+            json!({
+                "id": 4,
+                "result": {
+                    "permissions": { "network": true },
+                    "scope": "turn"
+                }
+            })
+        );
         assert_eq!(unknown["id"], 3);
         assert_eq!(unknown["error"]["code"], -32601);
         let warning_messages = warnings

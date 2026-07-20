@@ -339,27 +339,14 @@ fn normalize_codex_login(
     }
 }
 
-/// Bound for `account/read` during status probes. The frontend watchdog is 10s;
-/// stay well under that so disk-detected installs can surface Sign in promptly.
+/// Bound for `account/read` during status probes once the app-server is warm.
+/// Cold start uses [`CODEX_COLD_START_STATUS_TIMEOUT`] separately so a slow first
+/// launch cannot be mistaken for a missing install / logged-out account.
 const CODEX_ACCOUNT_READ_TIMEOUT: Duration = Duration::from_secs(3);
 
-async fn codex_read_account_bounded(
-    app: &AppHandle,
-    codex_state: &codex::CodexAppServerState,
-    binary: &CodexBinary,
-) -> RuntimeAccount {
-    match tokio::time::timeout(
-        CODEX_ACCOUNT_READ_TIMEOUT,
-        codex::read_account(app, codex_state, binary.version.clone()),
-    )
-    .await
-    {
-        Ok(Ok(account)) => account,
-        Ok(Err(error)) => codex_account_with_error(binary, error),
-        // Timed out talking to app-server — still report installed so login UI appears.
-        Err(_) => codex_account_from_binary(Some(binary)),
-    }
-}
+/// Bound for the first Codex app-server cold start during status probes.
+/// Must stay under the frontend status watchdog (10s).
+const CODEX_COLD_START_STATUS_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[tauri::command]
 pub async fn runtime_status(
@@ -415,17 +402,25 @@ pub async fn runtime_status(
                 }
             }
 
-            // Fast path: disk-detect under APPDATA/npm (etc.) before full discover.
-            if let Some(binary) = probed {
-                return Ok(codex_read_account_bounded(&app, &codex_state, &binary).await);
-            }
-
-            // Fallback: full discover + bounded account/read.
-            let binary = codex::discovery::discover_codex_binary().await.ok();
-            let Some(binary) = binary else {
-                return Ok(codex_account_from_binary(None));
+            // Cold start: allow a longer budget than warm account/read. The previous
+            // 3s wrap aborted startup after initialize and left Codex looking logged out.
+            let binary = match probed {
+                Some(binary) => binary,
+                None => match codex::discovery::discover_codex_binary().await {
+                    Ok(binary) => binary,
+                    Err(_) => return Ok(codex_account_from_binary(None)),
+                },
             };
-            Ok(codex_read_account_bounded(&app, &codex_state, &binary).await)
+            match tokio::time::timeout(
+                CODEX_COLD_START_STATUS_TIMEOUT,
+                codex::read_account(&app, &codex_state, binary.version.clone()),
+            )
+            .await
+            {
+                Ok(Ok(account)) => Ok(account),
+                Ok(Err(error)) => Ok(codex_account_with_error(&binary, error)),
+                Err(_) => Ok(codex_account_from_binary(Some(&binary))),
+            }
         }
     }
 }
