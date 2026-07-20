@@ -1,0 +1,66 @@
+{
+  "$schema": "claude-prism/release-evidence/dual-runtime-child-agent/v1",
+  "title": "Dual-runtime child-agent visibility evidence (schema/template)",
+  "status": "mvp-template",
+  "note": "Scrubbed placeholder documenting the verification procedure and current MVP status. Do NOT invent fake live nonce evidence. Fill observed* fields only after a real Claude/Codex child run.",
+  "procedure": {
+    "codex": [
+      "Install a harmless test skill whose instruction requires the child to return a fixed nonce plus its resolved SKILL.md path.",
+      "Assign the skill to a Codex custom agent role.",
+      "Start a root Codex turn that spawns that role.",
+      "Verify Active then Done states, parent/child IDs, and recovery after app restart via runtime_agent_runs/thread/list."
+    ],
+    "claude": [
+      "Install the equivalent Claude skill and assign it in a Claude agent's native skills list.",
+      "Run a child via the Agent/Task tool.",
+      "Verify nonce/path and that transcriptAvailable remains false when Claude exposes only status/result.",
+      "Confirm legacy claude-output streaming still works alongside runtime-event dual emission."
+    ]
+  },
+  "mvpStatus": {
+    "normalizedRuntimeEvents": true,
+    "approvalExactlyOnce": true,
+    "frontendAgentRunTree": true,
+    "claudeAgentTaskDualEmission": true,
+    "claudePermissionBypassRemoved": true,
+    "codexThreadListRecovery": true,
+    "liveAssignedSkillNonceEvidence": false
+  },
+  "fields": {
+    "recordedAt": null,
+    "appVersion": null,
+    "claudeCliVersion": null,
+    "codexAppServerVersion": null,
+    "runtimes": [
+      {
+        "runtime": "codex",
+        "rootConversationIdHash": null,
+        "childIdHash": null,
+        "parentRelationship": "child.parentId == rootConversationIdHash (or intermediate parent)",
+        "assignedSkillName": null,
+        "assignedSkillPathHash": null,
+        "observedNonce": null,
+        "stateTransitions": ["queued|running", "completed|failed|cancelled"],
+        "recoveredAfterRestart": null
+      },
+      {
+        "runtime": "claude",
+        "rootConversationIdHash": null,
+        "childIdHash": "Agent/Task tool_use id",
+        "parentRelationship": "run.parentId == session_id",
+        "assignedSkillName": null,
+        "assignedSkillPathHash": null,
+        "observedNonce": null,
+        "stateTransitions": ["running", "completed|failed"],
+        "transcriptAvailable": false,
+        "recoveredAfterRestart": false
+      }
+    ]
+  },
+  "exclusions": [
+    "prompts",
+    "credentials",
+    "account identifiers",
+    "raw hidden reasoning"
+  ]
+}

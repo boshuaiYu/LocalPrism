@@ -445,6 +445,18 @@ pub(crate) struct Thread {
     pub(crate) status: ThreadStatus,
     #[serde(default)]
     pub(crate) turns: Vec<Turn>,
+    /// Immediate parent thread when this thread is a collab/subagent child.
+    #[serde(default)]
+    pub(crate) parent_thread_id: Option<String>,
+    /// Experimental ancestor/root id (requires experimentalApi negotiation).
+    #[serde(default)]
+    pub(crate) ancestor_thread_id: Option<String>,
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) nickname: Option<String>,
+    #[serde(default)]
+    pub(crate) model: Option<String>,
 }
 
 impl Thread {

@@ -56,6 +56,13 @@ impl AgentRunState {
             runs.insert(key, merged);
         }
     }
+
+    /// Merge recovered runs into the live cache without wiping concurrent updates.
+    pub async fn merge_recovered(&self, recovered: Vec<AgentRun>) {
+        for run in recovered {
+            let _ = self.apply(run).await;
+        }
+    }
 }
 
 fn run_key(runtime: RuntimeKind, id: &str) -> String {

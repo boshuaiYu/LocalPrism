@@ -19,6 +19,7 @@ pub mod discovery;
 pub mod event_mapper;
 pub mod models_cache;
 pub mod protocol;
+pub mod recovery;
 pub mod rpc;
 
 pub use app_server::CodexAppServerState;

@@ -33,16 +33,14 @@ vi.mock("@/stores/claude-chat-store", () => ({
 import { SubagentPanel } from "@/components/subagents/subagent-panel";
 
 function seedRun(run: AgentRun) {
-  useAgentRunStore
-    .getState()
-    .applyEvent(
-      {
-        runtime: run.runtime,
-        sessionId: run.rootConversationId,
-        projectPath: "",
-      },
-      { type: "subagentDiscovered", run },
-    );
+  useAgentRunStore.getState().applyEvent(
+    {
+      runtime: run.runtime,
+      sessionId: run.rootConversationId,
+      projectPath: "",
+    },
+    { type: "subagentDiscovered", run },
+  );
 }
 
 describe("SubagentPanel", () => {

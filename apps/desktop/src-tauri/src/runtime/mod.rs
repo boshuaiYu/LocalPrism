@@ -1149,15 +1149,40 @@ pub async fn runtime_request_respond(
 
 #[tauri::command]
 pub async fn runtime_agent_runs(
+    app: AppHandle,
     runtime: RuntimeKind,
     root_conversation_id: String,
-    _project_path: String,
+    project_path: String,
     state: State<'_, AgentRunState>,
+    codex_state: State<'_, codex::CodexAppServerState>,
 ) -> Result<Vec<AgentRun>, String> {
     if root_conversation_id.trim().is_empty() {
         return Err("A root conversation ID is required".into());
     }
-    Ok(state.list_for_root(runtime, &root_conversation_id).await)
+
+    match runtime {
+        RuntimeKind::Claude => Ok(state.list_for_root(runtime, &root_conversation_id).await),
+        RuntimeKind::Codex => {
+            if !project_path.trim().is_empty() {
+                match codex::list_threads(&app, &codex_state, project_path).await {
+                    Ok(threads) => {
+                        let recovered = codex::recovery::recover_agent_runs_from_threads(
+                            &root_conversation_id,
+                            &threads,
+                        );
+                        state.merge_recovered(recovered).await;
+                    }
+                    Err(error) => {
+                        // Live cache remains usable when app-server recovery is unavailable.
+                        eprintln!(
+                            "[runtime_agent_runs] Codex thread recovery skipped: {error}"
+                        );
+                    }
+                }
+            }
+            Ok(state.list_for_root(runtime, &root_conversation_id).await)
+        }
+    }
 }
 
 #[cfg(test)]
