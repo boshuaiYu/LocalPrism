@@ -14,6 +14,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 use tokio::task::JoinHandle;
 
 pub mod app_server;
+pub mod approvals;
 pub mod discovery;
 pub mod event_mapper;
 pub mod models_cache;
@@ -21,6 +22,9 @@ pub mod protocol;
 pub mod rpc;
 
 pub use app_server::CodexAppServerState;
+pub use approvals::{
+    ApprovalState, ResolveRuntimeRequest, RuntimeRequestDecision,
+};
 
 const RUNTIME_ACCOUNT_UPDATED_EVENT: &str = "runtime-account-updated";
 const RUNTIME_WARNING_EVENT: &str = "runtime-warning";

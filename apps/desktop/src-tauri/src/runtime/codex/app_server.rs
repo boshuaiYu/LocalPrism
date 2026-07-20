@@ -1,3 +1,7 @@
+use super::approvals::{
+    auto_accept_response, is_codex_approval_request, map_decision_to_response,
+    redact_request_details, ApprovalState, PendingRuntimeRequest,
+};
 use super::discovery::{
     attach_process_tree, discover_codex_binary, isolate_process_tree,
     probe_known_codex_binary_on_disk, terminate_process_tree, ProcessTreeGuard,
@@ -6,14 +10,14 @@ use super::event_mapper::CodexEventMapper;
 use super::protocol::{
     AccountLoginCompletedNotification, AccountUpdatedNotification, InitializeParams,
 };
-use super::rpc::{RpcClient, RpcInbound};
+use super::rpc::{RpcClient, RpcId, RpcInbound};
 use super::sanitize_install_output;
-use crate::runtime::events::RuntimeEventEnvelope;
+use crate::runtime::events::{RuntimeEvent, RuntimeEventEnvelope, RuntimeRequest};
 use crate::runtime::process::{
     CodexTurnBinding, CodexTurnReservation, CodexTurnStart, RuntimeProcessError,
     RuntimeProcessState, TurnRoute,
 };
-use crate::runtime::RuntimeKind;
+use crate::runtime::{AgentRunState, RuntimeKind};
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
@@ -40,6 +44,7 @@ const RUNTIME_EVENT: &str = "runtime-event";
 const WARNING_METHOD_LIMIT: usize = 256;
 const INBOUND_QUEUE_CAPACITY: usize = 32;
 const EARLY_LOGIN_COMPLETION_LIMIT: usize = 8;
+const APPROVAL_UI_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 type DynReader = Box<dyn AsyncRead + Unpin + Send>;
 type DynWriter = Box<dyn AsyncWrite + Unpin + Send>;
@@ -310,29 +315,83 @@ fn safe_warning_method(method: &str) -> String {
     format!("{}...", &single_line[..end])
 }
 
-fn is_codex_approval_request(method: &str) -> bool {
-    matches!(
-        method,
-        "item/commandExecution/requestApproval"
-            | "item/fileChange/requestApproval"
-            | "item/permissions/requestApproval"
-    )
-}
-
-fn codex_approval_accept_response(method: &str, params: &Value) -> Value {
-    if method == "item/permissions/requestApproval" {
-        let permissions = params
+fn build_runtime_request(
+    id: &RpcId,
+    method: &str,
+    params: &Value,
+    thread_id: Option<String>,
+    turn_id: Option<String>,
+    tab_id: &str,
+) -> RuntimeRequest {
+    let title = params
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or(method)
+        .to_owned();
+    let questions = params
+        .get("questions")
+        .and_then(Value::as_array)
+        .map(|questions| {
+            questions
+                .iter()
+                .filter_map(|question| {
+                    let id = question.get("id").and_then(Value::as_str)?;
+                    let prompt = question
+                        .get("prompt")
+                        .or_else(|| question.get("question"))
+                        .and_then(Value::as_str)?;
+                    let options = question
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .map(|options| {
+                            options
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    Some(crate::runtime::events::RuntimeRequestQuestion {
+                        id: id.to_owned(),
+                        prompt: prompt.to_owned(),
+                        options,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    RuntimeRequest {
+        request_id: serde_json::to_value(id).unwrap_or(Value::Null),
+        method: method.to_owned(),
+        runtime: RuntimeKind::Codex,
+        thread_id,
+        turn_id,
+        tab_id: tab_id.to_owned(),
+        agent_run_id: params
+            .get("agentId")
+            .or_else(|| params.get("agentRunId"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        title: sanitize_install_output(&title),
+        command: params
+            .get("command")
+            .and_then(Value::as_str)
+            .map(sanitize_install_output),
+        cwd: params
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(sanitize_install_output),
+        diff: params
+            .get("diff")
+            .and_then(Value::as_str)
+            .map(sanitize_install_output),
+        permissions: params
             .get("permissions")
             .or_else(|| params.get("requestedPermissions"))
-            .or_else(|| params.get("grantedPermissions"))
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({}));
-        return serde_json::json!({
-            "permissions": permissions,
-            "scope": "turn"
-        });
+            .cloned(),
+        questions,
+        details: redact_request_details(params),
     }
-    serde_json::json!({ "decision": "accept" })
 }
 
 #[derive(Debug)]
@@ -598,6 +657,36 @@ trait WarningSink: Send + Sync {
         Box::pin(async { NotificationHandling::Continue })
     }
 
+    fn handle_server_request(
+        &self,
+        client: Arc<RpcClient>,
+        id: RpcId,
+        method: String,
+        params: Value,
+    ) -> ServerFuture<'_, ()> {
+        Box::pin(async move {
+            if is_codex_approval_request(&method) {
+                let response = auto_accept_response(&method, &params);
+                if let Err(error) = client.respond(id, response).await {
+                    self.emit(format!(
+                        "Failed to accept Codex approval request safely: {error}"
+                    ));
+                }
+                return;
+            }
+            let safe_method = safe_warning_method(&method);
+            if let Err(error) = client.respond_error(id, -32601, "Method not found").await {
+                self.emit(format!(
+                    "Unsupported Codex server request `{safe_method}` could not be answered: {error}"
+                ));
+            } else {
+                self.emit(format!(
+                    "Unsupported Codex server request `{safe_method}` was rejected. Update Codex or LocalPrism if this request is required."
+                ));
+            }
+        })
+    }
+
     fn transport_reset(&self, _message: String) -> ServerFuture<'_, CodexLifecycleReset> {
         Box::pin(async { CodexLifecycleReset::default() })
     }
@@ -629,6 +718,15 @@ struct RuntimeWarningPayload {
 fn emit_runtime_event(app: &tauri::AppHandle, event: RuntimeEventEnvelope) {
     // Global emit keeps long-running Codex turns (gpt-5.6 reconnect storms)
     // visible even if the webview label used for emit_to does not match.
+    if let RuntimeEvent::SubagentDiscovered { run }
+    | RuntimeEvent::SubagentStatusChanged { run } = &event.event
+    {
+        let agent_runs = app.state::<AgentRunState>();
+        let run = run.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = agent_runs.apply(run).await;
+        });
+    }
     let _ = app.emit(RUNTIME_EVENT, &event);
 }
 
@@ -727,6 +825,179 @@ impl WarningSink for TauriWarningSink {
                 .state::<RuntimeProcessState>()
                 .transport_generation()
                 .await
+        })
+    }
+
+    fn handle_server_request(
+        &self,
+        client: Arc<RpcClient>,
+        id: RpcId,
+        method: String,
+        params: Value,
+    ) -> ServerFuture<'_, ()> {
+        let app = self.app.clone();
+        Box::pin(async move {
+            if !is_codex_approval_request(&method) {
+                let safe_method = safe_warning_method(&method);
+                if let Err(error) = client.respond_error(id, -32601, "Method not found").await {
+                    let _ = app.emit(
+                        WARNING_EVENT,
+                        RuntimeWarningPayload {
+                            runtime: RuntimeKind::Codex,
+                            message: format!(
+                                "Unsupported Codex server request `{safe_method}` could not be answered: {error}"
+                            ),
+                        },
+                    );
+                } else {
+                    let _ = app.emit(
+                        WARNING_EVENT,
+                        RuntimeWarningPayload {
+                            runtime: RuntimeKind::Codex,
+                            message: format!(
+                                "Unsupported Codex server request `{safe_method}` was rejected. Update Codex or LocalPrism if this request is required."
+                            ),
+                        },
+                    );
+                }
+                return;
+            }
+
+            let approvals = app.state::<ApprovalState>();
+            if !approvals.is_ui_ready() {
+                let response = auto_accept_response(&method, &params);
+                if let Err(error) = client.respond(id, response).await {
+                    let _ = app.emit(
+                        WARNING_EVENT,
+                        RuntimeWarningPayload {
+                            runtime: RuntimeKind::Codex,
+                            message: format!(
+                                "Failed to accept Codex approval request safely: {error}"
+                            ),
+                        },
+                    );
+                }
+                return;
+            }
+
+            let routes = app.state::<RuntimeProcessState>();
+            let snapshot = routes.snapshot().await;
+            let thread_id = params
+                .get("threadId")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let turn_id = params
+                .get("turnId")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let route = thread_id.as_deref().and_then(|thread| {
+                snapshot
+                    .routes
+                    .iter()
+                    .find(|route| {
+                        route.runtime == RuntimeKind::Codex
+                            && route.session_id.as_deref() == Some(thread)
+                    })
+                    .cloned()
+            });
+            let (window_label, tab_id, attempt_id, sequence) = if let Some(route) = route.as_ref() {
+                (
+                    route.window_label.clone(),
+                    route.tab_id.clone(),
+                    route.attempt_id.clone(),
+                    0,
+                )
+            } else {
+                ("main".into(), String::new(), String::new(), 0)
+            };
+
+            let (tx, rx) = oneshot::channel();
+            let pending = PendingRuntimeRequest {
+                id: id.clone(),
+                method: method.clone(),
+                window_label: window_label.clone(),
+                tab_id: tab_id.clone(),
+                thread_id: thread_id.clone(),
+                turn_id: turn_id.clone(),
+                created_at: std::time::Instant::now(),
+                payload: params.clone(),
+                responder: Some(tx),
+            };
+            if let Err(error) = approvals.register(pending).await {
+                let _ = app.emit(
+                    WARNING_EVENT,
+                    RuntimeWarningPayload {
+                        runtime: RuntimeKind::Codex,
+                        message: error,
+                    },
+                );
+                let response = auto_accept_response(&method, &params);
+                let _ = client.respond(id, response).await;
+                return;
+            }
+
+            let request = build_runtime_request(
+                &id,
+                &method,
+                &params,
+                thread_id.clone(),
+                turn_id.clone(),
+                &tab_id,
+            );
+            let event_type = if method == "item/tool/requestUserInput" {
+                RuntimeEvent::UserInputRequested { request }
+            } else {
+                RuntimeEvent::ApprovalRequested { request }
+            };
+            emit_runtime_event(
+                &app,
+                RuntimeEventEnvelope {
+                    runtime: RuntimeKind::Codex,
+                    window_label,
+                    tab_id,
+                    attempt_id,
+                    session_id: thread_id,
+                    turn_id,
+                    sequence,
+                    event: event_type,
+                },
+            );
+
+            // Do not block the inbound reader on UI decisions.
+            tokio::spawn(async move {
+                let decision = tokio::select! {
+                    result = rx => result.ok(),
+                    _ = tokio::time::sleep(APPROVAL_UI_TIMEOUT) => None,
+                };
+                let _ = approvals.take(&id).await;
+                let response = match decision {
+                    Some(resolve) => match map_decision_to_response(
+                        &method,
+                        &params,
+                        &resolve.decision,
+                        resolve.persistence.as_deref(),
+                        &resolve.answers,
+                    ) {
+                        Ok(value) => value,
+                        Err((code, message)) => {
+                            let _ = client.respond_error(id, code, &message).await;
+                            return;
+                        }
+                    },
+                    None => auto_accept_response(&method, &params),
+                };
+                if let Err(error) = client.respond(id, response).await {
+                    let _ = app.emit(
+                        WARNING_EVENT,
+                        RuntimeWarningPayload {
+                            runtime: RuntimeKind::Codex,
+                            message: format!(
+                                "Failed to respond to Codex approval request: {error}"
+                            ),
+                        },
+                    );
+                }
+            });
         })
     }
 
@@ -888,26 +1159,10 @@ async fn handle_inbound(
                     return;
                 }
             }
-            RpcInbound::ServerRequest { id, method, params } if is_codex_approval_request(&method) =>
-            {
-                let response = codex_approval_accept_response(&method, &params);
-                if let Err(error) = client.respond(id, response).await {
-                    warnings.emit(format!(
-                        "Failed to accept Codex approval request safely: {error}"
-                    ));
-                }
-            }
-            RpcInbound::ServerRequest { id, method, .. } => {
-                let safe_method = safe_warning_method(&method);
-                if let Err(error) = client.respond_error(id, -32601, "Method not found").await {
-                    warnings.emit(format!(
-                        "Unsupported Codex server request `{safe_method}` could not be answered: {error}"
-                    ));
-                } else {
-                    warnings.emit(format!(
-                        "Unsupported Codex server request `{safe_method}` was rejected. Update Codex or LocalPrism if this request is required."
-                    ));
-                }
+            RpcInbound::ServerRequest { id, method, params } => {
+                warnings
+                    .handle_server_request(client.clone(), id, method, params)
+                    .await;
             }
             RpcInbound::Malformed { error, .. } => {
                 warnings.emit(format!(

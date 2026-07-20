@@ -145,6 +145,70 @@ export interface RuntimeEventEnvelope {
   event: RuntimeEvent;
 }
 
+export type AgentRunStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface AgentRun {
+  id: string;
+  parentId: string | null;
+  rootConversationId: string;
+  runtime: RuntimeKind;
+  agentName: string;
+  agentRole: string | null;
+  model: string | null;
+  status: AgentRunStatus;
+  startedAt: number;
+  completedAt: number | null;
+  activity: string | null;
+  summary: string | null;
+  error: string | null;
+  transcriptAvailable: boolean;
+}
+
+export interface AgentRunNode extends AgentRun {
+  children: AgentRunNode[];
+}
+
+export interface RuntimeRequestQuestion {
+  id: string;
+  prompt: string;
+  options: string[];
+}
+
+export interface RuntimeRequest {
+  requestId: number | string;
+  method: string;
+  runtime: RuntimeKind;
+  threadId: string | null;
+  turnId: string | null;
+  tabId: string;
+  agentRunId: string | null;
+  title: string;
+  command: string | null;
+  cwd: string | null;
+  diff: string | null;
+  permissions: Record<string, unknown> | null;
+  questions: RuntimeRequestQuestion[];
+  details: JsonValue;
+}
+
+export type RuntimeRequestDecision =
+  | "allow"
+  | "allowForSession"
+  | "deny"
+  | "cancel"
+  | "unsupported";
+
+export interface RuntimeRequestResponse {
+  decision: RuntimeRequestDecision;
+  persistence: "turn" | "session" | null;
+  answers: Record<string, string[]>;
+}
+
 export type RuntimeEvent =
   | { type: "sessionStarted"; sessionId: string }
   | { type: "turnStarted"; turnId: string }
@@ -164,30 +228,10 @@ export type RuntimeEvent =
     }
   | { type: "fileChange"; itemId: string; path: string; diff: string | null }
   | { type: "usage"; inputTokens: number; outputTokens: number }
-  | {
-      type: "approvalRequested";
-      requestId: JsonValue;
-      method: string;
-      details: JsonValue;
-    }
-  | {
-      type: "userInputRequested";
-      requestId: JsonValue;
-      prompt: string;
-      details: JsonValue;
-    }
-  | {
-      type: "subagentDiscovered";
-      agentId: string;
-      name: string | null;
-      details: JsonValue;
-    }
-  | {
-      type: "subagentStatusChanged";
-      agentId: string;
-      status: string;
-      details: JsonValue;
-    }
+  | { type: "approvalRequested"; request: RuntimeRequest }
+  | { type: "userInputRequested"; request: RuntimeRequest }
+  | { type: "subagentDiscovered"; run: AgentRun }
+  | { type: "subagentStatusChanged"; run: AgentRun }
   | { type: "warning"; message: string }
   | { type: "unknown"; nativeType: string };
 

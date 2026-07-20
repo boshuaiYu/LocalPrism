@@ -6,10 +6,14 @@ use tauri::{AppHandle, Manager, State, WebviewWindow};
 
 use codex::discovery::CodexBinary;
 
+pub mod agent_runs;
 pub mod claude;
 pub mod codex;
 pub mod events;
 pub mod process;
+
+pub use agent_runs::AgentRunState;
+pub use events::{AgentRun, AgentRunStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -837,6 +841,7 @@ pub async fn runtime_start_turn(
                     request.reasoning_effort,
                     request.provider_credential_id,
                     request.provider_model_override,
+                    request.agent_id,
                     Some(attempt_id.clone()),
                 )
                 .await
@@ -850,6 +855,7 @@ pub async fn runtime_start_turn(
                     request.reasoning_effort,
                     request.provider_credential_id,
                     request.provider_model_override,
+                    request.agent_id,
                     Some(attempt_id.clone()),
                 )
                 .await
@@ -1122,6 +1128,36 @@ pub async fn runtime_archive_conversation(
             codex::archive_thread(&app, &codex_state, reference.session_id).await
         }
     }
+}
+
+#[tauri::command]
+pub async fn runtime_approvals_set_ready(
+    ready: bool,
+    approvals: State<'_, codex::ApprovalState>,
+) -> Result<(), String> {
+    approvals.set_ui_ready(ready);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn runtime_request_respond(
+    request: codex::ResolveRuntimeRequest,
+    approvals: State<'_, codex::ApprovalState>,
+) -> Result<(), String> {
+    approvals.resolve(request).await
+}
+
+#[tauri::command]
+pub async fn runtime_agent_runs(
+    runtime: RuntimeKind,
+    root_conversation_id: String,
+    _project_path: String,
+    state: State<'_, AgentRunState>,
+) -> Result<Vec<AgentRun>, String> {
+    if root_conversation_id.trim().is_empty() {
+        return Err("A root conversation ID is required".into());
+    }
+    Ok(state.list_for_root(runtime, &root_conversation_id).await)
 }
 
 #[cfg(test)]

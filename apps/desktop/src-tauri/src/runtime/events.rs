@@ -15,6 +15,62 @@ pub struct RuntimeEventEnvelope {
     pub event: RuntimeEvent,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentRunStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRun {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub root_conversation_id: String,
+    pub runtime: RuntimeKind,
+    pub agent_name: String,
+    pub agent_role: Option<String>,
+    pub model: Option<String>,
+    pub status: AgentRunStatus,
+    pub started_at: i64,
+    pub completed_at: Option<i64>,
+    pub activity: Option<String>,
+    pub summary: Option<String>,
+    pub error: Option<String>,
+    pub transcript_available: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeRequestQuestion {
+    pub id: String,
+    pub prompt: String,
+    pub options: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeRequest {
+    pub request_id: serde_json::Value,
+    pub method: String,
+    pub runtime: RuntimeKind,
+    pub thread_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub tab_id: String,
+    pub agent_run_id: Option<String>,
+    pub title: String,
+    pub command: Option<String>,
+    pub cwd: Option<String>,
+    pub diff: Option<String>,
+    pub permissions: Option<serde_json::Value>,
+    pub questions: Vec<RuntimeRequestQuestion>,
+    pub details: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(
     tag = "type",
@@ -74,24 +130,16 @@ pub enum RuntimeEvent {
         output_tokens: u64,
     },
     ApprovalRequested {
-        request_id: serde_json::Value,
-        method: String,
-        details: serde_json::Value,
+        request: RuntimeRequest,
     },
     UserInputRequested {
-        request_id: serde_json::Value,
-        prompt: String,
-        details: serde_json::Value,
+        request: RuntimeRequest,
     },
     SubagentDiscovered {
-        agent_id: String,
-        name: Option<String>,
-        details: serde_json::Value,
+        run: AgentRun,
     },
     SubagentStatusChanged {
-        agent_id: String,
-        status: String,
-        details: serde_json::Value,
+        run: AgentRun,
     },
     Warning {
         message: String,
@@ -111,6 +159,44 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned()
+    }
+
+    fn sample_run() -> AgentRun {
+        AgentRun {
+            id: "agent-1".into(),
+            parent_id: Some("thread-1".into()),
+            root_conversation_id: "thread-1".into(),
+            runtime: RuntimeKind::Codex,
+            agent_name: "reviewer".into(),
+            agent_role: Some("reviewer".into()),
+            model: Some("gpt-5.4".into()),
+            status: AgentRunStatus::Running,
+            started_at: 1,
+            completed_at: None,
+            activity: Some("spawned".into()),
+            summary: None,
+            error: None,
+            transcript_available: true,
+        }
+    }
+
+    fn sample_request() -> RuntimeRequest {
+        RuntimeRequest {
+            request_id: serde_json::json!(7),
+            method: "item/commandExecution/requestApproval".into(),
+            runtime: RuntimeKind::Codex,
+            thread_id: Some("thread-1".into()),
+            turn_id: Some("turn-1".into()),
+            tab_id: "tab-1".into(),
+            agent_run_id: None,
+            title: "Run command".into(),
+            command: Some("cargo test".into()),
+            cwd: None,
+            diff: None,
+            permissions: None,
+            questions: vec![],
+            details: serde_json::json!({}),
+        }
     }
 
     #[test]
@@ -152,6 +238,19 @@ mod tests {
         assert_eq!(value["type"], "turnFailed");
         assert!(value["turnId"].is_null());
         assert_eq!(value["message"], "transport closed");
+    }
+
+    #[test]
+    fn agent_run_and_request_use_camel_case_wire_fields() {
+        let run = serde_json::to_value(sample_run()).unwrap();
+        assert_eq!(run["rootConversationId"], "thread-1");
+        assert_eq!(run["agentName"], "reviewer");
+        assert_eq!(run["transcriptAvailable"], true);
+        assert_eq!(run["status"], "running");
+
+        let request = serde_json::to_value(sample_request()).unwrap();
+        assert_eq!(request["requestId"], 7);
+        assert_eq!(request["agentRunId"], serde_json::Value::Null);
     }
 
     #[test]
@@ -249,33 +348,25 @@ mod tests {
             ),
             (
                 RuntimeEvent::ApprovalRequested {
-                    request_id: serde_json::json!(7),
-                    method: "command/approval".into(),
-                    details: serde_json::json!({"title": "Run command"}),
+                    request: sample_request(),
                 },
                 "approvalRequested",
             ),
             (
                 RuntimeEvent::UserInputRequested {
-                    request_id: serde_json::json!(8),
-                    prompt: "Choose".into(),
-                    details: serde_json::json!({"options": ["yes", "no"]}),
+                    request: sample_request(),
                 },
                 "userInputRequested",
             ),
             (
                 RuntimeEvent::SubagentDiscovered {
-                    agent_id: "agent-1".into(),
-                    name: Some("reviewer".into()),
-                    details: serde_json::json!({}),
+                    run: sample_run(),
                 },
                 "subagentDiscovered",
             ),
             (
                 RuntimeEvent::SubagentStatusChanged {
-                    agent_id: "agent-1".into(),
-                    status: "running".into(),
-                    details: serde_json::json!({}),
+                    run: sample_run(),
                 },
                 "subagentStatusChanged",
             ),

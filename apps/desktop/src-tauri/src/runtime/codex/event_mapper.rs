@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use serde_json::Value;
 
 use crate::runtime::{
-    events::{RuntimeEvent, RuntimeEventEnvelope},
+    events::{AgentRun, AgentRunStatus, RuntimeEvent, RuntimeEventEnvelope},
     process::TurnRoute,
     RuntimeKind,
 };
@@ -84,20 +84,37 @@ impl CodexEventMapper {
             return Vec::new();
         }
 
-        let event = match method {
-            "thread/started" => self.map_thread_started(generation, route, params),
-            "turn/started" => self.map_turn_started(generation, route, params),
-            "item/agentMessage/delta" => self.map_agent_message_delta(generation, route, params),
-            "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
-                self.map_reasoning_delta(generation, route, params)
-            }
+        match method {
+            "thread/started" => self
+                .map_thread_started(generation, route, params)
+                .into_iter()
+                .collect(),
+            "turn/started" => self
+                .map_turn_started(generation, route, params)
+                .into_iter()
+                .collect(),
+            "item/agentMessage/delta" => self
+                .map_agent_message_delta(generation, route, params)
+                .into_iter()
+                .collect(),
+            "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => self
+                .map_reasoning_delta(generation, route, params)
+                .into_iter()
+                .collect(),
             "item/completed" => self.map_item_completed(generation, route, params),
-            "turn/completed" => self.map_turn_completed(generation, route, params),
-            "error" => self.map_error(generation, route, params),
-            _ => self.map_unknown(generation, route, method, params),
-        };
-
-        event.into_iter().collect()
+            "turn/completed" => self
+                .map_turn_completed(generation, route, params)
+                .into_iter()
+                .collect(),
+            "error" => self
+                .map_error(generation, route, params)
+                .into_iter()
+                .collect(),
+            _ => self
+                .map_unknown(generation, route, method, params)
+                .into_iter()
+                .collect(),
+        }
     }
 
     /// Produces the single failed terminal event required before a broken
@@ -320,23 +337,23 @@ impl CodexEventMapper {
         generation: u64,
         route: &TurnRoute,
         params: &Value,
-    ) -> Option<RuntimeEventEnvelope> {
+    ) -> Vec<RuntimeEventEnvelope> {
         // completedAtMs is optional on newer Codex builds.
         let (Some(thread_id), Some(turn_id), Some(item)) = (
             string_field(params, "threadId"),
             string_field(params, "turnId"),
             params.get("item").and_then(Value::as_object),
         ) else {
-            return Some(self.malformed(route, "item/completed"));
+            return vec![self.malformed(route, "item/completed")];
         };
         let (Some(item_id), Some(item_type)) = (
             item.get("id").and_then(Value::as_str),
             item.get("type").and_then(Value::as_str),
         ) else {
-            return Some(self.malformed(route, "item/completed"));
+            return vec![self.malformed(route, "item/completed")];
         };
         if !route_matches(route, thread_id, Some(turn_id)) {
-            return None;
+            return Vec::new();
         }
 
         let turn = scoped_turn(generation, route, thread_id, turn_id);
@@ -345,25 +362,30 @@ impl CodexEventMapper {
             item_id: item_id.to_owned(),
         };
         if self.terminal_turns.contains(&turn) || self.completed_items.contains(&scoped_item) {
-            return None;
+            return Vec::new();
         }
+        self.completed_items.insert(scoped_item);
 
-        let event = match item_type {
+        match item_type {
             "agentMessage" => {
                 let content = item
                     .get("text")
                     .and_then(Value::as_str)
                     .or_else(|| item.get("content").and_then(Value::as_str))
                     .unwrap_or("");
-                RuntimeEvent::AssistantCompleted {
-                    item_id: item_id.to_owned(),
-                    content: sanitize_install_output(content),
-                }
+                vec![self.envelope(
+                    route,
+                    Some(thread_id.to_owned()),
+                    Some(turn_id.to_owned()),
+                    RuntimeEvent::AssistantCompleted {
+                        item_id: item_id.to_owned(),
+                        content: sanitize_install_output(content),
+                    },
+                )]
             }
             "reasoning" => {
                 let summary = reasoning_summary_text(item);
-                if summary.is_empty() {
-                    // Empty reasoning must not block the turn; degrade quietly.
+                let event = if summary.is_empty() {
                     RuntimeEvent::Unknown {
                         native_type: "reasoning".into(),
                     }
@@ -372,19 +394,220 @@ impl CodexEventMapper {
                         item_id: item_id.to_owned(),
                         delta: sanitize_install_output(&summary),
                     }
-                }
+                };
+                vec![self.envelope(
+                    route,
+                    Some(thread_id.to_owned()),
+                    Some(turn_id.to_owned()),
+                    event,
+                )]
             }
-            native_type => RuntimeEvent::Unknown {
-                native_type: sanitize_install_output(native_type),
-            },
-        };
-        self.completed_items.insert(scoped_item);
-        Some(self.envelope(
-            route,
-            Some(thread_id.to_owned()),
-            Some(turn_id.to_owned()),
-            event,
-        ))
+            "commandExecution" => {
+                let command = item
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .unwrap_or("command");
+                let output = item
+                    .get("aggregatedOutput")
+                    .and_then(Value::as_str)
+                    .or_else(|| item.get("output").and_then(Value::as_str))
+                    .map(sanitize_install_output);
+                let success = item
+                    .get("exitCode")
+                    .and_then(Value::as_i64)
+                    .map(|code| code == 0)
+                    .or_else(|| item.get("success").and_then(Value::as_bool))
+                    .unwrap_or(true);
+                vec![
+                    self.envelope(
+                        route,
+                        Some(thread_id.to_owned()),
+                        Some(turn_id.to_owned()),
+                        RuntimeEvent::ToolStarted {
+                            item_id: item_id.to_owned(),
+                            name: "commandExecution".into(),
+                            input: serde_json::json!({ "command": sanitize_install_output(command) }),
+                        },
+                    ),
+                    self.envelope(
+                        route,
+                        Some(thread_id.to_owned()),
+                        Some(turn_id.to_owned()),
+                        RuntimeEvent::ToolCompleted {
+                            item_id: item_id.to_owned(),
+                            success,
+                            output,
+                        },
+                    ),
+                ]
+            }
+            "fileChange" => {
+                let path = item
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .or_else(|| {
+                        item.get("changes")
+                            .and_then(Value::as_array)
+                            .and_then(|changes| changes.first())
+                            .and_then(|change| change.get("path"))
+                            .and_then(Value::as_str)
+                    })
+                    .unwrap_or("file");
+                let diff = item
+                    .get("diff")
+                    .and_then(Value::as_str)
+                    .map(sanitize_install_output);
+                vec![self.envelope(
+                    route,
+                    Some(thread_id.to_owned()),
+                    Some(turn_id.to_owned()),
+                    RuntimeEvent::FileChange {
+                        item_id: item_id.to_owned(),
+                        path: sanitize_install_output(path),
+                        diff,
+                    },
+                )]
+            }
+            "collabAgentToolCall" => self.map_collab_agent_tool_call(
+                route,
+                thread_id,
+                turn_id,
+                item,
+            ),
+            native_type => vec![self.envelope(
+                route,
+                Some(thread_id.to_owned()),
+                Some(turn_id.to_owned()),
+                RuntimeEvent::Unknown {
+                    native_type: sanitize_install_output(native_type),
+                },
+            )],
+        }
+    }
+
+    fn map_collab_agent_tool_call(
+        &mut self,
+        route: &TurnRoute,
+        thread_id: &str,
+        turn_id: &str,
+        item: &serde_json::Map<String, Value>,
+    ) -> Vec<RuntimeEventEnvelope> {
+        let tool = item.get("tool").and_then(Value::as_str).unwrap_or("");
+        if tool != "spawnAgent" && !item.contains_key("agentsStates") {
+            return vec![self.envelope(
+                route,
+                Some(thread_id.to_owned()),
+                Some(turn_id.to_owned()),
+                RuntimeEvent::Unknown {
+                    native_type: "collabAgentToolCall".into(),
+                },
+            )];
+        }
+
+        let parent_id = item
+            .get("senderThreadId")
+            .and_then(Value::as_str)
+            .unwrap_or(thread_id)
+            .to_owned();
+        let root_id = route
+            .session_id
+            .clone()
+            .unwrap_or_else(|| parent_id.clone());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(0);
+
+        let mut events = Vec::new();
+        let receiver_ids = item
+            .get("receiverThreadIds")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let agents_states = item
+            .get("agentsStates")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut child_ids = receiver_ids
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if child_ids.is_empty() {
+            child_ids.extend(agents_states.keys().cloned());
+        }
+
+        for child_id in child_ids {
+            let state = agents_states.get(&child_id);
+            let status = map_agent_state_status(
+                state
+                    .and_then(|value| value.get("status"))
+                    .and_then(Value::as_str)
+                    .or_else(|| item.get("status").and_then(Value::as_str)),
+            );
+            let agent_name = state
+                .and_then(|value| value.get("nickname").or_else(|| value.get("name")))
+                .and_then(Value::as_str)
+                .or_else(|| item.get("nickname").and_then(Value::as_str))
+                .unwrap_or("subagent")
+                .to_owned();
+            let model = state
+                .and_then(|value| value.get("model"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let activity = state
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let completed_at = is_terminal_status(status).then_some(now);
+            let run = AgentRun {
+                id: child_id,
+                parent_id: Some(parent_id.clone()),
+                root_conversation_id: root_id.clone(),
+                runtime: RuntimeKind::Codex,
+                agent_name: sanitize_install_output(&agent_name),
+                agent_role: state
+                    .and_then(|value| value.get("role").or_else(|| value.get("agentRole")))
+                    .and_then(Value::as_str)
+                    .map(sanitize_install_output),
+                model: model.map(|value| sanitize_install_output(&value)),
+                status,
+                started_at: now,
+                completed_at,
+                activity: activity.map(|value| sanitize_install_output(&value)),
+                summary: None,
+                error: state
+                    .and_then(|value| value.get("error"))
+                    .and_then(Value::as_str)
+                    .map(sanitize_install_output),
+                transcript_available: true,
+            };
+            let event = if is_terminal_status(status) {
+                RuntimeEvent::SubagentStatusChanged { run }
+            } else {
+                RuntimeEvent::SubagentDiscovered { run }
+            };
+            events.push(self.envelope(
+                route,
+                Some(thread_id.to_owned()),
+                Some(turn_id.to_owned()),
+                event,
+            ));
+        }
+
+        if events.is_empty() {
+            events.push(self.envelope(
+                route,
+                Some(thread_id.to_owned()),
+                Some(turn_id.to_owned()),
+                RuntimeEvent::Unknown {
+                    native_type: "collabAgentToolCall".into(),
+                },
+            ));
+        }
+        events
     }
 
     fn map_turn_completed(
@@ -652,6 +875,24 @@ fn scoped_turn(generation: u64, route: &TurnRoute, thread_id: &str, turn_id: &st
     }
 }
 
+fn map_agent_state_status(status: Option<&str>) -> AgentRunStatus {
+    match status {
+        Some("pendingInit" | "pending" | "queued") => AgentRunStatus::Queued,
+        Some("running" | "inProgress" | "active") => AgentRunStatus::Running,
+        Some("completed" | "done" | "success") => AgentRunStatus::Completed,
+        Some("errored" | "failed" | "error") => AgentRunStatus::Failed,
+        Some("interrupted" | "shutdown" | "cancelled" | "canceled") => AgentRunStatus::Cancelled,
+        _ => AgentRunStatus::Running,
+    }
+}
+
+fn is_terminal_status(status: AgentRunStatus) -> bool {
+    matches!(
+        status,
+        AgentRunStatus::Completed | AgentRunStatus::Failed | AgentRunStatus::Cancelled
+    )
+}
+
 fn reasoning_summary_text(item: &serde_json::Map<String, Value>) -> String {
     if let Some(text) = item.get("text").and_then(Value::as_str) {
         if !text.trim().is_empty() {
@@ -752,6 +993,65 @@ mod tests {
         params: Value,
     ) -> Vec<RuntimeEventEnvelope> {
         mapper.map_notification(0, route, method, &params)
+    }
+
+    #[test]
+    fn collab_spawn_agent_maps_children_with_parent_and_status() {
+        let mut mapper = CodexEventMapper::default();
+        let route = route("main", "tab-a", "thread-a", Some("turn-a"));
+        let events = map(
+            &mut mapper,
+            &route,
+            "item/completed",
+            json!({
+                "threadId":"thread-a",
+                "turnId":"turn-a",
+                "item":{
+                    "type":"collabAgentToolCall",
+                    "id":"item-collab",
+                    "tool":"spawnAgent",
+                    "senderThreadId":"thread-a",
+                    "receiverThreadIds":["child-1","child-2"],
+                    "agentsStates":{
+                        "child-1":{"status":"pendingInit","nickname":"reviewer","model":"gpt-5.4"},
+                        "child-2":{"status":"completed","nickname":"writer","model":"gpt-5.4"}
+                    }
+                }
+            }),
+        );
+        assert_eq!(events.len(), 2);
+        let RuntimeEvent::SubagentDiscovered { run: queued } = &events[0].event else {
+            panic!("expected discovered child");
+        };
+        assert_eq!(queued.id, "child-1");
+        assert_eq!(queued.parent_id.as_deref(), Some("thread-a"));
+        assert_eq!(queued.status, crate::runtime::events::AgentRunStatus::Queued);
+
+        let RuntimeEvent::SubagentStatusChanged { run: done } = &events[1].event else {
+            panic!("expected status-changed child");
+        };
+        assert_eq!(done.id, "child-2");
+        assert_eq!(done.status, crate::runtime::events::AgentRunStatus::Completed);
+
+        // Replay must not duplicate children.
+        let replay = map(
+            &mut mapper,
+            &route,
+            "item/completed",
+            json!({
+                "threadId":"thread-a",
+                "turnId":"turn-a",
+                "item":{
+                    "type":"collabAgentToolCall",
+                    "id":"item-collab",
+                    "tool":"spawnAgent",
+                    "senderThreadId":"thread-a",
+                    "receiverThreadIds":["child-1"],
+                    "agentsStates":{"child-1":{"status":"running"}}
+                }
+            }),
+        );
+        assert!(replay.is_empty());
     }
 
     #[test]

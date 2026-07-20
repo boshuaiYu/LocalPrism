@@ -670,6 +670,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(claude::ClaudeProcessState::default())
         .manage(runtime::codex::CodexAppServerState::default())
+        .manage(runtime::codex::ApprovalState::default())
+        .manage(runtime::AgentRunState::default())
         .manage(runtime::process::RuntimeProcessState::default())
         .manage(latex::LatexCompilerState::default())
         .manage(zotero::ZoteroOAuthState::default())
@@ -739,6 +741,9 @@ pub fn run() {
             runtime::runtime_list_conversations,
             runtime::runtime_read_conversation,
             runtime::runtime_archive_conversation,
+            runtime::runtime_approvals_set_ready,
+            runtime::runtime_request_respond,
+            runtime::runtime_agent_runs,
             zotero::zotero_start_oauth,
             zotero::zotero_complete_oauth,
             zotero::zotero_cancel_oauth,

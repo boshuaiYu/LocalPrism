@@ -7,6 +7,9 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { ApprovalDialog } from "@/components/approvals/approval-dialog";
+import { SubagentPanel } from "@/components/subagents/subagent-panel";
+import { useRuntimeEvents } from "@/hooks/use-runtime-events";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import { ChatMessages } from "./chat-messages";
 import { ChatComposer } from "./chat-composer";
@@ -16,6 +19,7 @@ const MIN_HEIGHT = 260;
 const DEFAULT_HEIGHT = 360;
 
 export function ClaudeChatDrawer() {
+  useRuntimeEvents();
   const anyStreaming = useClaudeChatStore((s) =>
     s.tabs.some((t) => t.isStreaming),
   );
@@ -207,9 +211,12 @@ export function ClaudeChatDrawer() {
           </div>
         )}
 
+        <SubagentPanel />
+
         {/* Messages area */}
         <div className="relative min-h-0 flex-1 overflow-hidden">
           <ChatMessages />
+          <ApprovalDialog />
         </div>
 
         {/* Composer */}

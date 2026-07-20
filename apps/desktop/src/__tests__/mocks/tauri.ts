@@ -32,6 +32,38 @@ Object.defineProperty(globalThis, "localStorage", {
   configurable: true,
 });
 
+const tauriEventHelpers = vi.hoisted(() => {
+  type Listener = (event: {
+    event: string;
+    id: number;
+    payload: unknown;
+  }) => void;
+  const listeners = new Map<string, Set<Listener>>();
+  return {
+    listen: vi.fn(async (name: string, callback: Listener) => {
+      const set = listeners.get(name) ?? new Set();
+      set.add(callback);
+      listeners.set(name, set);
+      return () => {
+        set.delete(callback);
+      };
+    }),
+    emitMockTauriEvent(name: string, payload: unknown) {
+      const set = listeners.get(name);
+      if (!set) return;
+      for (const listener of set) {
+        listener({ event: name, id: 1, payload });
+      }
+    },
+    resetMockTauriEvents() {
+      listeners.clear();
+    },
+  };
+});
+
+export const emitMockTauriEvent = tauriEventHelpers.emitMockTauriEvent;
+export const resetMockTauriEvents = tauriEventHelpers.resetMockTauriEvents;
+
 // Mock @tauri-apps/api/core
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -41,7 +73,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 // Mock @tauri-apps/api/event
 vi.mock("@tauri-apps/api/event", () => ({
   emit: vi.fn(() => Promise.resolve()),
-  listen: vi.fn(() => Promise.resolve(() => {})),
+  listen: tauriEventHelpers.listen,
 }));
 
 // Mock @tauri-apps/api/webview
