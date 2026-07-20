@@ -260,6 +260,9 @@ mod tests {
         assert_eq!(reloaded.skill_ids, vec!["writer", "lint"]);
         assert_eq!(reloaded.unknown_fields.get("color"), Some(&"blue".into()));
         assert!(reloaded.instructions.contains("Be thorough."));
-        assert_eq!(validate_agent_slug("reviewer"), Ok(()));
+        assert_eq!(
+            validate_agent_slug("reviewer").expect("slug should validate"),
+            "reviewer"
+        );
     }
 }

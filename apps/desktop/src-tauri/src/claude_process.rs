@@ -905,9 +905,10 @@ pub async fn spawn_claude_process(
                     | crate::runtime::events::RuntimeEvent::SubagentStatusChanged { run } =
                         &event.event
                     {
-                        let agent_runs = win_stdout.state::<crate::runtime::AgentRunState>();
+                        let app = win_stdout.clone();
                         let run = run.clone();
                         tauri::async_runtime::spawn(async move {
+                            let agent_runs = app.state::<crate::runtime::AgentRunState>();
                             let _ = agent_runs.apply(run).await;
                         });
                     }

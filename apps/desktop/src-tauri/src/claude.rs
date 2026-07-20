@@ -2837,10 +2837,10 @@ fn resolve_claude_permission_mode(
         Some(std::path::Path::new(project_path))
     };
     for scope in [
-        crate::skills::SkillScope::Project,
-        crate::skills::SkillScope::User,
+        crate::skills::domain::SkillScope::Project,
+        crate::skills::domain::SkillScope::User,
     ] {
-        if scope == crate::skills::SkillScope::Project && project.is_none() {
+        if scope == crate::skills::domain::SkillScope::Project && project.is_none() {
             continue;
         }
         let Ok(root) = crate::agents::claude::agents_root(scope, project) else {
