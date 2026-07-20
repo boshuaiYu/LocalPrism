@@ -698,12 +698,14 @@ impl CodexEventMapper {
             return None;
         }
         let message = sanitized_error_message(Some(error), "Codex turn failed");
-        if will_retry {
+        let reconnect_exhausted = reconnect_attempt_exhausted(&message);
+        if will_retry && !reconnect_exhausted {
+            // Keep the upstream reconnect text intact so the UI can parse N/M.
             return Some(self.warning(
                 route,
                 Some(thread_id.to_owned()),
                 Some(turn_id.to_owned()),
-                &format!("Codex will retry after an error: {message}"),
+                &message,
             ));
         }
 
@@ -714,7 +716,13 @@ impl CodexEventMapper {
             Some(turn_id.to_owned()),
             RuntimeEvent::TurnFailed {
                 turn_id: Some(turn_id.to_owned()),
-                message,
+                message: if reconnect_exhausted {
+                    format!(
+                        "{message}. Codex could not reach the model API (request timed out). Check network/VPN/proxy, then retry."
+                    )
+                } else {
+                    message
+                },
             },
         ))
     }
@@ -938,6 +946,40 @@ fn reasoning_summary_text(item: &serde_json::Map<String, Value>) -> String {
         }
     }
     String::new()
+}
+
+pub(crate) fn reconnect_attempt_exhausted(message: &str) -> bool {
+    // Matches Codex retry text like "Reconnecting... 5/5".
+    let lower = message.to_ascii_lowercase();
+    let Some(index) = lower.find("reconnecting") else {
+        return false;
+    };
+    let tail = message[index..].trim();
+    let Some(slash) = tail.find('/') else {
+        return false;
+    };
+    let (left, right) = tail.split_at(slash);
+    let current = left
+        .bytes()
+        .rev()
+        .take_while(u8::is_ascii_digit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(char::from)
+        .collect::<String>();
+    let total = right
+        .chars()
+        .skip(1)
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    let Ok(current) = current.parse::<u32>() else {
+        return false;
+    };
+    let Ok(total) = total.parse::<u32>() else {
+        return false;
+    };
+    total > 0 && current >= total
 }
 
 fn nested_json_error_message(raw: &str) -> Option<String> {
@@ -1399,15 +1441,52 @@ mod tests {
             RuntimeEvent::Warning { message } if message.contains("temporary")
         ));
 
-        let completed = map(
+        let exhausted_retry = map(
             &mut mapper,
             &route,
-            "turn/completed",
-            json!({"threadId":"thread-a","turn":{"id":"turn-a","status":"completed","items":[]}}),
+            "error",
+            json!({
+                "threadId":"thread-a","turnId":"turn-a","willRetry":true,
+                "error":{"message":"Reconnecting... 5/5","additionalDetails":"request timed out"}
+            }),
         );
         assert!(matches!(
-            completed[0].event,
-            RuntimeEvent::TurnCompleted { .. }
+            &exhausted_retry[0].event,
+            RuntimeEvent::Warning { message }
+                if message.contains("Reconnecting... 5/5")
+                    && message.to_ascii_lowercase().contains("timed out")
+        ));
+        assert!(mapper
+            .terminal_turns
+            .iter()
+            .all(|terminal| terminal.turn_id != "turn-a"));
+
+        let late_delta = map(
+            &mut mapper,
+            &route,
+            "item/agentMessage/delta",
+            json!({
+                "threadId":"thread-a","turnId":"turn-a",
+                "itemId":"msg-1","delta":"hello"
+            }),
+        );
+        assert!(matches!(
+            &late_delta[0].event,
+            RuntimeEvent::AssistantDelta { delta, .. } if delta == "hello"
+        ));
+
+        let hard_fail = map(
+            &mut mapper,
+            &route,
+            "error",
+            json!({
+                "threadId":"thread-a","turnId":"turn-a","willRetry":false,
+                "error":{"message":"request failed permanently"}
+            }),
+        );
+        assert!(matches!(
+            &hard_fail[0].event,
+            RuntimeEvent::TurnFailed { message, .. } if message.contains("request failed permanently")
         ));
     }
 

@@ -454,7 +454,18 @@ fn notification_is_terminal(method: &str, params: &Value) -> bool {
             .pointer("/turn/status")
             .and_then(Value::as_str)
             .is_none_or(|status| status != "inProgress"),
-        "error" => params.get("willRetry").and_then(Value::as_bool) == Some(false),
+        "error" => {
+            let will_retry = params.get("willRetry").and_then(Value::as_bool) == Some(true);
+            if !will_retry {
+                return true;
+            }
+            // Codex sometimes keeps willRetry=true on the final reconnect slot.
+            let message = params
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            super::event_mapper::reconnect_attempt_exhausted(message)
+        }
         _ => false,
     }
 }
@@ -721,9 +732,10 @@ fn emit_runtime_event(app: &tauri::AppHandle, event: RuntimeEventEnvelope) {
     if let RuntimeEvent::SubagentDiscovered { run }
     | RuntimeEvent::SubagentStatusChanged { run } = &event.event
     {
-        let agent_runs = app.state::<AgentRunState>();
+        let app = app.clone();
         let run = run.clone();
         tauri::async_runtime::spawn(async move {
+            let agent_runs = app.state::<AgentRunState>();
             let _ = agent_runs.apply(run).await;
         });
     }
@@ -964,7 +976,9 @@ impl WarningSink for TauriWarningSink {
             );
 
             // Do not block the inbound reader on UI decisions.
+            let app_for_task = app.clone();
             tokio::spawn(async move {
+                let approvals = app_for_task.state::<ApprovalState>();
                 let decision = tokio::select! {
                     result = rx => result.ok(),
                     _ = tokio::time::sleep(APPROVAL_UI_TIMEOUT) => None,
@@ -987,7 +1001,7 @@ impl WarningSink for TauriWarningSink {
                     None => auto_accept_response(&method, &params),
                 };
                 if let Err(error) = client.respond(id, response).await {
-                    let _ = app.emit(
+                    let _ = app_for_task.emit(
                         WARNING_EVENT,
                         RuntimeWarningPayload {
                             runtime: RuntimeKind::Codex,
@@ -3371,6 +3385,24 @@ mod tests {
         )
         .is_err());
         assert!(super::validate_thread_resume_response("thread-1", &json!({})).is_err());
+    }
+
+    #[test]
+    fn notification_is_terminal_keeps_retrying_reconnect_errors_non_terminal() {
+        assert!(!super::notification_is_terminal(
+            "error",
+            &json!({
+                "willRetry": true,
+                "error": { "message": "Reconnecting... 5/5" }
+            }),
+        ));
+        assert!(super::notification_is_terminal(
+            "error",
+            &json!({
+                "willRetry": false,
+                "error": { "message": "Reconnecting... 5/5" }
+            }),
+        ));
     }
 
     #[derive(Default)]
