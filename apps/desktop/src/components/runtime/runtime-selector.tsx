@@ -676,13 +676,46 @@ export function RuntimeSelector({
           projectPath={projectPath}
           agentId={agentId}
           busy={busy}
-          onAgentChange={(nextAgentId) =>
+          onAgentChange={(agent) => {
+            if (!agent) {
+              // Clearing restores runtime defaults for the active peer.
+              writePeerDefaults(peer);
+              return;
+            }
+
+            const hasModelOverride = Boolean(selectedModelId?.trim());
+            const hasEffortOverride = Boolean(reasoningEffort?.trim());
+            const nextModel = hasModelOverride
+              ? selectedModelId
+              : (agent.model ?? selectedModelId);
+            const nextEffort = hasEffortOverride
+              ? reasoningEffort
+              : (agent.reasoningEffort ?? reasoningEffort);
+
+            if (peer !== "codex" && nextModel) {
+              const claudeModel = CLAUDE_MODEL_OPTIONS.find(
+                (option) => option.id === nextModel,
+              )?.id;
+              if (claudeModel) onClaudeModelChange(claudeModel);
+            }
+            if (
+              peer !== "codex" &&
+              nextEffort &&
+              CLAUDE_REASONING_EFFORT_OPTIONS.includes(
+                nextEffort as (typeof CLAUDE_REASONING_EFFORT_OPTIONS)[number],
+              )
+            ) {
+              onClaudeEffortChange(
+                nextEffort as (typeof CLAUDE_REASONING_EFFORT_OPTIONS)[number],
+              );
+            }
+
             onSelectionChange({
-              runtimeModel: selectedModelId,
-              reasoningEffort,
-              agentId: nextAgentId,
-            })
-          }
+              runtimeModel: nextModel,
+              reasoningEffort: nextEffort,
+              agentId: agent.id,
+            });
+          }}
         />
       </div>
 

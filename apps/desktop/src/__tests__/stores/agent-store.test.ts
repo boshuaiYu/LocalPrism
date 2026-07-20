@@ -107,4 +107,44 @@ describe("agent-store", () => {
     expect(useAgentStore.getState().agents).toEqual([existing]);
     expect(useAgentStore.getState().error).toContain("Agent slug invalid");
   });
+
+  it("propagates incompatible assigned-skill validation from the backend", async () => {
+    invoke.mockRejectedValueOnce(
+      new Error("Assigned skill 'writer' is not available for Codex User"),
+    );
+
+    await expect(
+      useAgentStore.getState().save(
+        sampleAgent({
+          runtime: "codex",
+          skillIds: ["writer"],
+        }),
+        undefined,
+        false,
+      ),
+    ).rejects.toThrow(/not available/i);
+
+    expect(useAgentStore.getState().error).toMatch(/not available/i);
+  });
+
+  it("keeps the skill catalog untouched when deleting an agent", async () => {
+    const existing = sampleAgent();
+    useAgentStore.setState({ agents: [existing] });
+    invoke.mockResolvedValueOnce(undefined).mockResolvedValueOnce([]);
+
+    await useAgentStore.getState().remove(existing);
+
+    expect(invoke).toHaveBeenCalledWith("delete_agent", {
+      runtime: "claude",
+      scope: "user",
+      agentId: "reviewer",
+      projectPath: null,
+    });
+    // Agent deletion must never invoke skill_delete_managed / skill_import.
+    expect(
+      invoke.mock.calls.some(([command]) =>
+        String(command).startsWith("skill_"),
+      ),
+    ).toBe(false);
+  });
 });

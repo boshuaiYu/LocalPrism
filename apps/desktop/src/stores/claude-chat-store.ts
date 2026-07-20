@@ -1188,7 +1188,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     const runtime = activeTab.runtime;
     const runtimeModel = activeTab.runtimeModel?.trim() || null;
     let tabReasoningEffort = activeTab.reasoningEffort?.trim() || null;
-    const codexAgentId = activeTab.agentId?.trim() || null;
+    const selectedAgentId = activeTab.agentId?.trim() || null;
     if (runtime === "codex" && !runtimeModel) {
       set((s) =>
         applyTabUpdate(s, activeTabId, {
@@ -1504,7 +1504,9 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
           runtime === "claude"
             ? (tabReasoningEffort ?? effortLevel)
             : tabReasoningEffort,
-        agentId: runtime === "codex" ? codexAgentId : null,
+        // Claude CLI accepts `--agent <slug>`; Codex projects selected-agent
+        // model/effort/instructions into thread/turn params (no root agentId).
+        agentId: selectedAgentId,
         providerCredentialId:
           runtime === "claude" ? providerCredentialId : null,
         providerModelOverride:

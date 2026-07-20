@@ -2001,6 +2001,13 @@ fn with_prompt_transport(mut args: Vec<String>, prompt: String) -> (Vec<String>,
     }
 }
 
+fn push_agent_arg(args: &mut Vec<String>, agent_id: Option<&str>) {
+    if let Some(agent) = agent_id.map(str::trim).filter(|value| !value.is_empty()) {
+        args.push("--agent".to_string());
+        args.push(agent.to_string());
+    }
+}
+
 // 鈹€鈹€鈹€ Setup / Status Commands 鈹€鈹€鈹€
 
 #[derive(serde::Serialize)]
@@ -3484,6 +3491,7 @@ pub async fn execute_claude_code(
     effort_level: Option<String>,
     provider_credential_id: Option<String>,
     provider_model_override: Option<String>,
+    agent_id: Option<String>,
     attempt_id: Option<String>,
 ) -> Result<(), String> {
     let Some(reservation) = reserve_claude_start(&window, &tab_id, attempt_id.as_deref()).await
@@ -3521,6 +3529,7 @@ pub async fn execute_claude_code(
             args.push("--model".to_string());
             args.push(m);
         }
+        push_agent_arg(&mut args, agent_id.as_deref());
         args.extend(common_claude_args());
 
         let cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
@@ -3603,6 +3612,7 @@ pub async fn resume_claude_code(
     effort_level: Option<String>,
     provider_credential_id: Option<String>,
     provider_model_override: Option<String>,
+    agent_id: Option<String>,
     attempt_id: Option<String>,
 ) -> Result<(), String> {
     let Some(reservation) = reserve_claude_start(&window, &tab_id, attempt_id.as_deref()).await
@@ -3641,6 +3651,7 @@ pub async fn resume_claude_code(
             args.push("--model".to_string());
             args.push(m);
         }
+        push_agent_arg(&mut args, agent_id.as_deref());
         args.extend(common_claude_args());
 
         let cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
@@ -5229,6 +5240,25 @@ mod tests {
             .unwrap();
         let prompt = &args[prompt_idx + 1];
         assert!(prompt.contains("LaTeX"));
+    }
+
+    #[test]
+    fn test_push_agent_arg_adds_native_slug() {
+        let mut args = vec!["--model".into(), "opus".into()];
+        push_agent_arg(&mut args, Some("  reviewer  "));
+        assert_eq!(
+            args,
+            vec![
+                "--model".to_string(),
+                "opus".to_string(),
+                "--agent".to_string(),
+                "reviewer".to_string()
+            ]
+        );
+        let mut empty = Vec::new();
+        push_agent_arg(&mut empty, Some("   "));
+        push_agent_arg(&mut empty, None);
+        assert!(empty.is_empty());
     }
 
     #[test]

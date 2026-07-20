@@ -3,6 +3,7 @@ import { useAgentStore } from "@/stores/agent-store";
 import { cn } from "@/lib/utils";
 import {
   wireRuntimeFromPeer,
+  type AgentProfile,
   type ChatRuntimePeer,
   type RuntimeKind,
 } from "@/runtime/types";
@@ -12,7 +13,8 @@ export interface AgentSelectorProps {
   projectPath?: string | null;
   agentId: string | null;
   busy?: boolean;
-  onAgentChange: (agentId: string | null) => void;
+  /** Called with the selected agent profile, or null for Default. */
+  onAgentChange: (agent: AgentProfile | null) => void;
 }
 
 export function AgentSelector({
@@ -57,7 +59,11 @@ export function AgentSelector({
         value={selected?.id ?? ""}
         onChange={(event) => {
           const next = event.target.value.trim();
-          onAgentChange(next.length > 0 ? next : null);
+          if (!next) {
+            onAgentChange(null);
+            return;
+          }
+          onAgentChange(options.find((agent) => agent.id === next) ?? null);
         }}
       >
         <option value="">Default</option>

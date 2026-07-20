@@ -30,6 +30,7 @@ import {
 } from "@/lib/template-registry";
 import { TemplateGallery } from "@/components/template-gallery";
 import { DEFAULT_PROJECT_INSTRUCTIONS } from "@/lib/default-claude-md";
+import { ensureProjectAgentsMd } from "@/lib/project-agents-md";
 import {
   buildReferenceFilesSection,
   importReferenceFiles,
@@ -87,6 +88,7 @@ function ScratchForm({ onBack }: { onBack: () => void }) {
   const [isDragOver, setIsDragOver] = useState(false);
   const [refFilesOpen, setRefFilesOpen] = useState(false);
   const [locationOpen, setLocationOpen] = useState(false);
+  const [enableCodex, setEnableCodex] = useState(false);
 
   const projectNameRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -204,15 +206,14 @@ function ScratchForm({ onBack }: { onBack: () => void }) {
       }
       await mkdir(projectPath, { recursive: true });
 
-      // Neutral project instructions for Claude Code (CLAUDE.md) and Codex (AGENTS.md)
+      // CLAUDE.md is optional project context — create only if missing, never overwrite.
       const claudeMdPath = await join(projectPath, "CLAUDE.md");
       if (!(await exists(claudeMdPath))) {
         await writeTextFile(claudeMdPath, DEFAULT_PROJECT_INSTRUCTIONS);
       }
-      const agentsMdPath = await join(projectPath, "AGENTS.md");
-      if (!(await exists(agentsMdPath))) {
-        await writeTextFile(agentsMdPath, DEFAULT_PROJECT_INSTRUCTIONS);
-      }
+
+      // AGENTS.md only when Codex is explicitly enabled; never overwrite.
+      await ensureProjectAgentsMd(projectPath, enableCodex);
 
       const mainTexPath = await join(projectPath, template.mainFileName);
       const mainExists = await exists(mainTexPath);
@@ -317,6 +318,24 @@ function ScratchForm({ onBack }: { onBack: () => void }) {
               <p className="text-destructive text-xs">{projectNameError}</p>
             )}
           </div>
+
+          <label className="flex items-start gap-2.5 rounded-xl border border-border/60 bg-card/30 px-3 py-2.5 text-sm">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={enableCodex}
+              onChange={(event) => setEnableCodex(event.target.checked)}
+            />
+            <span>
+              <span className="font-medium">
+                Enable Codex project instructions
+              </span>
+              <span className="mt-0.5 block text-muted-foreground text-xs leading-relaxed">
+                Creates <code>AGENTS.md</code> only if it does not already
+                exist. Never overwrites existing project agents or skills.
+              </span>
+            </span>
+          </label>
 
           {/* Purpose */}
           <div className="space-y-2.5">

@@ -1,6 +1,11 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { AgentProfile, RuntimeKind, SkillScope } from "@/runtime/types";
 import { emptyAgentProfile, useAgentStore } from "@/stores/agent-store";
+import { useSkillStore } from "@/stores/skill-store";
+import {
+  skillAssignmentId,
+  skillsCompatibleWith,
+} from "@/lib/compatible-skills";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -23,6 +28,8 @@ export function AgentEditor({
 }: AgentEditorProps) {
   const save = useAgentStore((state) => state.save);
   const error = useAgentStore((state) => state.error);
+  const skills = useSkillStore((state) => state.skills);
+  const refreshSkills = useSkillStore((state) => state.refresh);
   const [profile, setProfile] = useState<AgentProfile>(
     () =>
       initial ?? emptyAgentProfile(runtime, projectPath ? "project" : "user"),
@@ -31,11 +38,29 @@ export function AgentEditor({
   const [saving, setSaving] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
+  useEffect(() => {
+    void refreshSkills(projectPath ?? undefined);
+  }, [projectPath, refreshSkills]);
+
+  const compatibleSkills = useMemo(
+    () => skillsCompatibleWith(skills, runtime, profile.scope),
+    [skills, runtime, profile.scope],
+  );
+
   const update = <K extends keyof AgentProfile>(
     key: K,
     value: AgentProfile[K],
   ) => {
     setProfile((current) => ({ ...current, [key]: value }));
+  };
+
+  const toggleSkill = (skillId: string, enabled: boolean) => {
+    setProfile((current) => {
+      const next = new Set(current.skillIds);
+      if (enabled) next.add(skillId);
+      else next.delete(skillId);
+      return { ...current, skillIds: [...next] };
+    });
   };
 
   const onSubmit = async () => {
@@ -47,6 +72,16 @@ export function AgentEditor({
           ...profile,
           runtime,
           id: profile.id || profile.name,
+          // Persist only skills still compatible with the chosen runtime/scope.
+          skillIds: profile.skillIds.filter((skillId) =>
+            compatibleSkills.some(
+              (skill) =>
+                skillAssignmentId(skill) === skillId ||
+                skill.id === skillId ||
+                skill.folder === skillId ||
+                skill.name === skillId,
+            ),
+          ),
         },
         projectPath ?? undefined,
         overwrite || Boolean(initial),
@@ -152,20 +187,55 @@ export function AgentEditor({
         </div>
       )}
       <div className="grid gap-2">
-        <Label htmlFor="agent-skills">Assigned skills (comma-separated)</Label>
-        <Input
-          id="agent-skills"
-          value={profile.skillIds.join(", ")}
-          onChange={(event) =>
-            update(
-              "skillIds",
-              event.target.value
-                .split(",")
-                .map((item) => item.trim())
-                .filter(Boolean),
-            )
-          }
-        />
+        <Label>Assigned skills</Label>
+        <p className="text-muted-foreground text-xs">
+          Only skills installed for {runtime} / {profile.scope} can be assigned.
+          Saving writes native Claude <code>skills:</code> or Codex skill config
+          fields.
+        </p>
+        {compatibleSkills.length === 0 ? (
+          <p className="text-muted-foreground text-sm">
+            No compatible skills for this runtime and scope.
+          </p>
+        ) : (
+          <ul className="max-h-40 space-y-1 overflow-y-auto rounded-md border border-border p-2">
+            {compatibleSkills.map((skill) => {
+              const id = skillAssignmentId(skill);
+              const checked = profile.skillIds.some(
+                (skillId) =>
+                  skillId === id ||
+                  skillId === skill.id ||
+                  skillId === skill.folder ||
+                  skillId === skill.name,
+              );
+              return (
+                <li key={`${skill.id}:${skill.sourcePath}`}>
+                  <label className="flex items-start gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={checked}
+                      onChange={(event) =>
+                        toggleSkill(id, event.target.checked)
+                      }
+                    />
+                    <span>
+                      <span className="font-medium">{skill.name}</span>
+                      <span className="ml-1 text-muted-foreground text-xs">
+                        ({id})
+                      </span>
+                      {skill.description && (
+                        <span className="mt-0.5 block text-muted-foreground text-xs">
+                          {skill.description}
+                        </span>
+                      )}
+                    </span>
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </div>
       <div className="grid gap-2">
         <Label htmlFor="agent-instructions">Instructions</Label>

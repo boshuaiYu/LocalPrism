@@ -25,6 +25,7 @@ import {
   AppWindowIcon,
   FlaskConicalIcon,
   TerminalIcon,
+  SettingsIcon,
   type LucideIcon,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -80,6 +81,7 @@ import { useUvSetupStore } from "@/stores/uv-setup-store";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import { ProjectCloseButton } from "@/components/workspace/project-close-button";
 import { UvSetupDialog } from "@/components/uv-setup";
+import { SettingsDialog } from "@/components/settings/settings-dialog";
 import { createLogger } from "@/lib/debug/logger";
 
 const log = createLogger("sidebar");
@@ -950,6 +952,7 @@ export function Sidebar({
   const [isRenamingProject, setIsRenamingProject] = useState(false);
   const [newFileName, setNewFileName] = useState("");
   const [newFolderName, setNewFolderName] = useState("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Folder expand/collapse
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(
@@ -1452,6 +1455,16 @@ export function Sidebar({
           <div className="flex h-9 items-center justify-between border-sidebar-border border-t px-3 text-muted-foreground text-xs">
             <span className="truncate">LocalPrism v{appVersion}</span>
             <div className="flex shrink-0 items-center gap-1">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-6"
+                onClick={() => setSettingsOpen(true)}
+                title="Settings"
+                aria-label="Open settings"
+              >
+                <SettingsIcon className="size-3.5" />
+              </Button>
               <Button variant="ghost" size="icon" className="size-6" asChild>
                 <a
                   href="https://github.com/delibae/claude-prism"
@@ -1489,6 +1502,8 @@ export function Sidebar({
               </Button>
             </div>
           </div>
+
+          <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
 
           {/* New File Dialog */}
           <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
@@ -2086,10 +2101,11 @@ function EnvironmentSection({
               {pythonLabel}
             </span>
           </button>
-          {/* Scientific Skills row */}
+          {/* Skills row — curated catalog (also available under Settings → Skills) */}
           <button
             className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-sidebar-accent/50"
             onClick={() => setShowOnboarding(true)}
+            title="Browse curated scientific skills"
           >
             <FlaskConicalIcon
               className={cn(

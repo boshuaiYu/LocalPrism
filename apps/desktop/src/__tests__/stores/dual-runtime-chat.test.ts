@@ -195,6 +195,28 @@ describe("dual-runtime chat dispatch", () => {
     );
   });
 
+  it("forwards the Claude custom agent slug on runtime_start_turn", async () => {
+    resetStore(
+      makeTab({
+        runtime: "claude",
+        runtimeModel: "opus",
+        reasoningEffort: "high",
+        agentId: "reviewer",
+      }),
+    );
+
+    await useClaudeChatStore.getState().sendPrompt("Use reviewer agent");
+
+    expect(runtimeRequest()).toEqual(
+      expect.objectContaining({
+        runtime: "claude",
+        model: "opus",
+        reasoningEffort: "high",
+        agentId: "reviewer",
+      }),
+    );
+  });
+
   it("falls back to legacy global Claude model and effort selections", async () => {
     resetStore(
       makeTab({

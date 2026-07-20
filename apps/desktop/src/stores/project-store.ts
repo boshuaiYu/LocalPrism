@@ -1,5 +1,9 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import {
+  ensureProjectAgentsMd,
+  type AgentsMdWriteReason,
+} from "@/lib/project-agents-md";
 
 interface RecentProject {
   path: string;
@@ -14,6 +18,8 @@ interface ProjectState {
   removeRecentProject: (path: string) => void;
   renameRecentProject: (oldPath: string, newPath: string) => void;
   setLastProjectFolder: (path: string) => void;
+  /** Enable Codex later: create AGENTS.md only if missing. */
+  enableCodexAgentsMd: (projectPath: string) => Promise<AgentsMdWriteReason>;
 }
 
 const MAX_RECENT = 10;
@@ -80,6 +86,9 @@ export const useProjectStore = create<ProjectState>()(
           ].slice(0, MAX_RECENT),
         }));
       },
+
+      enableCodexAgentsMd: async (projectPath) =>
+        ensureProjectAgentsMd(normalizeRecentPath(projectPath), true),
     }),
     {
       name: "claude-prism-projects",

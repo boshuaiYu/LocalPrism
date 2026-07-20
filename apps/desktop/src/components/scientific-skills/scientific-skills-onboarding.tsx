@@ -126,7 +126,7 @@ export function ScientificSkillsOnboarding({
     };
   }, []);
 
-  // Skills are global Claude Code assets under ~/.claude/skills.
+  // Curated skills install to runtime skill destinations (Claude and/or Codex).
   const checkStatus = useCallback(async () => {
     try {
       const [gs, skills] = await Promise.all([
@@ -590,7 +590,7 @@ export function ScientificSkillsOnboarding({
           {/* Footer */}
           <div className="flex shrink-0 items-center justify-between border-border border-t bg-muted/20 px-6 py-2.5">
             <p className="font-mono text-[11px] text-muted-foreground/60">
-              {status?.location ?? "~/.claude/skills/"}
+              {status?.location ?? "Runtime skill destinations"}
             </p>
             <Button
               variant="ghost"
@@ -614,8 +614,8 @@ export function ScientificSkillsOnboarding({
           <DialogHeader>
             <DialogTitle>Delete Skill</DialogTitle>
             <DialogDescription>
-              Delete {deleteTarget?.name ?? "this skill"} from ~/.claude/skills.
-              This cannot be undone.
+              Delete {deleteTarget?.name ?? "this skill"} from its installed
+              skill destination. This cannot be undone.
             </DialogDescription>
           </DialogHeader>
           <div className="rounded-lg border border-border/60 bg-muted/30 px-3 py-2 font-mono text-muted-foreground text-xs">
@@ -658,8 +658,8 @@ export function ScientificSkillsOnboarding({
           <DialogHeader>
             <DialogTitle>Uninstall All Skills</DialogTitle>
             <DialogDescription>
-              This will delete every skill under ~/.claude/skills, including
-              imported local skills. This cannot be undone.
+              This will uninstall managed skills from their skill destinations,
+              including imported local skills. This cannot be undone.
             </DialogDescription>
           </DialogHeader>
           <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-destructive text-xs">

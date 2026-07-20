@@ -48,6 +48,7 @@ import {
   importReferenceFiles,
 } from "@/lib/project-attachments";
 import { getProjectNameError, normalizeProjectName } from "@/lib/project-name";
+import { ensureProjectAgentsMd } from "@/lib/project-agents-md";
 
 const log = createLogger("template-preview");
 
@@ -88,6 +89,7 @@ export function TemplatePreview() {
   const [isDragOver, setIsDragOver] = useState(false);
   const [refFilesOpen, setRefFilesOpen] = useState(false);
   const [locationOpen, setLocationOpen] = useState(false);
+  const [enableCodex, setEnableCodex] = useState(false);
   const projectNameRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -375,6 +377,9 @@ export function TemplatePreview() {
       }
       await mkdir(projectPath, { recursive: true });
 
+      // AGENTS.md only when Codex is explicitly enabled; never overwrite.
+      await ensureProjectAgentsMd(projectPath, enableCodex);
+
       const mainTexPath = await join(projectPath, template.mainFileName);
       const mainExists = await exists(mainTexPath);
       if (!mainExists) {
@@ -587,6 +592,23 @@ export function TemplatePreview() {
                     </p>
                   )}
                 </div>
+                <label className="flex items-start gap-2.5 rounded-xl border border-border/60 bg-card/30 px-3 py-2.5 text-sm">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={enableCodex}
+                    onChange={(event) => setEnableCodex(event.target.checked)}
+                  />
+                  <span>
+                    <span className="font-medium">
+                      Enable Codex project instructions
+                    </span>
+                    <span className="mt-0.5 block text-muted-foreground text-xs leading-relaxed">
+                      Creates <code>AGENTS.md</code> only if missing. Never
+                      overwrites existing agents or skills.
+                    </span>
+                  </span>
+                </label>
                 {/* Purpose — hero element */}
                 <div className="space-y-2">
                   <div>

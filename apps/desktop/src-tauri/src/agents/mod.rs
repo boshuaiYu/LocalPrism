@@ -241,7 +241,7 @@ fn resolve_skill_paths(
         let has_target = skill.targets.iter().any(|target| {
             target.runtime == profile.runtime && target.scope == profile.scope
         });
-        if !has_target && !skill.compatible_runtimes.contains(&profile.runtime) {
+        if !has_target {
             return Err(AgentError::from(format!(
                 "Assigned skill '{skill_id}' is not available for {:?} {:?}",
                 profile.runtime, profile.scope
