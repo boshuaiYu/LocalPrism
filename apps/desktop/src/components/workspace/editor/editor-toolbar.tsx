@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/select";
 import { useDocumentStore } from "@/stores/document-store";
 import { useSettingsStore } from "@/stores/settings-store";
+import { CitationPickerDialog } from "@/components/workspace/editor/citation-picker-dialog";
 
 interface EditorInfo {
   id: string;
@@ -105,6 +106,7 @@ export function EditorToolbar({
   const projectRoot = useDocumentStore((s) => s.projectRoot);
 
   const [editors, setEditors] = useState<EditorInfo[]>([]);
+  const [citationPickerOpen, setCitationPickerOpen] = useState(false);
 
   useEffect(() => {
     invoke<EditorInfo[]>("detect_editors")
@@ -147,6 +149,19 @@ export function EditorToolbar({
         anchor: from + before.length,
         head: from + before.length + selectedText.length,
       },
+    });
+    view.focus();
+  };
+
+  const insertCitationCommand = (citeCommand: string) => {
+    if (useDocumentStore.getState().isProjectMutating) return;
+    const view = editorView.current;
+    if (!view) return;
+
+    const { from, to } = view.state.selection.main;
+    view.dispatch({
+      changes: { from, to, insert: citeCommand },
+      selection: { anchor: from + citeCommand.length },
     });
     view.focus();
   };
@@ -321,8 +336,8 @@ export function EditorToolbar({
       </TooltipIconButton>
       <div className="mx-2 h-4 w-px bg-border" />
       <TooltipIconButton
-        tooltip="Citation (\\cite)"
-        onClick={() => insertText("\\cite{", "}")}
+        tooltip="Insert citation (\\cite)"
+        onClick={() => setCitationPickerOpen(true)}
       >
         <BookMarkedIcon className="size-4" />
       </TooltipIconButton>
@@ -370,6 +385,11 @@ export function EditorToolbar({
           </DropdownMenuContent>
         </DropdownMenu>
       )}
+      <CitationPickerDialog
+        open={citationPickerOpen}
+        onOpenChange={setCitationPickerOpen}
+        onInsert={insertCitationCommand}
+      />
     </div>
   );
 }
