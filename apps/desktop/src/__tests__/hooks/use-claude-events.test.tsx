@@ -1047,7 +1047,7 @@ describe("useClaudeEvents cancellation isolation", () => {
       runtime?.(
         runtimeEvent("tab-a", "tab-a-attempt-1", {
           type: "warning",
-          message: "Codex will retry after an error: Reconnecting... 2/5",
+          message: "Reconnecting... 2/5 (request timed out)",
         }),
       );
       await Promise.resolve();
@@ -1132,7 +1132,7 @@ describe("useClaudeEvents cancellation isolation", () => {
     );
   });
 
-  it("clears streaming when a non-retry Codex warning becomes a tab error", async () => {
+  it("keeps streaming through soft Codex warnings", async () => {
     await act(async () => {
       useClaudeChatStore.setState((state) => ({
         tabs: state.tabs.map((tab) =>
@@ -1154,7 +1154,7 @@ describe("useClaudeEvents cancellation isolation", () => {
       runtime?.(
         runtimeEvent("tab-a", "tab-a-attempt-1", {
           type: "warning",
-          message: "Codex rate limit exceeded",
+          message: "temporary",
         }),
       );
       await Promise.resolve();
@@ -1163,9 +1163,9 @@ describe("useClaudeEvents cancellation isolation", () => {
     const tab = useClaudeChatStore
       .getState()
       .tabs.find((candidate) => candidate.id === "tab-a");
-    expect(tab?.error).toBe("Codex rate limit exceeded");
-    expect(tab?.streamingStatus).toBeNull();
-    expect(tab?.isStreaming).toBe(false);
+    expect(tab?.error).toBeNull();
+    expect(tab?.isStreaming).toBe(true);
+    expect(tab?.streamingStatus).toBe("temporary");
   });
 
   it("surfaces Codex turnFailed and clears streaming", async () => {

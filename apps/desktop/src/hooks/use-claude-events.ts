@@ -791,26 +791,22 @@ export function useClaudeEvents() {
           chatStore._addUsage(tabId, event.inputTokens, event.outputTokens);
           break;
         case "warning": {
-          // Reconnect / retry warnings must not sticky-fail the tab or leave
-          // Thinking stuck; only surface non-retry warnings as tab errors.
+          // Soft / reconnect / retry warnings must not end streaming or
+          // sticky-fail the tab. Only turnFailed / turnCompleted /
+          // turnInterrupted should clear isStreaming.
           const message = event.message.trim();
           if (!message) break;
           const reconnectMatch = message.match(
             /Reconnecting(?:\.\.\.|…)\s*(\d+)\s*\/\s*(\d+)/i,
           );
-          const isRetryWarning =
-            /will retry/i.test(message) || /reconnecting/i.test(message);
           if (reconnectMatch) {
             chatStore._setStreamingStatus(
               tabId,
               `Codex reconnecting ${reconnectMatch[1]}/${reconnectMatch[2]} (request timed out; still waiting for a reply)…`,
             );
-          } else if (isRetryWarning) {
-            chatStore._setStreamingStatus(tabId, message);
           } else {
-            chatStore._setError(tabId, message);
-            chatStore._setStreamingStatus(tabId, null);
-            chatStore._setStreaming(tabId, false);
+            // Retry notices and other soft warnings only update status.
+            chatStore._setStreamingStatus(tabId, message);
           }
           break;
         }
