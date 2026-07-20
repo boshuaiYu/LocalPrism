@@ -698,14 +698,27 @@ impl CodexEventMapper {
             return None;
         }
         let message = sanitized_error_message(Some(error), "Codex turn failed");
-        let reconnect_exhausted = reconnect_attempt_exhausted(&message);
-        if will_retry && !reconnect_exhausted {
-            // Keep the upstream reconnect text intact so the UI can parse N/M.
+        let details = error
+            .get("additionalDetails")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(sanitize_install_output);
+        let warning_message = match details {
+            Some(details) if !message.to_ascii_lowercase().contains(&details.to_ascii_lowercase()) => {
+                format!("{message} ({details})")
+            }
+            _ => message.clone(),
+        };
+
+        if will_retry {
+            // Live Codex can emit Reconnecting... 5/5 with willRetry=true and still
+            // complete the turn afterward. Never release the route here.
             return Some(self.warning(
                 route,
                 Some(thread_id.to_owned()),
                 Some(turn_id.to_owned()),
-                &message,
+                &warning_message,
             ));
         }
 
@@ -716,13 +729,7 @@ impl CodexEventMapper {
             Some(turn_id.to_owned()),
             RuntimeEvent::TurnFailed {
                 turn_id: Some(turn_id.to_owned()),
-                message: if reconnect_exhausted {
-                    format!(
-                        "{message}. Codex could not reach the model API (request timed out). Check network/VPN/proxy, then retry."
-                    )
-                } else {
-                    message
-                },
+                message,
             },
         ))
     }
@@ -946,40 +953,6 @@ fn reasoning_summary_text(item: &serde_json::Map<String, Value>) -> String {
         }
     }
     String::new()
-}
-
-pub(crate) fn reconnect_attempt_exhausted(message: &str) -> bool {
-    // Matches Codex retry text like "Reconnecting... 5/5".
-    let lower = message.to_ascii_lowercase();
-    let Some(index) = lower.find("reconnecting") else {
-        return false;
-    };
-    let tail = message[index..].trim();
-    let Some(slash) = tail.find('/') else {
-        return false;
-    };
-    let (left, right) = tail.split_at(slash);
-    let current = left
-        .bytes()
-        .rev()
-        .take_while(u8::is_ascii_digit)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(char::from)
-        .collect::<String>();
-    let total = right
-        .chars()
-        .skip(1)
-        .take_while(|ch| ch.is_ascii_digit())
-        .collect::<String>();
-    let Ok(current) = current.parse::<u32>() else {
-        return false;
-    };
-    let Ok(total) = total.parse::<u32>() else {
-        return false;
-    };
-    total > 0 && current >= total
 }
 
 fn nested_json_error_message(raw: &str) -> Option<String> {

@@ -454,18 +454,7 @@ fn notification_is_terminal(method: &str, params: &Value) -> bool {
             .pointer("/turn/status")
             .and_then(Value::as_str)
             .is_none_or(|status| status != "inProgress"),
-        "error" => {
-            let will_retry = params.get("willRetry").and_then(Value::as_bool) == Some(true);
-            if !will_retry {
-                return true;
-            }
-            // Codex sometimes keeps willRetry=true on the final reconnect slot.
-            let message = params
-                .pointer("/error/message")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            super::event_mapper::reconnect_attempt_exhausted(message)
-        }
+        "error" => params.get("willRetry").and_then(Value::as_bool) == Some(false),
         _ => false,
     }
 }
