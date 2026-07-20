@@ -14,9 +14,13 @@ import { readTexFileContent } from "@/lib/tauri/fs";
 import { resolveCompileTarget } from "@/lib/latex-compiler";
 import { runOwnedProjectCompile } from "@/lib/project-compile";
 import { createLogger } from "@/lib/debug/logger";
+import { interruptRuntimeTurn } from "@/runtime/commands";
 import type { RuntimeEventEnvelope } from "@/runtime/types";
 
 const log = createLogger("claude-event");
+
+/** Fail a Codex turn that receives no assistant/tool/reasoning progress. */
+const CODEX_NO_PROGRESS_MS = 90_000;
 
 /** Backend event payload shapes (include tab_id for routing) */
 interface ClaudeOutputPayload {
@@ -59,6 +63,9 @@ export function useClaudeEvents() {
   const msgCountRef = useRef(new Map<string, number>());
   const streamStartTimeRef = useRef(new Map<string, number>());
   const lastMsgTimeRef = useRef(new Map<string, number>());
+  const lastCodexEventAtRef = useRef(new Map<string, number>());
+  const lastCodexProgressAtRef = useRef(new Map<string, number>());
+  const codexStallReportedRef = useRef(new Set<string>());
 
   // Reset per-tab state whenever any tab starts streaming
   const tabs = useClaudeChatStore((s) => s.tabs);
@@ -84,6 +91,10 @@ export function useClaudeEvents() {
         msgCountRef.current.set(tab.id, 0);
         streamStartTimeRef.current.delete(tab.id);
         lastMsgTimeRef.current.delete(tab.id);
+        const now = Date.now();
+        lastCodexEventAtRef.current.set(tab.id, now);
+        lastCodexProgressAtRef.current.set(tab.id, now);
+        codexStallReportedRef.current.delete(`${tab.id}:${attemptId}`);
       } else if (!tab.isStreaming) {
         // Clean up finished tab state
         activeAttemptRef.current.delete(tab.id);
@@ -95,9 +106,50 @@ export function useClaudeEvents() {
         msgCountRef.current.delete(tab.id);
         streamStartTimeRef.current.delete(tab.id);
         lastMsgTimeRef.current.delete(tab.id);
+        lastCodexEventAtRef.current.delete(tab.id);
+        lastCodexProgressAtRef.current.delete(tab.id);
       }
     }
   }, [tabs]);
+
+  // Stall only when assistant/tool/reasoning progress stops — reconnect
+  // warnings and other soft events must not reset this clock.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      const chatStore = useClaudeChatStore.getState();
+      for (const tab of chatStore.tabs) {
+        if (
+          tab.runtime !== "codex" ||
+          !tab.isStreaming ||
+          !tab.activeAttemptId
+        ) {
+          continue;
+        }
+        const attemptKey = `${tab.id}:${tab.activeAttemptId}`;
+        if (codexStallReportedRef.current.has(attemptKey)) continue;
+        const lastProgressAt =
+          lastCodexProgressAtRef.current.get(tab.id) ??
+          tab.streamingStartedAt ??
+          now;
+        if (now - lastProgressAt < CODEX_NO_PROGRESS_MS) continue;
+        codexStallReportedRef.current.add(attemptKey);
+        chatStore._setError(
+          tab.id,
+          "Codex made no reply progress for 90 seconds (reconnects alone do not count). Check network/VPN/proxy, then Stop and retry.",
+        );
+        chatStore._setStreamingStatus(tab.id, null);
+        void chatStore.cancelExecution(tab.id);
+        void interruptRuntimeTurn(
+          "codex",
+          tab.id,
+          tab.activeAttemptId,
+          "terminate",
+        ).catch(() => undefined);
+      }
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   // ── One-time listener setup (mount only) ──
   useEffect(() => {
@@ -727,6 +779,16 @@ export function useClaudeEvents() {
 
       if (!initialTab.isStreaming || !isCurrentAttempt()) return;
       const chatStore = useClaudeChatStore.getState();
+      lastCodexEventAtRef.current.set(tabId, Date.now());
+      const isProgressEvent =
+        event.type === "assistantDelta" ||
+        event.type === "assistantCompleted" ||
+        event.type === "reasoningSummaryDelta" ||
+        event.type === "toolStarted" ||
+        event.type === "toolCompleted";
+      if (isProgressEvent) {
+        lastCodexProgressAtRef.current.set(tabId, Date.now());
+      }
       switch (event.type) {
         case "sessionStarted":
           chatStore._setSessionId(tabId, event.sessionId);

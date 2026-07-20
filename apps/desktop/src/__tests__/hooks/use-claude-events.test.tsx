@@ -1025,7 +1025,74 @@ describe("useClaudeEvents cancellation isolation", () => {
     );
   });
 
-  it("ignores Codex reconnect warnings and clears streaming on turnCompleted", async () => {
+  it("stall-fails a Codex turn with reconnect noise but no assistant progress", async () => {
+    vi.useFakeTimers();
+    try {
+      // Remount under fake timers so the stall interval is controlled.
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+      container = document.createElement("div");
+      document.body.append(container);
+      root = createRoot(container);
+      await act(async () => {
+        root.render(<Probe />);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        useClaudeChatStore.setState((state) => ({
+          tabs: state.tabs.map((tab) =>
+            tab.id === "tab-a"
+              ? {
+                  ...tab,
+                  runtime: "codex" as const,
+                  isStreaming: true,
+                  activeAttemptId: "tab-a-attempt-1",
+                  streamingStartedAt: Date.now(),
+                  streamingStatus: "Codex is working…",
+                  error: null,
+                }
+              : tab,
+          ),
+        }));
+      });
+
+      const runtime = callbacks.get("runtime-event");
+      await act(async () => {
+        runtime?.(
+          runtimeEvent("tab-a", "tab-a-attempt-1", { type: "turnStarted" }),
+        );
+        runtime?.(
+          runtimeEvent("tab-a", "tab-a-attempt-1", {
+            type: "warning",
+            message: "Reconnecting... 2/5",
+          }),
+        );
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(90_000);
+      });
+
+      const tab = useClaudeChatStore
+        .getState()
+        .tabs.find((candidate) => candidate.id === "tab-a");
+      expect(tab?.isStreaming).toBe(false);
+      expect(tab?.streamingStatus).toBeNull();
+      expect(tab?.error).toMatch(/no reply progress/i);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps streaming through Codex reconnect warnings and clears on turnCompleted", async () => {
     await act(async () => {
       useClaudeChatStore.setState((state) => ({
         tabs: state.tabs.map((tab) =>
