@@ -72,6 +72,20 @@ const CODEX_EFFORT_ALIASES: Record<string, string> = {
   ultra: "xhigh",
 };
 
+/**
+ * Catalog may still list these, but current Responses API (e.g. gpt-5.6-sol)
+ * rejects them on the wire and triggers long reconnect storms.
+ */
+const CODEX_UNSUPPORTED_WIRE_EFFORTS = new Set(["minimal"]);
+
+const CODEX_API_STABLE_EFFORTS = [
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+] as const;
+
 /** "claude" and "api" are both Claude-backed peers and share the same effort set. */
 export function getReasoningEffortOptions(
   peer: ChatRuntimePeer,
@@ -83,24 +97,18 @@ export function getReasoningEffortOptions(
 
   if (selectedModel?.runtime !== "codex") return [];
   // Catalog may list max/ultra; expose the API-stable xhigh instead.
+  // Hide unsupported wire efforts (e.g. minimal) from the picker.
   const seen = new Set<string>();
   const options: string[] = [];
   for (const effort of selectedModel.reasoningEfforts) {
     const normalized = CODEX_EFFORT_ALIASES[effort] ?? effort;
+    if (CODEX_UNSUPPORTED_WIRE_EFFORTS.has(normalized)) continue;
     if (seen.has(normalized)) continue;
     seen.add(normalized);
     options.push(normalized);
   }
   return options;
 }
-
-const CODEX_API_STABLE_EFFORTS = [
-  "none",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-] as const;
 
 export function coerceCodexReasoningEffort(
   effort: string | null | undefined,
@@ -113,29 +121,43 @@ export function coerceCodexReasoningEffort(
   const resolve = (value: string | null | undefined): string | null => {
     const raw = value?.trim() || null;
     if (!raw) return null;
-    return CODEX_EFFORT_ALIASES[raw] ?? raw;
+    const aliased = CODEX_EFFORT_ALIASES[raw] ?? raw;
+    if (CODEX_UNSUPPORTED_WIRE_EFFORTS.has(aliased)) return null;
+    return aliased;
   };
+
+  const apiStableSupported = supported
+    .map((entry) => CODEX_EFFORT_ALIASES[entry] ?? entry)
+    .filter(
+      (entry) =>
+        (CODEX_API_STABLE_EFFORTS as readonly string[]).includes(entry) ||
+        entry === "xhigh",
+    );
 
   const candidates = [
     resolve(effort),
     resolve(selectedModel.defaultReasoningEffort),
     ...CODEX_API_STABLE_EFFORTS,
-    supported[0],
+    apiStableSupported[0],
+    supported.find((entry) => !CODEX_UNSUPPORTED_WIRE_EFFORTS.has(entry)) ??
+      null,
   ];
 
   for (const candidate of candidates) {
     if (!candidate) continue;
-    // Accept catalog-listed efforts, or xhigh after max/ultra coercion even if
-    // the catalog omitted the stable name.
+    // Accept API-stable catalog efforts, or xhigh after max/ultra coercion even
+    // if the catalog omitted the stable name.
     if (
-      supported.includes(candidate) ||
+      apiStableSupported.includes(candidate) ||
+      ((CODEX_API_STABLE_EFFORTS as readonly string[]).includes(candidate) &&
+        supported.includes(candidate)) ||
       (candidate === "xhigh" &&
         (supported.includes("max") || supported.includes("ultra")))
     ) {
       return candidate;
     }
   }
-  return supported.find((entry) => !(entry in CODEX_EFFORT_ALIASES)) ?? null;
+  return apiStableSupported[0] ?? null;
 }
 
 export function normalizeReasoningEffort(

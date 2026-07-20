@@ -6,6 +6,7 @@ import { ChatComposer } from "@/components/claude-chat/chat-composer";
 import * as runtimeSelectorModule from "@/components/runtime/runtime-selector";
 import {
   CLAUDE_MODEL_OPTIONS,
+  coerceCodexReasoningEffort,
   filterRuntimeConversations,
   getCodexModelOptions,
   getReasoningEffortOptions,
@@ -154,7 +155,6 @@ describe("runtime selector helpers", () => {
   it("uses only the selected Codex model's arbitrary backend efforts", () => {
     expect(getReasoningEffortOptions("codex", codexModel)).toEqual([
       "none",
-      "minimal",
       "low",
       "medium",
       "high",
@@ -162,6 +162,27 @@ describe("runtime selector helpers", () => {
     ]);
     expect(getReasoningEffortOptions("codex", null)).toEqual([]);
     expect(getReasoningEffortOptions("codex", backendClaudeModel)).toEqual([]);
+  });
+
+  it("coerces Codex catalog minimal effort to an API-stable effort", () => {
+    const model = {
+      ...codexModel,
+      id: "gpt-5.6-sol",
+      reasoningEfforts: ["minimal", "low", "medium", "high", "xhigh"],
+      defaultReasoningEffort: "minimal",
+    };
+    expect(coerceCodexReasoningEffort("minimal", model)).toBe("low");
+    expect(normalizeReasoningEffort("codex", "minimal", model)).toBe("low");
+  });
+
+  it("keeps low when already API-stable", () => {
+    const model = {
+      ...codexModel,
+      id: "gpt-5.6-sol",
+      reasoningEfforts: ["low", "medium", "high", "xhigh"],
+      defaultReasoningEffort: "low",
+    };
+    expect(coerceCodexReasoningEffort("low", model)).toBe("low");
   });
 
   it("keeps a supported effort and otherwise uses the supported backend default", () => {
@@ -173,7 +194,8 @@ describe("runtime selector helpers", () => {
       "xhigh",
     );
     expect(normalizeReasoningEffort("codex", "max", codexModel)).toBe("xhigh");
-    expect(normalizeReasoningEffort("codex", null, codexModel)).toBe("minimal");
+    // Catalog default "minimal" is not API-stable; coerce to first stable option.
+    expect(normalizeReasoningEffort("codex", null, codexModel)).toBe("none");
   });
 
   it("falls back to the first supported effort and then null", () => {
@@ -284,7 +306,7 @@ const defaultSelectorProps: RuntimeSelectorTestProps = {
   codexModels: [codexModel, secondCodexModel],
   codexModelsLoading: false,
   selectedModelId: "gpt-5.4",
-  reasoningEffort: "minimal",
+  reasoningEffort: "low",
   busy: false,
   apiProviderControls: <button type="button">API provider</button>,
   selectedClaudeModel: "sonnet",
@@ -396,7 +418,7 @@ describe("RuntimeSelector", () => {
         ),
       ).toBe("false");
       expect(
-        buttonByLabel(view.container, "Reasoning effort minimal").getAttribute(
+        buttonByLabel(view.container, "Reasoning effort low").getAttribute(
           "aria-pressed",
         ),
       ).toBe("true");
@@ -405,6 +427,11 @@ describe("RuntimeSelector", () => {
           "aria-pressed",
         ),
       ).toBe("false");
+      expect(
+        view.container.querySelector(
+          'button[aria-label="Reasoning effort minimal"]',
+        ),
+      ).toBeNull();
     } finally {
       await view.unmount();
     }
@@ -505,7 +532,7 @@ describe("RuntimeSelector", () => {
       codexAvailable: false,
       codexModels: [codexModel],
       selectedModelId: codexModel.id,
-      reasoningEffort: "minimal",
+      reasoningEffort: "low",
     });
     try {
       expect(
@@ -565,17 +592,19 @@ describe("RuntimeSelector", () => {
         reasoningEffort: "xhigh",
       });
       expect(
-        buttonByLabel(view.container, "Reasoning effort minimal"),
-      ).not.toBeNull();
+        view.container.querySelector(
+          'button[aria-label="Reasoning effort minimal"]',
+        ),
+      ).toBeNull();
       expect(
         buttonByLabel(view.container, "Reasoning effort xhigh"),
       ).not.toBeNull();
       await act(async () =>
-        buttonByLabel(view.container, "Reasoning effort minimal").click(),
+        buttonByLabel(view.container, "Reasoning effort low").click(),
       );
       expect(onSelectionChange).toHaveBeenLastCalledWith({
         runtimeModel: "gpt-5.4",
-        reasoningEffort: "minimal",
+        reasoningEffort: "low",
         agentId: null,
       });
     } finally {
@@ -717,7 +746,7 @@ describe("RuntimeSelector", () => {
       });
       expect(onSelectionChange).toHaveBeenLastCalledWith({
         runtimeModel: "gpt-5.4",
-        reasoningEffort: "minimal",
+        reasoningEffort: "none",
         agentId: null,
       });
     } finally {
@@ -900,18 +929,16 @@ describe("RuntimeSelector", () => {
     }
   });
 
-  it("shows unavailable runtime status and a disabled future Agent control", async () => {
+  it("shows unavailable runtime status and still renders the agent control", async () => {
     const view = await mountSelector({ codexAvailable: false });
     try {
       const codex = buttonByLabel(view.container, "Codex peer");
       expect(codex.disabled).toBe(true);
       expect(codex.textContent).toContain("Not authenticated");
-      const agent = buttonByLabel(
-        view.container,
-        "Agent (coming in the custom-agent phase)",
+      const agent = view.container.querySelector(
+        'select[aria-label="Select custom agent"]',
       );
-      expect(agent.disabled).toBe(true);
-      expect(agent.textContent).toContain("Coming in the custom-agent phase");
+      expect(agent).toBeInstanceOf(HTMLSelectElement);
     } finally {
       await view.unmount();
     }
@@ -1802,7 +1829,9 @@ describe("ChatComposer runtime peer wiring", () => {
       expect(selectedModelButton).toBeInstanceOf(HTMLButtonElement);
       expect(selectedModelButton?.getAttribute("aria-pressed")).toBe("true");
       expect(firstModelButton?.getAttribute("aria-pressed")).toBe("false");
-      expect(scrollIntoView).toHaveBeenCalledWith({ block: "center" });
+      await vi.waitFor(() => {
+        expect(scrollIntoView).toHaveBeenCalledWith({ block: "center" });
+      });
     } finally {
       await act(async () => root.unmount());
       container.remove();
