@@ -1414,7 +1414,7 @@ mod tests {
             RuntimeEvent::Warning { message } if message.contains("temporary")
         ));
 
-        let exhausted_retry = map(
+        let retrying_at_limit = map(
             &mut mapper,
             &route,
             "error",
@@ -1424,7 +1424,7 @@ mod tests {
             }),
         );
         assert!(matches!(
-            &exhausted_retry[0].event,
+            &retrying_at_limit[0].event,
             RuntimeEvent::Warning { message }
                 if message.contains("Reconnecting... 5/5")
                     && message.to_ascii_lowercase().contains("timed out")
@@ -1461,6 +1461,10 @@ mod tests {
             &hard_fail[0].event,
             RuntimeEvent::TurnFailed { message, .. } if message.contains("request failed permanently")
         ));
+        assert!(mapper
+            .terminal_turns
+            .iter()
+            .any(|terminal| terminal.turn_id == "turn-a"));
     }
 
     #[test]

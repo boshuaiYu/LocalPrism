@@ -1059,6 +1059,9 @@ describe("useClaudeEvents cancellation isolation", () => {
     expect(tab?.error).toBeNull();
     expect(tab?.isStreaming).toBe(true);
     expect(tab?.streamingStatus).toMatch(/reconnecting 2\/5/i);
+    expect(tab?.streamingStatus).toMatch(
+      /request timed out; still waiting for a reply/i,
+    );
 
     await act(async () => {
       runtime?.(
@@ -1089,6 +1092,80 @@ describe("useClaudeEvents cancellation isolation", () => {
         message: { content: [{ type: "text", text: "hello" }] },
       }),
     );
+  });
+
+  it("surfaces Codex reconnect progress when the warning uses a unicode ellipsis", async () => {
+    await act(async () => {
+      useClaudeChatStore.setState((state) => ({
+        tabs: state.tabs.map((tab) =>
+          tab.id === "tab-a"
+            ? {
+                ...tab,
+                runtime: "codex" as const,
+                error: null,
+                isStreaming: true,
+                streamingStatus: "Waiting for Codex…",
+              }
+            : tab,
+        ),
+      }));
+    });
+
+    const runtime = callbacks.get("runtime-event");
+    await act(async () => {
+      runtime?.(
+        runtimeEvent("tab-a", "tab-a-attempt-1", {
+          type: "warning",
+          message: "Codex will retry after an error: Reconnecting… 3/5",
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    const tab = useClaudeChatStore
+      .getState()
+      .tabs.find((candidate) => candidate.id === "tab-a");
+    expect(tab?.error).toBeNull();
+    expect(tab?.isStreaming).toBe(true);
+    expect(tab?.streamingStatus).toBe(
+      "Codex reconnecting 3/5 (request timed out; still waiting for a reply)…",
+    );
+  });
+
+  it("clears streaming when a non-retry Codex warning becomes a tab error", async () => {
+    await act(async () => {
+      useClaudeChatStore.setState((state) => ({
+        tabs: state.tabs.map((tab) =>
+          tab.id === "tab-a"
+            ? {
+                ...tab,
+                runtime: "codex" as const,
+                error: null,
+                isStreaming: true,
+                streamingStatus: "Waiting for Codex…",
+              }
+            : tab,
+        ),
+      }));
+    });
+
+    const runtime = callbacks.get("runtime-event");
+    await act(async () => {
+      runtime?.(
+        runtimeEvent("tab-a", "tab-a-attempt-1", {
+          type: "warning",
+          message: "Codex rate limit exceeded",
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    const tab = useClaudeChatStore
+      .getState()
+      .tabs.find((candidate) => candidate.id === "tab-a");
+    expect(tab?.error).toBe("Codex rate limit exceeded");
+    expect(tab?.streamingStatus).toBeNull();
+    expect(tab?.isStreaming).toBe(false);
   });
 
   it("surfaces Codex turnFailed and clears streaming", async () => {

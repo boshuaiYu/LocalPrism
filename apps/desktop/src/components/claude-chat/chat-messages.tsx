@@ -18,6 +18,9 @@ import { ThinkingWidget, ToolWidget } from "./tool-widgets";
 
 // ─── Streaming Indicator (isolated to prevent re-render storms) ───
 
+const GENERIC_CODEX_STATUS =
+  /^(thinking(\.\.\.|…)|codex is working(\.\.\.|…)|waiting for codex(\.\.\.|…))$/i;
+
 const StreamingIndicator: FC<{
   startedAt: number | null;
   status?: string | null;
@@ -35,11 +38,16 @@ const StreamingIndicator: FC<{
     return () => clearInterval(timer);
   }, [startedAt]);
 
-  const label =
-    status?.trim() ||
-    (elapsed >= 45
-      ? "Still waiting on Codex (reconnects can take 1–2 minutes)…"
-      : "Thinking...");
+  const normalizedStatus = status?.trim() || "";
+  const label = (() => {
+    if (normalizedStatus && !GENERIC_CODEX_STATUS.test(normalizedStatus)) {
+      return normalizedStatus;
+    }
+    if (elapsed >= 45) {
+      return "Still waiting on Codex (reconnects can take 1–2 minutes)…";
+    }
+    return normalizedStatus || "Thinking...";
+  })();
 
   return (
     <div className="flex items-center gap-1.5 px-1 py-1.5 text-muted-foreground">

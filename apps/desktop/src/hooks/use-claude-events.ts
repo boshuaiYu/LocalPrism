@@ -796,19 +796,21 @@ export function useClaudeEvents() {
           const message = event.message.trim();
           if (!message) break;
           const reconnectMatch = message.match(
-            /Reconnecting\.\.\.\s*(\d+)\s*\/\s*(\d+)/i,
+            /Reconnecting(?:\.\.\.|…)\s*(\d+)\s*\/\s*(\d+)/i,
           );
           const isRetryWarning =
             /will retry/i.test(message) || /reconnecting/i.test(message);
           if (reconnectMatch) {
             chatStore._setStreamingStatus(
               tabId,
-              `Codex reconnecting ${reconnectMatch[1]}/${reconnectMatch[2]} (WebSocket timed out; falling back to HTTP)…`,
+              `Codex reconnecting ${reconnectMatch[1]}/${reconnectMatch[2]} (request timed out; still waiting for a reply)…`,
             );
           } else if (isRetryWarning) {
             chatStore._setStreamingStatus(tabId, message);
           } else {
             chatStore._setError(tabId, message);
+            chatStore._setStreamingStatus(tabId, null);
+            chatStore._setStreaming(tabId, false);
           }
           break;
         }
