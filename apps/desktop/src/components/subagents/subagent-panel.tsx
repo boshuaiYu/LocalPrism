@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ChevronDownIcon, ChevronRightIcon } from "lucide-react";
 import type { AgentRunNode, ConversationRef } from "@/runtime/types";
 import { useAgentRunStore } from "@/stores/agent-run-store";
@@ -29,14 +29,22 @@ export function SubagentPanel() {
   const selectedRunId = useAgentRunStore((state) => state.selectedRunId);
   const selectRun = useAgentRunStore((state) => state.selectRun);
   const runsByRoot = useAgentRunStore((state) => state.runsByRoot);
+  const projectPath = useClaudeChatStore(
+    (state) => state.activeProjectPath ?? "",
+  );
 
   const root: ConversationRef | null = activeTab?.sessionId
     ? {
         runtime: activeTab.runtime === "codex" ? "codex" : "claude",
         sessionId: activeTab.sessionId,
-        projectPath: "",
+        projectPath,
       }
     : null;
+
+  useEffect(() => {
+    if (!root) return;
+    void useAgentRunStore.getState().restore(root);
+  }, [root?.runtime, root?.sessionId, root?.projectPath]);
 
   const runs = useMemo(() => {
     if (!root) return [];

@@ -826,9 +826,11 @@ pub async fn spawn_claude_process(
     let provider_metadata_stdout = provider_metadata.clone();
     let registry_stdout = registry.clone();
     let reservation_stdout = reservation.clone();
+    let window_label_stdout = window.label().to_string();
     let stdout_task = tokio::spawn(async move {
         let mut lines = stdout_reader.lines();
         let mut line_count: u64 = 0;
+        let mut agent_mapper = crate::runtime::claude::ClaudeAgentMapper::default();
         while let Ok(Some(mut line)) = lines.next_line().await {
             line_count += 1;
             let elapsed = start_time.elapsed().as_secs_f64();
@@ -881,14 +883,36 @@ pub async fn spawn_claude_process(
                 registry.is_current(&reservation_stdout)
             };
             if should_emit {
+                // Preserve legacy Claude streaming consumers unchanged.
                 let _ = win_stdout.emit(
                     "claude-output",
                     ClaudeOutputEvent {
                         tab_id: tab_id_stdout.clone(),
                         attempt_id: reservation_stdout.attempt_id.clone(),
-                        data: line,
+                        data: line.clone(),
                     },
                 );
+
+                // Additionally emit normalized Agent/Task lifecycle for the subagent panel.
+                let runtime_events = agent_mapper.ingest_line(
+                    &line,
+                    &window_label_stdout,
+                    &tab_id_stdout,
+                    &reservation_stdout.attempt_id,
+                );
+                for event in runtime_events {
+                    if let crate::runtime::events::RuntimeEvent::SubagentDiscovered { run }
+                    | crate::runtime::events::RuntimeEvent::SubagentStatusChanged { run } =
+                        &event.event
+                    {
+                        let agent_runs = win_stdout.state::<crate::runtime::AgentRunState>();
+                        let run = run.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let _ = agent_runs.apply(run).await;
+                        });
+                    }
+                    let _ = win_stdout.emit("runtime-event", &event);
+                }
             }
         }
         eprintln!(

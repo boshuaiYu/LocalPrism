@@ -1,0 +1,5 @@
+{"method":"thread/started","params":{"thread":{"id":"root-thread","preview":"Start","cwd":"/tmp/paper","updatedAt":1000,"status":{"type":"idle"}}}}
+{"method":"turn/started","params":{"threadId":"root-thread","turn":{"id":"turn-1","status":"inProgress"}}}
+{"method":"item/started","params":{"threadId":"root-thread","turnId":"turn-1","item":{"id":"item-collab-1","type":"collabAgentToolCall","tool":"spawnAgent","senderThreadId":"root-thread","receiverThreadIds":["child-1"],"agentsStates":{"child-1":{"status":"pendingInit","nickname":"reviewer","model":"gpt-5.4"}}}}}
+{"method":"item/completed","params":{"threadId":"root-thread","turnId":"turn-1","item":{"id":"item-collab-1","type":"collabAgentToolCall","tool":"spawnAgent","senderThreadId":"root-thread","receiverThreadIds":["child-1"],"status":"completed","agentsStates":{"child-1":{"status":"completed","nickname":"reviewer","model":"gpt-5.4"}}}}}
+{"method":"turn/completed","params":{"threadId":"root-thread","turn":{"id":"turn-1","status":"completed"}}}

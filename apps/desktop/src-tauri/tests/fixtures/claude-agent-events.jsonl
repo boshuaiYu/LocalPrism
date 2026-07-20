@@ -1,0 +1,6 @@
+{"type":"system","subtype":"init","session_id":"session-root","model":"claude-sonnet-4","tools":["Agent","Task","Bash"]}
+{"type":"assistant","session_id":"session-root","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_agent_1","name":"Agent","input":{"description":"Review the draft","prompt":"[redacted]","subagent_type":"general-purpose"}}]}}
+{"type":"progress","subtype":"agent_progress","session_id":"session-root","parent_tool_use_id":"toolu_agent_1","data":{"status":"running","message":"scanning files"}}
+{"type":"user","session_id":"session-root","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_agent_1","content":"Completed review. nonce=prism-child-verify-001","is_error":false}]}}
+{"type":"assistant","session_id":"session-root","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_task_1","name":"Task","input":{"description":"Legacy task spawn","prompt":"[redacted]","subagent_type":"Explore"}}]}}
+{"type":"user","session_id":"session-root","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_task_1","content":"Subagent cancelled by user","is_error":true}]}}

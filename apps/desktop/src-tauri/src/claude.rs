@@ -2810,20 +2810,77 @@ pub async fn logout_claude() -> Result<(), String> {
     logout_claude_with(&program, run_claude_logout_command).await
 }
 
+/// Normalize an explicit Claude permission mode for `--permission-mode`.
+/// Never falls back to `--dangerously-skip-permissions`.
+fn normalize_claude_permission_mode(permission_mode: Option<&str>) -> &'static str {
+    match permission_mode.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("acceptEdits") => "acceptEdits",
+        Some("bypassPermissions") => "bypassPermissions",
+        Some("plan") => "plan",
+        Some("dontAsk") => "dontAsk",
+        Some("default") => "default",
+        _ => "default",
+    }
+}
+
+fn resolve_claude_permission_mode(
+    project_path: &str,
+    agent_id: Option<&str>,
+) -> Option<String> {
+    let agent_id = agent_id?.trim();
+    if agent_id.is_empty() {
+        return None;
+    }
+    let project = if project_path.trim().is_empty() {
+        None
+    } else {
+        Some(std::path::Path::new(project_path))
+    };
+    for scope in [
+        crate::skills::SkillScope::Project,
+        crate::skills::SkillScope::User,
+    ] {
+        if scope == crate::skills::SkillScope::Project && project.is_none() {
+            continue;
+        }
+        let Ok(root) = crate::agents::claude::agents_root(scope, project) else {
+            continue;
+        };
+        let path = root.join(format!("{agent_id}.md"));
+        if !path.exists() {
+            continue;
+        }
+        if let Ok(profile) = crate::agents::claude::parse_claude_agent(&path, scope) {
+            if let Some(mode) = profile.permission_mode {
+                if !mode.trim().is_empty() {
+                    return Some(mode);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Common CLI flags shared across all Claude invocations.
 fn common_claude_args() -> Vec<String> {
+    common_claude_args_with_permission_mode(None)
+}
+
+fn common_claude_args_with_permission_mode(permission_mode: Option<&str>) -> Vec<String> {
+    let mode = normalize_claude_permission_mode(permission_mode);
     vec![
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--verbose".to_string(),
-        "--dangerously-skip-permissions".to_string(),
+        "--permission-mode".to_string(),
+        mode.to_string(),
         "--append-system-prompt".to_string(),
         concat!(
             "You are an AI assistant integrated into a LaTeX document editor (Prism). ",
             "Follow these rules strictly:\n",
             "1. PLANNING FIRST: Before making changes, use TodoWrite to create a step-by-step plan. ",
             "Break large tasks into small, incremental steps (one section or one logical unit per step).\n",
-            "2. INCREMENTAL EDITS: Use the Edit tool to make small, targeted changes 鈥?one step at a time. ",
+            "2. INCREMENTAL EDITS: Use the Edit tool to make small, targeted changes — one step at a time. ",
             "NEVER write or rewrite an entire file at once. Always prefer editing existing content over replacing it wholesale.\n",
             "3. STEP BY STEP: After each edit, mark the todo item as completed, then proceed to the next step. ",
             "This lets the user review changes incrementally.\n",
@@ -2835,7 +2892,8 @@ fn common_claude_args() -> Vec<String> {
             "for domain-specific tasks. Use skill-provided LaTeX packages (.sty) and code patterns.\n",
             "7. PYTHON: If a .venv/ exists in the project, it is already activated. ",
             "Use `uv pip install` to add packages and `python` to run scripts."
-        ).to_string(),
+        )
+        .to_string(),
     ]
 }
 
@@ -3530,7 +3588,10 @@ pub async fn execute_claude_code(
             args.push(m);
         }
         push_agent_arg(&mut args, agent_id.as_deref());
-        args.extend(common_claude_args());
+        let permission_mode = resolve_claude_permission_mode(&project_path, agent_id.as_deref());
+        args.extend(common_claude_args_with_permission_mode(
+            permission_mode.as_deref(),
+        ));
 
         let cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
         spawn_claude_process(window, cmd, tab_id, reservation, stdin_payload, None).await
@@ -3652,7 +3713,10 @@ pub async fn resume_claude_code(
             args.push(m);
         }
         push_agent_arg(&mut args, agent_id.as_deref());
-        args.extend(common_claude_args());
+        let permission_mode = resolve_claude_permission_mode(&project_path, agent_id.as_deref());
+        args.extend(common_claude_args_with_permission_mode(
+            permission_mode.as_deref(),
+        ));
 
         let cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
         spawn_claude_process(window, cmd, tab_id, reservation, stdin_payload, None).await
@@ -5227,8 +5291,34 @@ mod tests {
         assert!(args.contains(&"--output-format".to_string()));
         assert!(args.contains(&"stream-json".to_string()));
         assert!(args.contains(&"--verbose".to_string()));
-        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(args.contains(&"--permission-mode".to_string()));
+        assert!(args.contains(&"default".to_string()));
+        assert!(!args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(args.contains(&"--append-system-prompt".to_string()));
+    }
+
+    #[test]
+    fn test_common_claude_args_bypass_flag_absent_by_default() {
+        let args = common_claude_args_with_permission_mode(None);
+        assert!(!args.iter().any(|arg| arg.contains("dangerously-skip")));
+        let mode_idx = args
+            .iter()
+            .position(|arg| arg == "--permission-mode")
+            .expect("permission mode flag");
+        assert_eq!(args.get(mode_idx + 1).map(String::as_str), Some("default"));
+    }
+
+    #[test]
+    fn test_common_claude_args_honors_explicit_permission_mode() {
+        let args = common_claude_args_with_permission_mode(Some("acceptEdits"));
+        let mode_idx = args
+            .iter()
+            .position(|arg| arg == "--permission-mode")
+            .expect("permission mode flag");
+        assert_eq!(
+            args.get(mode_idx + 1).map(String::as_str),
+            Some("acceptEdits")
+        );
     }
 
     #[test]
