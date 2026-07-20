@@ -20,7 +20,7 @@ import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import { clearDocCache } from "@/lib/mupdf/pdf-doc-cache";
 import { clearScrollPositionCache } from "@/components/workspace/preview/pdf-viewer";
 import { clearZoomCache } from "@/components/workspace/preview/pdf-preview";
-import { clearEditorStateCache } from "@/components/workspace/editor/latex-editor";
+import { clearEditorStateCache } from "@/components/workspace/editor/editor-state-cache";
 import { useProjectStore } from "@/stores/project-store";
 import { createLogger } from "@/lib/debug/logger";
 import {

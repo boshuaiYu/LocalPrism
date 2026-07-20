@@ -476,7 +476,12 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
       return;
 
     const credentialId = selectedProviderCredential.id;
-    if (providerModelOptions[credentialId]) return;
+    if (providerModelOptions[credentialId]) {
+      setProviderModelLoadingId((current) =>
+        current === credentialId ? null : current,
+      );
+      return;
+    }
 
     let cancelled = false;
     setProviderModelLoadingId(credentialId);
@@ -525,9 +530,9 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
         }));
       })
       .finally(() => {
-        if (!cancelled) {
-          setProviderModelLoadingId(null);
-        }
+        setProviderModelLoadingId((current) =>
+          current === credentialId ? null : current,
+        );
       });
 
     return () => {
@@ -1339,30 +1344,42 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
   const setProviderModelListNode = useCallback(
     (node: HTMLDivElement | null) => {
       providerModelListRef.current = node;
-
-      if (
-        !node ||
-        !modelPickerOpen ||
-        chatPeer !== "api" ||
-        !selectedProviderCredential ||
-        activeProviderModelsLoading
-      ) {
-        return;
-      }
-
-      providerModelItemRefs.current[directProviderModel]?.scrollIntoView({
-        block: "center",
-      });
     },
-    [
-      activeProviderModelOptionsKey,
-      activeProviderModelsLoading,
-      chatPeer,
-      directProviderModel,
-      modelPickerOpen,
-      selectedProviderCredential,
-    ],
+    [],
   );
+
+  useLayoutEffect(() => {
+    if (
+      !modelPickerOpen ||
+      chatPeer !== "api" ||
+      !selectedProviderCredential ||
+      activeProviderModelsLoading ||
+      activeProviderModelOptions.length === 0
+    ) {
+      return;
+    }
+
+    const selectedButton =
+      providerModelItemRefs.current[directProviderModel] ??
+      Array.from(
+        (
+          providerModelListRef.current ??
+          modelPickerRef.current?.querySelector<HTMLElement>(
+            '[aria-label="Runtime controls"]',
+          )
+        )?.querySelectorAll("button") ?? [],
+      ).find((button) => button.textContent?.trim() === directProviderModel);
+
+    selectedButton?.scrollIntoView({ block: "center" });
+  }, [
+    activeProviderModelOptions.length,
+    activeProviderModelOptionsKey,
+    activeProviderModelsLoading,
+    chatPeer,
+    directProviderModel,
+    modelPickerOpen,
+    selectedProviderCredential,
+  ]);
 
   const apiProviderControls = (
     <>

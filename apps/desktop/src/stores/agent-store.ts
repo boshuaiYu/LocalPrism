@@ -57,7 +57,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         runtime,
         projectPath: projectPath ?? null,
       });
-      set({ agents, loading: false });
+      set({ agents: agents ?? [], loading: false });
     } catch (error) {
       set({
         loading: false,

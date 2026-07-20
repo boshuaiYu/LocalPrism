@@ -58,6 +58,7 @@ import { runOwnedProjectCompile } from "@/lib/project-compile";
 import { completeProposedChangeAction } from "@/lib/proposed-change-resolution";
 import { useSettingsStore } from "@/stores/settings-store";
 import { EditorToolbar } from "./editor-toolbar";
+import { editorStateCache } from "./editor-state-cache";
 import { SelectionToolbar, type ToolbarAction } from "./selection-toolbar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -92,16 +93,7 @@ function getActiveFileContent(): string {
   return activeFile?.content ?? "";
 }
 
-/** Per-file editor state cache: fileId → { cursor, scrollTop } */
-const editorStateCache = new Map<
-  string,
-  { cursor: number; scrollTop: number }
->();
-
-/** Clear editor state cache (e.g., on project close). */
-export function clearEditorStateCache(): void {
-  editorStateCache.clear();
-}
+export { clearEditorStateCache } from "./editor-state-cache";
 
 export function LatexEditor() {
   const containerRef = useRef<HTMLDivElement>(null);

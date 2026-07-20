@@ -34,7 +34,7 @@ export function AgentSelector({
   }, [runtime, projectPath, refresh]);
 
   const options = useMemo(
-    () => agents.filter((agent) => agent.runtime === runtime),
+    () => (agents ?? []).filter((agent) => agent.runtime === runtime),
     [agents, runtime],
   );
 
