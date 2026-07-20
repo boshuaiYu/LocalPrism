@@ -14,6 +14,7 @@ import type {
   RuntimeKind,
   RuntimeModel,
 } from "@/runtime/types";
+import { AgentSelector } from "@/components/agents/agent-selector";
 import { cn } from "@/lib/utils";
 
 export type ClaudeModelAlias = "sonnet" | "opus" | "haiku" | "opusplan";
@@ -227,6 +228,8 @@ export interface RuntimeSelectorProps {
   codexModelsLoading: boolean;
   selectedModelId: string | null;
   reasoningEffort: string | null;
+  agentId?: string | null;
+  projectPath?: string | null;
   busy: boolean;
   apiProviderControls: ReactNode;
   apiModelControls?: ReactNode;
@@ -267,6 +270,8 @@ export function RuntimeSelector({
   codexModelsLoading,
   selectedModelId,
   reasoningEffort,
+  agentId = null,
+  projectPath = null,
   busy,
   apiProviderControls,
   apiModelControls,
@@ -346,9 +351,10 @@ export function RuntimeSelector({
     onSelectionChange({
       runtimeModel: model.id,
       reasoningEffort: normalizedEffort,
-      agentId: null,
+      agentId,
     });
   }, [
+    agentId,
     busy,
     codexAvailable,
     codexModelsLoading,
@@ -424,7 +430,7 @@ export function RuntimeSelector({
     onSelectionChange({
       runtimeModel: model,
       reasoningEffort: selectedClaudeEffort,
-      agentId: null,
+      agentId,
     });
   };
 
@@ -434,7 +440,7 @@ export function RuntimeSelector({
     onSelectionChange({
       runtimeModel: selectedClaudeModel,
       reasoningEffort: effort,
-      agentId: null,
+      agentId,
     });
   };
 
@@ -447,7 +453,7 @@ export function RuntimeSelector({
         reasoningEffort,
         model,
       ),
-      agentId: null,
+      agentId,
     });
   };
 
@@ -456,7 +462,7 @@ export function RuntimeSelector({
     onSelectionChange({
       runtimeModel: selectedCodexModel.id,
       reasoningEffort: effort,
-      agentId: null,
+      agentId,
     });
   };
 
@@ -665,15 +671,19 @@ export function RuntimeSelector({
         <div className="border-border border-t px-2 pt-2 pb-1 font-medium text-muted-foreground text-xs">
           Agent
         </div>
-        <button
-          type="button"
-          aria-label="Agent (coming in the custom-agent phase)"
-          disabled
-          className="mx-2 mb-2 flex cursor-not-allowed items-center justify-between rounded-lg bg-muted px-3 py-2 text-left text-muted-foreground opacity-60"
-        >
-          <span className="font-medium text-xs">Agent</span>
-          <span className="text-xs">Coming in the custom-agent phase</span>
-        </button>
+        <AgentSelector
+          peer={peer}
+          projectPath={projectPath}
+          agentId={agentId}
+          busy={busy}
+          onAgentChange={(nextAgentId) =>
+            onSelectionChange({
+              runtimeModel: selectedModelId,
+              reasoningEffort,
+              agentId: nextAgentId,
+            })
+          }
+        />
       </div>
 
       {pendingPeer && (

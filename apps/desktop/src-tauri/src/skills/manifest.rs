@@ -273,6 +273,20 @@ impl ManifestStore {
         })
     }
 
+    pub fn remove(&self, entry_id: &str) -> Result<(), ManifestError> {
+        let id = entry_id.to_string();
+        self.update(move |manifest| {
+            let before = manifest.entries.len();
+            manifest.entries.retain(|entry| entry.id != id);
+            if manifest.entries.len() == before {
+                return Err(ManifestError::InvalidData(format!(
+                    "managed skill entry {id:?} was not found"
+                )));
+            }
+            Ok(())
+        })
+    }
+
     fn load_or_recover_locked(&self) -> Result<SkillManifest, ManifestError> {
         match self.read_current()? {
             ReadState::Missing => Ok(SkillManifest::default()),

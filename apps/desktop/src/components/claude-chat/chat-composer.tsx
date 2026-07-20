@@ -1565,6 +1565,8 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
               codexModelsLoading={codexModelsLoading}
               selectedModelId={selectedRuntimeModelId}
               reasoningEffort={selectedRuntimeEffort}
+              agentId={activeTab?.agentId ?? null}
+              projectPath={projectRoot}
               busy={runtimeBusy}
               apiProviderControls={apiProviderControls}
               apiModelControls={apiModelControls}

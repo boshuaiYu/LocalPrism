@@ -1,5 +1,6 @@
 #![recursion_limit = "512"]
 
+mod agents;
 mod anthropic_proxy;
 mod claude;
 mod claude_process;
@@ -756,12 +757,20 @@ pub fn run() {
             skills::install_scientific_skills,
             skills::install_scientific_skills_global,
             skills::import_skill_from_folder,
+            skills::skill_import,
+            skills::skill_list,
+            skills::skill_delete_managed,
+            skills::skill_auto_import_project,
             skills::check_skills_installed,
             skills::list_installed_skills,
             skills::delete_installed_skill,
             skills::uninstall_scientific_skills,
             skills::get_skill_categories,
             skills::get_skill_content,
+            agents::list_agents,
+            agents::get_agent,
+            agents::save_agent,
+            agents::delete_agent,
             uv::check_uv_status,
             uv::install_uv,
             uv::setup_project_venv,

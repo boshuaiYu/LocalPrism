@@ -669,6 +669,17 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
       );
       if (!stillOwnsOpen()) return;
       bindHistoryToDocumentProject(get());
+      // Non-destructive: register project skill folders that are not yet managed.
+      // Dynamic import avoids a document↔editor↔zotero circular init cycle.
+      void import("@/stores/skill-store")
+        .then(({ useSkillStore }) =>
+          useSkillStore.getState().autoImportProject(rootPath),
+        )
+        .catch((error) => {
+          log.warn("Project skill auto-import failed", {
+            error: String(error),
+          });
+        });
     } finally {
       if (ownsMutationGuard) {
         set((state) =>

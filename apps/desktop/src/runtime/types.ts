@@ -48,6 +48,24 @@ export interface RuntimeSkill {
   discoveryError: string | null;
 }
 
+export interface AgentProfile {
+  id: string;
+  runtime: RuntimeKind;
+  scope: SkillScope;
+  name: string;
+  description: string;
+  instructions: string;
+  model: string | null;
+  reasoningEffort: string | null;
+  sandboxMode: string | null;
+  permissionMode: string | null;
+  tools: string[];
+  nicknameCandidates: string[];
+  skillIds: string[];
+  sourcePath: string;
+  unknownFields?: Record<string, string>;
+}
+
 export interface RuntimeWarningPayload {
   runtime: RuntimeKind;
   message: string;

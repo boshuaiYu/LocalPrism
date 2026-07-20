@@ -4,6 +4,7 @@ use std::time::Duration;
 use tauri::{Emitter, Manager, WebviewWindow};
 
 pub mod domain;
+pub mod import;
 pub mod manifest;
 pub mod paths;
 
@@ -1188,75 +1189,85 @@ pub async fn install_scientific_skills_global(
 
 #[tauri::command]
 pub async fn import_skill_from_folder(source_path: String) -> Result<Vec<SkillInfo>, String> {
+    // Backward-compatible adapter: Claude user scope.
+    let installed = skill_import(
+        source_path,
+        vec![domain::SkillTarget {
+            runtime: crate::runtime::RuntimeKind::Claude,
+            scope: domain::SkillScope::User,
+        }],
+        None,
+    )
+    .await?;
+    Ok(installed
+        .into_iter()
+        .map(|skill| SkillInfo {
+            id: skill.folder.clone(),
+            name: skill.name,
+            domain: "imported".into(),
+            description: skill.description,
+            folder: skill.folder,
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn skill_import(
+    source_path: String,
+    targets: Vec<domain::SkillTarget>,
+    project_path: Option<String>,
+) -> Result<Vec<domain::RuntimeSkill>, String> {
     let source = PathBuf::from(&source_path);
     if !source.is_dir() {
         return Err("Selected path is not a folder".into());
     }
 
     let mut skill_dirs = Vec::new();
-    collect_skill_dirs(&source, &mut skill_dirs);
+    import::collect_skill_dirs(&source, &mut skill_dirs);
     skill_dirs.sort();
-
     if skill_dirs.is_empty() {
         return Err(
-            "Selected folder does not contain any Claude skills. A skill must contain SKILL.md."
-                .into(),
+            "Selected folder does not contain any skills. A skill must contain SKILL.md.".into(),
         );
     }
 
-    let target_root = skills_dir(None)?;
-    std::fs::create_dir_all(&target_root).map_err(|e| {
-        format!(
-            "Failed to create skills dir {}: {}",
-            target_root.display(),
-            e
-        )
-    })?;
-
+    let project = project_path.as_deref().map(Path::new);
     let mut imported = Vec::new();
     for skill_dir in skill_dirs {
-        let raw_folder_name = skill_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| "Selected skill folder has an invalid name".to_string())?;
-        let folder_name = sanitize_skill_folder_name(raw_folder_name);
-        if folder_name.is_empty() {
-            return Err("Selected skill folder has an invalid name".into());
-        }
-
-        let target = target_root.join(folder_name);
-        let source_canon = skill_dir
-            .canonicalize()
-            .map_err(|e| format!("Failed to resolve selected skill folder: {}", e))?;
-
-        if target.exists() {
-            let target_canon = target
-                .canonicalize()
-                .map_err(|e| format!("Failed to resolve existing skill folder: {}", e))?;
-            if target_canon == source_canon {
-                let info = parse_skill_md(&target).ok_or_else(|| {
-                    "Selected skill folder has an unreadable SKILL.md".to_string()
-                })?;
-                imported.push(info);
-                continue;
-            }
-
-            std::fs::remove_dir_all(&target).map_err(|e| {
-                format!(
-                    "Failed to replace existing skill {}: {}",
-                    target.display(),
-                    e
-                )
-            })?;
-        }
-
-        copy_dir_recursive(&skill_dir, &target)?;
-        let info = parse_skill_md(&target)
-            .ok_or_else(|| "Imported skill has an unreadable SKILL.md".to_string())?;
-        imported.push(info);
+        let mut batch = import::import_skill_to_targets(
+            &skill_dir,
+            &targets,
+            project,
+            manifest::SkillSource::Folder {
+                path: skill_dir.to_string_lossy().to_string(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        imported.append(&mut batch);
     }
-
     Ok(imported)
+}
+
+#[tauri::command]
+pub async fn skill_list(
+    project_path: Option<String>,
+) -> Result<Vec<domain::RuntimeSkill>, String> {
+    import::list_runtime_skills(project_path.as_deref().map(Path::new))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn skill_delete_managed(
+    entry_id: String,
+    confirm_modified: bool,
+) -> Result<(), String> {
+    import::delete_managed_skill(&entry_id, confirm_modified).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn skill_auto_import_project(project_path: String) -> Result<Vec<domain::RuntimeSkill>, String> {
+    let path = PathBuf::from(&project_path);
+    import::auto_import_project_skills(&path).map_err(|error| error.to_string())
 }
 
 /// Ensure the target directory is creatable and writable.

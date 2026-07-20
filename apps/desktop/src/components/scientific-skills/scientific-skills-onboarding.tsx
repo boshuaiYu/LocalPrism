@@ -34,6 +34,8 @@ import {
   ICON_MAP,
 } from "./skill-category-card";
 import { InstallProgress } from "./install-progress";
+import { useSkillStore } from "@/stores/skill-store";
+import type { SkillTarget } from "@/runtime/types";
 
 const STORAGE_KEY = "scientific-skills-installed";
 
@@ -85,6 +87,23 @@ export function ScientificSkillsOnboarding({
   );
   const mountedRef = useRef(true);
   const installBackendLogSeenRef = useRef(false);
+  const selectedTargets = useSkillStore((state) => state.selectedTargets);
+  const setSelectedTargets = useSkillStore((state) => state.setSelectedTargets);
+
+  const toggleImportTarget = (target: SkillTarget) => {
+    const exists = selectedTargets.some(
+      (item) => item.runtime === target.runtime && item.scope === target.scope,
+    );
+    if (exists) {
+      const next = selectedTargets.filter(
+        (item) =>
+          !(item.runtime === target.runtime && item.scope === target.scope),
+      );
+      setSelectedTargets(next);
+      return;
+    }
+    setSelectedTargets([...selectedTargets, target]);
+  };
 
   useEffect(() => {
     return () => {
@@ -255,13 +274,18 @@ export function ScientificSkillsOnboarding({
       const selectedFolder = await open({
         directory: true,
         multiple: false,
-        title: "Import Claude Skill Folder",
+        title: "Import Skill Folder",
       });
 
       if (typeof selectedFolder !== "string") return;
 
-      const skills = await invoke<SkillInfo[]>("import_skill_from_folder", {
+      const targets = useSkillStore.getState().selectedTargets;
+      const skills = await invoke<
+        Array<{ name: string; folder: string; description: string }>
+      >("skill_import", {
         sourcePath: selectedFolder,
+        targets,
+        projectPath: null,
       });
 
       localStorage.setItem(STORAGE_KEY, "true");
@@ -410,8 +434,8 @@ export function ScientificSkillsOnboarding({
                 <DialogTitle className="text-sm">Skills</DialogTitle>
                 <DialogDescription className="mt-0.5 text-xs">
                   {totalSkills} skills across {displayCategories.length} groups
-                  - install curated scientific skills or import a local Claude
-                  skill. Curated set powered by{" "}
+                  - install curated scientific skills or import a local skill to
+                  Claude and/or Codex. Curated set powered by{" "}
                   <a
                     href="https://github.com/K-Dense-AI/scientific-agent-skills"
                     target="_blank"
@@ -460,11 +484,42 @@ export function ScientificSkillsOnboarding({
                     Install All
                   </Button>
                 )}
+                <div className="flex items-center gap-1">
+                  {(
+                    [
+                      { runtime: "claude", scope: "user" },
+                      { runtime: "codex", scope: "user" },
+                    ] as const
+                  ).map((target) => {
+                    const active = selectedTargets.some(
+                      (item) =>
+                        item.runtime === target.runtime &&
+                        item.scope === target.scope,
+                    );
+                    return (
+                      <Button
+                        key={`${target.runtime}:${target.scope}`}
+                        type="button"
+                        size="sm"
+                        variant={active ? "default" : "outline"}
+                        className="h-8 px-2 text-xs"
+                        onClick={() => toggleImportTarget(target)}
+                      >
+                        {target.runtime}
+                      </Button>
+                    );
+                  })}
+                </div>
                 <Button
                   variant="outline"
                   size="sm"
                   onClick={handleImportSkill}
-                  disabled={isImporting || isInstalling || isUninstalling}
+                  disabled={
+                    isImporting ||
+                    isInstalling ||
+                    isUninstalling ||
+                    selectedTargets.length === 0
+                  }
                   className="gap-1.5 border-border/70 bg-muted/30 text-foreground shadow-none hover:bg-muted/60 hover:text-foreground"
                 >
                   {isImporting ? (
