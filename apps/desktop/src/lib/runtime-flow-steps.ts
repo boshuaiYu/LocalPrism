@@ -46,7 +46,10 @@ export function advanceSteps(
   });
 }
 
-export function failActiveStep(steps: StepInfo[], errorLabel?: string): StepInfo[] {
+export function failActiveStep(
+  steps: StepInfo[],
+  errorLabel?: string,
+): StepInfo[] {
   return steps.map((step) =>
     step.status === "active"
       ? {

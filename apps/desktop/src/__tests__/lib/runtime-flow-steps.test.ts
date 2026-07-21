@@ -12,7 +12,9 @@ describe("runtime-flow-steps", () => {
     const install = createPendingSteps(CODEX_INSTALL_STEPS);
     expect(install.map((s) => s.id)).toEqual(STEP_ORDER_CODEX_INSTALL);
     expect(install.every((s) => s.status === "pending")).toBe(true);
-    expect(createPendingSteps(CODEX_LOGIN_STEPS)[0]?.id).toBe("opening-browser");
+    expect(createPendingSteps(CODEX_LOGIN_STEPS)[0]?.id).toBe(
+      "opening-browser",
+    );
   });
 
   it("marks prior steps complete when advancing", () => {
