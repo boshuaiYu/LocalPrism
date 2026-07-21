@@ -44,6 +44,9 @@ export function RuntimeSettings({
     (state) => state.ensureInstalledAndStartLogin,
   );
   const codexSetupFlow = useRuntimeStore((state) => state.codexSetupFlow);
+  const resetCodexSetupFlow = useRuntimeStore(
+    (state) => state.resetCodexSetupFlow,
+  );
   const cancelLogin = useRuntimeStore((state) => state.cancelLogin);
   const logout = useRuntimeStore((state) => state.logout);
   const checkClaudeStatus = useClaudeSetupStore((state) => state.checkStatus);
@@ -81,7 +84,12 @@ export function RuntimeSettings({
         installInFlight={installInFlight.codex}
         login={login.codex}
         setupFlow={codexSetupFlow}
-        onInstall={() => consume(() => install("codex"))}
+        onInstall={() =>
+          consume(async () => {
+            resetCodexSetupFlow();
+            await install("codex");
+          })
+        }
         onLogin={(mode, apiKey) =>
           consume(() =>
             mode === "api-key"

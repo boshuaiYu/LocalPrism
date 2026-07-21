@@ -108,6 +108,7 @@ describe("RuntimeSettings", () => {
   let ensureInstalledAndStartLogin: Mock<
     RuntimeState["ensureInstalledAndStartLogin"]
   >;
+  let resetCodexSetupFlow: Mock<RuntimeState["resetCodexSetupFlow"]>;
   let cancelLogin: Mock<RuntimeState["cancelLogin"]>;
   let logout: Mock<RuntimeState["logout"]>;
   let checkClaudeStatus: Mock<ClaudeSetupState["checkStatus"]>;
@@ -125,6 +126,7 @@ describe("RuntimeSettings", () => {
     ensureInstalledAndStartLogin = vi
       .fn<RuntimeState["ensureInstalledAndStartLogin"]>()
       .mockResolvedValue(undefined);
+    resetCodexSetupFlow = vi.fn<RuntimeState["resetCodexSetupFlow"]>();
     cancelLogin = vi
       .fn<RuntimeState["cancelLogin"]>()
       .mockResolvedValue(undefined);
@@ -140,6 +142,7 @@ describe("RuntimeSettings", () => {
       install,
       startLogin,
       ensureInstalledAndStartLogin,
+      resetCodexSetupFlow,
       cancelLogin,
       logout,
     });
@@ -242,6 +245,19 @@ describe("RuntimeSettings", () => {
     expect(checkClaudeStatus).not.toHaveBeenCalled();
   });
 
+  it("resets Codex setup flow before Install only", async () => {
+    await renderSettings();
+    const codex = mocks.cards.get("codex");
+
+    await expect(codex?.onInstall?.()).resolves.toBeUndefined();
+
+    expect(resetCodexSetupFlow).toHaveBeenCalledTimes(1);
+    expect(install).toHaveBeenCalledWith("codex");
+    expect(resetCodexSetupFlow.mock.invocationCallOrder[0]).toBeLessThan(
+      install.mock.invocationCallOrder[0],
+    );
+  });
+
   it("routes Codex actions and external links without touching legacy Claude status", async () => {
     await renderSettings();
     const codex = mocks.cards.get("codex");
@@ -259,6 +275,7 @@ describe("RuntimeSettings", () => {
     ).resolves.toBeUndefined();
     await expect(codex?.onLogout?.()).resolves.toBeUndefined();
 
+    expect(resetCodexSetupFlow).toHaveBeenCalled();
     expect(install).toHaveBeenCalledWith("codex");
     expect(ensureInstalledAndStartLogin).toHaveBeenNthCalledWith(
       1,

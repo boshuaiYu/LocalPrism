@@ -145,6 +145,31 @@ describe("RuntimeCard", () => {
     expect(container.textContent).toContain("Installing CLI");
   });
 
+  it("keeps Install only clickable after setupFlow error", async () => {
+    const onInstall = vi.fn().mockResolvedValue(true);
+    await renderCard({
+      account: account({ installed: false, version: null }),
+      installInFlight: false,
+      setupFlow: {
+        phase: "error",
+        installSteps: [
+          { id: "downloading", label: "Downloading Codex", status: "error" },
+        ],
+        loginSteps: [],
+        installLogs: [],
+        error: "Codex installation failed",
+        autoOpenBrowser: false,
+      },
+      onInstall,
+      onLogin: vi.fn(),
+    });
+
+    const installOnly = findButton(container, "Install only");
+    expect(installOnly.disabled).toBe(false);
+    await act(async () => installOnly.click());
+    expect(onInstall).toHaveBeenCalledTimes(1);
+  });
+
   it("does not treat background loading as Installing without installInFlight", async () => {
     await renderCard({
       account: account({ installed: false, version: null }),

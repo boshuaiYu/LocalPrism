@@ -91,7 +91,9 @@ export function RuntimeCard({
   const loginStatus = login?.status ?? null;
   const installing =
     Boolean(installInFlight) && !account.installed && !!onInstall;
-  const controlsLocked = loading || installInFlight;
+  const flowBusy =
+    setupFlow?.phase === "installing" || setupFlow?.phase === "logging-in";
+  const controlsLocked = loading || installInFlight || flowBusy;
   const showSetupSteps =
     setupFlow?.phase === "installing" ||
     setupFlow?.phase === "logging-in" ||
