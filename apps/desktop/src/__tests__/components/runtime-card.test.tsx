@@ -2,7 +2,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RuntimeCard } from "@/components/runtime/runtime-card";
-import type { RuntimeAccount, RuntimeLoginState } from "@/runtime/types";
+import type {
+  CodexSetupFlowState,
+  RuntimeAccount,
+  RuntimeLoginState,
+} from "@/runtime/types";
 
 function account(overrides: Partial<RuntimeAccount> = {}): RuntimeAccount {
   return {
@@ -69,6 +73,7 @@ describe("RuntimeCard", () => {
       login?: RuntimeLoginState | null;
       loading?: boolean;
       installInFlight?: boolean;
+      setupFlow?: CodexSetupFlowState | null;
       onInstall?: () => Promise<unknown>;
       onLogin?: (
         mode: "browser" | "device-code" | "api-key",
@@ -88,6 +93,7 @@ describe("RuntimeCard", () => {
           login={options.login}
           loading={options.loading}
           installInFlight={options.installInFlight}
+          setupFlow={options.setupFlow}
           onInstall={options.onInstall}
           onLogin={options.onLogin}
           onCancelLogin={options.onCancelLogin}
@@ -97,6 +103,47 @@ describe("RuntimeCard", () => {
       );
     });
   }
+
+  it("shows Continue in browser when Codex is not installed", async () => {
+    const onLogin = vi.fn().mockResolvedValue(undefined);
+    await renderCard({
+      account: account({ installed: false, version: null }),
+      onInstall: vi.fn(),
+      onLogin,
+    });
+    expect(findButton(container, "Continue in browser")).toBeTruthy();
+    expect(findButton(container, "Install only")).toBeTruthy();
+    await act(async () => findButton(container, "Continue in browser").click());
+    expect(onLogin).toHaveBeenCalledWith("browser");
+  });
+
+  it("renders setup flow steps while installing/logging in", async () => {
+    await renderCard({
+      account: account({ installed: false, version: null }),
+      installInFlight: true,
+      setupFlow: {
+        phase: "installing",
+        installSteps: [
+          { id: "downloading", label: "Downloading Codex", status: "complete" },
+          { id: "installing", label: "Installing CLI", status: "active" },
+          {
+            id: "verifying",
+            label: "Verifying installation",
+            status: "pending",
+          },
+          { id: "complete", label: "Codex ready", status: "pending" },
+        ],
+        loginSteps: [],
+        installLogs: ["npm install -g @openai/codex"],
+        error: null,
+        autoOpenBrowser: false,
+      },
+      onInstall: vi.fn(),
+      onLogin: vi.fn(),
+    });
+    expect(container.textContent).toContain("Downloading Codex");
+    expect(container.textContent).toContain("Installing CLI");
+  });
 
   it("does not treat background loading as Installing without installInFlight", async () => {
     await renderCard({
@@ -108,7 +155,7 @@ describe("RuntimeCard", () => {
     expect(container.textContent).toContain("Working...");
     expect(container.textContent).not.toContain("Installing...");
     expect(container.textContent).not.toContain("Checking Codex");
-    expect(findButton(container, "Install").disabled).toBe(true);
+    expect(findButton(container, "Install only").disabled).toBe(true);
   });
 
   it("shows Installing / Checking Codex only while installInFlight", async () => {
@@ -137,7 +184,7 @@ describe("RuntimeCard", () => {
 
     expect(container.textContent).toContain("Account error");
     expect(container.textContent).toContain("status unavailable");
-    await act(async () => findButton(container, "Install").click());
+    await act(async () => findButton(container, "Install only").click());
     expect(onInstall).toHaveBeenCalledTimes(1);
 
     const onLogout = vi.fn().mockResolvedValue(undefined);

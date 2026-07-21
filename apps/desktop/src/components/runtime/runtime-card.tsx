@@ -1,8 +1,13 @@
 import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import { CheckCircle2Icon, ExternalLinkIcon, Loader2Icon } from "lucide-react";
+import { RuntimeFlowSteps } from "@/components/runtime/runtime-flow-steps";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import type { RuntimeAccount, RuntimeLoginState } from "@/runtime/types";
+import type {
+  CodexSetupFlowState,
+  RuntimeAccount,
+  RuntimeLoginState,
+} from "@/runtime/types";
 
 export type RuntimeLoginMode = "browser" | "device-code" | "api-key";
 
@@ -16,6 +21,7 @@ export interface RuntimeCardProps {
   loading?: boolean;
   /** True only while store.install() is in progress ??not background refresh. */
   installInFlight?: boolean;
+  setupFlow?: CodexSetupFlowState | null;
   onInstall?: () => Promise<unknown> | unknown;
   onLogin?: (mode: RuntimeLoginMode, apiKey?: string) => Promise<void> | void;
   onCancelLogin?: () => Promise<void> | void;
@@ -31,6 +37,23 @@ function consume(action: (() => Promise<unknown> | unknown) | undefined) {
     .catch(() => undefined);
 }
 
+function SetupFlowProgress({ setupFlow }: { setupFlow: CodexSetupFlowState }) {
+  return (
+    <>
+      <RuntimeFlowSteps steps={setupFlow.installSteps} />
+      <RuntimeFlowSteps steps={setupFlow.loginSteps} />
+      {setupFlow.error && (
+        <div
+          className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-destructive text-xs"
+          role="alert"
+        >
+          {setupFlow.error}
+        </div>
+      )}
+    </>
+  );
+}
+
 export function RuntimeCard({
   title,
   description,
@@ -39,6 +62,7 @@ export function RuntimeCard({
   login,
   loading = false,
   installInFlight = false,
+  setupFlow = null,
   onInstall,
   onLogin,
   onCancelLogin,
@@ -68,6 +92,11 @@ export function RuntimeCard({
   const installing =
     Boolean(installInFlight) && !account.installed && !!onInstall;
   const controlsLocked = loading || installInFlight;
+  const showSetupSteps =
+    setupFlow?.phase === "installing" ||
+    setupFlow?.phase === "logging-in" ||
+    setupFlow?.phase === "error" ||
+    setupFlow?.phase === "complete";
 
   useEffect(() => {
     if (!account.installed || account.authenticated || loginStatus !== null) {
@@ -96,10 +125,15 @@ export function RuntimeCard({
           )}
         </div>
         <div className="flex shrink-0 items-center gap-1.5 text-xs">
-          {installing ? (
+          {setupFlow?.phase === "installing" || installing ? (
             <>
               <Loader2Icon className="size-3.5 animate-spin" />
               Installing...
+            </>
+          ) : setupFlow?.phase === "logging-in" ? (
+            <>
+              <Loader2Icon className="size-3.5 animate-spin" />
+              Signing in...
             </>
           ) : loading ? (
             <>
@@ -154,17 +188,48 @@ export function RuntimeCard({
         )}
 
         {!account.installed ? (
-          onInstall && (
-            <Button
-              type="button"
-              disabled={controlsLocked}
-              onClick={() => consume(onInstall)}
-            >
-              {installing ? "Checking Codex\u2026" : "Install"}
-            </Button>
-          )
+          <div className="space-y-3">
+            {showSetupSteps && setupFlow && (
+              <SetupFlowProgress setupFlow={setupFlow} />
+            )}
+            {onLogin && (
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={controlsLocked}
+                  onClick={() => startInteractiveLogin("browser")}
+                >
+                  Continue in browser
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={controlsLocked}
+                  onClick={() => startInteractiveLogin("device-code")}
+                >
+                  Use device code
+                </Button>
+              </div>
+            )}
+            {onInstall && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={controlsLocked}
+                onClick={() => consume(onInstall)}
+              >
+                {installing ? "Checking Codex\u2026" : "Install only"}
+              </Button>
+            )}
+          </div>
         ) : account.authenticated ? (
           <div className="space-y-3">
+            {showSetupSteps && setupFlow && (
+              <SetupFlowProgress setupFlow={setupFlow} />
+            )}
             <dl className="grid gap-2 text-xs sm:grid-cols-3">
               <RuntimeDetail label="Version" value={account.version} />
               <RuntimeDetail label="Account" value={account.accountLabel} />
@@ -184,6 +249,9 @@ export function RuntimeCard({
           </div>
         ) : waiting?.mode === "browser" ? (
           <div className="space-y-3 text-sm">
+            {showSetupSteps && setupFlow && (
+              <SetupFlowProgress setupFlow={setupFlow} />
+            )}
             <p className="text-muted-foreground text-xs">
               Complete sign-in in your browser:
             </p>
@@ -215,6 +283,9 @@ export function RuntimeCard({
           </div>
         ) : waiting?.mode === "device-code" ? (
           <div className="space-y-3 text-sm">
+            {showSetupSteps && setupFlow && (
+              <SetupFlowProgress setupFlow={setupFlow} />
+            )}
             <p className="text-muted-foreground text-xs">
               Open the verification page and enter this code:
             </p>
@@ -251,13 +322,25 @@ export function RuntimeCard({
               )}
             </div>
           </div>
-        ) : hasLiveLoginError ? null : login?.status === "complete" ? (
-          <p className="text-muted-foreground text-xs">
-            Sign-in completed. Refreshing account status...
-          </p>
+        ) : hasLiveLoginError ? (
+          showSetupSteps && setupFlow ? (
+            <SetupFlowProgress setupFlow={setupFlow} />
+          ) : null
+        ) : login?.status === "complete" ? (
+          <div className="space-y-3">
+            {showSetupSteps && setupFlow && (
+              <SetupFlowProgress setupFlow={setupFlow} />
+            )}
+            <p className="text-muted-foreground text-xs">
+              Sign-in completed. Refreshing account status...
+            </p>
+          </div>
         ) : (
           onLogin && (
             <div className="space-y-3">
+              {showSetupSteps && setupFlow && (
+                <SetupFlowProgress setupFlow={setupFlow} />
+              )}
               <div className="flex flex-wrap gap-2">
                 <Button
                   type="button"
