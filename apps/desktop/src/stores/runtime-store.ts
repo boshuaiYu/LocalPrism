@@ -1,5 +1,16 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { create } from "zustand";
+import {
+  advanceSteps,
+  completeAllSteps,
+  createPendingSteps,
+  failActiveStep,
+  CODEX_INSTALL_STEPS,
+  CODEX_LOGIN_STEPS,
+  STEP_ORDER_CODEX_INSTALL,
+  STEP_ORDER_CODEX_LOGIN,
+} from "@/lib/runtime-flow-steps";
 import {
   runtimeInstall,
   runtimeListModels,
@@ -9,7 +20,10 @@ import {
   runtimeStatus,
 } from "@/runtime/commands";
 import type {
+  CodexSetupFlowState,
   RuntimeAccount,
+  RuntimeInstallCompleteEvent,
+  RuntimeInstallOutputEvent,
   RuntimeKind,
   RuntimeLoginState,
   RuntimeModel,
@@ -17,6 +31,8 @@ import type {
 
 const RUNTIMES: RuntimeKind[] = ["claude", "codex"];
 const ACCOUNT_EVENT = "runtime-account-updated";
+const INSTALL_OUTPUT_EVENT = "runtime-install-output";
+const INSTALL_COMPLETE_EVENT = "runtime-install-complete";
 const LOGIN_POLL_INTERVAL_MS = 1_000;
 const LOGIN_POLL_LIMIT = 180;
 
@@ -43,6 +59,8 @@ export interface RuntimeState {
   loading: Partial<Record<RuntimeKind, boolean>>;
   installInFlight: Partial<Record<RuntimeKind, boolean>>;
   login: Partial<Record<RuntimeKind, RuntimeLoginState | null>>;
+  codexSetupFlow: CodexSetupFlowState;
+  idleCodexSetupFlow(): CodexSetupFlowState;
   refresh(runtime?: RuntimeKind, options?: { silent?: boolean }): Promise<void>;
   install(runtime: RuntimeKind): Promise<boolean>;
   startLogin(
@@ -50,9 +68,25 @@ export interface RuntimeState {
     mode: "browser" | "device-code" | "api-key",
     apiKey?: string,
   ): Promise<void>;
+  ensureInstalledAndStartLogin(
+    runtime: RuntimeKind,
+    mode: "browser" | "device-code",
+  ): Promise<void>;
+  resetCodexSetupFlow(): void;
   cancelLogin(runtime: RuntimeKind): Promise<void>;
   logout(runtime: RuntimeKind): Promise<void>;
   refreshModels(runtime: RuntimeKind): Promise<void>;
+}
+
+function idleCodexSetupFlow(): CodexSetupFlowState {
+  return {
+    phase: "idle",
+    installSteps: [],
+    loginSteps: [],
+    installLogs: [],
+    error: null,
+    autoOpenBrowser: false,
+  };
 }
 
 function emptyAccount(runtime: RuntimeKind): RuntimeAccount {
@@ -84,9 +118,15 @@ function initialData() {
     loading: {},
     installInFlight: {},
     login: {},
+    codexSetupFlow: idleCodexSetupFlow(),
   } satisfies Pick<
     RuntimeState,
-    "accounts" | "models" | "loading" | "installInFlight" | "login"
+    | "accounts"
+    | "models"
+    | "loading"
+    | "installInFlight"
+    | "login"
+    | "codexSetupFlow"
   >;
 }
 
@@ -236,6 +276,16 @@ function completeAuthenticatedLogin(runtime: RuntimeKind): void {
       typeof state.login[runtime]?.loginId === "string"
         ? { ...state.login, [runtime]: null }
         : state.login,
+    ...(runtime === "codex"
+      ? {
+          codexSetupFlow: {
+            ...state.codexSetupFlow,
+            phase: "complete" as const,
+            error: null,
+            loginSteps: completeAllSteps(state.codexSetupFlow.loginSteps),
+          },
+        }
+      : {}),
   }));
   if (runtime === "codex") {
     void useRuntimeStore
@@ -243,6 +293,73 @@ function completeAuthenticatedLogin(runtime: RuntimeKind): void {
       .refreshModels("codex")
       .catch(() => undefined);
   }
+}
+
+let installListenersReady = false;
+let installOutputUnlisten: UnlistenFn | null = null;
+let installCompleteUnlisten: UnlistenFn | null = null;
+
+async function ensureInstallListeners(): Promise<void> {
+  if (installListenersReady) return;
+  installListenersReady = true;
+  installOutputUnlisten = await listen<RuntimeInstallOutputEvent>(
+    INSTALL_OUTPUT_EVENT,
+    (event) => {
+      if (event.payload.runtime !== "codex") return;
+      const line = event.payload.line.trim();
+      if (!line) return;
+      useRuntimeStore.setState((state) => {
+        if (state.codexSetupFlow.phase !== "installing") return {};
+        let installSteps = state.codexSetupFlow.installSteps;
+        const lower = line.toLowerCase();
+        if (lower.includes("download")) {
+          installSteps = advanceSteps(
+            installSteps,
+            "downloading",
+            STEP_ORDER_CODEX_INSTALL,
+          );
+        } else if (lower.includes("install") || lower.includes("npm")) {
+          installSteps = advanceSteps(
+            installSteps,
+            "installing",
+            STEP_ORDER_CODEX_INSTALL,
+          );
+        } else if (lower.includes("verif") || lower.includes("found")) {
+          installSteps = advanceSteps(
+            installSteps,
+            "verifying",
+            STEP_ORDER_CODEX_INSTALL,
+          );
+        }
+        return {
+          codexSetupFlow: {
+            ...state.codexSetupFlow,
+            installSteps,
+            installLogs: [...state.codexSetupFlow.installLogs, line].slice(
+              -200,
+            ),
+          },
+        };
+      });
+    },
+  );
+  installCompleteUnlisten = await listen<RuntimeInstallCompleteEvent>(
+    INSTALL_COMPLETE_EVENT,
+    (event) => {
+      if (event.payload.runtime !== "codex") return;
+      useRuntimeStore.setState((state) => {
+        if (state.codexSetupFlow.phase !== "installing") return {};
+        return {
+          codexSetupFlow: {
+            ...state.codexSetupFlow,
+            installSteps: event.payload.success
+              ? completeAllSteps(state.codexSetupFlow.installSteps)
+              : failActiveStep(state.codexSetupFlow.installSteps),
+          },
+        };
+      });
+    },
+  );
 }
 
 function schedulePoll(poll: LoginPoll): void {
@@ -319,6 +436,111 @@ function startLoginPolling(
 
 export const useRuntimeStore = create<RuntimeState>((set, get) => ({
   ...initialData(),
+
+  idleCodexSetupFlow,
+
+  resetCodexSetupFlow: () => {
+    set({ codexSetupFlow: idleCodexSetupFlow() });
+  },
+
+  ensureInstalledAndStartLogin: async (runtime, mode) => {
+    if (runtime !== "codex") {
+      await get().startLogin(runtime, mode);
+      return;
+    }
+    await ensureInstallListeners();
+    const alreadyInstalled = get().accounts.codex.installed;
+    set({
+      codexSetupFlow: {
+        phase: alreadyInstalled ? "logging-in" : "installing",
+        installSteps: alreadyInstalled
+          ? []
+          : createPendingSteps(CODEX_INSTALL_STEPS).map((step, index) =>
+              index === 0 ? { ...step, status: "active" as const } : step,
+            ),
+        loginSteps: createPendingSteps(CODEX_LOGIN_STEPS),
+        installLogs: [],
+        error: null,
+        autoOpenBrowser: mode === "browser",
+      },
+    });
+
+    if (!alreadyInstalled) {
+      const ok = await get().install("codex");
+      if (!ok || !get().accounts.codex.installed) {
+        set((state) => ({
+          codexSetupFlow: {
+            ...state.codexSetupFlow,
+            phase: "error",
+            error:
+              state.accounts.codex.error ??
+              "Codex installation failed. Install manually, then retry sign-in.",
+            installSteps: failActiveStep(state.codexSetupFlow.installSteps),
+          },
+        }));
+        return;
+      }
+    }
+
+    set((state) => ({
+      codexSetupFlow: {
+        ...state.codexSetupFlow,
+        phase: "logging-in",
+        loginSteps: advanceSteps(
+          state.codexSetupFlow.loginSteps,
+          "opening-browser",
+          STEP_ORDER_CODEX_LOGIN,
+        ),
+      },
+    }));
+
+    await get().startLogin("codex", mode);
+
+    const login = get().login.codex;
+    if (login?.status === "waiting" && login.mode === "browser") {
+      set((state) => ({
+        codexSetupFlow: {
+          ...state.codexSetupFlow,
+          loginSteps: advanceSteps(
+            state.codexSetupFlow.loginSteps,
+            "waiting-auth",
+            STEP_ORDER_CODEX_LOGIN,
+          ),
+        },
+      }));
+      if (get().codexSetupFlow.autoOpenBrowser) {
+        try {
+          await shellOpen(login.authUrl);
+        } catch {
+          // User can still click Open authorization page.
+        }
+        set((state) => ({
+          codexSetupFlow: { ...state.codexSetupFlow, autoOpenBrowser: false },
+        }));
+      }
+    } else if (login?.status === "waiting" && login.mode === "device-code") {
+      set((state) => ({
+        codexSetupFlow: {
+          ...state.codexSetupFlow,
+          loginSteps: advanceSteps(
+            // Reuse waiting-auth label semantics for device code.
+            state.codexSetupFlow.loginSteps,
+            "waiting-auth",
+            STEP_ORDER_CODEX_LOGIN,
+          ),
+        },
+      }));
+    } else if (login?.status === "error") {
+      set((state) => ({
+        codexSetupFlow: {
+          ...state.codexSetupFlow,
+          phase: "error",
+          error: login.message ?? null,
+          loginSteps: failActiveStep(state.codexSetupFlow.loginSteps),
+        },
+      }));
+    }
+  },
 
   refresh: async (runtime, options) => {
     const silent = options?.silent === true;
@@ -528,7 +750,12 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
     const current = get().login[runtime];
     const epoch = invalidateLogin(runtime);
     if (!current?.loginId) {
-      set((state) => ({ login: { ...state.login, [runtime]: null } }));
+      set((state) => ({
+        login: { ...state.login, [runtime]: null },
+        ...(runtime === "codex"
+          ? { codexSetupFlow: idleCodexSetupFlow() }
+          : {}),
+      }));
       return;
     }
     const { loginId, mode } = current;
@@ -536,7 +763,12 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
     try {
       await runtimeLoginCancel(runtime, loginId);
       if (!isCurrentLogin(runtime, epoch)) return;
-      set((state) => ({ login: { ...state.login, [runtime]: null } }));
+      set((state) => ({
+        login: { ...state.login, [runtime]: null },
+        ...(runtime === "codex"
+          ? { codexSetupFlow: idleCodexSetupFlow() }
+          : {}),
+      }));
     } catch (error) {
       if (isCurrentLogin(runtime, epoch)) {
         set((state) => ({
@@ -729,6 +961,13 @@ export function disposeRuntimeStore(): void {
   const unlisten = listenerUnlisten;
   listenerUnlisten = null;
   if (unlisten) unlisten();
+  installListenersReady = false;
+  const unlistenOutput = installOutputUnlisten;
+  installOutputUnlisten = null;
+  if (unlistenOutput) unlistenOutput();
+  const unlistenComplete = installCompleteUnlisten;
+  installCompleteUnlisten = null;
+  if (unlistenComplete) unlistenComplete();
 }
 
 export function resetRuntimeStoreForTests(): void {
