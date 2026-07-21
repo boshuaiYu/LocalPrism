@@ -93,7 +93,8 @@ export function RuntimeCard({
     Boolean(installInFlight) && !account.installed && !!onInstall;
   const flowBusy =
     setupFlow?.phase === "installing" || setupFlow?.phase === "logging-in";
-  const controlsLocked = loading || installInFlight || flowBusy;
+  const startControlsLocked = loading || installInFlight || flowBusy;
+  const escapeControlsLocked = loading || installInFlight;
   const showSetupSteps =
     setupFlow?.phase === "installing" ||
     setupFlow?.phase === "logging-in" ||
@@ -180,7 +181,7 @@ export function RuntimeCard({
                   type="button"
                   size="sm"
                   variant="outline"
-                  disabled={controlsLocked}
+                  disabled={escapeControlsLocked}
                   onClick={() => consume(onCancelLogin)}
                 >
                   Cancel
@@ -199,7 +200,7 @@ export function RuntimeCard({
                 <Button
                   type="button"
                   size="sm"
-                  disabled={controlsLocked}
+                  disabled={startControlsLocked}
                   onClick={() => startInteractiveLogin("browser")}
                 >
                   Continue in browser
@@ -208,7 +209,7 @@ export function RuntimeCard({
                   type="button"
                   size="sm"
                   variant="outline"
-                  disabled={controlsLocked}
+                  disabled={startControlsLocked}
                   onClick={() => startInteractiveLogin("device-code")}
                 >
                   Use device code
@@ -220,7 +221,7 @@ export function RuntimeCard({
                 type="button"
                 variant="outline"
                 size="sm"
-                disabled={controlsLocked}
+                disabled={startControlsLocked}
                 onClick={() => consume(onInstall)}
               >
                 {installing ? "Checking Codex\u2026" : "Install only"}
@@ -242,7 +243,7 @@ export function RuntimeCard({
                 type="button"
                 variant="outline"
                 size="sm"
-                disabled={controlsLocked}
+                disabled={startControlsLocked}
                 onClick={() => consume(onLogout)}
               >
                 Log out
@@ -264,7 +265,7 @@ export function RuntimeCard({
               <Button
                 type="button"
                 size="sm"
-                disabled={controlsLocked || !onOpenExternal}
+                disabled={escapeControlsLocked || !onOpenExternal}
                 onClick={() => consume(() => onOpenExternal?.(waiting.authUrl))}
               >
                 <ExternalLinkIcon className="size-3.5" />
@@ -275,7 +276,7 @@ export function RuntimeCard({
                   type="button"
                   size="sm"
                   variant="outline"
-                  disabled={controlsLocked}
+                  disabled={escapeControlsLocked}
                   onClick={() => consume(onCancelLogin)}
                 >
                   Cancel
@@ -303,7 +304,7 @@ export function RuntimeCard({
               <Button
                 type="button"
                 size="sm"
-                disabled={controlsLocked || !onOpenExternal}
+                disabled={escapeControlsLocked || !onOpenExternal}
                 onClick={() =>
                   consume(() => onOpenExternal?.(waiting.verificationUrl))
                 }
@@ -316,7 +317,7 @@ export function RuntimeCard({
                   type="button"
                   size="sm"
                   variant="outline"
-                  disabled={controlsLocked}
+                  disabled={escapeControlsLocked}
                   onClick={() => consume(onCancelLogin)}
                 >
                   Cancel
@@ -347,7 +348,7 @@ export function RuntimeCard({
                 <Button
                   type="button"
                   size="sm"
-                  disabled={controlsLocked}
+                  disabled={startControlsLocked}
                   onClick={() => startInteractiveLogin("browser")}
                 >
                   Continue in browser
@@ -356,7 +357,7 @@ export function RuntimeCard({
                   type="button"
                   size="sm"
                   variant="outline"
-                  disabled={controlsLocked}
+                  disabled={startControlsLocked}
                   onClick={() => startInteractiveLogin("device-code")}
                 >
                   Use device code
@@ -368,14 +369,14 @@ export function RuntimeCard({
                   type="password"
                   autoComplete="off"
                   value={apiKey}
-                  disabled={controlsLocked}
+                  disabled={startControlsLocked}
                   placeholder="Codex API key"
                   onChange={(event) => setApiKey(event.currentTarget.value)}
                 />
                 <Button
                   type="submit"
                   variant="outline"
-                  disabled={controlsLocked || !apiKey.trim()}
+                  disabled={startControlsLocked || !apiKey.trim()}
                 >
                   Use API key
                 </Button>

@@ -384,6 +384,43 @@ describe("RuntimeCard", () => {
     expect(onCancelLogin).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps Cancel and Open usable while setupFlow is logging-in", async () => {
+    const onOpenExternal = vi.fn().mockResolvedValue(undefined);
+    const onCancelLogin = vi.fn().mockResolvedValue(undefined);
+    await renderCard({
+      login: {
+        mode: "browser",
+        status: "waiting",
+        loginId: "login-flow",
+        authUrl: "https://auth.example/browser",
+      },
+      setupFlow: {
+        phase: "logging-in",
+        installSteps: [],
+        loginSteps: [
+          { id: "browser", label: "Waiting for browser", status: "active" },
+        ],
+        installLogs: [],
+        error: null,
+        autoOpenBrowser: true,
+      },
+      onOpenExternal,
+      onCancelLogin,
+    });
+
+    expect(findButton(container, "Open authorization page").disabled).toBe(
+      false,
+    );
+    expect(findButton(container, "Cancel").disabled).toBe(false);
+
+    await act(async () =>
+      findButton(container, "Open authorization page").click(),
+    );
+    await act(async () => findButton(container, "Cancel").click());
+    expect(onOpenExternal).toHaveBeenCalledWith("https://auth.example/browser");
+    expect(onCancelLogin).toHaveBeenCalledTimes(1);
+  });
+
   it("shows device verification data and supports opening and cancellation", async () => {
     const onOpenExternal = vi.fn().mockResolvedValue(undefined);
     const onCancelLogin = vi.fn().mockResolvedValue(undefined);
