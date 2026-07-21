@@ -1,3 +1,5 @@
+import type { StepInfo } from "@/lib/runtime-flow-steps";
+
 export type RuntimeKind = "claude" | "codex";
 
 /**
@@ -284,3 +286,31 @@ export interface RuntimeConversationHistory {
   reference: ConversationRef;
   items: JsonValue[];
 }
+
+export type RuntimeInstallOutputEvent = {
+  runtime: RuntimeKind;
+  stream: "stdout" | "stderr" | "status";
+  line: string;
+};
+
+export type RuntimeInstallCompleteEvent = {
+  runtime: RuntimeKind;
+  success: boolean;
+};
+
+export type CodexSetupFlowPhase =
+  | "idle"
+  | "installing"
+  | "logging-in"
+  | "complete"
+  | "error";
+
+export type CodexSetupFlowState = {
+  phase: CodexSetupFlowPhase;
+  installSteps: StepInfo[];
+  loginSteps: StepInfo[];
+  installLogs: string[];
+  error: string | null;
+  /** When true, browser login should auto-open authUrl once. */
+  autoOpenBrowser: boolean;
+};
