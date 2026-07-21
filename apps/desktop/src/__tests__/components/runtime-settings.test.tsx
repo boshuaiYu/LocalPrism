@@ -105,6 +105,9 @@ describe("RuntimeSettings", () => {
   let refresh: Mock<RuntimeState["refresh"]>;
   let install: Mock<RuntimeState["install"]>;
   let startLogin: Mock<RuntimeState["startLogin"]>;
+  let ensureInstalledAndStartLogin: Mock<
+    RuntimeState["ensureInstalledAndStartLogin"]
+  >;
   let cancelLogin: Mock<RuntimeState["cancelLogin"]>;
   let logout: Mock<RuntimeState["logout"]>;
   let checkClaudeStatus: Mock<ClaudeSetupState["checkStatus"]>;
@@ -118,6 +121,9 @@ describe("RuntimeSettings", () => {
     install = vi.fn<RuntimeState["install"]>().mockResolvedValue(true);
     startLogin = vi
       .fn<RuntimeState["startLogin"]>()
+      .mockResolvedValue(undefined);
+    ensureInstalledAndStartLogin = vi
+      .fn<RuntimeState["ensureInstalledAndStartLogin"]>()
       .mockResolvedValue(undefined);
     cancelLogin = vi
       .fn<RuntimeState["cancelLogin"]>()
@@ -133,6 +139,7 @@ describe("RuntimeSettings", () => {
       refresh,
       install,
       startLogin,
+      ensureInstalledAndStartLogin,
       cancelLogin,
       logout,
     });
@@ -242,6 +249,7 @@ describe("RuntimeSettings", () => {
 
     await expect(codex?.onInstall?.()).resolves.toBeUndefined();
     await expect(codex?.onLogin?.("browser")).resolves.toBeUndefined();
+    await expect(codex?.onLogin?.("device-code")).resolves.toBeUndefined();
     await expect(
       codex?.onLogin?.("api-key", "sk-test"),
     ).resolves.toBeUndefined();
@@ -252,17 +260,21 @@ describe("RuntimeSettings", () => {
     await expect(codex?.onLogout?.()).resolves.toBeUndefined();
 
     expect(install).toHaveBeenCalledWith("codex");
-    expect(startLogin).toHaveBeenNthCalledWith(
+    expect(ensureInstalledAndStartLogin).toHaveBeenNthCalledWith(
       1,
       "codex",
       "browser",
-      undefined,
     );
-    expect(startLogin).toHaveBeenNthCalledWith(
+    expect(ensureInstalledAndStartLogin).toHaveBeenNthCalledWith(
       2,
       "codex",
-      "api-key",
-      "sk-test",
+      "device-code",
+    );
+    expect(startLogin).toHaveBeenCalledWith("codex", "api-key", "sk-test");
+    expect(startLogin).not.toHaveBeenCalledWith(
+      "codex",
+      "browser",
+      expect.anything(),
     );
     expect(cancelLogin).toHaveBeenCalledWith("codex");
     expect(mocks.shellOpen).toHaveBeenCalledWith("https://auth.example");
@@ -283,7 +295,9 @@ describe("RuntimeSettings", () => {
 
   it("consumes rejected Codex actions", async () => {
     install.mockRejectedValueOnce(new Error("install failed"));
-    startLogin.mockRejectedValueOnce(new Error("login failed"));
+    ensureInstalledAndStartLogin.mockRejectedValueOnce(
+      new Error("login failed"),
+    );
     cancelLogin.mockRejectedValueOnce(new Error("cancel failed"));
     logout.mockRejectedValueOnce(new Error("logout failed"));
     mocks.shellOpen.mockRejectedValueOnce(
