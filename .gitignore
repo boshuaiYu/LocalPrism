@@ -45,6 +45,9 @@ yarn-error.log*
 # Misc
 .DS_Store
 .worktrees/
+.tmp/
+.omc/
+apps/desktop/src-tauri/target-static/
 *.pem
 
 *.acn

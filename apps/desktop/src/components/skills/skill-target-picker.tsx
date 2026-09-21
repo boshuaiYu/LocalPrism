@@ -6,10 +6,8 @@ const OPTIONS: Array<{
   scope: SkillScope;
   label: string;
 }> = [
-  { runtime: "claude", scope: "user", label: "Claude / user" },
-  { runtime: "claude", scope: "project", label: "Claude / project" },
-  { runtime: "codex", scope: "user", label: "Codex / user" },
-  { runtime: "codex", scope: "project", label: "Codex / project" },
+  { runtime: "claude", scope: "user", label: "LocalPrism / user" },
+  { runtime: "claude", scope: "project", label: "LocalPrism / project" },
 ];
 
 export interface SkillTargetPickerProps {

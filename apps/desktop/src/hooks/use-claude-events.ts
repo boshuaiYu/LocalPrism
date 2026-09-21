@@ -5,22 +5,95 @@ import {
   CLAUDE_CODE_PROVIDER_ID,
   useClaudeChatStore,
   type ClaudeStreamMessage,
+  type TabState,
 } from "@/stores/claude-chat-store";
 import { useDocumentStore } from "@/stores/document-store";
 import { useHistoryStore } from "@/stores/history-store";
 import { useProposedChangesStore } from "@/stores/proposed-changes-store";
-import { useSettingsStore } from "@/stores/settings-store";
 import { readTexFileContent } from "@/lib/tauri/fs";
-import { resolveCompileTarget } from "@/lib/latex-compiler";
+import {
+  resolveCompileTarget,
+  activeCompileUsesTexlive,
+} from "@/lib/latex-compiler";
 import { runOwnedProjectCompile } from "@/lib/project-compile";
 import { createLogger } from "@/lib/debug/logger";
+import { isDebugLoggingEnabled } from "@/lib/debug/log-store";
 import { interruptRuntimeTurn } from "@/runtime/commands";
 import type { RuntimeEventEnvelope } from "@/runtime/types";
+import { useApprovalStore } from "@/stores/approval-store";
+import {
+  classifyClaudeProcessStderr,
+  formatUnexpectedClaudeExit,
+} from "@/lib/claude-exit-error";
+import { createStreamDeltaBatcher } from "@/hooks/stream-delta-batch";
+
+function streamingAttemptSignature(tabs: readonly TabState[]): string {
+  return tabs
+    .map((tab) => {
+      if (!tab.isStreaming) return `${tab.id}:idle`;
+      const providerKey = tab.sessionProviderKey ?? tab.providerKey ?? "";
+      return `${tab.id}:${tab.activeAttemptId ?? ""}:${tab.runtime}:${providerKey}`;
+    })
+    .join("|");
+}
 
 const log = createLogger("claude-event");
 
-/** Fail a Codex turn that receives no assistant/tool/reasoning progress. */
-const CODEX_NO_PROGRESS_MS = 90_000;
+/** Fail a turn that receives no assistant/tool/reasoning progress. */
+// Codex WebSocket reconnect storms commonly take ~75–120s before HTTP
+// fallback succeeds; keep the local abort above that budget.
+const CODEX_NO_PROGRESS_MS = 180_000;
+const CLAUDE_NO_PROGRESS_MS = 180_000;
+
+const EMPTY_CODEX_REPLY_ERROR =
+  "Codex finished without a reply. Stop and retry.";
+const INTERRUPTED_CODEX_REPLY_ERROR =
+  "Codex turn was interrupted before a reply arrived.";
+
+function messageHasVisibleCodexContent(message: ClaudeStreamMessage): boolean {
+  if (message.type === "assistant") {
+    const content = message.message?.content;
+    if (!Array.isArray(content)) return false;
+    return content.some(
+      (block) =>
+        (block.type === "text" && !!block.text?.trim()) ||
+        (block.type === "thinking" && !!block.thinking?.trim()) ||
+        (block.type === "tool_use" && !!block.id),
+    );
+  }
+  if (message.type === "user") {
+    const content = message.message?.content;
+    if (!Array.isArray(content)) return false;
+    // Tool results count as visible turn activity for empty-reply detection.
+    return content.some(
+      (block) => block.type === "tool_result" && !!block.tool_use_id,
+    );
+  }
+  return false;
+}
+
+/** Visible assistant/tool activity after the latest user text bubble. */
+function hasVisibleCodexReplyAfterLastUser(
+  messages: ClaudeStreamMessage[],
+): boolean {
+  let lastUserTextIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.type !== "user") continue;
+    const content = message.message?.content;
+    const hasUserText = Array.isArray(content)
+      ? content.some((block) => block.type === "text" && !!block.text?.trim())
+      : false;
+    if (hasUserText) {
+      lastUserTextIndex = index;
+      break;
+    }
+  }
+  if (lastUserTextIndex < 0) return false;
+  return messages
+    .slice(lastUserTextIndex + 1)
+    .some(messageHasVisibleCodexContent);
+}
 
 /** Backend event payload shapes (include tab_id for routing) */
 interface ClaudeOutputPayload {
@@ -33,6 +106,8 @@ interface ClaudeCompletePayload {
   tab_id: string;
   attempt_id: string;
   success: boolean;
+  exit_code?: number | null;
+  stderr_tail?: string | null;
 }
 
 interface ClaudeErrorPayload {
@@ -65,11 +140,17 @@ export function useClaudeEvents() {
   const lastMsgTimeRef = useRef(new Map<string, number>());
   const lastCodexEventAtRef = useRef(new Map<string, number>());
   const lastCodexProgressAtRef = useRef(new Map<string, number>());
+  const lastClaudeProgressAtRef = useRef(new Map<string, number>());
+  const codexHadReplyRef = useRef(new Set<string>());
   const codexStallReportedRef = useRef(new Set<string>());
+  const claudeStallReportedRef = useRef(new Set<string>());
 
-  // Reset per-tab state whenever any tab starts streaming
-  const tabs = useClaudeChatStore((s) => s.tabs);
+  // Reset per-tab state when a tab starts/stops streaming — not on every token.
+  const streamingSignature = useClaudeChatStore((s) =>
+    streamingAttemptSignature(s.tabs),
+  );
   useEffect(() => {
+    const tabs = useClaudeChatStore.getState().tabs;
     for (const tab of tabs) {
       const attemptId = tab.activeAttemptId;
       if (
@@ -94,6 +175,9 @@ export function useClaudeEvents() {
         const now = Date.now();
         lastCodexEventAtRef.current.set(tab.id, now);
         lastCodexProgressAtRef.current.set(tab.id, now);
+        lastClaudeProgressAtRef.current.set(tab.id, now);
+        codexHadReplyRef.current.delete(`${tab.id}:${attemptId}`);
+        claudeStallReportedRef.current.delete(`${tab.id}:${attemptId}`);
         codexStallReportedRef.current.delete(`${tab.id}:${attemptId}`);
       } else if (!tab.isStreaming) {
         // Clean up finished tab state
@@ -108,9 +192,20 @@ export function useClaudeEvents() {
         lastMsgTimeRef.current.delete(tab.id);
         lastCodexEventAtRef.current.delete(tab.id);
         lastCodexProgressAtRef.current.delete(tab.id);
+        lastClaudeProgressAtRef.current.delete(tab.id);
+        for (const key of [...codexHadReplyRef.current]) {
+          if (key.startsWith(`${tab.id}:`)) {
+            codexHadReplyRef.current.delete(key);
+          }
+        }
+        for (const key of [...claudeStallReportedRef.current]) {
+          if (key.startsWith(`${tab.id}:`)) {
+            claudeStallReportedRef.current.delete(key);
+          }
+        }
       }
     }
-  }, [tabs]);
+  }, [streamingSignature]);
 
   // Stall only when assistant/tool/reasoning progress stops — reconnect
   // warnings and other soft events must not reset this clock.
@@ -119,33 +214,46 @@ export function useClaudeEvents() {
       const now = Date.now();
       const chatStore = useClaudeChatStore.getState();
       for (const tab of chatStore.tabs) {
-        if (
-          tab.runtime !== "codex" ||
-          !tab.isStreaming ||
-          !tab.activeAttemptId
-        ) {
+        if (!tab.isStreaming || !tab.activeAttemptId) {
           continue;
         }
         const attemptKey = `${tab.id}:${tab.activeAttemptId}`;
-        if (codexStallReportedRef.current.has(attemptKey)) continue;
+        if (tab.runtime === "codex") {
+          if (codexStallReportedRef.current.has(attemptKey)) continue;
+          const lastProgressAt =
+            lastCodexProgressAtRef.current.get(tab.id) ??
+            tab.streamingStartedAt ??
+            now;
+          if (now - lastProgressAt < CODEX_NO_PROGRESS_MS) continue;
+          codexStallReportedRef.current.add(attemptKey);
+          chatStore._setError(
+            tab.id,
+            "Codex made no reply progress for 180 seconds (reconnects alone do not count). Check network/VPN/proxy, then Stop and retry.",
+          );
+          chatStore._setStreamingStatus(tab.id, null);
+          void chatStore.cancelExecution(tab.id);
+          void interruptRuntimeTurn(
+            "codex",
+            tab.id,
+            tab.activeAttemptId,
+            "terminate",
+          ).catch(() => undefined);
+          continue;
+        }
+        if (tab.runtime !== "claude") continue;
+        if (claudeStallReportedRef.current.has(attemptKey)) continue;
         const lastProgressAt =
-          lastCodexProgressAtRef.current.get(tab.id) ??
+          lastClaudeProgressAtRef.current.get(tab.id) ??
           tab.streamingStartedAt ??
           now;
-        if (now - lastProgressAt < CODEX_NO_PROGRESS_MS) continue;
-        codexStallReportedRef.current.add(attemptKey);
+        if (now - lastProgressAt < CLAUDE_NO_PROGRESS_MS) continue;
+        claudeStallReportedRef.current.add(attemptKey);
         chatStore._setError(
           tab.id,
-          "Codex made no reply progress for 90 seconds (reconnects alone do not count). Check network/VPN/proxy, then Stop and retry.",
+          "The model made no reply for 180 seconds. Check the provider API key, network, or Stop and retry.",
         );
         chatStore._setStreamingStatus(tab.id, null);
         void chatStore.cancelExecution(tab.id);
-        void interruptRuntimeTurn(
-          "codex",
-          tab.id,
-          tab.activeAttemptId,
-          "terminate",
-        ).catch(() => undefined);
       }
     }, 5_000);
     return () => window.clearInterval(timer);
@@ -153,6 +261,10 @@ export function useClaudeEvents() {
 
   // ── One-time listener setup (mount only) ──
   useEffect(() => {
+    const deltaBatcher = createStreamDeltaBatcher((tabId, message) => {
+      useClaudeChatStore.getState()._appendMessage(tabId, message);
+    });
+
     type ProjectOwner = {
       projectRoot: string;
       projectGeneration: number | undefined;
@@ -287,50 +399,58 @@ export function useClaudeEvents() {
       const gap = lastTime ? ((now - lastTime) / 1000).toFixed(1) : "0";
       lastMsgTimeRef.current.set(tabId, now);
 
-      // Log ALL message types with gap detection
-      const contentTypes =
-        msg.message?.content?.map((b: any) => b.type).join(",") ?? "";
-      const gapWarning = Number(gap) > 10 ? ` GAP ${gap}s` : "";
-      log.debug(
-        `[${tabId}] ${elapsed(tabId)} #${count} type=${msg.type} sub=${msg.subtype ?? ""} content=[${contentTypes}] gap=${gap}s${gapWarning}`,
-      );
-
-      if (msg.type === "assistant") {
-        const thinkingBlock = msg.message?.content?.find(
-          (b: any) => b.type === "thinking",
-        );
-        if (thinkingBlock) {
-          log.debug(
-            `[${tabId}] ${elapsed(tabId)} thinking: ${(thinkingBlock.thinking || "").slice(0, 100)}`,
-          );
-        }
-        const textBlock = msg.message?.content?.find(
-          (b: any) => b.type === "text",
-        );
-        if (textBlock?.text) {
-          log.debug(
-            `[${tabId}] ${elapsed(tabId)} text: ${textBlock.text.slice(0, 100)}`,
-          );
-        }
-        const toolBlock = msg.message?.content?.find(
-          (b: any) => b.type === "tool_use",
-        );
-        if (toolBlock) {
-          log.debug(
-            `[${tabId}] ${elapsed(tabId)} tool_use: ${toolBlock.name} ${toolBlock.input?.file_path ?? ""}`,
-          );
-        }
+      if (msg.type === "assistant" && messageHasVisibleCodexContent(msg)) {
+        lastClaudeProgressAtRef.current.set(tabId, Date.now());
       }
-      if (msg.type === "user" && msg.message?.content) {
-        for (const block of msg.message.content) {
-          if (block.type === "tool_result") {
-            const preview =
-              typeof block.content === "string"
-                ? block.content.slice(0, 80)
-                : JSON.stringify(block.content)?.slice(0, 80);
+      if (msg.type === "user" && messageHasVisibleCodexContent(msg)) {
+        lastClaudeProgressAtRef.current.set(tabId, Date.now());
+      }
+
+      if (isDebugLoggingEnabled()) {
+        const contentTypes =
+          msg.message?.content?.map((b: any) => b.type).join(",") ?? "";
+        const gapWarning = Number(gap) > 10 ? ` GAP ${gap}s` : "";
+        log.debug(
+          `[${tabId}] ${elapsed(tabId)} #${count} type=${msg.type} sub=${msg.subtype ?? ""} content=[${contentTypes}] gap=${gap}s${gapWarning}`,
+        );
+
+        if (msg.type === "assistant") {
+          const thinkingBlock = msg.message?.content?.find(
+            (b: any) => b.type === "thinking",
+          );
+          if (thinkingBlock) {
             log.debug(
-              `[${tabId}] ${elapsed(tabId)} tool_result: id=${block.tool_use_id} err=${block.is_error ?? false} len=${preview?.length ?? 0}`,
+              `[${tabId}] ${elapsed(tabId)} thinking: ${(thinkingBlock.thinking || "").slice(0, 100)}`,
             );
+          }
+          const textBlock = msg.message?.content?.find(
+            (b: any) => b.type === "text",
+          );
+          if (textBlock?.text) {
+            log.debug(
+              `[${tabId}] ${elapsed(tabId)} text: ${textBlock.text.slice(0, 100)}`,
+            );
+          }
+          const toolBlock = msg.message?.content?.find(
+            (b: any) => b.type === "tool_use",
+          );
+          if (toolBlock) {
+            log.debug(
+              `[${tabId}] ${elapsed(tabId)} tool_use: ${toolBlock.name} ${toolBlock.input?.file_path ?? ""}`,
+            );
+          }
+        }
+        if (msg.type === "user" && msg.message?.content) {
+          for (const block of msg.message.content) {
+            if (block.type === "tool_result") {
+              const preview =
+                typeof block.content === "string"
+                  ? block.content.slice(0, 80)
+                  : JSON.stringify(block.content)?.slice(0, 80);
+              log.debug(
+                `[${tabId}] ${elapsed(tabId)} tool_result: id=${block.tool_use_id} err=${block.is_error ?? false} len=${preview?.length ?? 0}`,
+              );
+            }
           }
         }
       }
@@ -515,24 +635,17 @@ export function useClaudeEvents() {
         cancellation?.mode !== "interrupt"
       ) {
         const isDirectProvider = directProviderTabRef.current.get(tabId);
-        if (count === 0) {
-          const isWindows = navigator.userAgent.includes("Windows");
-          chatStore._setError(
-            tabId,
-            isDirectProvider
-              ? "AI provider request failed to start. Check the provider API key, Base URL, model name, and model access."
-              : isWindows
-                ? "Claude process failed to start. Check that Claude Code CLI is installed and git-bash is available."
-                : "Claude process failed to start. Check that Claude Code CLI is installed.",
-          );
-        } else {
-          chatStore._setError(
-            tabId,
-            isDirectProvider
-              ? "AI provider request stopped unexpectedly. Check the provider API key, model access, Base URL, tool-call support, or rate limits."
-              : "Claude process exited unexpectedly. This may be due to rate limiting or an API error.",
-          );
-        }
+        const isWindows = navigator.userAgent.includes("Windows");
+        chatStore._setError(
+          tabId,
+          formatUnexpectedClaudeExit({
+            started: count > 0,
+            isDirectProvider: !!isDirectProvider,
+            isWindows,
+            exitCode: payload.exit_code,
+            stderrTail: payload.stderr_tail,
+          }),
+        );
       }
 
       // Clean up per-tab state
@@ -546,6 +659,7 @@ export function useClaudeEvents() {
       }
 
       const completedSessionId = tab.sessionId;
+      useApprovalStore.getState().dismissForTab(tabId);
       chatStore._setStreaming(tabId, false);
       chatStore._cleanupTemporaryFilePaths(
         chatStore.consumeTemporaryFilePaths(tabId),
@@ -564,6 +678,7 @@ export function useClaudeEvents() {
             .sendPrompt(queuedGuidance.prompt, queuedGuidance.contextOverride, {
               tabId,
               preserveTabProvider: true,
+              displayPrompt: queuedGuidance.displayPrompt,
             });
           return;
         }
@@ -633,6 +748,7 @@ export function useClaudeEvents() {
           .sendPrompt(queuedGuidance.prompt, queuedGuidance.contextOverride, {
             tabId,
             preserveTabProvider: true,
+            displayPrompt: queuedGuidance.displayPrompt,
           });
         return;
       }
@@ -654,8 +770,7 @@ export function useClaudeEvents() {
             owner: { projectRoot, projectGeneration },
             rootFileId: rootId,
             targetPath,
-            useTexlive:
-              useSettingsStore.getState().compilerBackend === "texlive",
+            useTexlive: activeCompileUsesTexlive(),
             minimumBusyMs: 0,
             isStillValid: () =>
               stillOwnsProject(completionProjectOwner) &&
@@ -688,15 +803,24 @@ export function useClaudeEvents() {
         event.type === "turnFailed";
 
       if (terminal) {
+        deltaBatcher.flush(tabId);
         const hasMatchingCancellation = (
           initialTab.cancelledAttempts ?? []
         ).some((candidate) => candidate.attemptId === attemptId);
-        if (
-          !hasMatchingCancellation &&
-          (!initialTab.isStreaming || !isCurrentAttempt())
-        ) {
+        const currentForGate = useClaudeChatStore
+          .getState()
+          .tabs.find((candidate) => candidate.id === tabId);
+        // A newer live attempt owns the tab — ignore stale terminals.
+        const newerAttemptOwnsTab =
+          !!currentForGate?.activeAttemptId &&
+          currentForGate.activeAttemptId !== attemptId &&
+          !hasMatchingCancellation;
+        if (newerAttemptOwnsTab) {
           return;
         }
+        // Previously required isStreaming && current attempt. That dropped
+        // late turnCompleted after a premature streaming clear, leaving only
+        // the user bubble with no error banner.
 
         const chatStore = useClaudeChatStore.getState();
         const cancellation = chatStore._consumeAttemptCancellation(
@@ -704,6 +828,7 @@ export function useClaudeEvents() {
           attemptId,
         );
         if (cancellation?.mode === "terminate") {
+          deltaBatcher.discard(tabId);
           const currentTab = useClaudeChatStore
             .getState()
             .tabs.find((candidate) => candidate.id === tabId);
@@ -712,25 +837,51 @@ export function useClaudeEvents() {
             (currentTab.attemptEpoch ?? 0) <= cancellation.attemptEpoch + 1
           ) {
             chatStore._setStreaming(tabId, false);
+            chatStore._clearActiveAttempt(tabId, attemptId);
           }
           chatStore._cleanupTemporaryFilePaths(
             cancellation.temporaryFilePaths ?? [],
           );
           return;
         }
-        if (!isCurrentAttempt()) return;
         const completionProjectOwner = captureProjectOwner();
+        const attemptKey = `${tabId}:${attemptId}`;
+        const tabSnapshot =
+          useClaudeChatStore
+            .getState()
+            .tabs.find((candidate) => candidate.id === tabId) ?? initialTab;
+        const hadReply =
+          codexHadReplyRef.current.has(attemptKey) ||
+          hasVisibleCodexReplyAfterLastUser(tabSnapshot.messages ?? []);
         // Terminal events must always leave the UI, even after reconnect warnings.
         chatStore._setStreamingStatus(tabId, null);
         chatStore._setStreaming(tabId, false);
+        let emptyReplyError: string | null = null;
         if (event.type === "turnFailed") {
           chatStore._setError(tabId, event.message);
+        } else if (event.type === "turnInterrupted") {
+          emptyReplyError = hadReply ? null : INTERRUPTED_CODEX_REPLY_ERROR;
+          chatStore._setError(tabId, emptyReplyError);
         } else if (event.type === "turnCompleted") {
-          chatStore._setError(tabId, null);
+          // Empty successful completions previously left only the user bubble
+          // (streaming off, no error, empty assistant filtered from UI).
+          emptyReplyError = hadReply ? null : EMPTY_CODEX_REPLY_ERROR;
+          chatStore._setError(tabId, emptyReplyError);
+        }
+        if (emptyReplyError) {
+          // Banner alone is easy to miss; keep a visible bubble in-thread.
+          chatStore._appendMessage(tabId, {
+            type: "assistant",
+            subtype: "streaming_final",
+            message: {
+              content: [{ type: "text", text: emptyReplyError }],
+            },
+          });
         }
         chatStore._cleanupTemporaryFilePaths(
           chatStore.consumeTemporaryFilePaths(tabId),
         );
+        codexHadReplyRef.current.delete(attemptKey);
 
         const completedTab = useClaudeChatStore
           .getState()
@@ -748,11 +899,13 @@ export function useClaudeEvents() {
               ? useClaudeChatStore.getState().consumeQueuedGuidance(tabId)
               : null;
         if (queuedGuidance) {
+          chatStore._clearActiveAttempt(tabId, attemptId);
           void useClaudeChatStore
             .getState()
             .sendPrompt(queuedGuidance.prompt, queuedGuidance.contextOverride, {
               tabId,
               preserveTabProvider: true,
+              displayPrompt: queuedGuidance.displayPrompt,
             });
           return;
         }
@@ -770,10 +923,12 @@ export function useClaudeEvents() {
             !stillOwnsProject(completionProjectOwner) ||
             !isCurrentAttempt()
           ) {
+            chatStore._clearActiveAttempt(tabId, attemptId);
             return;
           }
           await useDocumentStore.getState().refreshFiles();
         }
+        chatStore._clearActiveAttempt(tabId, attemptId);
         return;
       }
 
@@ -788,20 +943,27 @@ export function useClaudeEvents() {
         event.type === "toolCompleted";
       if (isProgressEvent) {
         lastCodexProgressAtRef.current.set(tabId, Date.now());
+        const hasVisibleReply =
+          (event.type === "assistantDelta" && !!event.delta?.trim()) ||
+          (event.type === "assistantCompleted" && !!event.content?.trim()) ||
+          event.type === "reasoningSummaryDelta" ||
+          event.type === "toolStarted" ||
+          event.type === "toolCompleted";
+        if (hasVisibleReply) {
+          codexHadReplyRef.current.add(`${tabId}:${attemptId}`);
+        }
       }
       switch (event.type) {
         case "sessionStarted":
+          deltaBatcher.flush(tabId);
           chatStore._setSessionId(tabId, event.sessionId);
           break;
         case "assistantDelta":
           chatStore._setStreamingStatus(tabId, null);
-          chatStore._appendMessage(tabId, {
-            type: "assistant",
-            subtype: "streaming_delta",
-            message: { content: [{ type: "text", text: event.delta }] },
-          });
+          deltaBatcher.enqueue(tabId, "text", event.delta);
           break;
         case "assistantCompleted":
+          deltaBatcher.flush(tabId);
           chatStore._setStreamingStatus(tabId, null);
           chatStore._appendMessage(tabId, {
             type: "assistant",
@@ -811,15 +973,10 @@ export function useClaudeEvents() {
           break;
         case "reasoningSummaryDelta":
           chatStore._setStreamingStatus(tabId, null);
-          chatStore._appendMessage(tabId, {
-            type: "assistant",
-            subtype: "streaming_delta",
-            message: {
-              content: [{ type: "thinking", thinking: event.delta }],
-            },
-          });
+          deltaBatcher.enqueue(tabId, "thinking", event.delta);
           break;
         case "toolStarted":
+          deltaBatcher.flush(tabId);
           chatStore._appendMessage(tabId, {
             type: "assistant",
             message: {
@@ -835,6 +992,7 @@ export function useClaudeEvents() {
           });
           break;
         case "toolCompleted":
+          deltaBatcher.flush(tabId);
           chatStore._appendMessage(tabId, {
             type: "user",
             message: {
@@ -850,12 +1008,16 @@ export function useClaudeEvents() {
           });
           break;
         case "usage":
-          chatStore._addUsage(tabId, event.inputTokens, event.outputTokens);
+          deltaBatcher.flush(tabId);
+          chatStore._addUsage(tabId, event.inputTokens, event.outputTokens, {
+            cacheReadTokens: event.cacheReadTokens,
+          });
           break;
         case "warning": {
           // Soft / reconnect / retry warnings must not end streaming or
           // sticky-fail the tab. Only turnFailed / turnCompleted /
           // turnInterrupted should clear isStreaming.
+          deltaBatcher.flush(tabId);
           const message = event.message.trim();
           if (!message) break;
           const reconnectMatch = message.match(
@@ -933,12 +1095,15 @@ export function useClaudeEvents() {
               log.error(`[${tabId}] CRITICAL: ${payload}`);
             }
             const isDirectProvider = directProviderTabRef.current.get(tabId);
+            const classified = classifyClaudeProcessStderr(payload);
             const providerMessage =
               isDirectProvider || providerErrorMessage(payload)
                 ? providerErrorMessage(payload) || payload.trim()
-                : null;
+                : classified;
             if (providerMessage) {
               setUserVisibleError(tabId, providerMessage);
+            } else if (classified) {
+              setUserVisibleError(tabId, classified);
             }
             // Surface critical stderr messages to the user UI (only if no error is already set)
             if (
@@ -979,6 +1144,7 @@ export function useClaudeEvents() {
 
     return () => {
       cancelled = true;
+      deltaBatcher.dispose();
       for (const unlisten of listenersRef.current) {
         unlisten();
       }

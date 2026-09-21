@@ -1,0 +1,21 @@
+% !TEX root = ../main.tex
+\chapter{残差校准方法}[Residual-score calibration]
+
+\section{问题表述}[Problem formulation]
+
+设 $f_\theta$ 为已训练并冻结的代理模型。对查询 $x$ 与真值 $y$，定义残差分数
+\begin{equation}
+  s(x,y)=\|y-f_\theta(x)\|_2.
+\end{equation}
+给定校准集 $\{(x_i,y_i)\}_{i=1}^{n}$，记 $\hat F$ 为 $\{s(x_i,y_i)\}$ 的经验分布函数。对目标误覆盖率 $\alpha$，标量输出的对称区间为
+\begin{equation}
+  f_\theta(x)\pm \hat F^{-1}(1-\alpha).
+\end{equation}
+
+\section{覆盖率}[Coverage]
+
+若校准分数与测试分数可交换，则上述区间的覆盖率至少为 $1-\alpha$，并带有 $1/(n+1)$ 的离散化修正。当分数序列出现显著膨胀时，判定代理模型离开可信流形，并回退到数值求解器。
+
+\section{数值实验}[Numerical experiments]
+
+在 Burgers 方程、Darcy 流与反应--扩散系统上，未校准覆盖率分别为 0.71、0.64 与 0.77；校准后为 0.91、0.89 与 0.92（目标 90\%）。区间平均宽度分别增加 31\%、55\% 与 29\%。

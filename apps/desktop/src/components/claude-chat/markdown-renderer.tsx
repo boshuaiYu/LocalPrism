@@ -1,4 +1,4 @@
-import { type FC, useCallback, useState } from "react";
+import { type FC, type ReactNode, memo, useCallback, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -14,9 +14,15 @@ import {
   ChevronRightIcon,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import "katex/dist/katex.min.css";
 
 import { useDocumentStore } from "@/stores/document-store";
+import {
+  isOpenableChatHref,
+  promoteChatCitations,
+  transformChatUrl,
+} from "@/lib/chat-citations";
 import { cn } from "@/lib/utils";
 
 // ─── Shell Detection ───
@@ -71,99 +77,191 @@ function isShellCodeBlock(language: string, code: string): boolean {
 
 // ─── Markdown Renderer ───
 
+const REMARK_PLUGINS = [remarkGfm, remarkMath];
+const REHYPE_PLUGINS = [rehypeKatex];
+
 interface MarkdownRendererProps {
   content: string;
   className?: string;
+  preview?: boolean;
 }
 
-export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
-  content,
-  className,
-}) => {
+function MarkdownCode({
+  className: codeClassName,
+  children,
+  node,
+  preview = false,
+  ...props
+}: {
+  className?: string;
+  children?: ReactNode;
+  node?: { position?: { start: { line: number }; end: { line: number } } };
+  preview?: boolean;
+}) {
+  const match = /language-(\w+)/.exec(codeClassName || "");
+  const language = match?.[1];
+  const code = String(children).replace(/\n$/, "");
+  const isBlock =
+    node?.position && node.position.start.line !== node.position.end.line;
+
+  if (!match && !isBlock) {
+    return (
+      <code
+        className={cn("break-words [overflow-wrap:anywhere]", codeClassName)}
+        {...props}
+      >
+        {children}
+      </code>
+    );
+  }
+
+  return <CodeBlock language={language || ""} code={code} preview={preview} />;
+}
+
+function MarkdownLink({
+  href,
+  children,
+  node: _node,
+  ...props
+}: {
+  href?: string;
+  children?: ReactNode;
+  node?: unknown;
+}) {
+  const url = transformChatUrl(href ?? "");
+  const isExternal = isOpenableChatHref(url);
+
+  const openSafeUrl = (event: { preventDefault: () => void }) => {
+    event.preventDefault();
+    if (!isExternal) return;
+    void shellOpen(url).catch(() => undefined);
+  };
+
   return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm, remarkMath]}
-      rehypePlugins={[rehypeKatex]}
-      className={cn(
-        "min-w-0 max-w-full break-words [overflow-wrap:anywhere] [&_*]:max-w-full",
-        className ?? "prose prose-sm dark:prose-invert max-w-none",
-      )}
-      components={{
-        pre({ children }) {
-          return <>{children}</>;
-        },
-        table({ children, node, ...props }) {
-          return (
-            <div className="my-3 w-full overflow-x-auto rounded-lg border border-border">
-              <table
-                className="m-0 w-full border-collapse text-left text-sm"
-                {...props}
-              >
-                {children}
-              </table>
-            </div>
-          );
-        },
-        thead({ children, node, ...props }) {
-          return (
-            <thead className="bg-muted/70" {...props}>
-              {children}
-            </thead>
-          );
-        },
-        th({ children, node, ...props }) {
-          return (
-            <th
-              className="border-border border-r border-b px-3 py-2 font-medium text-foreground last:border-r-0"
-              {...props}
-            >
-              {children}
-            </th>
-          );
-        },
-        td({ children, node, ...props }) {
-          return (
-            <td
-              className="border-border border-t border-r px-3 py-2 align-top text-foreground last:border-r-0"
-              {...props}
-            >
-              {children}
-            </td>
-          );
-        },
-        hr({ node, ...props }) {
-          return <hr className="my-5 border-border border-t" {...props} />;
-        },
-        code({ className: codeClassName, children, node, ...props }) {
-          const match = /language-(\w+)/.exec(codeClassName || "");
-          const language = match?.[1];
-          const code = String(children).replace(/\n$/, "");
-          const isBlock =
-            node?.position &&
-            node.position.start.line !== node.position.end.line;
-
-          if (!match && !isBlock) {
-            return (
-              <code
-                className={cn(
-                  "break-words [overflow-wrap:anywhere]",
-                  codeClassName,
-                )}
-                {...props}
-              >
-                {children}
-              </code>
-            );
-          }
-
-          return <CodeBlock language={language || ""} code={code} />;
-        },
-      }}
+    <a
+      {...props}
+      href={url || undefined}
+      data-testid="chat-markdown-link"
+      className="inline max-w-full break-all rounded-md border border-primary/20 bg-primary/10 px-1.5 py-px text-primary underline decoration-primary/45 underline-offset-2 transition-colors hover:bg-primary/15"
+      onClick={openSafeUrl}
+      onAuxClick={openSafeUrl}
     >
-      {content}
-    </ReactMarkdown>
+      {children}
+    </a>
   );
+}
+
+const MARKDOWN_COMPONENTS = {
+  a: MarkdownLink,
+  pre({ children }: { children?: ReactNode }) {
+    return <>{children}</>;
+  },
+  table({
+    children,
+    node: _node,
+    ...props
+  }: {
+    children?: ReactNode;
+    node?: unknown;
+  }) {
+    return (
+      <div className="my-3 w-full overflow-x-auto rounded-lg border border-border">
+        <table
+          className="m-0 w-full border-collapse text-left text-sm"
+          {...props}
+        >
+          {children}
+        </table>
+      </div>
+    );
+  },
+  thead({
+    children,
+    node: _node,
+    ...props
+  }: {
+    children?: ReactNode;
+    node?: unknown;
+  }) {
+    return (
+      <thead className="bg-muted/70" {...props}>
+        {children}
+      </thead>
+    );
+  },
+  th({
+    children,
+    node: _node,
+    ...props
+  }: {
+    children?: ReactNode;
+    node?: unknown;
+  }) {
+    return (
+      <th
+        className="border-border border-r border-b px-3 py-2 font-medium text-foreground last:border-r-0"
+        {...props}
+      >
+        {children}
+      </th>
+    );
+  },
+  td({
+    children,
+    node: _node,
+    ...props
+  }: {
+    children?: ReactNode;
+    node?: unknown;
+  }) {
+    return (
+      <td
+        className="border-border border-t border-r px-3 py-2 align-top text-foreground last:border-r-0"
+        {...props}
+      >
+        {children}
+      </td>
+    );
+  },
+  hr({ node: _node, ...props }: { node?: unknown }) {
+    return <hr className="my-5 border-border border-t" {...props} />;
+  },
+  code(props: {
+    className?: string;
+    children?: ReactNode;
+    node?: { position?: { start: { line: number }; end: { line: number } } };
+  }) {
+    return <MarkdownCode {...props} />;
+  },
 };
+
+export const MarkdownRenderer: FC<MarkdownRendererProps> = memo(
+  ({ content, className, preview = false }) => {
+    return (
+      <ReactMarkdown
+        remarkPlugins={REMARK_PLUGINS}
+        rehypePlugins={REHYPE_PLUGINS}
+        urlTransform={transformChatUrl}
+        className={cn(
+          "min-w-0 max-w-full break-words [overflow-wrap:anywhere] [&_*]:max-w-full",
+          className ?? "prose prose-sm dark:prose-invert max-w-none",
+        )}
+        components={
+          preview
+            ? {
+                ...MARKDOWN_COMPONENTS,
+                code(props) {
+                  return <MarkdownCode {...props} preview />;
+                },
+              }
+            : MARKDOWN_COMPONENTS
+        }
+      >
+        {promoteChatCitations(content)}
+      </ReactMarkdown>
+    );
+  },
+);
 
 // ─── Code Block ───
 
@@ -174,14 +272,15 @@ type RunState =
   | { status: "done"; exitCode: number; stdout: string; stderr: string }
   | { status: "error"; message: string };
 
-const CodeBlock: FC<{ language: string; code: string }> = ({
+const CodeBlock: FC<{ language: string; code: string; preview?: boolean }> = ({
   language,
   code,
+  preview = false,
 }) => {
   const insertAtCursor = useDocumentStore((s) => s.insertAtCursor);
   const projectRoot = useDocumentStore((s) => s.projectRoot);
-  const isLatex = language === "latex" || language === "tex";
-  const isShell = isShellCodeBlock(language, code);
+  const isLatex = !preview && (language === "latex" || language === "tex");
+  const isShell = !preview && isShellCodeBlock(language, code);
 
   const [runState, setRunState] = useState<RunState>({ status: "idle" });
 

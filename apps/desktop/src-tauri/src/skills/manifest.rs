@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub const SKILL_MANIFEST_VERSION: u32 = 1;
-const MANIFEST_DIRECTORY: &str = "ClaudePrism";
 const MANIFEST_FILENAME: &str = "skills-manifest.json";
+const LEGACY_MANIFEST_DIRECTORY: &str = "ClaudePrism";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -37,10 +37,21 @@ pub enum SkillSource {
     Folder {
         path: String,
     },
+    Url {
+        url: String,
+    },
     Curated {
         #[serde(rename = "packageId")]
         package_id: String,
     },
+}
+
+pub fn source_url_from_skill_source(source: &SkillSource) -> Option<String> {
+    match source {
+        SkillSource::Url { url } => Some(url.clone()),
+        SkillSource::Curated { package_id } => Some(format!("curated:{package_id}")),
+        SkillSource::Folder { .. } => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,7 +102,31 @@ impl fmt::Display for ManifestError {
 impl std::error::Error for ManifestError {}
 
 pub fn manifest_path(config_dir: &Path) -> PathBuf {
-    config_dir.join(MANIFEST_DIRECTORY).join(MANIFEST_FILENAME)
+    config_dir.join(MANIFEST_FILENAME)
+}
+
+fn migrate_legacy_manifest(config_dir: &Path) {
+    let dest = manifest_path(config_dir);
+    let legacy_dir = config_dir.join(LEGACY_MANIFEST_DIRECTORY);
+    let legacy = legacy_dir.join(MANIFEST_FILENAME);
+    if dest.exists() || !legacy.is_file() {
+        return;
+    }
+    let renamed = std::fs::rename(&legacy, &dest).is_ok()
+        || (std::fs::copy(&legacy, &dest).is_ok() && std::fs::remove_file(&legacy).is_ok());
+    if !renamed {
+        return;
+    }
+    if dir_is_empty(&legacy_dir) {
+        let _ = std::fs::remove_dir(&legacy_dir);
+    }
+}
+
+fn dir_is_empty(dir: &Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => false,
+    }
 }
 
 pub fn stable_entry_id(target: &SkillTarget, folder: &str) -> Result<String, ManifestError> {
@@ -220,7 +255,9 @@ pub struct ManifestStore {
 
 impl ManifestStore {
     pub fn new(config_dir: impl AsRef<Path>) -> Self {
-        let path = manifest_path(config_dir.as_ref());
+        let config_dir = config_dir.as_ref();
+        migrate_legacy_manifest(config_dir);
+        let path = manifest_path(config_dir);
         let lock_path = path.with_file_name(format!("{MANIFEST_FILENAME}.lock"));
         Self { path, lock_path }
     }
@@ -459,12 +496,17 @@ fn validate_entry(entry: &ManagedSkillEntry) -> Result<(), ManifestError> {
                 "folder source path must not be empty".into(),
             ));
         }
+        SkillSource::Url { url } if url.trim().is_empty() => {
+            return Err(ManifestError::InvalidData(
+                "URL source must not be empty".into(),
+            ));
+        }
         SkillSource::Curated { package_id } if package_id.trim().is_empty() => {
             return Err(ManifestError::InvalidData(
                 "curated package ID must not be empty".into(),
             ));
         }
-        SkillSource::Folder { .. } | SkillSource::Curated { .. } => {}
+        SkillSource::Folder { .. } | SkillSource::Url { .. } | SkillSource::Curated { .. } => {}
     }
     if entry.content_sha256.len() != 64
         || !entry
@@ -493,21 +535,30 @@ fn validate_entry(entry: &ManagedSkillEntry) -> Result<(), ManifestError> {
             "managed destination basename must match the skill folder".into(),
         ));
     }
-    let runtime_directory = match entry.target.runtime {
-        RuntimeKind::Claude => ".claude",
-        RuntimeKind::Codex => ".agents",
-    };
-    let skills_directory = destination.parent().and_then(Path::file_name);
-    let runtime_parent = destination
+    let parent_name = destination.parent().and_then(Path::file_name);
+    let grandparent_name = destination
         .parent()
         .and_then(Path::parent)
         .and_then(Path::file_name);
-    if !path_component_matches(skills_directory, "skills")
-        || !path_component_matches(runtime_parent, runtime_directory)
-    {
-        return Err(ManifestError::InvalidData(format!(
-            "managed destination must be inside {runtime_directory}/skills"
-        )));
+    let valid = match entry.target.scope {
+        SkillScope::User => {
+            path_component_matches(parent_name, "skills")
+                || path_component_matches(parent_name, ".skills")
+        }
+        SkillScope::Project => {
+            path_component_matches(parent_name, "skills")
+                && path_component_matches(grandparent_name, ".localprism")
+        }
+    };
+    if !valid {
+        return Err(ManifestError::InvalidData(
+            match entry.target.scope {
+                SkillScope::User => "managed destination must be inside skills or .skills".into(),
+                SkillScope::Project => {
+                    "managed destination must be inside .localprism/skills".into()
+                }
+            },
+        ));
     }
     Ok(())
 }
@@ -634,16 +685,12 @@ mod tests {
     }
 
     fn entry(root: &Path, folder: &str, target: SkillTarget) -> ManagedSkillEntry {
-        let runtime_dir = match target.runtime {
-            RuntimeKind::Claude => ".claude",
-            RuntimeKind::Codex => ".agents",
-        };
-        let destination = root
-            .join(runtime_dir)
-            .join("skills")
-            .join(folder)
-            .to_string_lossy()
-            .to_string();
+        let destination = match target.scope {
+            SkillScope::User => root.join("skills").join(folder),
+            SkillScope::Project => root.join(".localprism").join("skills").join(folder),
+        }
+        .to_string_lossy()
+        .to_string();
         ManagedSkillEntry {
             id: stable_entry_id(&target, folder).unwrap(),
             declared_name: format!("Skill {folder}"),
@@ -661,6 +708,22 @@ mod tests {
 
     fn target(runtime: RuntimeKind, scope: SkillScope) -> SkillTarget {
         SkillTarget { runtime, scope }
+    }
+
+    #[test]
+    fn user_scope_still_accepts_legacy_skills_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut owned = entry(
+            temp.path(),
+            "writer",
+            target(RuntimeKind::Claude, SkillScope::User),
+        );
+        owned.destination = temp
+            .path()
+            .join("home/.skills/writer")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(super::validate_entry(&owned), Ok(()));
     }
 
     fn write_unchecked(path: &Path, bytes: &[u8]) {
@@ -700,6 +763,7 @@ mod tests {
             description: "Test skill".into(),
             folder: folder.into(),
             source_path: path.to_string_lossy().to_string(),
+            source_url: None,
             targets: vec![target],
             managed: true,
             compatible_runtimes: vec![RuntimeKind::Claude, RuntimeKind::Codex],
@@ -716,7 +780,58 @@ mod tests {
         assert_eq!(store.load().unwrap(), SkillManifest::default());
         assert_eq!(store.path(), manifest_path(temp.path()).as_path());
         assert!(!store.path().exists());
-        assert!(!temp.path().join(MANIFEST_DIRECTORY).exists());
+        assert!(!temp.path().join("ClaudePrism").exists());
+    }
+
+    #[test]
+    fn migrates_legacy_claudeprism_manifest_when_dest_is_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy_dir = temp.path().join("ClaudePrism");
+        let legacy = legacy_dir.join("skills-manifest.json");
+        let owned = entry(
+            temp.path(),
+            "writer",
+            target(RuntimeKind::Claude, SkillScope::User),
+        );
+        write_unchecked(
+            &legacy,
+            &serde_json::to_vec(&SkillManifest {
+                version: SKILL_MANIFEST_VERSION,
+                entries: vec![owned],
+            })
+            .unwrap(),
+        );
+
+        let store = ManifestStore::new(temp.path());
+        assert_eq!(store.path(), temp.path().join("skills-manifest.json"));
+        assert_eq!(store.load().unwrap().entries.len(), 1);
+        assert!(store.path().is_file());
+        assert!(!legacy.exists());
+        assert!(!legacy_dir.exists());
+    }
+
+    #[test]
+    fn keeps_existing_manifest_when_legacy_claudeprism_copy_is_also_present() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ManifestStore::new(temp.path());
+        let kept = entry(
+            temp.path(),
+            "writer",
+            target(RuntimeKind::Claude, SkillScope::User),
+        );
+        replace_manifest(
+            &store,
+            &SkillManifest {
+                version: SKILL_MANIFEST_VERSION,
+                entries: vec![kept],
+            },
+        );
+        let legacy = temp.path().join("ClaudePrism").join("skills-manifest.json");
+        write_unchecked(&legacy, b"{\"version\":1,\"entries\":[]}");
+
+        let reopened = ManifestStore::new(temp.path());
+        assert_eq!(reopened.load().unwrap().entries.len(), 1);
+        assert!(legacy.exists());
     }
 
     #[test]
@@ -945,7 +1060,7 @@ mod tests {
         );
         managed.destination = temp
             .path()
-            .join("home/.CLAUDE/SKILLS/WRITER")
+            .join("home/CLAUDE-HOME/SKILLS/WRITER")
             .to_string_lossy()
             .to_string();
 

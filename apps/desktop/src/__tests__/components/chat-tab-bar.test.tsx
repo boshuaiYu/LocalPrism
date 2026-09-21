@@ -6,7 +6,12 @@ vi.mock("@/components/claude-chat/session-selector", () => ({
   SessionSelector: () => <div data-testid="session-selector" />,
 }));
 
+vi.mock("@/components/claude-chat/workspace-account-button", () => ({
+  WorkspaceAccountButton: () => <div data-testid="workspace-account-button" />,
+}));
+
 import { ChatTabBar } from "@/components/claude-chat/chat-tab-bar";
+import { useApprovalStore } from "@/stores/approval-store";
 import { type TabState, useClaudeChatStore } from "@/stores/claude-chat-store";
 
 function makeTab(
@@ -48,6 +53,7 @@ describe("ChatTabBar runtime badges", () => {
 
   beforeEach(() => {
     chatSnapshot = useClaudeChatStore.getState();
+    useApprovalStore.getState().reset();
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -68,6 +74,7 @@ describe("ChatTabBar runtime badges", () => {
     await act(async () => root.unmount());
     container.remove();
     useClaudeChatStore.setState(chatSnapshot, true);
+    useApprovalStore.getState().reset();
     if (scrollIntoViewDescriptor) {
       Object.defineProperty(
         HTMLElement.prototype,
@@ -96,7 +103,7 @@ describe("ChatTabBar runtime badges", () => {
     await act(async () => root.render(<ChatTabBar />));
   }
 
-  it("visibly and accessibly identifies every tab runtime", async () => {
+  it("shows tab titles without runtime badges", async () => {
     await renderTabs([
       makeTab("tab-claude", "Literature review", "claude"),
       makeTab("tab-codex", "Run checks", "codex"),
@@ -104,21 +111,13 @@ describe("ChatTabBar runtime badges", () => {
 
     const claudeTab = tabButton(container, "tab-claude");
     const codexTab = tabButton(container, "tab-codex");
-    const claudeBadge = Array.from(claudeTab.querySelectorAll("span")).find(
-      (node) => node.textContent === "Claude",
-    );
-    const codexBadge = Array.from(codexTab.querySelectorAll("span")).find(
-      (node) => node.textContent === "Codex",
-    );
-
-    expect(claudeBadge).toBeInstanceOf(HTMLSpanElement);
-    expect(codexBadge).toBeInstanceOf(HTMLSpanElement);
-    expect(claudeTab.getAttribute("aria-label")).toBe(
-      "Claude runtime: Literature review",
-    );
-    expect(codexTab.getAttribute("aria-label")).toBe(
-      "Codex runtime: Run checks",
-    );
+    expect(claudeTab.getAttribute("aria-label")).toBe("Literature review");
+    expect(codexTab.getAttribute("aria-label")).toBe("Run checks");
+    expect(claudeTab.textContent).not.toContain("Claude");
+    expect(codexTab.textContent).not.toContain("Codex");
+    expect(
+      container.querySelector('[data-testid="workspace-account-button"]'),
+    ).not.toBeNull();
   });
 
   it("keeps the streaming indicator and close-button protections", async () => {
@@ -188,5 +187,50 @@ describe("ChatTabBar runtime badges", () => {
     expect(
       useClaudeChatStore.getState().tabs.some((tab) => tab.id === createdTabId),
     ).toBe(false);
+  });
+
+  it("marks the originating tab when a tool approval is parked", async () => {
+    await renderTabs([
+      makeTab("tab-old", "你好", "claude", true),
+      makeTab("tab-new", "New Chat", "claude"),
+    ]);
+    useApprovalStore.getState().enqueue({
+      requestId: "req-old",
+      method: "claude/can_use_tool",
+      runtime: "claude",
+      threadId: "thread-old",
+      turnId: "turn-old",
+      tabId: "tab-old",
+      agentRunId: null,
+      title: "PowerShell",
+      command: "Get-Location",
+      cwd: null,
+      diff: null,
+      permissions: null,
+      questions: [],
+      details: null,
+    });
+    await act(async () => root.render(<ChatTabBar />));
+
+    const oldTab = tabButton(container, "tab-old");
+    const newTab = tabButton(container, "tab-new");
+    expect(oldTab.getAttribute("aria-label")).toBe("你好 (needs approval)");
+    expect(
+      oldTab.querySelector('[data-testid="tab-approval-indicator"]'),
+    ).not.toBeNull();
+    expect(newTab.getAttribute("aria-label")).toBe("New Chat");
+    expect(
+      newTab.querySelector('[data-testid="tab-approval-indicator"]'),
+    ).toBeNull();
+    useApprovalStore.getState().reset();
+  });
+
+  it("shows a close control on the last idle tab", async () => {
+    await renderTabs([makeTab("tab-only", "Literature review", "claude")]);
+
+    const onlyTab = tabButton(container, "tab-only");
+    expect(
+      onlyTab.querySelector('[role="button"][aria-label="Close tab"]'),
+    ).toBeInstanceOf(HTMLSpanElement);
   });
 });

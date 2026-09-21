@@ -11,10 +11,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { readFile, readTextFile, stat } from "@tauri-apps/plugin-fs";
+import { readFile } from "@tauri-apps/plugin-fs";
 import { toast } from "sonner";
 import {
   FolderOpenIcon,
+  FolderPlusIcon,
+  ClockIcon,
   XIcon,
   FileTextIcon,
   SparklesIcon,
@@ -24,8 +26,7 @@ import {
   Loader2Icon,
   KeyRoundIcon,
   SearchIcon,
-  PanelLeftIcon,
-  PlusIcon,
+  ArrowLeftIcon,
   SettingsIcon,
   GithubIcon,
   MonitorIcon,
@@ -38,8 +39,6 @@ import { useProjectStore } from "@/stores/project-store";
 import { useDocumentStore } from "@/stores/document-store";
 import { useRuntimeStore } from "@/stores/runtime-store";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
-import { useSettingsStore } from "@/stores/settings-store";
-import { compileLatex } from "@/lib/latex-compiler";
 import { getMupdfClient } from "@/lib/mupdf/mupdf-client";
 import { exists, join } from "@/lib/tauri/fs";
 import { Button } from "@/components/ui/button";
@@ -53,6 +52,10 @@ import {
 } from "@/components/ui/dialog";
 import { ProjectWizard, type CreationMode } from "./project-wizard";
 import { RuntimeSettings } from "./runtime/runtime-settings";
+import { HomepageEnvironmentStatus } from "./homepage-environment-status";
+import { areDefaultSkillPacksReady } from "@/lib/default-skill-packs";
+import { useAgentStore } from "@/stores/agent-store";
+import { useSkillStore } from "@/stores/skill-store";
 import { cn } from "@/lib/utils";
 
 interface DefaultProject {
@@ -86,13 +89,11 @@ type ProjectPreviewState =
 
 const projectPreviewCache = new Map<string, ProjectPreviewData>();
 const projectPreviewRequests = new Map<string, Promise<ProjectPreviewData>>();
-let projectPreviewCompileQueue: Promise<void> = Promise.resolve();
 
 export function ProjectPicker() {
   const [showModeDialog, setShowModeDialog] = useState(false);
   const [wizardMode, setWizardMode] = useState<CreationMode | null>(null);
   const [appVersion, setAppVersion] = useState("");
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [activeSection, setActiveSection] =
     useState<ProjectPickerSection>("projects");
   const [settingsDetailSection, setSettingsDetailSection] =
@@ -102,8 +103,12 @@ export function ProjectPicker() {
     useState<RecentProject | null>(null);
   const defaultProjectsDiscoveredRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const pendingSearchFocus = useRef(false);
   const { theme = "system", setTheme } = useTheme();
-  const searchShortcutLabel = "⌘ K";
+  const searchShortcutLabel = useMemo(() => {
+    if (typeof navigator === "undefined") return "Ctrl+K";
+    return /Mac|iPhone|iPad/i.test(navigator.platform) ? "⌘K" : "Ctrl+K";
+  }, []);
 
   const recentProjects = useProjectStore((s) => s.recentProjects);
   const addRecentProject = useProjectStore((s) => s.addRecentProject);
@@ -132,17 +137,26 @@ export function ProjectPicker() {
         return;
       }
 
+      if (recentProjects.length === 0 && activeSection === "projects") {
+        return;
+      }
+
       event.preventDefault();
+      pendingSearchFocus.current = true;
       setActiveSection("projects");
-      requestAnimationFrame(() => {
-        searchInputRef.current?.focus();
-        searchInputRef.current?.select();
-      });
     };
 
     window.addEventListener("keydown", handleSearchShortcut);
     return () => window.removeEventListener("keydown", handleSearchShortcut);
-  }, []);
+  }, [activeSection, recentProjects.length]);
+
+  useEffect(() => {
+    if (!pendingSearchFocus.current) return;
+    if (activeSection !== "projects" || !searchInputRef.current) return;
+    pendingSearchFocus.current = false;
+    searchInputRef.current.focus();
+    searchInputRef.current.select();
+  }, [activeSection, recentProjects.length, searchQuery]);
 
   useEffect(() => {
     if (defaultProjectsDiscoveredRef.current || recentProjects.length > 0) {
@@ -198,8 +212,14 @@ export function ProjectPicker() {
       await openProject(path);
       addRecentProject(path);
     } catch (err) {
-      removeRecentProject(path);
+      const stillExists = await exists(path).catch(() => false);
+      if (!stillExists) {
+        removeRecentProject(path);
+      }
       console.warn("Failed to open recent project:", { path, error: err });
+      toast.error("Failed to open recent project", {
+        description: err instanceof Error ? err.message : String(err),
+      });
     }
   };
 
@@ -224,175 +244,85 @@ export function ProjectPicker() {
     );
   }
 
+  const cycleTheme = () => {
+    if (theme === "system") setTheme("light");
+    else if (theme === "light") setTheme("dark");
+    else setTheme("system");
+  };
+
   return (
-    <div className="flex h-full bg-background text-foreground">
-      <aside
-        className={cn(
-          "flex shrink-0 flex-col border-sidebar-border border-r bg-sidebar text-sidebar-foreground transition-[width] duration-200 ease-out",
-          isSidebarCollapsed ? "w-12" : "w-56",
-        )}
-      >
-        <div
-          className={cn(
-            "flex h-[calc(48px+var(--titlebar-height))] items-center gap-2 px-3 pt-[var(--titlebar-height)]",
-            isSidebarCollapsed ? "justify-center" : "justify-between",
-          )}
-        >
-          {!isSidebarCollapsed && (
-            <div className="flex min-w-0 items-center gap-2">
-              <img src="/icon-192.png" alt="LocalPrism" className="size-6" />
-              <span className="truncate font-semibold text-sm">LocalPrism</span>
-            </div>
-          )}
-          <Button
-            variant="ghost"
-            size="icon"
-            className={cn(
-              "rounded-lg text-muted-foreground hover:text-foreground",
-              isSidebarCollapsed ? "size-7" : "size-8",
-            )}
-            onClick={() => setIsSidebarCollapsed((value) => !value)}
-            aria-label={
-              isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"
-            }
-          >
-            <PanelLeftIcon
-              className={cn(
-                "size-3.5 transition-transform duration-200",
-                isSidebarCollapsed && "rotate-180",
-              )}
-            />
-          </Button>
-        </div>
+    <div className="relative flex h-full flex-col overflow-hidden bg-background text-foreground">
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top,oklch(0.96_0.02_85)_0%,transparent_55%)] dark:bg-[radial-gradient(ellipse_at_top,oklch(0.22_0.03_270)_0%,transparent_55%)]"
+      />
 
-        <nav
-          className={cn(
-            "flex flex-col gap-1",
-            isSidebarCollapsed ? "items-center px-0" : "px-2",
-          )}
-        >
-          <ProjectNavButton
-            active={activeSection === "projects"}
-            collapsed={isSidebarCollapsed}
-            icon={FolderOpenIcon}
-            onClick={() => setActiveSection("projects")}
+      <header className="relative z-10 flex h-[calc(44px+var(--titlebar-height))] shrink-0 items-center justify-end gap-1 px-4 pt-[var(--titlebar-height)]">
+        <Button variant="ghost" size="icon" className="size-8" asChild>
+          <a
+            href="https://github.com/delibae/claude-prism"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="GitHub"
           >
-            All Projects
-          </ProjectNavButton>
-          <ProjectNavButton
-            active={activeSection === "settings"}
-            collapsed={isSidebarCollapsed}
-            icon={SettingsIcon}
-            onClick={() => setActiveSection("settings")}
-          >
-            Settings
-          </ProjectNavButton>
-        </nav>
-
-        <div
-          className={cn(
-            "mt-auto flex h-9 items-center border-sidebar-border border-t text-muted-foreground text-xs",
-            isSidebarCollapsed ? "justify-center px-0" : "justify-between px-3",
-          )}
+            <GithubIcon className="size-4" />
+          </a>
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-8"
+          onClick={cycleTheme}
+          title={
+            theme === "system"
+              ? "System theme"
+              : theme === "light"
+                ? "Light mode"
+                : "Dark mode"
+          }
         >
-          {isSidebarCollapsed ? (
-            <img src="/icon-192.png" alt="LocalPrism" className="size-4" />
+          {theme === "system" ? (
+            <MonitorIcon className="size-4" />
+          ) : theme === "light" ? (
+            <SunIcon className="size-4" />
           ) : (
-            <>
-              <span className="truncate">LocalPrism v{appVersion}</span>
-              <div className="flex shrink-0 items-center gap-1">
-                <Button variant="ghost" size="icon" className="size-6" asChild>
-                  <a
-                    href="https://github.com/delibae/claude-prism"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title="GitHub"
-                  >
-                    <GithubIcon className="size-3.5" />
-                  </a>
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="size-6"
-                  onClick={() => {
-                    if (theme === "system") setTheme("light");
-                    else if (theme === "light") setTheme("dark");
-                    else setTheme("system");
-                  }}
-                  title={
-                    theme === "system"
-                      ? "System theme"
-                      : theme === "light"
-                        ? "Light mode"
-                        : "Dark mode"
-                  }
-                >
-                  {theme === "system" ? (
-                    <MonitorIcon className="size-3.5" />
-                  ) : theme === "light" ? (
-                    <SunIcon className="size-3.5" />
-                  ) : (
-                    <MoonIcon className="size-3.5" />
-                  )}
-                </Button>
-              </div>
-            </>
+            <MoonIcon className="size-4" />
           )}
-        </div>
-      </aside>
+        </Button>
+        <Button
+          variant={activeSection === "settings" ? "secondary" : "ghost"}
+          className="h-8 gap-1.5 px-2.5 text-muted-foreground hover:text-foreground"
+          onClick={() =>
+            setActiveSection((section) =>
+              section === "settings" ? "projects" : "settings",
+            )
+          }
+        >
+          <SettingsIcon className="size-4" />
+          Settings
+        </Button>
+      </header>
 
-      <main className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-[calc(48px+var(--titlebar-height))] shrink-0 flex-nowrap items-center gap-3 border-border/70 border-b bg-background px-5">
-          <div className="mr-auto flex min-w-0 items-center">
-            <h1 className="truncate font-semibold text-lg leading-none">
-              {activeSection === "settings" ? "Settings" : "All Projects"}
+      <main className="relative z-10 min-h-0 flex-1 overflow-auto">
+        {activeSection === "settings" ? (
+          <div className="mx-auto w-full max-w-4xl px-6 pb-12">
+            <button
+              type="button"
+              onClick={() => setActiveSection("projects")}
+              className="mb-5 inline-flex items-center gap-1.5 text-muted-foreground text-sm transition-colors hover:text-foreground"
+            >
+              <ArrowLeftIcon className="size-3.5" />
+              Back to home
+            </button>
+            <h1 className="mb-6 font-semibold text-xl tracking-tight">
+              Settings
             </h1>
-          </div>
-
-          {activeSection === "projects" && (
-            <div className="flex min-w-0 flex-1 flex-nowrap items-center justify-end gap-2">
-              <div className="relative flex min-w-40 flex-1 items-center sm:max-w-sm">
-                <SearchIcon className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
-                <input
-                  ref={searchInputRef}
-                  value={searchQuery}
-                  onChange={(event) => setSearchQuery(event.target.value)}
-                  placeholder="Search"
-                  className="h-9 w-full rounded-lg border border-input bg-background pr-16 pl-9 text-sm outline-none transition-colors placeholder:text-muted-foreground focus:border-ring"
-                />
-                <kbd className="pointer-events-none absolute top-1/2 right-2 flex h-6 min-w-10 -translate-y-1/2 items-center justify-center rounded-md border border-border/70 bg-muted/30 px-1.5 font-medium text-[11px] text-muted-foreground leading-none">
-                  {searchShortcutLabel}
-                </kbd>
-              </div>
-
-              <Button
-                onClick={handleOpenFolder}
-                variant="secondary"
-                className="h-9 shrink-0 gap-1.5 rounded-lg px-3.5"
-              >
-                <FolderOpenIcon className="size-4" />
-                Import
-              </Button>
-              <Button
-                onClick={() => setShowModeDialog(true)}
-                className="h-9 shrink-0 gap-1.5 rounded-lg px-4"
-              >
-                <PlusIcon className="size-4" />
-                New
-              </Button>
-            </div>
-          )}
-        </header>
-
-        <div className="min-h-0 flex-1 overflow-auto">
-          {activeSection === "settings" ? (
-            <div className="mx-auto grid w-full max-w-6xl grid-cols-1 gap-6 px-8 py-7 lg:grid-cols-[13rem_minmax(0,1fr)]">
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-[13rem_minmax(0,1fr)]">
               <aside className="space-y-1 lg:border-border/60 lg:border-r lg:pr-4">
                 <SettingsDetailButton
                   active={settingsDetailSection === "runtimes"}
                   icon={KeyRoundIcon}
-                  label="AI Runtimes"
+                  label="Providers"
                   meta={`${readyRuntimeCount}/2 ready`}
                   onClick={() => setSettingsDetailSection("runtimes")}
                 />
@@ -404,11 +334,10 @@ export function ProjectPicker() {
                   onClick={() => setSettingsDetailSection("environment")}
                 />
               </aside>
-
               <div className="min-w-0">
                 {settingsDetailSection === "runtimes" ? (
                   <SettingsPanel
-                    title="AI Runtimes"
+                    title="Providers"
                     icon={KeyRoundIcon}
                     contentClassName="p-0"
                   >
@@ -425,40 +354,89 @@ export function ProjectPicker() {
                 )}
               </div>
             </div>
-          ) : (
-            <div className="flex w-full flex-col gap-4 px-5 py-5">
-              {visibleProjects.length === 0 ? (
-                <div className="flex min-h-80 flex-col items-center justify-center rounded-lg border border-border border-dashed bg-muted/10 px-6 text-center">
-                  <FileTextIcon className="mb-4 size-10 text-muted-foreground/70" />
-                  <h2 className="font-semibold text-lg">
-                    {normalizedSearch ? "No matching projects" : "No projects"}
-                  </h2>
-                  <div className="mt-5 flex flex-wrap justify-center gap-3">
-                    <Button onClick={() => setShowModeDialog(true)}>
-                      <PlusIcon className="mr-2 size-4" />
-                      New
-                    </Button>
-                    <Button onClick={handleOpenFolder} variant="outline">
-                      <FolderOpenIcon className="mr-2 size-4" />
-                      Import
-                    </Button>
+          </div>
+        ) : (
+          <div className="mx-auto flex min-h-full w-full max-w-xl flex-col justify-center px-6 py-10">
+            <div className="mb-8 text-center">
+              <div className="mx-auto mb-4 flex size-16 items-center justify-center rounded-2xl border border-border/70 bg-background/80 shadow-sm">
+                <img src="/icon-192.png" alt="" className="size-10" />
+              </div>
+              <h1 className="font-semibold text-3xl tracking-tight">
+                LocalPrism
+              </h1>
+              <p className="mt-2 text-muted-foreground text-sm">
+                AI-powered academic writing workspace
+              </p>
+            </div>
+
+            <div className="flex gap-3">
+              <Button
+                onClick={() => setShowModeDialog(true)}
+                size="lg"
+                variant="outline"
+                className="h-11 flex-1 gap-2 rounded-xl"
+              >
+                <FolderPlusIcon className="size-4" />
+                New Project
+              </Button>
+              <Button
+                onClick={handleOpenFolder}
+                size="lg"
+                className="h-11 flex-1 gap-2 rounded-xl"
+              >
+                <FolderOpenIcon className="size-4" />
+                Open Folder
+              </Button>
+            </div>
+
+            <HomepageEnvironmentStatus />
+
+            {(recentProjects.length > 0 || normalizedSearch) && (
+              <section className="mt-8">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 text-muted-foreground text-xs uppercase tracking-wide">
+                    <ClockIcon className="size-3.5" />
+                    Recent Projects
+                  </div>
+                  <div className="relative w-40">
+                    <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                    <input
+                      ref={searchInputRef}
+                      value={searchQuery}
+                      onChange={(event) => setSearchQuery(event.target.value)}
+                      placeholder="Search"
+                      className="h-8 w-full rounded-lg border border-input bg-background pr-12 pl-8 text-xs outline-none transition-colors placeholder:text-muted-foreground focus:border-ring"
+                    />
+                    <kbd className="pointer-events-none absolute top-1/2 right-1.5 -translate-y-1/2 rounded border border-border/70 px-1 font-medium text-[10px] text-muted-foreground">
+                      {searchShortcutLabel}
+                    </kbd>
                   </div>
                 </div>
-              ) : (
-                <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-x-6 gap-y-6">
-                  {visibleProjects.map((project) => (
-                    <ProjectPreviewCard
-                      key={project.path}
-                      project={project}
-                      onOpen={() => handleOpenRecent(project.path)}
-                      onRemove={() => setRemoveProjectTarget(project)}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
+
+                {visibleProjects.length === 0 ? (
+                  <div className="rounded-xl border border-border border-dashed px-4 py-8 text-center text-muted-foreground text-sm">
+                    No matching projects
+                  </div>
+                ) : (
+                  <div className="overflow-hidden rounded-xl border border-border/70 bg-background/70 shadow-sm">
+                    {visibleProjects.map((project) => (
+                      <RecentProjectRow
+                        key={project.path}
+                        project={project}
+                        onOpen={() => handleOpenRecent(project.path)}
+                        onRemove={() => setRemoveProjectTarget(project)}
+                      />
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
+
+            <p className="mt-10 text-center text-muted-foreground text-xs">
+              LocalPrism{appVersion ? ` v${appVersion}` : ""}
+            </p>
+          </div>
+        )}
       </main>
 
       {/* New Project mode selection dialog */}
@@ -515,7 +493,7 @@ export function ProjectPicker() {
           <DialogHeader>
             <DialogTitle>Remove Project</DialogTitle>
             <DialogDescription>
-              Remove "{removeProjectTarget?.name ?? "this project"}" from All
+              Remove "{removeProjectTarget?.name ?? "this project"}" from Recent
               Projects? The project files will stay on disk.
             </DialogDescription>
           </DialogHeader>
@@ -554,15 +532,6 @@ interface SkillsStatus {
 
 function projectPreviewCacheKey(project: RecentProject) {
   return `${project.path}:${project.lastOpened}`;
-}
-
-function enqueueProjectPreviewCompile<T>(task: () => Promise<T>): Promise<T> {
-  const run = projectPreviewCompileQueue.then(task, task);
-  projectPreviewCompileQueue = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  return run;
 }
 
 async function firstExistingProjectFile(
@@ -613,60 +582,6 @@ async function renderPdfThumbnail(pdfPath: string): Promise<string> {
   return renderPdfThumbnailFromBytes(await readFile(pdfPath));
 }
 
-function texPreviewLines(content: string) {
-  return content
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .slice(0, 12)
-    .map((line) => (line.length > 70 ? `${line.slice(0, 67)}...` : line));
-}
-
-function statDateToMs(value: unknown): number | null {
-  if (!value) return null;
-  if (value instanceof Date) {
-    const time = value.getTime();
-    return Number.isFinite(time) ? time : null;
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value) || value <= 0) return null;
-    return value < 1_000_000_000_000 ? value * 1000 : value;
-  }
-  if (typeof value === "string") {
-    const time = Date.parse(value);
-    return Number.isFinite(time) ? time : null;
-  }
-  return null;
-}
-
-async function getProjectCreatedAt(
-  projectPath: string,
-): Promise<number | null> {
-  try {
-    const info = (await stat(projectPath)) as {
-      birthtime?: unknown;
-      ctime?: unknown;
-      mtime?: unknown;
-    };
-    return (
-      statDateToMs(info.birthtime) ??
-      statDateToMs(info.ctime) ??
-      statDateToMs(info.mtime)
-    );
-  } catch {
-    return null;
-  }
-}
-
-function formatProjectCreatedDate(createdAt: number | null) {
-  if (!createdAt) return "";
-  return new Intl.DateTimeFormat("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  }).format(new Date(createdAt));
-}
-
 async function loadProjectPreview(
   project: RecentProject,
 ): Promise<ProjectPreviewData> {
@@ -678,7 +593,7 @@ async function loadProjectPreview(
   if (pending) return pending;
 
   const promise = (async () => {
-    const createdAt = await getProjectCreatedAt(project.path);
+    const createdAt = null;
     const pdfPath = await firstExistingPath(project.path, [
       [".prism", "build", "main.pdf"],
       [".prism", "build", "document.pdf"],
@@ -690,44 +605,6 @@ async function loadProjectPreview(
       const data: ProjectPreviewData = {
         kind: "pdf",
         url: await renderPdfThumbnail(pdfPath),
-        createdAt,
-      };
-      projectPreviewCache.set(cacheKey, data);
-      return data;
-    }
-
-    const texFile = await firstExistingProjectFile(project.path, [
-      ["main.tex"],
-      ["document.tex"],
-    ]);
-
-    if (texFile) {
-      try {
-        const useTexlive =
-          useSettingsStore.getState().compilerBackend === "texlive";
-        const pdfBytes = await enqueueProjectPreviewCompile(() =>
-          compileLatex(project.path, texFile.relativePath, useTexlive),
-        );
-        const data: ProjectPreviewData = {
-          kind: "pdf",
-          url: await renderPdfThumbnailFromBytes(pdfBytes),
-          createdAt,
-        };
-        projectPreviewCache.set(cacheKey, data);
-        return data;
-      } catch (err) {
-        console.warn("Failed to compile project preview:", {
-          path: project.path,
-          target: texFile.relativePath,
-          error: err,
-        });
-      }
-
-      const fileName = texFile.absolutePath.split(/[\\/]/).pop() ?? "main.tex";
-      const data: ProjectPreviewData = {
-        kind: "tex",
-        fileName,
-        lines: texPreviewLines(await readTextFile(texFile.absolutePath)),
         createdAt,
       };
       projectPreviewCache.set(cacheKey, data);
@@ -747,7 +624,7 @@ async function loadProjectPreview(
   }
 }
 
-function ProjectPreviewCard({
+function RecentProjectRow({
   project,
   onOpen,
   onRemove,
@@ -760,11 +637,6 @@ function ProjectPreviewCard({
     const cached = projectPreviewCache.get(projectPreviewCacheKey(project));
     return cached ? { status: "ready", data: cached } : { status: "loading" };
   });
-  const createdDateLabel =
-    preview.status === "ready"
-      ? formatProjectCreatedDate(preview.data.createdAt)
-      : "";
-
   useEffect(() => {
     let cancelled = false;
     const cacheKey = projectPreviewCacheKey(project);
@@ -793,33 +665,31 @@ function ProjectPreviewCard({
   }, [project]);
 
   return (
-    <div className="group min-w-0">
-      <div className="relative">
-        <button
-          className="relative aspect-[3/4] w-full overflow-hidden rounded-lg border border-border/70 bg-background text-left transition-all duration-200 hover:border-foreground/20 hover:shadow-md"
-          onClick={onOpen}
-        >
-          <ProjectPreviewSurface preview={preview} projectName={project.name} />
-        </button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="absolute top-2 right-2 size-7 bg-background/80 opacity-0 shadow-sm backdrop-blur-sm transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
-          onClick={onRemove}
-          aria-label={`Remove ${project.name}`}
-        >
-          <XIcon className="size-3.5" />
-        </Button>
-      </div>
+    <div className="group flex items-center gap-3 border-border/60 border-b px-3 py-2.5 last:border-b-0 hover:bg-muted/50">
       <button
-        className="mt-2 block w-full truncate text-left font-medium text-sm leading-tight hover:underline"
+        type="button"
+        className="flex min-w-0 flex-1 items-center gap-3 text-left"
         onClick={onOpen}
       >
-        {project.name}
+        <div className="h-12 w-9 shrink-0 overflow-hidden rounded-md border border-border/70 bg-muted/20">
+          <ProjectPreviewSurface preview={preview} projectName={project.name} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="truncate font-medium text-sm">{project.name}</div>
+          <div className="truncate text-muted-foreground text-xs">
+            {project.path}
+          </div>
+        </div>
       </button>
-      <div className="mt-1 h-4 truncate text-left text-muted-foreground text-xs">
-        {createdDateLabel}
-      </div>
+      <Button
+        variant="ghost"
+        size="icon"
+        className="size-7 shrink-0 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
+        onClick={onRemove}
+        aria-label={`Remove ${project.name}`}
+      >
+        <XIcon className="size-3.5" />
+      </Button>
     </div>
   );
 }
@@ -869,44 +739,9 @@ function ProjectPreviewSurface({
   }
 
   return (
-    <div className="flex h-full w-full flex-col items-center justify-center bg-muted/10 text-muted-foreground">
-      <FileTextIcon className="mb-2 size-5" />
-      <span className="text-xs">No preview</span>
+    <div className="flex h-full w-full items-center justify-center bg-muted/10 text-muted-foreground">
+      <FileTextIcon className="size-4" />
     </div>
-  );
-}
-
-function ProjectNavButton({
-  active,
-  collapsed,
-  icon: Icon,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  collapsed: boolean;
-  icon: LucideIcon;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "flex items-center rounded-lg font-medium text-sm transition-colors",
-        collapsed
-          ? "size-8 justify-center"
-          : "h-10 w-full justify-start gap-3 px-3 text-left",
-        active
-          ? "bg-muted text-foreground"
-          : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-      )}
-      title={typeof children === "string" ? children : undefined}
-    >
-      <Icon className="size-3.5 shrink-0" />
-      {!collapsed && <span className="truncate">{children}</span>}
-    </button>
   );
 }
 
@@ -989,6 +824,18 @@ function EnvironmentStatus({ appVersion }: { appVersion: string }) {
   const [skillsStatus, setSkillsStatus] = useState<SkillsStatus | null>(null);
   const [skillsInstalling, _setSkillsInstalling] = useState(false);
   const [showSkillsOnboarding, setShowSkillsOnboarding] = useState(false);
+  const [paperSpineInstalling, setPaperSpineInstalling] = useState(false);
+  const paperSpineSkills = useSkillStore((state) => state.skills);
+  const refreshSkills = useSkillStore((state) => state.refresh);
+  const ensurePaperSpineSkills = useSkillStore(
+    (state) => state.ensurePaperSpineSkills,
+  );
+  const ensureDefaultSkillPacks = useSkillStore(
+    (state) => state.ensureDefaultSkillPacks,
+  );
+  const installingPackId = useSkillStore((state) => state.installingPackId);
+  const agents = useAgentStore((state) => state.agents);
+  const paperSpineReady = areDefaultSkillPacksReady(paperSpineSkills, agents);
 
   const checkSkills = useCallback(async () => {
     try {
@@ -1004,7 +851,11 @@ function EnvironmentStatus({ appVersion }: { appVersion: string }) {
   useEffect(() => {
     checkUv();
     checkSkills();
-  }, [checkUv, checkSkills]);
+    void refreshSkills();
+    void ensureDefaultSkillPacks().finally(() => {
+      void checkSkills();
+    });
+  }, [checkSkills, checkUv, ensureDefaultSkillPacks, refreshSkills]);
 
   // Listen for uv install completion
   useEffect(() => {
@@ -1056,7 +907,36 @@ function EnvironmentStatus({ appVersion }: { appVersion: string }) {
           }
         />
 
-        {/* Scientific Skills */}
+        <StatusRow
+          ok={paperSpineReady}
+          label="PaperSpine + default skills"
+          detail={
+            paperSpineInstalling || installingPackId
+              ? installingPackId
+                ? `Installing ${installingPackId}...`
+                : "Installing PaperSpine, academic-research, nature, and scientific skills..."
+              : paperSpineReady
+                ? "PaperSpine and default skill packs installed"
+                : "Not installed"
+          }
+          action={
+            paperSpineInstalling
+              ? { label: "Installing...", loading: true }
+              : paperSpineReady
+                ? undefined
+                : {
+                    label: "Install",
+                    onClick: () => {
+                      setPaperSpineInstalling(true);
+                      void ensurePaperSpineSkills().finally(() =>
+                        setPaperSpineInstalling(false),
+                      );
+                    },
+                  }
+          }
+        />
+
+        {/* Optional scientific packs */}
         <StatusRow
           ok={!!skillsStatus?.installed}
           label="Scientific Skills"

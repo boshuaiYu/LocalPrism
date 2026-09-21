@@ -13,6 +13,8 @@ pub(super) fn anthropic_to_openai_request(
     let mut messages = Vec::new();
     if let Some(system) = request.get("system").and_then(flatten_anthropic_content) {
         if !system.trim().is_empty() {
+            let system =
+                super::identity::bind_hosted_model_identity(&system, &credential.model);
             messages.push(json!({ "role": "system", "content": system }));
         }
     }
@@ -145,10 +147,7 @@ pub(super) fn openai_to_anthropic_message(
         "content": content,
         "stop_reason": stop_reason,
         "stop_sequence": Value::Null,
-        "usage": {
-            "input_tokens": usage_token(usage, &["prompt_tokens", "input_tokens", "prompt_token_count"]),
-            "output_tokens": usage_token(usage, &["completion_tokens", "output_tokens", "completion_token_count"]),
-        },
+        "usage": openai_usage_to_anthropic(usage),
     }))
 }
 
@@ -657,10 +656,23 @@ fn contains_only_exit_tool(message: &Value) -> bool {
         })
 }
 
-fn usage_token(usage: &Value, keys: &[&str]) -> u64 {
-    keys.iter()
-        .find_map(|key| usage.get(*key).and_then(|value| value.as_u64()))
-        .unwrap_or(0)
+fn openai_usage_to_anthropic(usage: &Value) -> Value {
+    let cache = super::usage::openai_cache_read_tokens(usage);
+    let input = super::usage::exclusive_openai_input_tokens(
+        super::usage::usage_token(
+            usage,
+            &["prompt_tokens", "input_tokens", "prompt_token_count"],
+        ),
+        cache,
+    );
+    json!({
+        "input_tokens": input,
+        "output_tokens": super::usage::usage_token(
+            usage,
+            &["completion_tokens", "output_tokens", "completion_token_count"],
+        ),
+        "cache_read_input_tokens": cache,
+    })
 }
 
 #[cfg(test)]
@@ -895,5 +907,26 @@ mod tests {
         assert_eq!(converted["stop_reason"], "end_turn");
         assert_eq!(converted["content"][0]["type"], "text");
         assert_eq!(converted["content"][0]["text"], "done");
+    }
+
+    #[test]
+    fn splits_inclusive_openai_usage_for_anthropic_meter() {
+        let request = json!({ "model": "gpt-5.6-luna" });
+        let response = json!({
+            "id": "chatcmpl_1",
+            "choices": [{
+                "message": { "role": "assistant", "content": "ok" },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 119881,
+                "completion_tokens": 7011,
+                "prompt_tokens_details": { "cached_tokens": 53760 }
+            }
+        });
+        let converted = openai_to_anthropic_message(&request, &response, &credential()).unwrap();
+        assert_eq!(converted["usage"]["input_tokens"], 66121);
+        assert_eq!(converted["usage"]["output_tokens"], 7011);
+        assert_eq!(converted["usage"]["cache_read_input_tokens"], 53760);
     }
 }

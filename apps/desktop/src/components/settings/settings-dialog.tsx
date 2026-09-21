@@ -27,23 +27,24 @@ export function SettingsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[85vh] w-[min(48rem,calc(100vw-2rem))] flex-col overflow-hidden sm:max-w-none">
+      <DialogContent className="flex h-[min(85vh,52rem)] max-h-[85vh] min-h-0 w-[min(48rem,calc(100vw-2rem))] flex-col overflow-hidden sm:max-w-none">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <SettingsIcon className="size-4" />
             Settings
           </DialogTitle>
           <DialogDescription>
-            Configure AI runtimes, skills, and custom agents.
+            Configure providers, skills, and custom agents.
           </DialogDescription>
         </DialogHeader>
 
         <Tabs
+          key={defaultTab}
           defaultValue={defaultTab}
           className="flex min-h-0 flex-1 flex-col gap-3"
         >
           <TabsList className="grid w-full grid-cols-3">
-            <TabsTrigger value="runtimes">AI Runtimes</TabsTrigger>
+            <TabsTrigger value="runtimes">Providers</TabsTrigger>
             <TabsTrigger value="skills">Skills</TabsTrigger>
             <TabsTrigger value="agents">Agents</TabsTrigger>
           </TabsList>

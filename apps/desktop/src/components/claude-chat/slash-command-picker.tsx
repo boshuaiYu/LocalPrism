@@ -21,8 +21,15 @@ import {
   FlaskConicalIcon,
   ChevronRightIcon,
   ChevronLeftIcon,
+  ChevronDownIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  groupItemsBySkillCategory,
+  skillFolderFromSlashCommand,
+  type CatalogSkillCategory,
+} from "@/lib/skill-categories";
+import { useSkillCategoryStore } from "@/stores/skill-category-store";
 
 export interface SlashCommand {
   id: string;
@@ -275,8 +282,12 @@ function filterAndSort(list: SlashCommand[], q: string): SlashCommand[] {
   return scored.map((s) => s.cmd);
 }
 
-/** Render SKILL.md body as lightweight styled content */
-function SkillPreview({ content }: { content: string }) {
+export function commandHasPreview(cmd: SlashCommand): boolean {
+  return Boolean(cmd.description?.trim() || cmd.content?.trim());
+}
+
+/** Render command / SKILL.md body as lightweight styled content */
+function CommandPreview({ content }: { content: string }) {
   // Strip frontmatter
   let body = content;
   if (body.startsWith("---")) {
@@ -361,6 +372,18 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [activeTab, setActiveTab] = useState<Tab>("skills");
   const [showPreview, setShowPreview] = useState(false);
+  const [catalog, setCatalog] = useState<CatalogSkillCategory[]>([]);
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>(
+    {},
+  );
+  const userCategories = useSkillCategoryStore((state) => state.categories);
+  const categoryAssignments = useSkillCategoryStore(
+    (state) => state.assignments,
+  );
+  const categorySnapshot = useMemo(
+    () => ({ categories: userCategories, assignments: categoryAssignments }),
+    [userCategories, categoryAssignments],
+  );
   const listRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{
     left: number;
@@ -397,6 +420,12 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
       });
   }, [projectPath]);
 
+  useEffect(() => {
+    invoke<CatalogSkillCategory[]>("get_skill_categories")
+      .then(setCatalog)
+      .catch(() => setCatalog([]));
+  }, []);
+
   // Counts per tab (for badges)
   const tabCounts = useMemo(() => {
     const counts: Record<Tab, number> = { skills: 0, default: 0, custom: 0 };
@@ -418,9 +447,41 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
     return byTab;
   }, [query, commands, activeTab, isSearching]);
 
+  const skillGroups = useMemo(() => {
+    if (isSearching || activeTab !== "skills") return [];
+    return groupItemsBySkillCategory(
+      filtered,
+      (cmd) => ({
+        folder: skillFolderFromSlashCommand(cmd.full_command),
+        name: cmd.name,
+      }),
+      categorySnapshot,
+      catalog,
+    );
+  }, [activeTab, catalog, categorySnapshot, filtered, isSearching]);
+
+  const isGroupExpanded = (groupId: string, defaultExpanded: boolean) =>
+    expandedGroups[groupId] ?? defaultExpanded;
+
+  const displayedCommands = useMemo(() => {
+    if (isSearching || activeTab !== "skills") return filtered;
+    return skillGroups.flatMap((group) =>
+      isGroupExpanded(group.id, group.defaultExpanded) ? group.items : [],
+    );
+  }, [activeTab, expandedGroups, filtered, isSearching, skillGroups]);
+
   // The currently highlighted command
-  const selectedCommand = filtered.length > 0 ? filtered[selectedIndex] : null;
-  const canPreview = selectedCommand?.scope === "skill";
+  const selectedCommand =
+    displayedCommands.length > 0
+      ? displayedCommands[Math.min(selectedIndex, displayedCommands.length - 1)]
+      : null;
+  const canPreview = Boolean(
+    selectedCommand && commandHasPreview(selectedCommand),
+  );
+  const previewDescription = selectedCommand?.description?.trim() ?? "";
+  const previewBody = selectedCommand?.content.trim() ?? "";
+  const previewBodyDistinct =
+    Boolean(previewBody) && previewBody !== previewDescription;
 
   // Group by scope for unified search display
   const searchGroups = useMemo(() => {
@@ -457,6 +518,13 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
     setSelectedIndex(0);
   }, [query, activeTab]);
 
+  useEffect(() => {
+    setSelectedIndex((prev) => {
+      if (displayedCommands.length === 0) return 0;
+      return Math.min(prev, displayedCommands.length - 1);
+    });
+  }, [displayedCommands.length]);
+
   // Close preview when switching away from a skill
   useEffect(() => {
     if (!canPreview) setShowPreview(false);
@@ -477,8 +545,11 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
         case "Enter":
         case "Tab":
           e.preventDefault();
-          if (filtered.length > 0 && selectedIndex < filtered.length) {
-            onSelect(filtered[selectedIndex]);
+          if (
+            displayedCommands.length > 0 &&
+            selectedIndex < displayedCommands.length
+          ) {
+            onSelect(displayedCommands[selectedIndex]);
           }
           break;
         case "ArrowUp":
@@ -487,7 +558,9 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
           break;
         case "ArrowDown":
           e.preventDefault();
-          setSelectedIndex((prev) => Math.min(filtered.length - 1, prev + 1));
+          setSelectedIndex((prev) =>
+            Math.min(displayedCommands.length - 1, prev + 1),
+          );
           break;
         case "ArrowRight":
           if (canPreview) {
@@ -506,7 +579,14 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [filtered, selectedIndex, onSelect, onClose, showPreview, canPreview]);
+  }, [
+    displayedCommands,
+    selectedIndex,
+    onSelect,
+    onClose,
+    showPreview,
+    canPreview,
+  ]);
 
   // Scroll selected item into view
   useEffect(() => {
@@ -520,18 +600,29 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
 
   const renderItem = (cmd: SlashCommand, index: number) => {
     const isSelected = index === selectedIndex;
-    const isSkill = cmd.scope === "skill";
+    const previewable = commandHasPreview(cmd);
     return (
       <button
         key={cmd.id}
+        type="button"
         data-index={index}
+        data-testid={`slash-command-item-${cmd.id}`}
         className={cn(
           "flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-left transition-colors",
           isSelected ? "bg-accent text-accent-foreground" : "hover:bg-muted",
         )}
         onMouseDown={(e) => {
           e.preventDefault();
-          onSelect(cmd);
+          const alreadyOpen =
+            previewable && showPreview && index === selectedIndex;
+          setSelectedIndex(index);
+          if (alreadyOpen) {
+            onSelect(cmd);
+            return;
+          }
+          if (previewable) {
+            setShowPreview(true);
+          }
         }}
         onMouseEnter={() => setSelectedIndex(index)}
       >
@@ -547,7 +638,7 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
             {SCOPE_LABEL[cmd.scope] ?? cmd.scope}
           </span>
         )}
-        {isSkill && isSelected && (
+        {previewable && isSelected && (
           <ChevronRightIcon
             className="size-3.5 shrink-0 text-muted-foreground"
             onMouseDown={(e) => {
@@ -576,14 +667,15 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
     const hints: Record<Tab, React.ReactNode> = {
       skills: (
         <p className="mt-1 px-4 text-center text-muted-foreground text-xs">
-          Install scientific skills from the sidebar menu.
+          Import skills into a category from Skills, or search to find a
+          scientific skill.
         </p>
       ),
       default: null,
       custom: (
         <p className="mt-1 px-4 text-center text-muted-foreground text-xs">
-          Add commands in <code className="px-1">.claude/commands/</code> or{" "}
-          <code className="px-1">~/.claude/commands/</code>
+          Add commands in <code className="px-1">claude-home/slash</code> or the
+          paper <code className="px-1">.localprism/slash</code>
         </p>
       ),
     };
@@ -625,9 +717,57 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
                 </div>
               ))}
             </div>
+          ) : activeTab === "skills" && skillGroups.length > 0 ? (
+            <div className="space-y-1">
+              {skillGroups.map((group) => {
+                const expanded = isGroupExpanded(
+                  group.id,
+                  group.defaultExpanded,
+                );
+                let runningIndex = 0;
+                for (const earlier of skillGroups) {
+                  if (earlier.id === group.id) break;
+                  if (isGroupExpanded(earlier.id, earlier.defaultExpanded)) {
+                    runningIndex += earlier.items.length;
+                  }
+                }
+                return (
+                  <div key={group.id}>
+                    <button
+                      type="button"
+                      className="flex w-full items-center gap-1.5 rounded-md px-3 py-1 text-left font-semibold text-[10px] text-muted-foreground uppercase tracking-wider hover:bg-muted/60"
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        setExpandedGroups((current) => ({
+                          ...current,
+                          [group.id]: !expanded,
+                        }));
+                      }}
+                    >
+                      {expanded ? (
+                        <ChevronDownIcon className="size-3" />
+                      ) : (
+                        <ChevronRightIcon className="size-3" />
+                      )}
+                      <span className="truncate">{group.name}</span>
+                      <span className="ml-auto tabular-nums">
+                        {group.items.length}
+                      </span>
+                    </button>
+                    {expanded && (
+                      <div className="space-y-0.5">
+                        {group.items.map((cmd, offset) =>
+                          renderItem(cmd, runningIndex + offset),
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           ) : (
             <div className="space-y-0.5">
-              {filtered.map((cmd, i) => renderItem(cmd, i))}
+              {displayedCommands.map((cmd, i) => renderItem(cmd, i))}
             </div>
           )}
         </div>
@@ -718,16 +858,18 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
         {/* Footer */}
         <div className="shrink-0 border-border border-t px-3 py-1">
           <span className="text-[10px] text-muted-foreground">
-            ↑↓ Navigate · Enter Select · {canPreview ? "→ Preview · " : ""}Esc
-            Close
+            ↑↓ Navigate · Enter Select
+            {canPreview ? " · Click or → Preview" : ""} · Esc Close
           </span>
         </div>
       </div>
 
       {/* Right side: preview panel */}
-      {showPreview && selectedCommand && (
-        <div className="flex w-[55%] flex-col border-border border-l">
-          {/* Preview header */}
+      {showPreview && selectedCommand && commandHasPreview(selectedCommand) && (
+        <div
+          className="flex w-[55%] flex-col border-border border-l"
+          data-testid="slash-command-preview"
+        >
           <div className="flex shrink-0 items-center gap-2 border-border border-b px-3 py-2">
             <button
               aria-label="Close preview"
@@ -739,15 +881,26 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
             >
               <ChevronLeftIcon className="size-3.5 text-muted-foreground" />
             </button>
-            <FlaskConicalIcon className="size-3.5 text-muted-foreground" />
+            {getCommandIcon(selectedCommand)}
             <span className="truncate font-medium font-mono text-sm">
               {selectedCommand.full_command}
             </span>
+            {SCOPE_LABEL[selectedCommand.scope] && (
+              <span className="ml-auto shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                {SCOPE_LABEL[selectedCommand.scope]}
+              </span>
+            )}
           </div>
 
-          {/* Preview body */}
           <div className="flex-1 overflow-y-auto px-3 py-2">
-            <SkillPreview content={selectedCommand.content} />
+            {previewDescription ? (
+              <p className="mb-2 text-foreground text-xs leading-relaxed">
+                {previewDescription}
+              </p>
+            ) : null}
+            {previewBodyDistinct ? (
+              <CommandPreview content={previewBody} />
+            ) : null}
           </div>
         </div>
       )}

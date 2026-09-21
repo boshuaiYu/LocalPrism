@@ -16,7 +16,7 @@ pub fn account_from_status(status: crate::claude::ClaudeStatus) -> RuntimeAccoun
             skills: true,
             custom_agents: true,
             subagents: true,
-            approvals: false,
+            approvals: true,
         },
         error: None,
     }
@@ -91,9 +91,7 @@ impl ClaudeAgentMapper {
         match msg_type {
             "assistant" => self.map_assistant(msg, window_label, tab_id, attempt_id),
             "user" => self.map_user_tool_results(msg, window_label, tab_id, attempt_id),
-            "progress" | "system" => {
-                self.map_progress(msg, window_label, tab_id, attempt_id)
-            }
+            "progress" | "system" => self.map_progress(msg, window_label, tab_id, attempt_id),
             _ => Vec::new(),
         }
     }
@@ -390,7 +388,7 @@ mod tests {
                 skills: true,
                 custom_agents: true,
                 subagents: true,
-                approvals: false,
+                approvals: true,
             }
         );
         assert_eq!(account.error, None);
@@ -486,9 +484,7 @@ mod tests {
         let discovered = envelopes
             .iter()
             .find_map(|envelope| match &envelope.event {
-                RuntimeEvent::SubagentDiscovered { run } if run.id == "toolu_agent_1" => {
-                    Some(run)
-                }
+                RuntimeEvent::SubagentDiscovered { run } if run.id == "toolu_agent_1" => Some(run),
                 _ => None,
             })
             .expect("Agent discovery");

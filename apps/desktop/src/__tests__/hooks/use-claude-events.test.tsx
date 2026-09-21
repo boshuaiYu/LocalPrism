@@ -39,6 +39,7 @@ vi.mock("@/stores/history-store", () => ({
 vi.mock("@/lib/latex-compiler", () => ({
   compileLatex,
   resolveCompileTarget,
+  activeCompileUsesTexlive: () => false,
   formatCompileError: (error: unknown) => String(error),
 }));
 
@@ -1081,12 +1082,85 @@ describe("useClaudeEvents cancellation isolation", () => {
         await vi.advanceTimersByTimeAsync(90_000);
       });
 
-      const tab = useClaudeChatStore
+      let tab = useClaudeChatStore
+        .getState()
+        .tabs.find((candidate) => candidate.id === "tab-a");
+      // WebSocket reconnect storms often finish after ~75–120s; do not abort yet.
+      expect(tab?.isStreaming).toBe(true);
+      expect(tab?.error).toBeNull();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(90_000);
+      });
+
+      tab = useClaudeChatStore
         .getState()
         .tabs.find((candidate) => candidate.id === "tab-a");
       expect(tab?.isStreaming).toBe(false);
       expect(tab?.streamingStatus).toBeNull();
       expect(tab?.error).toMatch(/no reply progress/i);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stall-fails a Claude turn that never produces a reply", async () => {
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+      container = document.createElement("div");
+      document.body.append(container);
+      root = createRoot(container);
+      await act(async () => {
+        root.render(<Probe />);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        useClaudeChatStore.setState((state) => ({
+          tabs: state.tabs.map((tab) =>
+            tab.id === "tab-a"
+              ? {
+                  ...tab,
+                  runtime: "claude" as const,
+                  isStreaming: true,
+                  activeAttemptId: "tab-a-attempt-1",
+                  streamingStartedAt: Date.now(),
+                  streamingStatus: "Thinking...",
+                  error: null,
+                }
+              : tab,
+          ),
+        }));
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(90_000);
+      });
+
+      let tab = useClaudeChatStore
+        .getState()
+        .tabs.find((candidate) => candidate.id === "tab-a");
+      expect(tab?.isStreaming).toBe(true);
+      expect(tab?.error).toBeNull();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(90_000);
+      });
+
+      tab = useClaudeChatStore
+        .getState()
+        .tabs.find((candidate) => candidate.id === "tab-a");
+      expect(tab?.isStreaming).toBe(false);
+      expect(tab?.error).toMatch(/no reply/i);
+      expect(tab?.error).not.toMatch(/Codex/i);
     } finally {
       vi.useRealTimers();
     }
@@ -1152,6 +1226,7 @@ describe("useClaudeEvents cancellation isolation", () => {
     expect(tab?.error).toBeNull();
     expect(tab?.isStreaming).toBe(false);
     expect(tab?.streamingStatus).toBeNull();
+    expect(tab?.activeAttemptId).toBeNull();
     const lastMessage = tab?.messages[tab.messages.length - 1];
     expect(lastMessage).toEqual(
       expect.objectContaining({
@@ -1159,6 +1234,124 @@ describe("useClaudeEvents cancellation isolation", () => {
         message: { content: [{ type: "text", text: "hello" }] },
       }),
     );
+  });
+
+  it("surfaces an error when Codex completes with no visible reply", async () => {
+    await act(async () => {
+      useClaudeChatStore.setState((state) => ({
+        tabs: state.tabs.map((tab) =>
+          tab.id === "tab-a"
+            ? {
+                ...tab,
+                runtime: "codex" as const,
+                error: null,
+                isStreaming: true,
+                streamingStatus: "Waiting for Codex…",
+                activeAttemptId: "tab-a-attempt-1",
+                messages: [
+                  {
+                    type: "user",
+                    message: { content: [{ type: "text", text: "你好" }] },
+                  },
+                ],
+              }
+            : tab,
+        ),
+      }));
+    });
+
+    const runtime = callbacks.get("runtime-event");
+    await act(async () => {
+      runtime?.(
+        runtimeEvent("tab-a", "tab-a-attempt-1", { type: "turnStarted" }),
+      );
+      runtime?.(
+        runtimeEvent("tab-a", "tab-a-attempt-1", {
+          type: "assistantCompleted",
+          content: "   ",
+        }),
+      );
+      runtime?.(
+        runtimeEvent("tab-a", "tab-a-attempt-1", {
+          type: "turnCompleted",
+          turnId: "turn-empty",
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    const tab = useClaudeChatStore
+      .getState()
+      .tabs.find((candidate) => candidate.id === "tab-a");
+    expect(tab?.isStreaming).toBe(false);
+    expect(tab?.activeAttemptId).toBeNull();
+    expect(tab?.error).toMatch(/finished without a reply/i);
+    expect(
+      tab?.messages.some(
+        (message) =>
+          message.type === "assistant" &&
+          Array.isArray(message.message?.content) &&
+          message.message.content.some(
+            (block) =>
+              block.type === "text" &&
+              /finished without a reply/i.test(block.text ?? ""),
+          ),
+      ),
+    ).toBe(true);
+  });
+
+  it("surfaces empty Codex completion even after streaming was already cleared", async () => {
+    await act(async () => {
+      useClaudeChatStore.setState((state) => ({
+        tabs: state.tabs.map((tab) =>
+          tab.id === "tab-a"
+            ? {
+                ...tab,
+                runtime: "codex" as const,
+                error: null,
+                // Premature clear: the bug that left only the user bubble.
+                isStreaming: false,
+                streamingStatus: null,
+                activeAttemptId: null,
+                messages: [
+                  {
+                    type: "user",
+                    message: { content: [{ type: "text", text: "你好" }] },
+                  },
+                ],
+              }
+            : tab,
+        ),
+      }));
+    });
+
+    const runtime = callbacks.get("runtime-event");
+    await act(async () => {
+      runtime?.(
+        runtimeEvent("tab-a", "tab-a-attempt-1", {
+          type: "turnCompleted",
+          turnId: "turn-late",
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    const tab = useClaudeChatStore
+      .getState()
+      .tabs.find((candidate) => candidate.id === "tab-a");
+    expect(tab?.error).toMatch(/finished without a reply/i);
+    expect(
+      tab?.messages.some(
+        (message) =>
+          message.type === "assistant" &&
+          Array.isArray(message.message?.content) &&
+          message.message.content.some(
+            (block) =>
+              block.type === "text" &&
+              /finished without a reply/i.test(block.text ?? ""),
+          ),
+      ),
+    ).toBe(true);
   });
 
   it("surfaces Codex reconnect progress when the warning uses a unicode ellipsis", async () => {
@@ -1263,5 +1456,44 @@ describe("useClaudeEvents cancellation isolation", () => {
       .tabs.find((candidate) => candidate.id === "tab-a");
     expect(tab?.isStreaming).toBe(false);
     expect(tab?.error).toBe("Unsupported value: 'minimal'");
+  });
+
+  it("surfaces Claude stderr and exit code instead of a generic rate-limit guess", async () => {
+    const output = callbacks.get("claude-output");
+    const complete = callbacks.get("claude-complete");
+    await act(async () => {
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "system",
+            subtype: "init",
+            session_id: "s1",
+          }),
+        ),
+      );
+      complete?.({
+        event: "claude-complete",
+        id: 1,
+        payload: {
+          tab_id: "tab-a",
+          attempt_id: "tab-a-attempt-1",
+          success: false,
+          exit_code: 1,
+          stderr_tail: "Error: prompt is too long (tokens=210000)",
+        },
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const error = useClaudeChatStore
+      .getState()
+      .tabs.find((tab) => tab.id === "tab-a")?.error;
+    expect(error).toMatch(/context limit|too long/i);
+    expect(error).not.toMatch(
+      /This may be due to rate limiting or an API error/,
+    );
   });
 });

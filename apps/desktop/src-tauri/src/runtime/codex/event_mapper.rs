@@ -102,10 +102,7 @@ impl CodexEventMapper {
                 .into_iter()
                 .collect(),
             "item/completed" => self.map_item_completed(generation, route, params),
-            "turn/completed" => self
-                .map_turn_completed(generation, route, params)
-                .into_iter()
-                .collect(),
+            "turn/completed" => self.map_turn_completed(generation, route, params),
             "error" => self
                 .map_error(generation, route, params)
                 .into_iter()
@@ -468,12 +465,9 @@ impl CodexEventMapper {
                     },
                 )]
             }
-            "collabAgentToolCall" => self.map_collab_agent_tool_call(
-                route,
-                thread_id,
-                turn_id,
-                item,
-            ),
+            "collabAgentToolCall" => {
+                self.map_collab_agent_tool_call(route, thread_id, turn_id, item)
+            }
             native_type => vec![self.envelope(
                 route,
                 Some(thread_id.to_owned()),
@@ -615,20 +609,20 @@ impl CodexEventMapper {
         generation: u64,
         route: &TurnRoute,
         params: &Value,
-    ) -> Option<RuntimeEventEnvelope> {
+    ) -> Vec<RuntimeEventEnvelope> {
         let (Some(thread_id), Some(turn_id)) = (
             string_field(params, "threadId"),
             nested_string(params, &["turn", "id"]),
         ) else {
-            return Some(self.malformed(route, "turn/completed"));
+            return vec![self.malformed(route, "turn/completed")];
         };
         if !route_matches(route, thread_id, Some(turn_id)) {
-            return None;
+            return Vec::new();
         }
 
         let turn = scoped_turn(generation, route, thread_id, turn_id);
         if self.terminal_turns.contains(&turn) {
-            return None;
+            return Vec::new();
         }
         let status = params.pointer("/turn/status").and_then(Value::as_str);
         let event = match status {
@@ -646,12 +640,12 @@ impl CodexEventMapper {
                 ),
             },
             Some("inProgress") => {
-                return Some(self.warning(
+                return vec![self.warning(
                     route,
                     Some(thread_id.to_owned()),
                     Some(turn_id.to_owned()),
                     "Codex sent `turn/completed` with a nonterminal status",
-                ));
+                )];
             }
             Some(unknown) => RuntimeEvent::TurnFailed {
                 turn_id: Some(turn_id.to_owned()),
@@ -666,13 +660,30 @@ impl CodexEventMapper {
             },
         };
 
+        let usage = matches!(event, RuntimeEvent::TurnCompleted { .. })
+            .then(|| parse_turn_usage(params))
+            .flatten();
         self.mark_terminal(turn);
-        Some(self.envelope(
+        let mut events = Vec::new();
+        if let Some((input_tokens, output_tokens, cache_read_tokens)) = usage {
+            events.push(self.envelope(
+                route,
+                Some(thread_id.to_owned()),
+                Some(turn_id.to_owned()),
+                RuntimeEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                },
+            ));
+        }
+        events.push(self.envelope(
             route,
             Some(thread_id.to_owned()),
             Some(turn_id.to_owned()),
             event,
-        ))
+        ));
+        events
     }
 
     fn map_error(
@@ -705,7 +716,11 @@ impl CodexEventMapper {
             .filter(|value| !value.is_empty())
             .map(sanitize_install_output);
         let warning_message = match details {
-            Some(details) if !message.to_ascii_lowercase().contains(&details.to_ascii_lowercase()) => {
+            Some(details)
+                if !message
+                    .to_ascii_lowercase()
+                    .contains(&details.to_ascii_lowercase()) =>
+            {
                 format!("{message} ({details})")
             }
             _ => message.clone(),
@@ -828,6 +843,62 @@ impl CodexEventMapper {
             }
         }
     }
+}
+
+fn parse_turn_usage(params: &Value) -> Option<(u64, u64, u64)> {
+    let usage = params
+        .pointer("/turn/usage")
+        .or_else(|| params.pointer("/turn/tokenUsage"))
+        .or_else(|| params.get("usage"))
+        .or_else(|| params.get("tokenUsage"))?;
+    let input = usage_number(
+        usage,
+        &["input_tokens", "inputTokens", "prompt_tokens", "promptTokens"],
+    )?;
+    let output = usage_number(
+        usage,
+        &[
+            "output_tokens",
+            "outputTokens",
+            "completion_tokens",
+            "completionTokens",
+        ],
+    )
+    .unwrap_or(0);
+    let cache = usage_number(
+        usage,
+        &[
+            "cached_input_tokens",
+            "cachedInputTokens",
+            "cache_read_input_tokens",
+            "cacheReadInputTokens",
+        ],
+    )
+    .unwrap_or(0);
+    if input == 0 && output == 0 && cache == 0 {
+        return None;
+    }
+    Some((input, output, cache))
+}
+
+fn usage_number(value: &Value, keys: &[&str]) -> Option<u64> {
+    for key in keys {
+        if let Some(number) = value.get(*key).and_then(json_u64) {
+            return Some(number);
+        }
+    }
+    None
+}
+
+fn json_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
+        .or_else(|| {
+            value
+                .as_f64()
+                .and_then(|n| (n.is_finite() && n >= 0.0).then_some(n as u64))
+        })
 }
 
 fn string_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
@@ -1040,13 +1111,19 @@ mod tests {
         };
         assert_eq!(queued.id, "child-1");
         assert_eq!(queued.parent_id.as_deref(), Some("thread-a"));
-        assert_eq!(queued.status, crate::runtime::events::AgentRunStatus::Queued);
+        assert_eq!(
+            queued.status,
+            crate::runtime::events::AgentRunStatus::Queued
+        );
 
         let RuntimeEvent::SubagentStatusChanged { run: done } = &events[1].event else {
             panic!("expected status-changed child");
         };
         assert_eq!(done.id, "child-2");
-        assert_eq!(done.status, crate::runtime::events::AgentRunStatus::Completed);
+        assert_eq!(
+            done.status,
+            crate::runtime::events::AgentRunStatus::Completed
+        );
 
         // Replay must not duplicate children.
         let replay = map(
@@ -1606,6 +1683,42 @@ mod tests {
         assert!(matches!(
             completed[0].event,
             RuntimeEvent::TurnCompleted { .. }
+        ));
+    }
+
+    #[test]
+    fn turn_completed_emits_usage_before_terminal() {
+        let mut mapper = CodexEventMapper::default();
+        let route = route("main", "tab-a", "thread-a", Some("turn-a"));
+        let events = map(
+            &mut mapper,
+            &route,
+            "turn/completed",
+            json!({
+                "threadId":"thread-a",
+                "turn":{
+                    "id":"turn-a",
+                    "status":"completed",
+                    "usage":{
+                        "input_tokens": 3588,
+                        "cached_input_tokens": 20992,
+                        "output_tokens": 100
+                    }
+                }
+            }),
+        );
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0].event,
+            RuntimeEvent::Usage {
+                input_tokens: 3588,
+                output_tokens: 100,
+                cache_read_tokens: 20992
+            }
+        ));
+        assert!(matches!(
+            &events[1].event,
+            RuntimeEvent::TurnCompleted { turn_id } if turn_id == "turn-a"
         ));
     }
 

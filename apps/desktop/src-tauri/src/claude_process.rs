@@ -6,25 +6,155 @@ use std::time::Duration;
 
 use tauri::{Emitter, Manager, WebviewWindow};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::Mutex;
+
+use crate::claude_permissions::{
+    classify_claude_stdout_line, control_ack_line, control_allow_line, control_deny_line,
+    ClaudeStdoutControl,
+};
+use crate::runtime::codex::approvals::{ResolveRuntimeRequest, RuntimeRequestDecision};
+use crate::runtime::codex::rpc::RpcId;
+use crate::runtime::events::{RuntimeEvent, RuntimeEventEnvelope};
+use crate::runtime::RuntimeKind;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const RECENT_STOP_TOMBSTONE_LIMIT: usize = 256;
+const STDERR_TAIL_LIMIT: usize = 12 * 1024;
 const CLAUDE_INTERRUPT_GRACE: Duration = Duration::from_secs(3);
 const CLAUDE_FORCE_REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct ClaudeProcessState {
     registry: Arc<Mutex<ClaudeProcessRegistry<Child>>>,
+    permissions: ClaudePermissionIo,
 }
 
 impl Default for ClaudeProcessState {
     fn default() -> Self {
         Self {
             registry: Arc::new(Mutex::new(ClaudeProcessRegistry::default())),
+            permissions: ClaudePermissionIo::default(),
         }
+    }
+}
+
+struct PendingClaudeTool {
+    attempt_id: String,
+    input: serde_json::Value,
+    suggestions: serde_json::Value,
+    tool_name: String,
+}
+
+#[derive(Clone, Default)]
+struct ClaudePermissionIo {
+    writers: Arc<Mutex<HashMap<String, ChildStdin>>>,
+    pending: Arc<Mutex<HashMap<String, PendingClaudeTool>>>,
+    recently_closed: Arc<Mutex<HashMap<String, ()>>>,
+}
+
+impl ClaudeProcessState {
+    pub async fn try_resolve_permission(
+        &self,
+        request: &ResolveRuntimeRequest,
+    ) -> Result<bool, String> {
+        self.permissions.resolve(request).await
+    }
+}
+
+impl ClaudePermissionIo {
+    async fn attach_stdin(&self, attempt_id: String, stdin: ChildStdin) {
+        self.writers.lock().await.insert(attempt_id, stdin);
+    }
+
+    async fn write_line(&self, attempt_id: &str, line: &str) -> Result<(), String> {
+        let mut writers = self.writers.lock().await;
+        let stdin = writers
+            .get_mut(attempt_id)
+            .ok_or_else(|| "Claude permission channel is no longer open".to_string())?;
+        stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|error| format!("Failed to answer Claude permission prompt: {error}"))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|error| format!("Failed to flush Claude permission prompt: {error}"))
+    }
+
+    async fn register_tool(&self, request_id: String, pending: PendingClaudeTool) {
+        self.pending.lock().await.insert(request_id, pending);
+    }
+
+    async fn take_pending(&self, request_id: &str) -> Option<PendingClaudeTool> {
+        self.pending.lock().await.remove(request_id)
+    }
+
+    async fn remember_closed(&self, request_ids: impl IntoIterator<Item = String>) {
+        let mut closed = self.recently_closed.lock().await;
+        for request_id in request_ids {
+            closed.insert(request_id, ());
+        }
+    }
+
+    async fn close_attempt(&self, attempt_id: &str) -> Vec<String> {
+        if let Some(mut stdin) = self.writers.lock().await.remove(attempt_id) {
+            let _ = stdin.shutdown().await;
+        }
+        let mut pending = self.pending.lock().await;
+        let dismissed = pending
+            .iter()
+            .filter(|(_, item)| item.attempt_id == attempt_id)
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<Vec<_>>();
+        pending.retain(|_, item| item.attempt_id != attempt_id);
+        self.remember_closed(dismissed.iter().cloned()).await;
+        dismissed
+    }
+
+    async fn resolve(&self, request: &ResolveRuntimeRequest) -> Result<bool, String> {
+        let request_id = rpc_id_as_request_id(&request.request_id);
+        if self.recently_closed.lock().await.contains_key(&request_id) {
+            return Ok(true);
+        }
+        let Some(pending) = self.take_pending(&request_id).await else {
+            return Ok(false);
+        };
+        let line = match request.decision {
+            RuntimeRequestDecision::Allow => control_allow_line(
+                &request_id,
+                &pending.input,
+                false,
+                &pending.tool_name,
+                &pending.suggestions,
+            ),
+            RuntimeRequestDecision::AllowForSession => control_allow_line(
+                &request_id,
+                &pending.input,
+                true,
+                &pending.tool_name,
+                &pending.suggestions,
+            ),
+            RuntimeRequestDecision::Deny | RuntimeRequestDecision::Unsupported => {
+                control_deny_line(&request_id, "User denied this action", false)
+            }
+            RuntimeRequestDecision::Cancel => {
+                control_deny_line(&request_id, "User cancelled the turn", true)
+            }
+        };
+        if let Err(error) = self.write_line(&pending.attempt_id, &line).await {
+            self.pending.lock().await.insert(request_id, pending);
+            return Err(error);
+        }
+        Ok(true)
+    }
+}
+
+fn rpc_id_as_request_id(id: &RpcId) -> String {
+    match id {
+        RpcId::String(value) => value.clone(),
+        RpcId::Number(value) => value.to_string(),
     }
 }
 
@@ -40,6 +170,10 @@ struct ClaudeCompleteEvent {
     tab_id: String,
     attempt_id: String,
     success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stderr_tail: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -572,11 +706,46 @@ where
     false
 }
 
+fn emit_approval_resolved(
+    window: &WebviewWindow,
+    tab_id: &str,
+    attempt_id: &str,
+    request_ids: impl IntoIterator<Item = String>,
+    sequence: u64,
+) {
+    for (offset, request_id) in request_ids.into_iter().enumerate() {
+        let _ = window.emit(
+            "runtime-event",
+            RuntimeEventEnvelope {
+                runtime: RuntimeKind::Claude,
+                window_label: window.label().to_string(),
+                tab_id: tab_id.to_string(),
+                attempt_id: attempt_id.to_string(),
+                session_id: None,
+                turn_id: Some(attempt_id.to_string()),
+                sequence: sequence + offset as u64,
+                event: RuntimeEvent::ApprovalResolved { request_id },
+            },
+        );
+    }
+}
+
 async fn emit_claude_complete(
     window: &WebviewWindow,
     tab_id: &str,
     attempt_id: &str,
     success: bool,
+) {
+    emit_claude_complete_with_details(window, tab_id, attempt_id, success, None, None).await;
+}
+
+async fn emit_claude_complete_with_details(
+    window: &WebviewWindow,
+    tab_id: &str,
+    attempt_id: &str,
+    success: bool,
+    exit_code: Option<i32>,
+    stderr_tail: Option<String>,
 ) {
     let routes = window.state::<crate::runtime::process::RuntimeProcessState>();
     routes
@@ -588,8 +757,26 @@ async fn emit_claude_complete(
             tab_id: tab_id.to_owned(),
             attempt_id: attempt_id.to_owned(),
             success,
+            exit_code,
+            stderr_tail: stderr_tail.filter(|value| !value.trim().is_empty()),
         },
     );
+}
+
+fn append_bounded_log(buffer: &mut String, line: &str, limit: usize) {
+    if !buffer.is_empty() {
+        buffer.push('\n');
+    }
+    buffer.push_str(line);
+    if buffer.len() <= limit {
+        return;
+    }
+    let excess = buffer.len() - limit;
+    let trim_at = buffer[excess..]
+        .find('\n')
+        .map(|idx| excess + idx + 1)
+        .unwrap_or(excess);
+    buffer.replace_range(..trim_at, "");
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -753,11 +940,9 @@ pub async fn spawn_claude_process(
     if reservation.key != ClaudeProcessKey::new(window.label(), &tab_id) {
         return Err("Claude start reservation does not match its window and tab".into());
     }
-    let registry = window
-        .state::<ClaudeProcessState>()
-        .inner()
-        .registry
-        .clone();
+    let process_state = window.state::<ClaudeProcessState>();
+    let registry = process_state.inner().registry.clone();
+    let permissions = process_state.inner().permissions.clone();
 
     if stdin_payload.is_some() {
         cmd.stdin(std::process::Stdio::piped());
@@ -813,6 +998,24 @@ pub async fn spawn_claude_process(
         }
     };
 
+    let stdin = match (stdin, stdin_payload, stop_requested.is_none()) {
+        (Some(mut stdin), Some(payload), true) => {
+            stdin
+                .write_all(payload.as_bytes())
+                .await
+                .map_err(|error| format!("Failed to write prompt to Claude process stdin: {error}"))?;
+            stdin
+                .flush()
+                .await
+                .map_err(|error| format!("Failed to flush Claude process stdin: {error}"))?;
+            permissions
+                .attach_stdin(reservation.attempt_id.clone(), stdin)
+                .await;
+            None
+        }
+        (stdin, _, _) => stdin,
+    };
+
     let stdout_reader = BufReader::new(stdout);
     let stderr_reader = BufReader::new(stderr);
     let result_success_holder: Arc<std::sync::Mutex<Option<bool>>> =
@@ -826,6 +1029,7 @@ pub async fn spawn_claude_process(
     let provider_metadata_stdout = provider_metadata.clone();
     let registry_stdout = registry.clone();
     let reservation_stdout = reservation.clone();
+    let permissions_stdout = permissions.clone();
     let window_label_stdout = window.label().to_string();
     let stdout_task = tokio::spawn(async move {
         let mut lines = stdout_reader.lines();
@@ -875,7 +1079,83 @@ pub async fn spawn_claude_process(
                     if let Ok(mut guard) = result_success_stdout.lock() {
                         *guard = Some(is_success);
                     }
+                    let dismissed = permissions_stdout
+                        .close_attempt(&reservation_stdout.attempt_id)
+                        .await;
+                    emit_approval_resolved(
+                        &win_stdout,
+                        &tab_id_stdout,
+                        &reservation_stdout.attempt_id,
+                        dismissed,
+                        line_count,
+                    );
                 }
+            }
+
+            match classify_claude_stdout_line(
+                &line,
+                &tab_id_stdout,
+                &reservation_stdout.attempt_id,
+            ) {
+                ClaudeStdoutControl::CanUseTool {
+                    request_id,
+                    runtime_request,
+                    input,
+                    suggestions,
+                    tool_name,
+                } => {
+                    permissions_stdout
+                        .register_tool(
+                            request_id,
+                            PendingClaudeTool {
+                                attempt_id: reservation_stdout.attempt_id.clone(),
+                                input,
+                                suggestions,
+                                tool_name,
+                            },
+                        )
+                        .await;
+                    let _ = win_stdout.emit(
+                        "runtime-event",
+                        RuntimeEventEnvelope {
+                            runtime: RuntimeKind::Claude,
+                            window_label: window_label_stdout.clone(),
+                            tab_id: tab_id_stdout.clone(),
+                            attempt_id: reservation_stdout.attempt_id.clone(),
+                            session_id: None,
+                            turn_id: Some(reservation_stdout.attempt_id.clone()),
+                            sequence: line_count,
+                            event: RuntimeEvent::ApprovalRequested {
+                                request: runtime_request,
+                            },
+                        },
+                    );
+                    continue;
+                }
+                ClaudeStdoutControl::AutoAck { request_id } => {
+                    let _ = permissions_stdout
+                        .write_line(
+                            &reservation_stdout.attempt_id,
+                            &control_ack_line(&request_id),
+                        )
+                        .await;
+                    continue;
+                }
+                ClaudeStdoutControl::Cancelled { request_id } => {
+                    let _ = permissions_stdout.take_pending(&request_id).await;
+                    permissions_stdout
+                        .remember_closed(std::iter::once(request_id.clone()))
+                        .await;
+                    emit_approval_resolved(
+                        &win_stdout,
+                        &tab_id_stdout,
+                        &reservation_stdout.attempt_id,
+                        [request_id],
+                        line_count,
+                    );
+                    continue;
+                }
+                ClaudeStdoutControl::NotControl => {}
             }
 
             let should_emit = {
@@ -928,6 +1208,9 @@ pub async fn spawn_claude_process(
     let tab_id_stderr = tab_id.clone();
     let registry_stderr = registry.clone();
     let reservation_stderr = reservation.clone();
+    let stderr_tail_holder: Arc<std::sync::Mutex<String>> =
+        Arc::new(std::sync::Mutex::new(String::new()));
+    let stderr_tail_writer = stderr_tail_holder.clone();
     let stderr_task = tokio::spawn(async move {
         let mut lines = stderr_reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
@@ -937,6 +1220,9 @@ pub async fn spawn_claude_process(
                 start_time.elapsed().as_secs_f64(),
                 &line[..line.len().min(200)]
             );
+            if let Ok(mut buffer) = stderr_tail_writer.lock() {
+                append_bounded_log(&mut buffer, &line, STDERR_TAIL_LIMIT);
+            }
             let should_emit = {
                 let registry = registry_stderr.lock().await;
                 registry.is_current(&reservation_stderr)
@@ -955,15 +1241,27 @@ pub async fn spawn_claude_process(
     });
 
     let registry_wait = registry.clone();
+    let permissions_wait = permissions.clone();
     let win_wait = window.clone();
     let tab_id_wait = tab_id.clone();
     let reservation_wait = reservation.clone();
     let result_success_wait = result_success_holder.clone();
+    let stderr_tail_wait = stderr_tail_holder.clone();
     let (startup_complete_tx, startup_complete_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let _ = stdout_task.await;
         let _ = stderr_task.await;
         let _ = startup_complete_rx.await;
+        let dismissed = permissions_wait
+            .close_attempt(&reservation_wait.attempt_id)
+            .await;
+        emit_approval_resolved(
+            &win_wait,
+            &tab_id_wait,
+            &reservation_wait.attempt_id,
+            dismissed,
+            0,
+        );
 
         let (child, should_emit_stopped) = {
             let mut registry = registry_wait.lock().await;
@@ -983,7 +1281,7 @@ pub async fn spawn_claude_process(
         let Some(mut child) = child else {
             return;
         };
-        let success = match child.wait().await {
+        let (success, exit_code) = match child.wait().await {
             Ok(status) => {
                 let exit_success = status.success();
                 let result_success = result_success_wait.lock().ok().and_then(|guard| *guard);
@@ -996,7 +1294,7 @@ pub async fn spawn_claude_process(
                     success,
                     start_time.elapsed().as_secs_f64()
                 );
-                success
+                (success, status.code())
             }
             Err(error) => {
                 eprintln!(
@@ -1005,65 +1303,63 @@ pub async fn spawn_claude_process(
                     error,
                     start_time.elapsed().as_secs_f64()
                 );
-                false
+                (false, None)
             }
         };
+        let stderr_tail = stderr_tail_wait.lock().ok().and_then(|buffer| {
+            let trimmed = buffer.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
 
         let should_emit = {
             let mut registry = registry_wait.lock().await;
             registry.finish_wait(&reservation_wait)
         };
         if should_emit {
-            emit_claude_complete(
-                &win_wait,
-                &tab_id_wait,
-                &reservation_wait.attempt_id,
-                success,
-            )
-            .await;
+            if success {
+                emit_claude_complete(
+                    &win_wait,
+                    &tab_id_wait,
+                    &reservation_wait.attempt_id,
+                    true,
+                )
+                .await;
+            } else {
+                emit_claude_complete_with_details(
+                    &win_wait,
+                    &tab_id_wait,
+                    &reservation_wait.attempt_id,
+                    false,
+                    exit_code,
+                    stderr_tail,
+                )
+                .await;
+            }
         }
     });
 
     if let Some((process, mode)) = stop_requested {
         drop(stdin);
+        let dismissed = permissions
+            .close_attempt(&reservation.attempt_id)
+            .await;
+        emit_approval_resolved(
+            &window,
+            &tab_id,
+            &reservation.attempt_id,
+            dismissed,
+            0,
+        );
         let _ = startup_complete_tx.send(());
         finalize_stopped_process(window, tab_id, registry, reservation, process, mode);
         return Ok(());
     }
 
-    let stdin_result = match (stdin, stdin_payload) {
-        (Some(mut stdin), Some(payload)) => {
-            async {
-                stdin.write_all(payload.as_bytes()).await.map_err(|error| {
-                    format!("Failed to write prompt to Claude process stdin: {}", error)
-                })?;
-                stdin
-                    .shutdown()
-                    .await
-                    .map_err(|error| format!("Failed to close Claude process stdin: {}", error))
-            }
-            .await
-        }
-        _ => Ok(()),
-    };
-    if let Err(error) = stdin_result {
-        let process = {
-            let mut registry = registry.lock().await;
-            registry.abort_running_start(&reservation)
-        };
-        if let Some(process) = process {
-            finalize_stopped_process(
-                window,
-                tab_id,
-                registry,
-                reservation,
-                process,
-                ClaudeStopMode::Terminate,
-            );
-        }
-        let _ = startup_complete_tx.send(());
-        return Err(error);
-    }
+    drop(stdin);
     let _ = startup_complete_tx.send(());
 
     Ok(())
@@ -1208,6 +1504,15 @@ pub async fn kill_process_for_window(state: &ClaudeProcessState, window_label: &
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn bounded_stderr_tail_keeps_the_newest_complete_lines() {
+        let mut buffer = String::new();
+        append_bounded_log(&mut buffer, "old-1", 16);
+        append_bounded_log(&mut buffer, "old-2", 16);
+        append_bounded_log(&mut buffer, "newest-line", 16);
+        assert_eq!(buffer, "newest-line");
+    }
 
     #[test]
     fn runtime_missing_process_is_silent_and_returns_false() {
@@ -1688,10 +1993,14 @@ mod tests {
             tab_id: "tab-a".into(),
             attempt_id: "attempt-a".into(),
             success: false,
+            exit_code: None,
+            stderr_tail: None,
         })
         .unwrap();
 
         assert_eq!(value["tab_id"], "tab-a");
         assert_eq!(value["attempt_id"], "attempt-a");
+        assert_eq!(value.get("exit_code"), None);
+        assert_eq!(value.get("stderr_tail"), None);
     }
 }

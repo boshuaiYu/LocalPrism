@@ -3,7 +3,7 @@ use hmac::{Hmac, Mac};
 use serde::Serialize;
 use sha1::Sha1;
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -372,6 +372,172 @@ pub async fn zotero_cancel_oauth(state: tauri::State<'_, ZoteroOAuthState>) -> R
     Ok(())
 }
 
+// ─── Library fetch (desktop local API + web API, no WebView cache) ───
+
+const ZOTERO_WEB_API: &str = "https://api.zotero.org";
+const ZOTERO_LOCAL_API: &str = "http://127.0.0.1:23119/api";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ZoteroApiResponse {
+    pub status: u16,
+    pub headers: HashMap<String, String>,
+    pub body: String,
+    pub source: String,
+}
+
+pub(crate) fn validate_zotero_api_path(path: &str) -> Result<(), String> {
+    if !path.starts_with('/') {
+        return Err("Zotero path must start with /".into());
+    }
+    if path.contains("://") || path.contains("..") || path.contains('\\') || path.contains('\n') {
+        return Err("Invalid Zotero path".into());
+    }
+    let route = path.split('?').next().unwrap_or(path);
+    if route == "/keys/current"
+        || route.starts_with("/keys/")
+        || route.starts_with("/users/")
+        || route.starts_with("/groups/")
+    {
+        return Ok(());
+    }
+    Err("Zotero path is not allowed".into())
+}
+
+fn zotero_response_headers(response: &reqwest::Response) -> HashMap<String, String> {
+    let mut headers = HashMap::new();
+    for (name, value) in response.headers() {
+        if let Ok(value) = value.to_str() {
+            headers.insert(name.as_str().to_string(), value.to_string());
+        }
+    }
+    headers
+}
+
+fn should_skip_forwarded_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "if-modified-since-version"
+            | "if-none-match"
+            | "if-modified-since"
+            | "zotero-api-key"
+            | "host"
+            | "content-length"
+    )
+}
+
+async fn fetch_zotero_source(
+    base: &str,
+    path: &str,
+    api_key: &str,
+    extra_headers: &HashMap<String, String>,
+    timeout: Duration,
+    source: &str,
+) -> Result<ZoteroApiResponse, String> {
+    let url = format!("{base}{path}");
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_millis(800))
+        .timeout(timeout)
+        .pool_max_idle_per_host(0)
+        .build()
+        .map_err(|e| format!("Failed to build Zotero HTTP client: {e}"))?;
+
+    let mut request = client
+        .get(&url)
+        .header("Zotero-API-Key", api_key)
+        .header("Zotero-API-Version", "3")
+        .header("Cache-Control", "no-cache, no-store")
+        .header("Pragma", "no-cache")
+        .header("User-Agent", "LocalPrism/2.0.0");
+
+    for (key, value) in extra_headers {
+        if should_skip_forwarded_header(key) {
+            continue;
+        }
+        request = request.header(key, value);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("Zotero {source} request failed: {e}"))?;
+    let status = response.status().as_u16();
+    let headers = zotero_response_headers(&response);
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read Zotero {source} response: {e}"))?;
+
+    Ok(ZoteroApiResponse {
+        status,
+        headers,
+        body,
+        source: source.to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn zotero_api_request(
+    api_key: String,
+    path: String,
+    extra_headers: Option<HashMap<String, String>>,
+    source: Option<String>,
+) -> Result<ZoteroApiResponse, String> {
+    validate_zotero_api_path(&path)?;
+    let extra_headers = extra_headers.unwrap_or_default();
+    let source = source.unwrap_or_else(|| "auto".to_string());
+
+    match source.as_str() {
+        "local" => {
+            fetch_zotero_source(
+                ZOTERO_LOCAL_API,
+                &path,
+                &api_key,
+                &extra_headers,
+                Duration::from_secs(3),
+                "local",
+            )
+            .await
+        }
+        "web" => {
+            fetch_zotero_source(
+                ZOTERO_WEB_API,
+                &path,
+                &api_key,
+                &extra_headers,
+                Duration::from_secs(60),
+                "web",
+            )
+            .await
+        }
+        _ => {
+            if let Ok(local) = fetch_zotero_source(
+                ZOTERO_LOCAL_API,
+                &path,
+                &api_key,
+                &extra_headers,
+                Duration::from_secs(2),
+                "local",
+            )
+            .await
+            {
+                if (200..300).contains(&local.status) {
+                    return Ok(local);
+                }
+            }
+            fetch_zotero_source(
+                ZOTERO_WEB_API,
+                &path,
+                &api_key,
+                &extra_headers,
+                Duration::from_secs(60),
+                "web",
+            )
+            .await
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,5 +657,21 @@ mod tests {
         // so value defaults to "" and we get one entry: ("", "")
         assert_eq!(result.len(), 1);
         assert_eq!(result.get("").unwrap(), "");
+    }
+
+    #[test]
+    fn test_validate_zotero_api_path_allows_library_routes() {
+        assert!(validate_zotero_api_path("/keys/current").is_ok());
+        assert!(validate_zotero_api_path("/users/123/items?start=0").is_ok());
+        assert!(validate_zotero_api_path("/users/123/collections").is_ok());
+        assert!(validate_zotero_api_path("/groups/9/items").is_ok());
+        assert!(validate_zotero_api_path("/users/123/deleted?since=1").is_ok());
+    }
+
+    #[test]
+    fn test_validate_zotero_api_path_rejects_absolute_urls() {
+        assert!(validate_zotero_api_path("https://api.zotero.org/users/1/items").is_err());
+        assert!(validate_zotero_api_path("/users/../keys/current").is_err());
+        assert!(validate_zotero_api_path("/settings/keys").is_err());
     }
 }

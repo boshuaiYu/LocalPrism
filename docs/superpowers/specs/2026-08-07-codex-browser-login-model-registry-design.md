@@ -1,5 +1,7 @@
 # Codex Browser Login and Model Registry Design
 
+**Status:** SUPERSEDED by [2026-09-17 Single-Provider Runtime Design](./2026-09-17-single-provider-runtime-design.md). ChatGPT login is now app-owned OAuth plus a Responses proxy, not `codex app-server`.
+
 **Date:** 2026-08-07
 
 ## Goal

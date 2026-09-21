@@ -1,0 +1,96 @@
+% !TEX program = XeLaTeX
+\documentclass[UTF8,a4paper,11pt]{ctexart}
+
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!70!black,
+  citecolor=green!50!black,
+  urlcolor=blue!80!black
+}
+
+\title{面向科学代理模型的残差校准方法}
+\author{张伟\quad 李娜}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+科学计算中的代理模型能够显著降低数值模拟成本，但在分布偏移下往往出现残差误校准。本文给出一种基于残差分数的事后校准流程：在较小的标注校准集上估计单调运输映射，并据此构造预测区间。该方法在三类偏微分方程算例上使区间覆盖率接近名义水平。文稿采用 \texttt{ctexart} 文档类，以 UTF-8 中文排版，可用 XeLaTeX 或 LuaLaTeX 编译。
+\end{abstract}
+
+\noindent\textbf{关键词：} 科学机器学习；不确定性量化；残差校准；中文论文
+
+\section{引言}
+
+高保真求解器在反问题与不确定性量化中代价高昂。数据驱动代理模型可以缩短计算时间，但其残差分布常随工况漂移~\cite{raissi2019,karniadakis2021}。当代理模型已经捕捉主要解流形时，事后校准通常比重新训练更经济。
+
+设 $f_\theta$ 为固定代理模型，$s(x,y)$ 为残差分数。我们在校准集上拟合单调映射 $T$，使 $T\circ s$ 近似服从目标分布，再反演 $T$ 得到区间。
+
+\section{方法}
+
+给定校准样本 $\{(x_i,y_i)\}_{i=1}^{n}$，定义
+\begin{equation}
+  s_i = \|y_i - f_\theta(x_i)\|_2.
+\end{equation}
+记 $\hat{F}$ 为 $\{s_i\}$ 的经验分布函数。对目标误覆盖率 $\alpha$，查询点 $x$ 处的对称区间为
+\begin{equation}
+  f_\theta(x) \pm \hat{F}^{-1}(1-\alpha).
+\end{equation}
+若校准分数与测试分数可交换，则覆盖率至少为 $1-\alpha$，并带有 $1/(n+1)$ 的有限样本修正。
+
+\section{数值实验}
+
+我们在 Burgers 方程、Darcy 流与反应--扩散系统上评估该方法。表~\ref{tab:cn-coverage} 给出校准前后的区间覆盖率。
+
+\begin{table}[t]
+\centering
+\caption{目标覆盖率 $90\%$ 时的实验结果}
+\label{tab:cn-coverage}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+问题 & 校准前覆盖率 & 校准后覆盖率 \\
+\midrule
+Burgers 方程 & 0.71 & 0.91 \\
+Darcy 流 & 0.64 & 0.89 \\
+反应--扩散 & 0.77 & 0.92 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{相关工作}
+
+物理信息神经网络与神经算子为科学代理提供了可微函数类~\cite{raissi2019,karniadakis2021}。共形推断从统计侧给出有限样本覆盖保证。本文将残差分数上的单调映射作为二者之间的最小接口，从而不必改写代理模型的训练流程。
+
+\section{讨论}
+
+当代理模型错过分岔时，校准不能凭空恢复正确的解流形。此时应检测分数膨胀并回退到数值求解器。校准集小于约 50 个点时，经验分布抖动明显，宜改用带尾部约束的参数族。学位论文请改用本应用中的 \texttt{hitszthesis} 模板。
+
+\section{结论}
+
+残差校准是科学代理模型的一种低成本保险机制：它不修改 $f_\theta$ 的可训练参数，只要求带标注的校准集，并在本文算例中使覆盖率回到名义水平。该稿可作为中文期刊论文初稿；哈尔滨工业大学（深圳）学位论文请使用 \texttt{hitszthesis}。
+
+\begin{thebibliography}{9}
+
+\bibitem{raissi2019}
+M.~Raissi, P.~Perdikaris, G.~E. Karniadakis.
+Physics-informed neural networks.
+\textit{Journal of Computational Physics}, 378:686--707, 2019.
+
+\bibitem{karniadakis2021}
+G.~E. Karniadakis 等.
+Physics-informed machine learning.
+\textit{Nature Reviews Physics}, 3:422--440, 2021.
+
+\end{thebibliography}
+
+\end{document}

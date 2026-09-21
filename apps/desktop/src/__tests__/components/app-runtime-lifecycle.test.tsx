@@ -29,6 +29,9 @@ const {
         attemptEpoch: number;
         isStreaming: boolean;
         cancelledAttempts?: unknown[];
+        messages?: unknown[];
+        sessionId?: string | null;
+        sessionRef?: unknown;
       }>,
       activeTabId: "missing-tab",
       pendingInitialPrompt: null as string | null,
@@ -78,6 +81,18 @@ vi.mock("@/hooks/use-runtime-warning-events", () => ({
   useRuntimeWarningEvents: vi.fn(),
 }));
 vi.mock("@/runtime/commands", () => ({ runtimeListConversations }));
+vi.mock("@/stores/claude-setup-store", () => ({
+  useClaudeSetupStore: Object.assign(
+    () => ({
+      ensureEngine: vi.fn(() => Promise.resolve()),
+    }),
+    {
+      getState: () => ({
+        ensureEngine: vi.fn(() => Promise.resolve()),
+      }),
+    },
+  ),
+}));
 vi.mock("@/stores/uv-setup-store", () => ({
   useUvSetupStore: {
     getState: () => ({
@@ -85,6 +100,18 @@ vi.mock("@/stores/uv-setup-store", () => ({
       checkStatus: vi.fn(() => Promise.resolve()),
     }),
   },
+}));
+vi.mock("@/stores/skill-store", () => ({
+  useSkillStore: Object.assign(
+    () => ({
+      ensureDefaultSkillPacks: vi.fn(() => Promise.resolve([])),
+    }),
+    {
+      getState: () => ({
+        ensureDefaultSkillPacks: vi.fn(() => Promise.resolve([])),
+      }),
+    },
+  ),
 }));
 vi.mock("@/components/project-picker", () => ({
   ProjectPicker: () => <div data-testid="project-picker" />,
@@ -94,6 +121,9 @@ vi.mock("@/components/workspace/workspace-layout", () => ({
 }));
 vi.mock("@/components/environment-onboarding", () => ({
   EnvironmentOnboarding: () => null,
+}));
+vi.mock("@/components/welcome-wizard", () => ({
+  WelcomeWizard: () => <div data-testid="welcome-wizard" />,
 }));
 vi.mock("@/components/ui/sonner", () => ({ Toaster: () => null }));
 vi.mock("@/components/ui/tooltip", () => ({
@@ -107,6 +137,7 @@ vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ setTitle, setTheme: vi.fn() }),
 }));
 
+import { WELCOME_COMPLETED_KEY } from "@/lib/welcome";
 import { App } from "@/App";
 
 type MockTab = (typeof chatState.tabs)[number];
@@ -119,6 +150,9 @@ function makeTab(overrides: Partial<MockTab> = {}): MockTab {
     attemptEpoch: 0,
     isStreaming: false,
     cancelledAttempts: [],
+    messages: [],
+    sessionId: null,
+    sessionRef: null,
     ...overrides,
   };
 }
@@ -158,6 +192,7 @@ describe("App runtime event lifecycle", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.setItem(WELCOME_COMPLETED_KEY, "true");
     documentState.projectRoot = null;
     documentState.initialized = false;
     chatState.tabs = [];
@@ -200,7 +235,7 @@ describe("App runtime event lifecycle", () => {
     ).not.toBeNull();
   });
 
-  it("captures the reset Codex tab and resumes its latest exact conversation", async () => {
+  it("does not auto-resume archived Codex conversations", async () => {
     documentState.projectRoot = "/project";
     documentState.initialized = true;
     chatState.tabs = [makeTab({ id: "before-reset", runtime: "claude" })];
@@ -210,17 +245,42 @@ describe("App runtime event lifecycle", () => {
       chatState.activeTabId = "codex-tab";
       return "reset";
     });
+    runtimeListConversations.mockResolvedValue([
+      conversation("codex", "codex-latest", "/project", 20, "Latest Codex"),
+    ]);
+
+    await act(async () => root.render(<App />));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(runtimeListConversations).not.toHaveBeenCalled();
+    expect(resumeConversation).not.toHaveBeenCalled();
+    expect(newSession).not.toHaveBeenCalled();
+    expect(resumeSession).not.toHaveBeenCalled();
+  });
+
+  it("captures the reset Claude tab and resumes its latest exact conversation", async () => {
+    documentState.projectRoot = "/project";
+    documentState.initialized = true;
+    chatState.tabs = [makeTab({ id: "before-reset", runtime: "codex" })];
+    chatState.activeTabId = "before-reset";
+    resetForProject.mockImplementation(() => {
+      chatState.tabs = [makeTab({ id: "claude-tab", runtime: "claude" })];
+      chatState.activeTabId = "claude-tab";
+      return "reset";
+    });
     const latest = conversation(
-      "codex",
-      "codex-latest",
+      "claude",
+      "claude-latest",
       "/project",
       20,
-      "Latest Codex",
+      "Latest Claude",
     );
     runtimeListConversations.mockResolvedValue([
-      conversation("codex", "codex-older", "/project", 10),
-      conversation("claude", "wrong-runtime", "/project", 100),
-      conversation("codex", "wrong-project", "/other-project", 200),
+      conversation("claude", "claude-older", "/project", 10),
+      conversation("codex", "wrong-runtime", "/project", 100),
+      conversation("claude", "wrong-project", "/other-project", 200),
       latest,
     ]);
 
@@ -232,43 +292,23 @@ describe("App runtime event lifecycle", () => {
         latest.title,
       ),
     );
-    expect(runtimeListConversations).toHaveBeenCalledWith("codex", "/project");
-    expect(resumeSession).not.toHaveBeenCalled();
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([command]) => command === "list_claude_sessions"),
-    ).toBe(false);
-  });
-
-  it("starts a new session for the captured Codex tab when history is empty", async () => {
-    documentState.projectRoot = "/project";
-    documentState.initialized = true;
-    chatState.tabs = [makeTab({ id: "codex-tab", runtime: "codex" })];
-    chatState.activeTabId = "codex-tab";
-    runtimeListConversations.mockResolvedValue([]);
-
-    await act(async () => root.render(<App />));
-
-    await vi.waitFor(() => expect(newSession).toHaveBeenCalledTimes(1));
-    expect(runtimeListConversations).toHaveBeenCalledWith("codex", "/project");
-    expect(resumeConversation).not.toHaveBeenCalled();
+    expect(runtimeListConversations).toHaveBeenCalledWith("claude", "/project");
     expect(resumeSession).not.toHaveBeenCalled();
   });
 
   it("ignores a conversation response after the document project changes", async () => {
     const response = deferred<ReturnType<typeof conversation>[]>();
-    const latest = conversation("codex", "thread-1", "/project", 10);
+    const latest = conversation("claude", "thread-1", "/project", 10);
     documentState.projectRoot = "/project";
     documentState.initialized = true;
-    chatState.tabs = [makeTab({ id: "codex-tab", runtime: "codex" })];
-    chatState.activeTabId = "codex-tab";
+    chatState.tabs = [makeTab({ id: "claude-tab", runtime: "claude" })];
+    chatState.activeTabId = "claude-tab";
     runtimeListConversations.mockReturnValue(response.promise);
 
     await act(async () => root.render(<App />));
     await vi.waitFor(() =>
       expect(runtimeListConversations).toHaveBeenCalledWith(
-        "codex",
+        "claude",
         "/project",
       ),
     );
@@ -285,20 +325,20 @@ describe("App runtime event lifecycle", () => {
 
   it("keeps a valid request when another tab's stopping count changes", async () => {
     const response = deferred<ReturnType<typeof conversation>[]>();
-    const latest = conversation("codex", "thread-1", "/project", 10);
+    const latest = conversation("claude", "thread-1", "/project", 10);
     documentState.projectRoot = "/project";
     documentState.initialized = true;
     chatState.tabs = [
-      makeTab({ id: "codex-tab", runtime: "codex" }),
+      makeTab({ id: "claude-tab", runtime: "claude" }),
       makeTab({ id: "other-tab", runtime: "claude" }),
     ];
-    chatState.activeTabId = "codex-tab";
+    chatState.activeTabId = "claude-tab";
     runtimeListConversations.mockReturnValue(response.promise);
 
     await act(async () => root.render(<App />));
     await vi.waitFor(() =>
       expect(runtimeListConversations).toHaveBeenCalledWith(
-        "codex",
+        "claude",
         "/project",
       ),
     );
@@ -324,23 +364,23 @@ describe("App runtime event lifecycle", () => {
 
   it("does not overwrite a conversation replaced by the user while history is loading", async () => {
     const response = deferred<ReturnType<typeof conversation>[]>();
-    const latest = conversation("codex", "thread-1", "/project", 10);
+    const latest = conversation("claude", "thread-1", "/project", 10);
     documentState.projectRoot = "/project";
     documentState.initialized = true;
-    chatState.tabs = [makeTab({ id: "codex-tab", runtime: "codex" })];
-    chatState.activeTabId = "codex-tab";
+    chatState.tabs = [makeTab({ id: "claude-tab", runtime: "claude" })];
+    chatState.activeTabId = "claude-tab";
     runtimeListConversations.mockReturnValue(response.promise);
 
     await act(async () => root.render(<App />));
     await vi.waitFor(() =>
       expect(runtimeListConversations).toHaveBeenCalledWith(
-        "codex",
+        "claude",
         "/project",
       ),
     );
 
     chatState.tabs = chatState.tabs.map((tab) =>
-      tab.id === "codex-tab"
+      tab.id === "claude-tab"
         ? { ...tab, attemptEpoch: tab.attemptEpoch + 1 }
         : tab,
     );
@@ -360,7 +400,7 @@ describe("App runtime event lifecycle", () => {
       mutateOwnership: () => {
         chatState.tabs = [
           ...chatState.tabs,
-          makeTab({ id: "other-tab", runtime: "codex" }),
+          makeTab({ id: "other-tab", runtime: "claude" }),
         ];
         chatState.activeTabId = "other-tab";
       },
@@ -369,7 +409,7 @@ describe("App runtime event lifecycle", () => {
       name: "captured tab runtime",
       mutateOwnership: () => {
         chatState.tabs = chatState.tabs.map((tab) =>
-          tab.id === "codex-tab" ? { ...tab, runtime: "claude" } : tab,
+          tab.id === "claude-tab" ? { ...tab, runtime: "codex" } : tab,
         );
       },
     },
@@ -377,7 +417,7 @@ describe("App runtime event lifecycle", () => {
       name: "captured tab project",
       mutateOwnership: () => {
         chatState.tabs = chatState.tabs.map((tab) =>
-          tab.id === "codex-tab"
+          tab.id === "claude-tab"
             ? { ...tab, projectPath: "/other-project" }
             : tab,
         );
@@ -389,14 +429,14 @@ describe("App runtime event lifecycle", () => {
     const response = deferred<ReturnType<typeof conversation>[]>();
     documentState.projectRoot = "/project";
     documentState.initialized = true;
-    chatState.tabs = [makeTab({ id: "codex-tab", runtime: "codex" })];
-    chatState.activeTabId = "codex-tab";
+    chatState.tabs = [makeTab({ id: "claude-tab", runtime: "claude" })];
+    chatState.activeTabId = "claude-tab";
     runtimeListConversations.mockReturnValue(response.promise);
 
     await act(async () => root.render(<App />));
     await vi.waitFor(() =>
       expect(runtimeListConversations).toHaveBeenCalledWith(
-        "codex",
+        "claude",
         "/project",
       ),
     );
@@ -422,7 +462,7 @@ describe("App runtime event lifecycle", () => {
       name: "the captured tab starts streaming",
       blockApply: () => {
         chatState.tabs = chatState.tabs.map((tab) =>
-          tab.id === "codex-tab" ? { ...tab, isStreaming: true } : tab,
+          tab.id === "claude-tab" ? { ...tab, isStreaming: true } : tab,
         );
       },
     },
@@ -430,7 +470,7 @@ describe("App runtime event lifecycle", () => {
       name: "the captured tab starts stopping",
       blockApply: () => {
         chatState.tabs = chatState.tabs.map((tab) =>
-          tab.id === "codex-tab"
+          tab.id === "claude-tab"
             ? { ...tab, cancelledAttempts: [{ attemptId: "stopping" }] }
             : tab,
         );
@@ -438,17 +478,17 @@ describe("App runtime event lifecycle", () => {
     },
   ])("does not apply history when $name", async ({ blockApply }) => {
     const response = deferred<ReturnType<typeof conversation>[]>();
-    const latest = conversation("codex", "thread-1", "/project", 10);
+    const latest = conversation("claude", "thread-1", "/project", 10);
     documentState.projectRoot = "/project";
     documentState.initialized = true;
-    chatState.tabs = [makeTab({ id: "codex-tab", runtime: "codex" })];
-    chatState.activeTabId = "codex-tab";
+    chatState.tabs = [makeTab({ id: "claude-tab", runtime: "claude" })];
+    chatState.activeTabId = "claude-tab";
     runtimeListConversations.mockReturnValue(response.promise);
 
     await act(async () => root.render(<App />));
     await vi.waitFor(() =>
       expect(runtimeListConversations).toHaveBeenCalledWith(
-        "codex",
+        "claude",
         "/project",
       ),
     );

@@ -13,8 +13,9 @@ import {
   CrosshairIcon,
   ChevronUpIcon,
   ChevronDownIcon,
+  ZapIcon,
 } from "lucide-react";
-import { writeFile, mkdir, exists } from "@tauri-apps/plugin-fs";
+import { writeFile, mkdir, exists, readFile } from "@tauri-apps/plugin-fs";
 import { join } from "@tauri-apps/api/path";
 import {
   useDocumentStore,
@@ -41,8 +42,16 @@ import {
   PopoverContent,
 } from "@/components/ui/popover";
 import { HistoryPanel } from "@/components/workspace/history-panel";
-import { synctexEdit, resolveCompileTarget } from "@/lib/latex-compiler";
+import {
+  synctexEdit,
+  resolveCompileTarget,
+  detectTexlive,
+  getCachedTexliveAvailable,
+  activeCompileUsesTexlive,
+} from "@/lib/latex-compiler";
 import { runOwnedProjectCompile } from "@/lib/project-compile";
+import { shouldScheduleLiveCompile } from "@/lib/live-compile";
+import { useLiveCompile } from "@/hooks/use-live-compile";
 import {
   ownsProjectFsState,
   runProjectFsOperation,
@@ -58,7 +67,8 @@ import {
   type PdfTextSelection,
   type CaptureResult,
 } from "./pdf-viewer";
-import { resolveTexRoot } from "@/stores/document-store";
+import { resolveTexRoot, type ProjectFile } from "@/stores/document-store";
+import { MarkdownPreviewPane } from "@/components/workspace/preview/markdown-preview-pane";
 import { createLogger } from "@/lib/debug/logger";
 
 const log = createLogger("pdf-preview");
@@ -76,6 +86,17 @@ export function clearZoomCache(): void {
   zoomCache.clear();
 }
 
+function parseCompileErrors(compileError: string): string[] {
+  return [
+    ...new Set(
+      compileError
+        .split(/\s*!\s*/)
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0 && s !== "Compilation failed"),
+    ),
+  ];
+}
+
 const ZOOM_OPTIONS = [
   { value: "0.5", label: "50%" },
   { value: "0.75", label: "75%" },
@@ -90,10 +111,18 @@ const ZOOM_OPTIONS = [
 export function PdfPreview() {
   const compilerBackend = useSettingsStore((s) => s.compilerBackend);
   const setCompilerBackend = useSettingsStore((s) => s.setCompilerBackend);
+  const autoCompile = useSettingsStore((s) => s.autoCompile);
+  const setAutoCompile = useSettingsStore((s) => s.setAutoCompile);
+  const [texliveAvailable, setTexliveAvailable] = useState<boolean | null>(
+    getCachedTexliveAvailable(),
+  );
+  const usingTexliveFallback =
+    compilerBackend === "texlive" && texliveAvailable === false;
   const pdfRevision = useDocumentStore((s) => s.pdfRevision);
   const compileError = useDocumentStore((s) => s.compileError);
   const isCompiling = useDocumentStore((s) => s.isCompiling);
   const isSaving = useDocumentStore((s) => s.isSaving);
+  const contentGeneration = useDocumentStore((s) => s.contentGeneration);
   const content = useDocumentStore((s) => s.content);
   const projectRoot = useDocumentStore((s) => s.projectRoot);
   const projectGeneration = useDocumentStore((s) => s.projectGeneration);
@@ -105,6 +134,9 @@ export function PdfPreview() {
   });
   const activeFileType = activeFile?.type ?? "tex";
   const isTexActive = activeFileType === "tex";
+  const isMarkdownActive = activeFileType === "markdown";
+  const isSourcePdfActive = activeFileType === "pdf";
+  const showCompiledPreview = !isMarkdownActive && !isSourcePdfActive;
   const requestJumpToPosition = useDocumentStore(
     (s) => s.requestJumpToPosition,
   );
@@ -139,6 +171,20 @@ export function PdfPreview() {
       : (getCurrentPdfRootId() ?? resolveTexRoot(activeFile?.id ?? "", files));
   const [aliveOrder, setAliveOrder] = useState<string[]>([]);
   const prevRootRef = useRef(currentRootFileId);
+
+  useEffect(() => {
+    let cancelled = false;
+    void detectTexlive()
+      .then((status) => {
+        if (!cancelled) setTexliveAvailable(status.available);
+      })
+      .catch(() => {
+        if (!cancelled) setTexliveAvailable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Save/restore zoom state per root file on switch
   useEffect(() => {
@@ -424,7 +470,7 @@ export function PdfPreview() {
         owner,
         rootFileId: resolved.rootId,
         targetPath: resolved.targetPath,
-        useTexlive: useSettingsStore.getState().compilerBackend === "texlive",
+        useTexlive: activeCompileUsesTexlive(),
         minimumBusyMs: 0,
       });
     };
@@ -516,46 +562,78 @@ export function PdfPreview() {
     setScale(newScale);
   };
 
-  const handleCompile = async (force = false) => {
-    // Read all guard values from the store to avoid stale closures
+  const handleCompile = useCallback(
+    async (force = false, options?: { minimumBusyMs?: number }) => {
+      const state = useDocumentStore.getState();
+      if (!state.projectRoot || state.isProjectMutating) return;
+      const allFiles = state.files;
+      const activeFileId = state.activeFileId;
+      const activeEntry = allFiles.find((f) => f.id === activeFileId);
+      if (!activeEntry || activeEntry.type !== "tex") return;
+      const resolved = resolveCompileTarget(activeFileId, allFiles);
+      if (!resolved) {
+        state.setCompileError(
+          "No .tex file found in this project. Create a main.tex file to compile.",
+        );
+        return;
+      }
+      const { rootId, targetPath: targetFile } = resolved;
+      const owner = {
+        projectRoot: state.projectRoot,
+        projectGeneration: state.projectGeneration,
+      };
+      if (!force) {
+        const lastGen = state.lastCompiledGenerations.get(rootId);
+        if (
+          hasPdfData() &&
+          lastGen !== undefined &&
+          state.contentGeneration === lastGen
+        )
+          return;
+      }
+      useHistoryStore.getState().stopReview();
+      setPdfError(null);
+      await runOwnedProjectCompile({
+        owner,
+        rootFileId: rootId,
+        targetPath: targetFile,
+        useTexlive: activeCompileUsesTexlive(),
+        minimumBusyMs: options?.minimumBusyMs,
+      });
+    },
+    [],
+  );
+
+  const compileLive = useCallback(() => {
     const state = useDocumentStore.getState();
-    if (!state.projectRoot || state.isProjectMutating) return;
-    const allFiles = state.files;
-    const activeFileId = state.activeFileId;
-    const activeEntry = allFiles.find((f) => f.id === activeFileId);
+    const activeEntry = state.files.find(
+      (file) => file.id === state.activeFileId,
+    );
     if (!activeEntry || activeEntry.type !== "tex") return;
-    const resolved = resolveCompileTarget(activeFileId, allFiles);
-    if (!resolved) {
-      state.setCompileError(
-        "No .tex file found in this project. Create a main.tex file to compile.",
-      );
+    const rootId = resolveTexRoot(activeEntry.id, state.files);
+    if (
+      !shouldScheduleLiveCompile({
+        autoCompile: useSettingsStore.getState().autoCompile,
+        isTexPreview: true,
+        isProjectMutating: state.isProjectMutating,
+        isCompiling: state.isCompiling,
+        pendingRecompile: state.pendingRecompile,
+        contentGeneration: state.contentGeneration,
+        lastCompiledGeneration: state.lastCompiledGenerations.get(rootId),
+      })
+    ) {
       return;
     }
-    const { rootId, targetPath: targetFile } = resolved;
-    const owner = {
-      projectRoot: state.projectRoot,
-      projectGeneration: state.projectGeneration,
-    };
-    // Skip recompile if no edits since last successful compile of this root
-    // (unless force=true, e.g. user clicked Recompile button)
-    if (!force) {
-      const lastGen = state.lastCompiledGenerations.get(rootId);
-      if (
-        hasPdfData() &&
-        lastGen !== undefined &&
-        state.contentGeneration === lastGen
-      )
-        return;
-    }
-    useHistoryStore.getState().stopReview();
-    setPdfError(null);
-    await runOwnedProjectCompile({
-      owner,
-      rootFileId: rootId,
-      targetPath: targetFile,
-      useTexlive: useSettingsStore.getState().compilerBackend === "texlive",
-    });
-  };
+    void handleCompile(false, { minimumBusyMs: 0 });
+  }, [handleCompile]);
+
+  useLiveCompile({
+    enabled: autoCompile && showCompiledPreview && isTexActive,
+    contentGeneration,
+    projectGeneration,
+    activeRootId: currentRootFileId,
+    compile: compileLive,
+  });
 
   const handleCapture = async (result: CaptureResult) => {
     setCaptureMode(false);
@@ -604,7 +682,7 @@ export function PdfPreview() {
     }
   };
 
-  // Listen for global Capture & Ask shortcut (Cmd+X / Ctrl+X)
+  // Listen for global Capture & Ask shortcut (Cmd+Shift+X / Ctrl+Shift+X)
   useEffect(() => {
     const handleToggleCapture = () => {
       if (pdfData) setCaptureMode((prev) => !prev);
@@ -615,15 +693,14 @@ export function PdfPreview() {
   }, [pdfData]);
 
   const renderContent = () => {
-    if (compileError) {
-      const errors = [
-        ...new Set(
-          compileError
-            .split(/\s*!\s*/)
-            .map((s) => s.trim())
-            .filter((s) => s.length > 0 && s !== "Compilation failed"),
-        ),
-      ];
+    if (isMarkdownActive) {
+      return <MarkdownPreviewPane file={activeFile} />;
+    }
+    if (isSourcePdfActive && activeFile) {
+      return <SourcePdfPreview file={activeFile} />;
+    }
+    if (compileError && !pdfData) {
+      const errors = parseCompileErrors(compileError);
 
       const handleFixWithChat = () => {
         const errorList = errors.map((e) => `- ${e}`).join("\n");
@@ -663,7 +740,7 @@ export function PdfPreview() {
                 Fix with Chat
               </button>
               <button
-                onClick={() => handleCompile(true)}
+                onClick={() => void handleCompile(true)}
                 className="flex items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-1.5 font-medium text-foreground text-xs transition-colors hover:bg-muted"
               >
                 <RefreshCwIcon className="size-3.5" />
@@ -671,6 +748,20 @@ export function PdfPreview() {
               </button>
             </div>
           </div>
+        </div>
+      );
+    }
+    if (!pdfData && isCompiling) {
+      return (
+        <div className="flex flex-1 flex-col items-center justify-center bg-muted/30 p-8">
+          <LoaderIcon className="mb-4 size-8 animate-spin text-muted-foreground" />
+          <h2 className="mb-2 font-medium text-foreground text-lg">
+            Compiling PDF…
+          </h2>
+          <p className="max-w-sm text-center text-muted-foreground text-sm">
+            First compile can take a minute while Tectonic fetches packages and
+            fonts.
+          </p>
         </div>
       );
     }
@@ -682,7 +773,9 @@ export function PdfPreview() {
             PDF Preview
           </h2>
           <p className="mb-4 text-center text-muted-foreground text-sm">
-            Press Cmd+Enter to compile your document
+            {autoCompile
+              ? "Preview updates as you type, or press Cmd+Enter to compile now"
+              : "Press Cmd+Enter to compile your document"}
           </p>
           {isTexActive && (
             <Button
@@ -715,6 +808,16 @@ export function PdfPreview() {
     // Keep-alive rendering: one PdfViewer per root file, toggle via CSS.
     // Use visibility:hidden + absolute positioning instead of display:none
     // so that the browser preserves scrollTop on the overflow container.
+    const compileErrors = compileError ? parseCompileErrors(compileError) : [];
+    const handleFixWithChat = () => {
+      const errorList = compileErrors.map((e) => `- ${e}`).join("\n");
+      useClaudeChatStore
+        .getState()
+        .sendPrompt(
+          `[Compilation errors]\n${errorList}\n\nFix these LaTeX compilation errors.`,
+        );
+    };
+
     return (
       <div className="relative flex min-h-0 flex-1">
         {aliveOrder.map((rootId) => {
@@ -784,6 +887,44 @@ export function PdfPreview() {
             </ErrorBoundary>
           );
         })}
+        {compileError && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 p-3">
+            <div className="pointer-events-auto mx-auto max-w-lg rounded-lg border border-destructive/30 bg-background/95 shadow-lg backdrop-blur-sm">
+              <div className="flex items-center gap-2 px-3 pt-2.5 text-destructive">
+                <AlertCircleIcon className="size-4" />
+                <h2 className="font-semibold text-sm">Compilation Failed</h2>
+                <span className="ml-auto rounded-full bg-destructive/15 px-2 py-0.5 font-medium text-xs">
+                  {compileErrors.length}{" "}
+                  {compileErrors.length === 1 ? "error" : "errors"}
+                </span>
+              </div>
+              <div className="max-h-28 divide-y divide-border overflow-y-auto px-1 py-1">
+                {compileErrors.map((error, i) => (
+                  <div key={i} className="flex items-start gap-2 px-2 py-1.5">
+                    <AlertCircleIcon className="mt-0.5 size-3 shrink-0 text-destructive/70" />
+                    <span className="text-foreground text-xs">{error}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="flex items-center gap-2 px-3 pb-2.5">
+                <button
+                  onClick={handleFixWithChat}
+                  className="flex items-center gap-1.5 rounded-lg bg-primary px-2.5 py-1 font-medium text-primary-foreground text-xs shadow-sm transition-colors hover:bg-primary/90"
+                >
+                  <MousePointerClickIcon className="size-3.5" />
+                  Fix with Chat
+                </button>
+                <button
+                  onClick={() => void handleCompile(true)}
+                  className="flex items-center gap-1.5 rounded-lg border border-border bg-background px-2.5 py-1 font-medium text-foreground text-xs transition-colors hover:bg-muted"
+                >
+                  <RefreshCwIcon className="size-3.5" />
+                  Retry
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   };
@@ -793,26 +934,63 @@ export function PdfPreview() {
       ref={previewContainerRef}
       className="@container/pv relative flex h-full flex-col bg-muted/50"
     >
-      <div className="flex h-[calc(var(--workspace-topbar-height)+var(--titlebar-height))] shrink-0 flex-nowrap items-center border-border border-b bg-background px-2">
-        <div className="flex min-w-0 shrink-0 items-center gap-1">
-          <Select
-            value={compilerBackend}
-            onValueChange={(v) =>
-              setCompilerBackend(v as "tectonic" | "texlive")
-            }
-          >
-            <SelectTrigger
-              size="sm"
-              className="h-7! @[44rem]/pv:w-[8.5rem] w-[6.75rem] text-xs"
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="tectonic">Tectonic</SelectItem>
-              <SelectItem value="texlive">TeXLive</SelectItem>
-            </SelectContent>
-          </Select>
-          {isSaving && (
+      <div className="flex min-h-[calc(var(--workspace-topbar-height)+var(--titlebar-height))] shrink-0 flex-wrap items-center gap-x-1 gap-y-1 border-border border-b bg-background px-2 py-1">
+        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
+          {isMarkdownActive ? (
+            <span className="px-1 font-medium text-muted-foreground text-xs">
+              Markdown preview
+            </span>
+          ) : isSourcePdfActive ? (
+            <span className="px-1 font-medium text-muted-foreground text-xs">
+              PDF preview
+            </span>
+          ) : (
+            <>
+              <Button
+                variant={autoCompile ? "secondary" : "ghost"}
+                size="sm"
+                className="h-7 gap-1 px-2 text-xs"
+                onClick={() => setAutoCompile(!autoCompile)}
+                title={
+                  autoCompile
+                    ? "Live preview on — click to pause"
+                    : "Live preview off — click to compile as you type"
+                }
+              >
+                <ZapIcon
+                  className={`size-3.5 ${autoCompile ? "text-amber-500" : ""}`}
+                />
+                <span className="@[42rem]/pv:inline hidden">Live</span>
+              </Button>
+              <Select
+                value={compilerBackend}
+                onValueChange={(v) =>
+                  setCompilerBackend(v as "tectonic" | "texlive")
+                }
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="@[24rem]/pv:flex hidden h-7! @[44rem]/pv:w-[8.5rem] w-[6.75rem] text-xs"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="tectonic">Tectonic</SelectItem>
+                  <SelectItem value="texlive">
+                    {texliveAvailable === false
+                      ? "TeXLive (not found)"
+                      : "TeXLive"}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </>
+          )}
+          {usingTexliveFallback && (
+            <span className="@[36rem]/pv:inline hidden max-w-[12rem] truncate px-1 text-amber-700 text-xs dark:text-amber-400">
+              xelatex not found — using Tectonic
+            </span>
+          )}
+          {showCompiledPreview && isSaving && (
             <div className="flex items-center gap-1.5 rounded-md bg-muted/50 px-2 py-1">
               <LoaderIcon className="size-3.5 animate-spin text-muted-foreground" />
               <span className="@[38rem]/pv:inline hidden font-medium text-muted-foreground text-xs">
@@ -820,7 +998,7 @@ export function PdfPreview() {
               </span>
             </div>
           )}
-          {!isSaving && isCompiling && (
+          {showCompiledPreview && !isSaving && isCompiling && (
             <div className="flex items-center gap-1.5 rounded-md bg-muted/50 px-2 py-1">
               <LoaderIcon className="size-3.5 animate-spin text-muted-foreground" />
               <span className="@[38rem]/pv:inline hidden font-medium text-muted-foreground text-xs">
@@ -842,7 +1020,7 @@ export function PdfPreview() {
               </span>
             </Button>
           )}
-          {!isSaving && !isCompiling && compileError && (
+          {showCompiledPreview && !isSaving && !isCompiling && compileError && (
             <Button
               variant="ghost"
               size="sm"
@@ -856,141 +1034,138 @@ export function PdfPreview() {
             </Button>
           )}
         </div>
-        <div data-tauri-drag-region className="min-w-2 flex-1 self-stretch" />
-        <div className="ml-auto flex min-w-0 shrink-0 flex-nowrap items-center justify-end gap-1">
-          {pdfData && (
+        <div className="ml-auto flex shrink-0 items-center justify-end gap-0.5">
+          {showCompiledPreview && pdfData && (
             <>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-7 shrink-0"
-                onClick={() => goToPage(currentPage - 1)}
-                disabled={currentPage <= 1}
-                title="Page Up"
-              >
-                <ChevronUpIcon className="size-3.5" />
-              </Button>
-              {isEditingPage ? (
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  className="h-6 w-7 shrink-0 rounded border border-border bg-background text-center text-foreground text-xs outline-none focus:ring-1 focus:ring-ring"
-                  value={pageInputValue}
-                  onChange={(e) => setPageInputValue(e.target.value)}
-                  onBlur={handlePageInputCommit}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") handlePageInputCommit();
-                    if (e.key === "Escape") {
-                      setIsEditingPage(false);
+              <div className="@[22rem]/pv:flex hidden items-center gap-0.5">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-7 shrink-0"
+                  onClick={() => goToPage(currentPage - 1)}
+                  disabled={currentPage <= 1}
+                  title="Page Up"
+                >
+                  <ChevronUpIcon className="size-3.5" />
+                </Button>
+                {isEditingPage ? (
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    className="h-6 w-7 shrink-0 rounded border border-border bg-background text-center text-foreground text-xs outline-none focus:ring-1 focus:ring-ring"
+                    value={pageInputValue}
+                    onChange={(e) => setPageInputValue(e.target.value)}
+                    onBlur={handlePageInputCommit}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") handlePageInputCommit();
+                      if (e.key === "Escape") {
+                        setIsEditingPage(false);
+                        setPageInputValue(String(currentPage));
+                      }
+                    }}
+                  />
+                ) : (
+                  <button
+                    className="flex h-6 w-7 shrink-0 items-center justify-center rounded text-muted-foreground text-xs tabular-nums hover:bg-muted"
+                    onClick={() => {
+                      setIsEditingPage(true);
                       setPageInputValue(String(currentPage));
+                    }}
+                    title="Click to jump to page"
+                  >
+                    {currentPage}
+                  </button>
+                )}
+                <span className="shrink-0 text-muted-foreground/80 text-xs tabular-nums">
+                  /
+                </span>
+                <span className="flex h-6 w-7 shrink-0 items-center justify-center text-muted-foreground text-xs tabular-nums">
+                  {numPages}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-7 shrink-0"
+                  onClick={() => goToPage(currentPage + 1)}
+                  disabled={currentPage >= numPages}
+                  title="Page Down"
+                >
+                  <ChevronDownIcon className="size-3.5" />
+                </Button>
+              </div>
+              <div className="@[28rem]/pv:flex hidden items-center gap-0.5">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-7"
+                  onClick={zoomOut}
+                  disabled={scale <= 0.25}
+                  title="Zoom out"
+                >
+                  <MinusIcon className="size-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-7"
+                  onClick={zoomIn}
+                  disabled={scale >= 4}
+                  title="Zoom in"
+                >
+                  <PlusIcon className="size-3.5" />
+                </Button>
+                <Select
+                  value={fitMode ?? scale.toString()}
+                  onValueChange={(v) => {
+                    if (v === "fit-width" || v === "fit-height") {
+                      setFitMode(v);
+                    } else {
+                      setFitMode(null);
+                      setScale(Number(v));
                     }
                   }}
-                />
-              ) : (
-                <button
-                  className="flex h-6 w-7 shrink-0 items-center justify-center rounded text-muted-foreground text-xs tabular-nums hover:bg-muted"
-                  onClick={() => {
-                    setIsEditingPage(true);
-                    setPageInputValue(String(currentPage));
-                  }}
-                  title="Click to jump to page"
                 >
-                  {currentPage}
-                </button>
-              )}
-              <span className="shrink-0 text-muted-foreground/80 text-xs tabular-nums">
-                /
-              </span>
-              <span className="flex h-6 w-7 shrink-0 items-center justify-center text-muted-foreground text-xs tabular-nums">
-                {numPages}
-              </span>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-7 shrink-0"
-                onClick={() => goToPage(currentPage + 1)}
-                disabled={currentPage >= numPages}
-                title="Page Down"
-              >
-                <ChevronDownIcon className="size-3.5" />
-              </Button>
-              <div className="mx-1 @[34rem]/pv:block hidden h-4 w-px bg-border" />
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-7"
-                onClick={zoomOut}
-                disabled={scale <= 0.25}
-              >
-                <MinusIcon className="size-3.5" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-7"
-                onClick={zoomIn}
-                disabled={scale >= 4}
-              >
-                <PlusIcon className="size-3.5" />
-              </Button>
-              <Select
-                value={fitMode ?? scale.toString()}
-                onValueChange={(v) => {
-                  if (v === "fit-width" || v === "fit-height") {
-                    setFitMode(v);
-                  } else {
-                    setFitMode(null);
-                    setScale(Number(v));
-                  }
-                }}
-              >
-                <SelectTrigger
-                  size="sm"
-                  className="h-7! @[48rem]/pv:w-[7.5rem] w-[5rem] text-xs"
-                >
-                  <SelectValue>
-                    {fitMode === "fit-width"
-                      ? "Fit width"
-                      : fitMode === "fit-height"
-                        ? "Fit height"
-                        : `${Math.round(scale * 100)}%`}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent position="popper" align="end">
-                  <SelectItem value="fit-width">Fit to width</SelectItem>
-                  <SelectItem value="fit-height">Fit to height</SelectItem>
-                  <SelectSeparator />
-                  {ZOOM_OPTIONS.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <div className="mx-1 @[34rem]/pv:block hidden h-4 w-px bg-border" />
-              {/* Capture mode */}
+                  <SelectTrigger
+                    size="sm"
+                    className="h-7! @[48rem]/pv:w-[7.5rem] w-[4.5rem] text-xs"
+                  >
+                    <SelectValue>
+                      {fitMode === "fit-width"
+                        ? "Fit width"
+                        : fitMode === "fit-height"
+                          ? "Fit height"
+                          : `${Math.round(scale * 100)}%`}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent position="popper" align="end">
+                    <SelectItem value="fit-width">Fit to width</SelectItem>
+                    <SelectItem value="fit-height">Fit to height</SelectItem>
+                    <SelectSeparator />
+                    {ZOOM_OPTIONS.map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
               <Button
                 variant={captureMode ? "default" : "secondary"}
-                size="sm"
-                className={`h-7 gap-1.5 @[56rem]/pv:px-2.5 px-2 text-xs ${
+                size="icon"
+                className={`size-7 shrink-0 ${
                   captureMode
                     ? "ring-2 ring-primary/30"
                     : "bg-foreground text-background hover:bg-foreground/90"
                 }`}
                 onClick={() => setCaptureMode(!captureMode)}
-                title={`Capture & Ask (${navigator.userAgent.includes("Mac") ? "Cmd+X" : "Ctrl+X"})`}
+                title={`Capture & Ask (${navigator.userAgent.includes("Mac") ? "Cmd+Shift+X" : "Ctrl+Shift+X"})`}
               >
                 <CrosshairIcon className="size-3.5 shrink-0" />
-                <span className="@[56rem]/pv:inline hidden">Capture & Ask</span>
-                <kbd className="pointer-events-none ml-0.5 @[64rem]/pv:inline hidden rounded border border-background/30 bg-background/20 px-1 py-0.5 font-medium text-[10px] text-background leading-none">
-                  {navigator.userAgent.includes("Mac") ? "Cmd+X" : "Ctrl+X"}
-                </kbd>
               </Button>
-              <div className="mx-1 @[34rem]/pv:block hidden h-4 w-px bg-border" />
               <Button
                 variant="ghost"
                 size="icon"
-                className="size-7"
+                className="size-7 shrink-0"
                 onClick={handleExport}
                 title="Export PDF"
               >
@@ -1003,7 +1178,7 @@ export function PdfPreview() {
               <Button
                 variant="ghost"
                 size="icon"
-                className="size-7"
+                className="size-7 shrink-0"
                 title="History"
               >
                 <HistoryIcon className="size-3.5" />
@@ -1028,7 +1203,7 @@ export function PdfPreview() {
         />
       )}
       {/* Capture mode floating banner */}
-      {captureMode && (
+      {showCompiledPreview && captureMode && (
         <div className="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center">
           <div className="pointer-events-auto flex items-center gap-2 rounded-lg border border-border bg-background/95 px-3 py-2 shadow-lg backdrop-blur-sm">
             <CrosshairIcon className="size-3.5 text-primary" />
@@ -1046,6 +1221,75 @@ export function PdfPreview() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function SourcePdfPreview({ file }: { file: ProjectFile }) {
+  const [pdfData, setPdfData] = useState<Uint8Array | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [scale, setScale] = useState(1);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPdfData(null);
+    setError(null);
+    readFile(file.absolutePath)
+      .then((data) => {
+        if (!cancelled) setPdfData(new Uint8Array(data));
+      })
+      .catch((err) => {
+        if (!cancelled) setError(String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [file.absolutePath]);
+
+  if (error) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-2 bg-muted/30 p-8 text-sm">
+        <AlertCircleIcon className="size-10 text-destructive" />
+        <p className="text-destructive">Failed to load PDF</p>
+        <p className="max-w-md text-center text-muted-foreground">{error}</p>
+      </div>
+    );
+  }
+
+  if (!pdfData) {
+    return (
+      <div className="flex flex-1 items-center justify-center text-muted-foreground text-sm">
+        Loading PDF…
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center justify-end gap-1 border-border border-b bg-background px-2 py-1">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7"
+          onClick={() => setScale((value) => Math.max(0.25, value - 0.25))}
+          disabled={scale <= 0.25}
+        >
+          <MinusIcon className="size-3.5" />
+        </Button>
+        <span className="min-w-12 text-center text-muted-foreground text-xs tabular-nums">
+          {Math.round(scale * 100)}%
+        </span>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7"
+          onClick={() => setScale((value) => Math.min(4, value + 0.25))}
+          disabled={scale >= 4}
+        >
+          <PlusIcon className="size-3.5" />
+        </Button>
+      </div>
+      <PdfViewer data={pdfData} scale={scale} onScaleChange={setScale} />
     </div>
   );
 }

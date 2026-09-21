@@ -1,0 +1,83 @@
+% !TEX program = XeLaTeX
+\documentclass[UTF8,a4paper,12pt]{ctexart}
+
+% HIT recommendation letter (Harbin campus).
+% Layout inspired by the Overleaf HIT LoR template (CC BY 4.0)
+% https://www.overleaf.com/latex/templates/hit-letter-of-recommendation-template/cchwdhcrhjtv
+% and the hitletter letterhead geometry (MIT). Official logos are not bundled.
+
+\usepackage{geometry}
+\geometry{left=3.17cm,right=3.17cm,top=3.4cm,bottom=2.6cm}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{calc}
+\usepackage{setspace}
+\usepackage{hyperref}
+\usepackage{parskip}
+
+\definecolor{hitblue}{cmyk}{1,0.80,0,0}
+\definecolor{hitlightblue}{cmyk}{0.35,0.10,0,0}
+
+\pagestyle{empty}
+\setstretch{1.25}
+\hypersetup{colorlinks=true,urlcolor=hitblue}
+
+\newcommand{\hitletterhead}{%
+  \begin{tikzpicture}[remember picture,overlay]
+    \fill[hitblue] (current page.north west) rectangle ($(current page.north east)+(0,-2.35)$);
+    \node[anchor=west,text=white,font=\bfseries\Large] at ($(current page.north west)+(1.15,-0.85)$)
+      {哈尔滨工业大学};
+    \node[anchor=west,text=white,font=\small] at ($(current page.north west)+(1.15,-1.45)$)
+      {Harbin Institute of Technology};
+    \node[anchor=east,text=white,font=\small\bfseries] at ($(current page.north east)+(-1.15,-0.85)$)
+      {LETTER OF RECOMMENDATION};
+    \node[anchor=east,text=white!90,font=\scriptsize] at ($(current page.north east)+(-1.15,-1.45)$)
+      {School of Computer Science and Technology};
+    \fill[hitblue] ($(current page.south west)$) rectangle ($(current page.south east)+(0,0.28)$);
+    \fill[hitlightblue] ($(current page.south west)+(0,0.28)$) rectangle ($(current page.south east)+(0,0.40)$);
+    \node[anchor=south,text=hitblue,font=\scriptsize] at ($(current page.south)+(0,0.55)$)
+      {92 West Dazhi Street, Harbin 150001, China \quad Tel: +86-451-8641-2114};
+  \end{tikzpicture}%
+}
+
+\begin{document}
+\hitletterhead
+\vspace*{0.4cm}
+
+\begin{flushright}
+15 March 2026
+\end{flushright}
+
+Admissions Committee\\
+Department of Electrical Engineering and Computer Science\\
+Massachusetts Institute of Technology\\
+Cambridge, MA 02139\\
+United States
+
+\vspace{0.4em}
+\textbf{Re: Recommendation for Ms.\,Wei Zhang (张薇)}
+
+Dear Members of the Committee,
+
+I am Professor Li Ming, Chair of the Institute of Intelligent Systems at Harbin Institute of Technology. I write in the strongest terms to recommend Ms.\,Wei Zhang for admission to your doctoral program. I have supervised Wei since 2023 as her undergraduate thesis advisor and as the principal investigator of the NSFC project on scientific surrogate calibration in which she is a student researcher.
+
+Wei's work sits at the intersection of scientific machine learning and uncertainty quantification. In her thesis she designed a residual-score calibration procedure for frozen PDE emulators. The method estimates a monotone transport map on a small labeled holdout set and produces prediction intervals with near-nominal coverage on Burgers, Darcy, and reaction--diffusion benchmarks. A workshop paper based on this study was accepted at a national AI-for-science symposium; Wei was first author and presented the poster.
+
+Beyond the technical results, Wei is unusually careful. She independently reproduced two baseline solvers, wrote a documented Python package for the calibration maps, and mentored two junior students through their first conference abstracts. In group meetings she is the person who notices when a coverage claim is being overstated.
+
+I rank Wei in the top 3\% of undergraduates I have taught in the last decade. She has the mathematical maturity, experimental discipline, and scientific taste to thrive in a competitive Ph.D.\ program. I recommend her without reservation. Please contact me if I can provide any further information.
+
+\vspace{1.1em}
+Sincerely,
+
+\vspace{1.4em}
+\textbf{Prof.\,Li Ming}\\
+Professor and Institute Chair\\
+School of Computer Science and Technology\\
+Harbin Institute of Technology\\
+\href{mailto:liming@hit.edu.cn}{liming@hit.edu.cn} \quad +86-451-8641-3300
+
+\vfill
+{\small\color{hitblue} Enclosures: curriculum vitae; unofficial transcript; list of publications.}
+
+\end{document}

@@ -11,7 +11,7 @@ import {
 } from "@/stores/runtime-store";
 
 vi.mock("@tauri-apps/api/app", () => ({
-  getVersion: vi.fn().mockResolvedValue("1.3.0"),
+  getVersion: vi.fn().mockResolvedValue("2.0.0"),
 }));
 
 vi.mock("next-themes", () => ({
@@ -21,6 +21,12 @@ vi.mock("next-themes", () => ({
 vi.mock("@/components/runtime/runtime-settings", () => ({
   RuntimeSettings: () => (
     <div data-testid="runtime-settings">Runtime settings content</div>
+  ),
+}));
+
+vi.mock("@/components/homepage-environment-status", () => ({
+  HomepageEnvironmentStatus: () => (
+    <div data-testid="homepage-environment">Environment</div>
   ),
 }));
 
@@ -110,16 +116,23 @@ describe("ProjectPicker runtime settings", () => {
       await Promise.resolve();
     });
 
+    expect(container.textContent).toContain("LocalPrism");
+    expect(container.textContent).toContain(
+      "AI-powered academic writing workspace",
+    );
+    expect(container.textContent).toContain("New Project");
+    expect(container.textContent).toContain("Open Folder");
+
     await act(async () => findButton(container, "Settings").click());
 
-    expect(container.textContent).toContain("AI Runtimes");
+    expect(container.textContent).toContain("Providers");
     expect(container.textContent).toContain("1/2 ready");
     expect(
       container.querySelector('[data-testid="runtime-settings"]'),
     ).not.toBeNull();
     expect(container.textContent).toContain("Environment");
     expect(container.textContent).toContain("Python / Skills");
-    expect(container.textContent).not.toContain("Provider");
+    expect(container.textContent).not.toContain("AI Runtimes");
     expect(checkClaudeStatus).not.toHaveBeenCalled();
   });
 });

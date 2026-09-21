@@ -573,4 +573,30 @@ describe("Multi-tab merge triggers", () => {
       expect(useProposedChangesStore.getState().changes).toHaveLength(1);
     });
   });
+
+  describe("last-turn token snapshots", () => {
+    it("keeps prompt tokens when a later output-only usage arrives", () => {
+      const chat = useClaudeChatStore.getState();
+
+      chat._appendMessage("tab-default", {
+        type: "result",
+        usage: {
+          input_tokens: 3588,
+          output_tokens: 12,
+          cache_read_input_tokens: 200,
+        },
+      });
+      chat._addUsage("tab-default", 0, 80);
+
+      const tab = useClaudeChatStore
+        .getState()
+        .tabs.find((candidate) => candidate.id === "tab-default");
+      expect(tab?.lastTurnUsage).toEqual({
+        inputTokens: 3588,
+        outputTokens: 80,
+        cacheReadTokens: 200,
+        cacheCreationTokens: 0,
+      });
+    });
+  });
 });

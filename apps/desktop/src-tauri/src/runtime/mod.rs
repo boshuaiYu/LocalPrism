@@ -134,6 +134,8 @@ pub struct RuntimeTurnRequest {
     pub agent_id: Option<String>,
     pub provider_credential_id: Option<String>,
     pub provider_model_override: Option<String>,
+    #[serde(default)]
+    pub permission_mode: Option<String>,
 }
 
 fn validate_runtime_turn_identity(request: &RuntimeTurnRequest) -> Result<(), String> {
@@ -172,6 +174,7 @@ fn validate_runtime_turn_request(request: &RuntimeTurnRequest) -> Result<(), Str
             "provider model override",
             request.provider_model_override.as_deref(),
         ),
+        ("permission mode", request.permission_mode.as_deref()),
     ] {
         if value.is_some_and(|value| value.trim().is_empty()) {
             return Err(format!("Runtime turn {name} must not be blank"));
@@ -363,12 +366,11 @@ pub async fn runtime_status(
             .await
             .map(claude::account_from_status),
         RuntimeKind::Codex => {
-            let probed = tokio::task::spawn_blocking(
-                codex::discovery::probe_known_codex_binary_on_disk,
-            )
-            .await
-            .ok()
-            .flatten();
+            let probed =
+                tokio::task::spawn_blocking(codex::discovery::probe_known_codex_binary_on_disk)
+                    .await
+                    .ok()
+                    .flatten();
 
             // Prefer a short account/read when the app-server is already warm.
             if codex_state.is_running().await {
@@ -442,6 +444,10 @@ pub async fn runtime_install(
     }
 }
 
+pub const CODEX_CHAT_RETIRED_MESSAGE: &str = "Codex is no longer a chat runtime. Sign in with ChatGPT Official in Settings → Providers and start a new conversation.";
+pub const CODEX_LOGIN_RETIRED_MESSAGE: &str =
+    "Codex app-server login is retired. Sign in with ChatGPT Official in Settings → Providers.";
+
 #[tauri::command]
 pub async fn runtime_login_start(
     runtime: RuntimeKind,
@@ -450,8 +456,8 @@ pub async fn runtime_login_start(
     app: AppHandle,
     codex_state: State<'_, codex::CodexAppServerState>,
 ) -> Result<RuntimeLoginStartResult, String> {
-    let api_key = normalize_codex_login(runtime, mode, api_key)?;
-    codex::login_start(&app, &codex_state, mode, api_key).await
+    let _ = (runtime, mode, api_key, app, codex_state);
+    Err(CODEX_LOGIN_RETIRED_MESSAGE.into())
 }
 
 #[tauri::command]
@@ -464,13 +470,8 @@ pub async fn runtime_login_cancel(
     if runtime != RuntimeKind::Codex {
         return Err("This login command is only available for the Codex runtime".into());
     }
-    if login_id.trim().is_empty() {
-        return Err("A login ID is required to cancel Codex login".into());
-    }
-    if codex_state.active_login_id().as_deref() != Some(login_id.as_str()) {
-        return Ok(());
-    }
-    codex::cancel_login(&app, &codex_state, login_id).await
+    let _ = (runtime, login_id, app, codex_state);
+    Err(CODEX_LOGIN_RETIRED_MESSAGE.into())
 }
 
 #[tauri::command]
@@ -571,7 +572,9 @@ where
         .abort_runtime_turn_outcome(routes, reservation, rollback_route)
         .await
     else {
-        return Ok(());
+        // Abort could not claim the reservation (already settled / raced).
+        // Still surface the original start failure — never pretend success.
+        return Err(error);
     };
     if cancel_requested {
         emit_terminal().await;
@@ -595,218 +598,6 @@ pub(crate) async fn settle_failed_codex_turn_start(
     } else {
         Ok(())
     }
-}
-
-async fn fail_codex_start_without_live_turn(
-    app: &AppHandle,
-    codex_state: &codex::CodexAppServerState,
-    routes: &process::RuntimeProcessState,
-    reservation: &process::CodexTurnReservation,
-    rollback_route: bool,
-    error: String,
-) -> Result<(), String> {
-    fail_codex_start_without_live_turn_with(
-        codex_state,
-        routes,
-        reservation,
-        rollback_route,
-        error,
-        || codex_state.emit_prestart_cancellation(app, routes, &reservation.route),
-    )
-    .await
-}
-
-async fn start_codex_runtime_turn(
-    window_label: String,
-    app: &AppHandle,
-    request: RuntimeTurnRequest,
-    routes: &process::RuntimeProcessState,
-    codex_state: &codex::CodexAppServerState,
-) -> Result<(), String> {
-    let start = codex_state
-        .begin_runtime_turn(routes, runtime_turn_route(&window_label, &request))
-        .await
-        .map_err(|error| error.to_string())?;
-    let reservation = match start {
-        process::CodexTurnStart::Reserved(reservation) => reservation,
-        process::CodexTurnStart::Cancelled(route) => {
-            codex_state
-                .emit_prestart_cancellation(app, routes, &route)
-                .await;
-            routes.settle_codex_cancel(&route, Ok(())).await;
-            return Ok(());
-        }
-    };
-
-    let thread_result = if let Some(thread_id) = request.session_id.clone() {
-        codex::resume_thread(app, codex_state, thread_id).await
-    } else {
-        codex::start_thread(
-            app,
-            codex_state,
-            request.project_path.clone(),
-            request.model.clone(),
-        )
-        .await
-    };
-    let thread = match thread_result {
-        Ok(thread) => thread,
-        Err(error) => {
-            return fail_codex_start_without_live_turn(
-                app,
-                codex_state,
-                routes,
-                &reservation,
-                true,
-                error,
-            )
-            .await;
-        }
-    };
-    if let Err(error) = validate_codex_runtime_turn_thread(&thread, &request) {
-        return fail_codex_start_without_live_turn(
-            app,
-            codex_state,
-            routes,
-            &reservation,
-            true,
-            error,
-        )
-        .await;
-    }
-    if let Err(error) = routes
-        .bind_codex_thread_for_reservation(&reservation, &thread.id)
-        .await
-    {
-        return fail_codex_start_without_live_turn(
-            app,
-            codex_state,
-            routes,
-            &reservation,
-            true,
-            error.to_string(),
-        )
-        .await;
-    }
-    if let Err(error) = codex_state
-        .emit_routed_notification(
-            app,
-            "thread/started",
-            serde_json::json!({ "thread": { "id": thread.id.clone() } }),
-        )
-        .await
-    {
-        return fail_codex_start_without_live_turn(
-            app,
-            codex_state,
-            routes,
-            &reservation,
-            true,
-            error,
-        )
-        .await;
-    }
-    if let Some(route) = routes.take_cancelled_pending_codex_turn(&reservation).await {
-        codex_state
-            .emit_prestart_cancellation(app, routes, &route)
-            .await;
-        routes.settle_codex_cancel(&route, Ok(())).await;
-        return Ok(());
-    }
-
-    let turn = match codex::start_turn(
-        app,
-        codex_state,
-        thread.id.clone(),
-        request.prompt,
-        request.model,
-        request.reasoning_effort,
-    )
-    .await
-    {
-        Ok(turn) => turn,
-        Err(error) => {
-            return fail_codex_start_without_live_turn(
-                app,
-                codex_state,
-                routes,
-                &reservation,
-                false,
-                error,
-            )
-            .await;
-        }
-    };
-    let binding = routes
-        .bind_codex_turn_for_reservation(&reservation, &thread.id, &turn.id)
-        .await
-        .map_err(|error| error.to_string());
-    if let Err(error) = binding {
-        return fail_codex_start_without_live_turn(
-            app,
-            codex_state,
-            routes,
-            &reservation,
-            false,
-            error,
-        )
-        .await;
-    }
-    if let Err(error) = codex_state
-        .emit_routed_notification(
-            app,
-            "turn/started",
-            serde_json::json!({
-                "threadId": thread.id.clone(),
-                "turn": { "id": turn.id.clone(), "status": turn.status.clone() }
-            }),
-        )
-        .await
-    {
-        routes
-            .settle_codex_cancel(&reservation.route, Err(error.clone()))
-            .await;
-        return Err(error);
-    }
-    if turn.status != "inProgress" {
-        codex_state
-            .emit_routed_notification(
-                app,
-                "turn/completed",
-                serde_json::json!({
-                    "threadId": thread.id.clone(),
-                    "turn": {
-                        "id": turn.id.clone(),
-                        "status": turn.status.clone(),
-                        "error": turn.error.clone()
-                    }
-                }),
-            )
-            .await?;
-        return Ok(());
-    }
-    if let Some(target) = routes
-        .claim_codex_cancel_target(
-            &window_label,
-            &request.tab_id,
-            &request.attempt_id,
-            reservation.generation,
-        )
-        .await
-    {
-        let interrupt_result = if let (Some(thread_id), Some(turn_id)) =
-            (target.session_id.clone(), target.turn_id.clone())
-        {
-            codex::interrupt_turn(app, codex_state, thread_id, turn_id).await
-        } else {
-            Err("Codex cancellation target is missing its thread or turn ID".into())
-        };
-        routes
-            .settle_codex_cancel(&target, interrupt_result.clone().map(|_| ()))
-            .await;
-        interrupt_result?;
-    }
-    Ok(())
 }
 
 #[tauri::command]
@@ -843,6 +634,7 @@ pub async fn runtime_start_turn(
                     request.provider_model_override,
                     request.agent_id,
                     Some(attempt_id.clone()),
+                    request.permission_mode.clone(),
                 )
                 .await
             } else {
@@ -857,6 +649,7 @@ pub async fn runtime_start_turn(
                     request.provider_model_override,
                     request.agent_id,
                     Some(attempt_id.clone()),
+                    request.permission_mode,
                 )
                 .await
             };
@@ -873,7 +666,8 @@ pub async fn runtime_start_turn(
             result
         }
         RuntimeKind::Codex => {
-            start_codex_runtime_turn(window_label, &app, request, &routes, &codex_state).await
+            settle_rejected_runtime_turn(&window, &app, &request, &routes, &codex_state).await;
+            Err(CODEX_CHAT_RETIRED_MESSAGE.into())
         }
     }
 }
@@ -1143,7 +937,11 @@ pub async fn runtime_approvals_set_ready(
 pub async fn runtime_request_respond(
     request: codex::ResolveRuntimeRequest,
     approvals: State<'_, codex::ApprovalState>,
+    claude_state: State<'_, crate::claude::ClaudeProcessState>,
 ) -> Result<(), String> {
+    if claude_state.try_resolve_permission(&request).await? {
+        return Ok(());
+    }
     approvals.resolve(request).await
 }
 
@@ -1174,9 +972,7 @@ pub async fn runtime_agent_runs(
                     }
                     Err(error) => {
                         // Live cache remains usable when app-server recovery is unavailable.
-                        eprintln!(
-                            "[runtime_agent_runs] Codex thread recovery skipped: {error}"
-                        );
+                        eprintln!("[runtime_agent_runs] Codex thread recovery skipped: {error}");
                     }
                 }
             }
@@ -1195,6 +991,13 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    #[test]
+    fn retired_codex_copy_points_at_chatgpt_official() {
+        assert!(CODEX_CHAT_RETIRED_MESSAGE.contains("ChatGPT Official"));
+        assert!(CODEX_LOGIN_RETIRED_MESSAGE.contains("ChatGPT Official"));
+        assert!(!CODEX_CHAT_RETIRED_MESSAGE.contains("official Codex app"));
+    }
 
     #[test]
     fn runtime_kind_uses_lowercase_wire_values() {
@@ -1703,6 +1506,7 @@ mod tests {
             agent_id: None,
             provider_credential_id: None,
             provider_model_override: None,
+            permission_mode: None,
         };
         let thread: codex::protocol::Thread = serde_json::from_value(json!({
             "id": "thread-7",

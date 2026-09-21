@@ -14,10 +14,14 @@ import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { useClaudeSetupStore } from "@/stores/claude-setup-store";
+import { useSkillStore } from "@/stores/skill-store";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
 import { ErrorFallback } from "@/components/error-fallback";
 import { createLogger } from "@/lib/debug/logger";
 import { EnvironmentOnboarding } from "@/components/environment-onboarding";
+import { WelcomeWizard } from "@/components/welcome-wizard";
+import { isWelcomeCompleted, markWelcomeCompleted } from "@/lib/welcome";
 import { runtimeListConversations } from "@/runtime/commands";
 
 const log = createLogger("app");
@@ -157,6 +161,11 @@ function WorkspaceWithClaude() {
     const capturedProjectPath = projectRoot;
     const capturedAttemptEpoch = capturedTab.attemptEpoch ?? 0;
 
+    if (capturedRuntime === "codex") {
+      autoResumedProjectRef.current = projectRoot;
+      return;
+    }
+
     autoResumedProjectRef.current = projectRoot;
     let cancelled = false;
 
@@ -192,8 +201,28 @@ function WorkspaceWithClaude() {
           .sort((a, b) => b.updatedAt - a.updatedAt)[0];
         const current = useClaudeChatStore.getState();
 
+        const active = current.tabs.find((tab) => tab.id === capturedTabId);
+        const hasLocalActivity =
+          (active?.messages.length ?? 0) > 0 ||
+          !!active?.isStreaming ||
+          (active?.cancelledAttempts?.length ?? 0) > 0;
+
         if (!latest?.reference.sessionId) {
-          current.newSession();
+          // Empty remote history must not wipe an in-progress or local draft.
+          // Only clear a stale idle session binding so the next send starts fresh.
+          if (
+            !hasLocalActivity &&
+            (active?.sessionRef != null || active?.sessionId != null)
+          ) {
+            current.newSession();
+          }
+          return;
+        }
+
+        // Local drafts already on screen must not be replaced by auto-resume.
+        // resumeConversation clears messages before history returns; an empty
+        // or slow Codex history read would make the chat "disappear".
+        if (hasLocalActivity) {
           return;
         }
 
@@ -238,6 +267,9 @@ function WorkspaceWithClaude() {
 export function App({ onReady }: { onReady?: () => void }) {
   const projectRoot = useDocumentStore((s) => s.projectRoot);
   const [showDebug, setShowDebug] = useState(false);
+  const [welcomeCompleted, setWelcomeCompleted] = useState(isWelcomeCompleted);
+  const firstRunSessionRef = useRef(!welcomeCompleted);
+  const showWelcome = !projectRoot && !welcomeCompleted;
 
   // Register global keyboard shortcuts (Cmd+S, Cmd+N) at the app level
   useKeyboardShortcuts();
@@ -262,8 +294,18 @@ export function App({ onReady }: { onReady?: () => void }) {
   }, [onReady]);
 
   useEffect(() => {
+    void useClaudeSetupStore.getState().ensureEngine();
+    void useSkillStore.getState().ensureDefaultSkillPacks();
+  }, []);
+
+  useEffect(() => {
     if (!projectRoot) {
       getCurrentWindow().setTitle("LocalPrism");
+      return;
+    }
+    if (!isWelcomeCompleted()) {
+      markWelcomeCompleted();
+      setWelcomeCompleted(true);
     }
   }, [projectRoot]);
 
@@ -284,8 +326,14 @@ export function App({ onReady }: { onReady?: () => void }) {
             data-tauri-drag-region
             className="fixed inset-x-0 top-0 z-[9999] h-[var(--titlebar-height)]"
           />
-          {projectRoot ? <WorkspaceWithClaude /> : <ProjectPicker />}
-          <EnvironmentOnboarding />
+          {projectRoot ? (
+            <WorkspaceWithClaude />
+          ) : showWelcome ? (
+            <WelcomeWizard onComplete={() => setWelcomeCompleted(true)} />
+          ) : (
+            <ProjectPicker />
+          )}
+          {!firstRunSessionRef.current && <EnvironmentOnboarding />}
           {showDebug && (
             <div className="fixed inset-0 z-[9998] flex items-end justify-center">
               <div

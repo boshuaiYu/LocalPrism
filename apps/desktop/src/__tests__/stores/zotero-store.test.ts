@@ -9,6 +9,10 @@ const api = vi.hoisted(() => ({
   completeOAuth: vi.fn(),
   cancelOAuth: vi.fn(),
 }));
+const toastApi = vi.hoisted(() => ({
+  success: vi.fn(),
+  error: vi.fn(),
+}));
 const getDocumentState = vi.hoisted(() => vi.fn());
 const documentStateSubscribers = vi.hoisted(
   () => new Set<(state: unknown, previousState: unknown) => void>(),
@@ -21,6 +25,7 @@ const subscribeDocumentState = vi.hoisted(() =>
 );
 const createFileOnDisk = vi.hoisted(() => vi.fn());
 
+vi.mock("sonner", () => ({ toast: toastApi }));
 vi.mock("@/lib/zotero-api", () => api);
 vi.mock("@/stores/document-store", () => ({
   useDocumentStore: {
@@ -327,6 +332,74 @@ describe("useZoteroStore project isolation", () => {
     });
   });
 
+  it("exposes starting download progress before the first network callback", async () => {
+    documentState.files = [bibFile("/project-a")];
+    const network = deferred<CollectionImportResult>();
+    api.importCollection.mockReturnValue(network.promise);
+
+    const importPromise = useZoteroStore
+      .getState()
+      .importCollectionToBib("COLL", "Papers");
+    expect(useZoteroStore.getState()).toMatchObject({
+      isSyncing: "COLL",
+      syncProgress: { loaded: 0, total: 0 },
+    });
+
+    network.resolve({
+      bibtex: "@article{new,}",
+      libraryVersion: 2,
+      keyMap: { new: "new" },
+      totalItems: 1,
+    });
+    await importPromise;
+  });
+
+  it("marks bibliography writing after the download and before the file lands", async () => {
+    const network = deferred<CollectionImportResult>();
+    const diskCreate = deferred<string>();
+    let reportProgress!: (loaded: number, total: number) => void;
+    api.importCollection.mockImplementation(
+      (_apiKey, _userID, _collectionKey, onProgress) => {
+        reportProgress = onProgress;
+        return network.promise;
+      },
+    );
+    createFileOnDisk.mockReturnValue(diskCreate.promise);
+
+    const importPromise = useZoteroStore
+      .getState()
+      .importCollectionToBib("COLL", "Papers");
+    expect(useZoteroStore.getState().syncProgress).toEqual({
+      loaded: 0,
+      total: 0,
+    });
+    reportProgress(4, 10);
+    expect(useZoteroStore.getState().syncProgress).toEqual({
+      loaded: 4,
+      total: 10,
+    });
+
+    network.resolve({
+      bibtex: "@book{created,}",
+      libraryVersion: 2,
+      keyMap: { item: "created" },
+      totalItems: 1,
+    });
+    await vi.waitFor(() => expect(createFileOnDisk).toHaveBeenCalledOnce());
+    expect(useZoteroStore.getState()).toMatchObject({
+      isSyncing: "COLL",
+      syncProgress: { loaded: 4, total: 10, writing: true },
+    });
+
+    const drain = drainProjectFsOperations(["/project-a"]);
+    diskCreate.resolve("/project-a/papers.bib");
+    await Promise.all([importPromise, drain]);
+    expect(useZoteroStore.getState()).toMatchObject({
+      isSyncing: null,
+      syncProgress: null,
+    });
+  });
+
   it("clears project A busy state immediately when project B is mounted", async () => {
     const network = deferred<CollectionImportResult>();
     let reportProgress!: (loaded: number, total: number) => void;
@@ -368,6 +441,8 @@ describe("useZoteroStore project isolation", () => {
     expect(useZoteroStore.getState().syncedCollections["/project-b"]).toBe(
       undefined,
     );
+    expect(toastApi.success).not.toHaveBeenCalled();
+    expect(toastApi.error).not.toHaveBeenCalled();
   });
 
   it("uses one canonical Windows project key across case and slash variants", async () => {
@@ -420,6 +495,7 @@ describe("useZoteroStore project isolation", () => {
     expect(
       useZoteroStore.getState().syncedCollections["/project-a"].COLL,
     ).toMatchObject({ libraryVersion: 4, keyMap: { itemNew: "new" } });
+    expect(toastApi.success).toHaveBeenCalledWith("Imported Papers");
   });
 
   it("registers a new .bib create before awaiting it and adds it as type bib", async () => {
@@ -590,7 +666,10 @@ describe("useZoteroStore project isolation", () => {
       .getState()
       .importCollectionToBib("COLL", "Papers");
     firstProgress(1, 10);
-    expect(useZoteroStore.getState().syncProgress).toBeNull();
+    expect(useZoteroStore.getState().syncProgress).toEqual({
+      loaded: 0,
+      total: 0,
+    });
     secondProgress(7, 10);
     expect(useZoteroStore.getState().syncProgress).toEqual({
       loaded: 7,
@@ -813,6 +892,72 @@ describe("useZoteroStore project isolation", () => {
       isSyncing: null,
       syncProgress: null,
     });
+    expect(toastApi.error).toHaveBeenCalledWith("disk full");
+  });
+
+  it("renames persisted bib file names only in the mounted project", () => {
+    useZoteroStore.setState({
+      syncedCollections: {
+        "/project-a": { COLL: syncInfo({ bibFileName: "research.bib" }) },
+        "/project-b": {
+          COLL: syncInfo({ bibFileName: "research.bib", libraryVersion: 99 }),
+        },
+      },
+    });
+
+    useZoteroStore
+      .getState()
+      .renameSyncedBibFile("research.bib", "refs.bib", "/project-a");
+
+    expect(
+      useZoteroStore.getState().syncedCollections["/project-a"].COLL
+        .bibFileName,
+    ).toBe("refs.bib");
+    expect(
+      useZoteroStore.getState().syncedCollections["/project-b"].COLL
+        .bibFileName,
+    ).toBe("research.bib");
+  });
+
+  it("follows a 1:1 root bib rename when syncing the old stored name", async () => {
+    documentState.files = [bibFile("/project-a", "refs.bib")];
+    setSyncedCollection(
+      "/project-a",
+      "COLL",
+      syncInfo({ bibFileName: "papers.bib" }),
+    );
+    api.syncCollection.mockResolvedValue({
+      updatedEntries: [],
+      deletedKeys: [],
+      libraryVersion: 3,
+    });
+
+    await useZoteroStore.getState().syncCollectionBib("COLL");
+
+    expect(api.syncCollection).toHaveBeenCalled();
+    expect(
+      useZoteroStore.getState().syncedCollections["/project-a"].COLL
+        .bibFileName,
+    ).toBe("refs.bib");
+  });
+
+  it("updates synced bib names when the mounted project file is renamed", () => {
+    documentState.files = [bibFile("/project-a", "research.bib")];
+    setSyncedCollection(
+      "/project-a",
+      "COLL",
+      syncInfo({ bibFileName: "research.bib" }),
+    );
+
+    mountDocumentState({
+      ...documentState,
+      files: [bibFile("/project-a", "refs.bib")],
+    });
+
+    expect(
+      useZoteroStore.getState().syncedCollections["/project-a"].COLL
+        .bibFileName,
+    ).toBe("refs.bib");
   });
 
   it("removes sync metadata only from the mounted project", () => {

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { resolveTexRoot, type ProjectFile } from "@/stores/document-store";
+import { useSettingsStore } from "@/stores/settings-store";
 import { createLogger } from "@/lib/debug/logger";
 
 const log = createLogger("latex");
@@ -34,6 +35,15 @@ export function formatCompileError(error: unknown): string {
       : "Compilation failed";
 }
 
+/** TeXLive only when the user picked it and it is actually installed. */
+export function resolveUseTexlive(
+  compilerBackend: "tectonic" | "texlive",
+  texliveAvailable: boolean | null,
+): boolean {
+  if (compilerBackend !== "texlive") return false;
+  return texliveAvailable !== false;
+}
+
 export async function compileLatex(
   projectDir: string,
   mainFile: string = "main.tex",
@@ -63,8 +73,31 @@ export interface TexliveStatus {
   version: string | null;
 }
 
+let cachedTexliveAvailable: boolean | null = null;
+
+export function getCachedTexliveAvailable(): boolean | null {
+  return cachedTexliveAvailable;
+}
+
 export async function detectTexlive(): Promise<TexliveStatus> {
-  return invoke<TexliveStatus>("detect_texlive");
+  const status = await invoke<TexliveStatus>("detect_texlive");
+  cachedTexliveAvailable = status.available;
+  return status;
+}
+
+export function resetTexliveAvailabilityForTests(): void {
+  cachedTexliveAvailable = null;
+}
+
+export function setCachedTexliveAvailableForTests(value: boolean | null): void {
+  cachedTexliveAvailable = value;
+}
+
+export function activeCompileUsesTexlive(): boolean {
+  return resolveUseTexlive(
+    useSettingsStore.getState().compilerBackend,
+    cachedTexliveAvailable,
+  );
 }
 
 export interface SynctexResult {

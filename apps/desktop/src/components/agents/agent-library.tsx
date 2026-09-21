@@ -2,51 +2,32 @@ import { useEffect, useState } from "react";
 import { AgentEditor } from "@/components/agents/agent-editor";
 import { Button } from "@/components/ui/button";
 import { useAgentStore } from "@/stores/agent-store";
-import type { AgentProfile, RuntimeKind } from "@/runtime/types";
+import type { AgentProfile } from "@/runtime/types";
 
 export interface AgentLibraryProps {
-  runtime?: RuntimeKind;
   projectPath?: string | null;
 }
 
-export function AgentLibrary({
-  runtime = "claude",
-  projectPath = null,
-}: AgentLibraryProps) {
+export function AgentLibrary({ projectPath = null }: AgentLibraryProps) {
   const agents = useAgentStore((state) => state.agents);
   const loading = useAgentStore((state) => state.loading);
   const error = useAgentStore((state) => state.error);
   const refresh = useAgentStore((state) => state.refresh);
   const remove = useAgentStore((state) => state.remove);
-  const [selectedRuntime, setSelectedRuntime] = useState<RuntimeKind>(runtime);
   const [editing, setEditing] = useState<AgentProfile | null>(null);
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
-    void refresh(selectedRuntime, projectPath ?? undefined);
-  }, [selectedRuntime, projectPath, refresh]);
-
-  const visible = agents.filter((agent) => agent.runtime === selectedRuntime);
+    void refresh("claude", projectPath ?? undefined);
+  }, [projectPath, refresh]);
 
   return (
     <div className="space-y-4" data-testid="agent-library">
+      <p className="text-muted-foreground text-xs">
+        Custom subagents are stored in claude-home/agents next to the LocalPrism
+        install folder, not ~/.claude.
+      </p>
       <div className="flex flex-wrap items-center gap-2">
-        <Button
-          type="button"
-          size="sm"
-          variant={selectedRuntime === "claude" ? "default" : "outline"}
-          onClick={() => setSelectedRuntime("claude")}
-        >
-          Claude
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant={selectedRuntime === "codex" ? "default" : "outline"}
-          onClick={() => setSelectedRuntime("codex")}
-        >
-          Codex
-        </Button>
         <Button
           type="button"
           size="sm"
@@ -67,7 +48,7 @@ export function AgentLibrary({
 
       {(creating || editing) && (
         <AgentEditor
-          runtime={selectedRuntime}
+          runtime="claude"
           projectPath={projectPath}
           initial={editing}
           onCancel={() => {
@@ -82,7 +63,7 @@ export function AgentLibrary({
       )}
 
       <ul className="space-y-2">
-        {visible.map((agent) => (
+        {agents.map((agent) => (
           <li
             key={`${agent.scope}:${agent.id}:${agent.sourcePath}`}
             className="rounded-lg border border-border px-3 py-2"
@@ -121,7 +102,7 @@ export function AgentLibrary({
             </div>
           </li>
         ))}
-        {!loading && visible.length === 0 && !creating && !editing && (
+        {!loading && agents.length === 0 && !creating && !editing && (
           <li className="text-muted-foreground text-sm">
             No custom agents yet.
           </li>

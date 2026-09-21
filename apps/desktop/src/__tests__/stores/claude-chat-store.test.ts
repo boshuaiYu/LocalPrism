@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
+import { useApprovalStore } from "@/stores/approval-store";
 import {
   CLAUDE_CODE_PROVIDER_ID,
   SELECTED_PROVIDER_CREDENTIAL_STORAGE_KEY,
@@ -204,6 +206,21 @@ describe("queued guidance", () => {
     ).toHaveLength(0);
   });
 
+  it("keeps a short slash label on queued guidance while storing the engine prompt", () => {
+    const chat = useClaudeChatStore.getState();
+    const tabId = chat.activeTabId;
+    const expanded = "Help the user install LocalPrism skills.";
+
+    chat.clearQueuedGuidance(tabId);
+    chat.queueGuidance(tabId, expanded, undefined, "/install-skills");
+
+    const queued = useClaudeChatStore
+      .getState()
+      .tabs.find((tab) => tab.id === tabId)?.queuedGuidance?.[0];
+    expect(queued?.prompt).toBe(expanded);
+    expect(queued?.displayPrompt).toBe("/install-skills");
+  });
+
   it("can remove and consume a specific queued guidance item", () => {
     const chat = useClaudeChatStore.getState();
     const tabId = chat.activeTabId;
@@ -303,5 +320,296 @@ describe("queued guidance", () => {
         .tabs.find((tab) => tab.id === tabId)
         ?.queuedGuidance?.map((item) => item.prompt),
     ).toEqual(["first"]);
+  });
+});
+
+function approvalRequest(id: string, tabId: string) {
+  return {
+    requestId: id,
+    method: "claude/can_use_tool" as const,
+    runtime: "claude" as const,
+    threadId: `${id}-thread`,
+    turnId: `${id}-turn`,
+    tabId,
+    agentRunId: null,
+    title: "PowerShell",
+    command: "Get-Location",
+    cwd: null,
+    diff: null,
+    permissions: null,
+    questions: [],
+    details: null,
+  };
+}
+
+function resetChatToSingleIdleTab() {
+  const state = useClaudeChatStore.getState();
+  const tab = state.tabs[0];
+  useClaudeChatStore.setState({
+    tabs: [
+      {
+        ...tab,
+        title: "New Chat",
+        isStreaming: false,
+        streamingStartedAt: null,
+        cancelledAttempts: [],
+        messages: [],
+        lastTurnUsage: null,
+        sessionId: null,
+        sessionRef: null,
+        activeAttemptId: null,
+        error: null,
+      },
+    ],
+    activeTabId: tab.id,
+    isStreaming: false,
+    streamingStartedAt: null,
+    messages: [],
+    lastTurnUsage: null,
+    sessionId: null,
+    error: null,
+  });
+}
+
+describe("newSession approval isolation", () => {
+  beforeEach(() => {
+    useApprovalStore.getState().reset();
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    resetChatToSingleIdleTab();
+  });
+
+  afterEach(() => {
+    useApprovalStore.getState().reset();
+    resetChatToSingleIdleTab();
+  });
+
+  it("cancels leftover prompts when the same tab is reset", async () => {
+    const tabId = useClaudeChatStore.getState().activeTabId;
+    useApprovalStore.getState().enqueue(approvalRequest("stale", tabId));
+
+    useClaudeChatStore.getState().newSession();
+    await vi.waitFor(() => {
+      expect(useApprovalStore.getState().pending).toEqual({});
+    });
+    expect(invoke).toHaveBeenCalledWith("runtime_request_respond", {
+      request: {
+        requestId: "stale",
+        decision: "cancel",
+        persistence: null,
+        answers: {},
+      },
+    });
+  });
+
+  it("keeps a streaming tab's prompt parked when opening a new chat", () => {
+    const oldTabId = useClaudeChatStore.getState().activeTabId;
+    useClaudeChatStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === oldTabId
+          ? {
+              ...tab,
+              isStreaming: true,
+              streamingStartedAt: 1,
+              activeAttemptId: "attempt-old",
+            }
+          : tab,
+      ),
+      isStreaming: true,
+    }));
+    useApprovalStore.getState().enqueue(approvalRequest("live", oldTabId));
+
+    useClaudeChatStore.getState().newSession();
+    const state = useClaudeChatStore.getState();
+    expect(state.activeTabId).not.toBe(oldTabId);
+    expect(useApprovalStore.getState().pending["s:live"]?.tabId).toBe(oldTabId);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("cancels leftover prompts when closing an idle tab", async () => {
+    const firstTabId = useClaudeChatStore.getState().activeTabId;
+    const secondTabId = useClaudeChatStore.getState().createTab();
+    useApprovalStore.getState().enqueue(approvalRequest("keep", firstTabId));
+    useApprovalStore.getState().enqueue(approvalRequest("gone", secondTabId));
+
+    useClaudeChatStore.getState().setActiveTab(firstTabId);
+    useClaudeChatStore.getState().closeTab(secondTabId);
+
+    await vi.waitFor(() => {
+      expect(Object.keys(useApprovalStore.getState().pending)).toEqual([
+        "s:keep",
+      ]);
+    });
+    expect(invoke).toHaveBeenCalledWith("runtime_request_respond", {
+      request: {
+        requestId: "gone",
+        decision: "cancel",
+        persistence: null,
+        answers: {},
+      },
+    });
+  });
+
+  it("does not cancel a streaming tab that cannot be closed", () => {
+    const tabId = useClaudeChatStore.getState().activeTabId;
+    useClaudeChatStore.getState().createTab();
+    useClaudeChatStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === tabId
+          ? {
+              ...tab,
+              isStreaming: true,
+              streamingStartedAt: 1,
+              activeAttemptId: "attempt-live",
+            }
+          : tab,
+      ),
+    }));
+    useApprovalStore.getState().enqueue(approvalRequest("live", tabId));
+
+    useClaudeChatStore.getState().closeTab(tabId);
+    expect(
+      useClaudeChatStore.getState().tabs.some((tab) => tab.id === tabId),
+    ).toBe(true);
+    expect(useApprovalStore.getState().pending["s:live"]?.tabId).toBe(tabId);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("cancels leftover prompts when changing runtime resets the tab", async () => {
+    const tabId = useClaudeChatStore.getState().activeTabId;
+    useApprovalStore.getState().enqueue(approvalRequest("stale", tabId));
+
+    expect(useClaudeChatStore.getState().changeTabRuntime(tabId, "api")).toBe(
+      "changed",
+    );
+    await vi.waitFor(() => {
+      expect(useApprovalStore.getState().pending).toEqual({});
+    });
+    expect(invoke).toHaveBeenCalledWith("runtime_request_respond", {
+      request: {
+        requestId: "stale",
+        decision: "cancel",
+        persistence: null,
+        answers: {},
+      },
+    });
+  });
+
+  it("cancels leftover prompts when the project tabs are replaced", async () => {
+    const tabId = useClaudeChatStore.getState().activeTabId;
+    useApprovalStore.getState().enqueue(approvalRequest("stale", tabId));
+
+    expect(
+      useClaudeChatStore.getState().resetForProject("/other-project"),
+    ).toBe("reset");
+    await vi.waitFor(() => {
+      expect(useApprovalStore.getState().pending).toEqual({});
+    });
+  });
+});
+
+describe("close last conversation", () => {
+  beforeEach(() => {
+    useApprovalStore.getState().reset();
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    resetChatToSingleIdleTab();
+  });
+
+  afterEach(() => {
+    useApprovalStore.getState().reset();
+    resetChatToSingleIdleTab();
+  });
+
+  it("replaces the last idle tab with a new empty conversation", async () => {
+    const onlyId = useClaudeChatStore.getState().activeTabId;
+    useClaudeChatStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === onlyId
+          ? {
+              ...tab,
+              title: "Literature review",
+              sessionId: "sess-last",
+              messages: [
+                {
+                  type: "user",
+                  message: { content: [{ type: "text", text: "hello" }] },
+                },
+              ],
+            }
+          : tab,
+      ),
+      sessionId: "sess-last",
+    }));
+    useApprovalStore.getState().enqueue(approvalRequest("last", onlyId));
+
+    useClaudeChatStore.getState().closeTab(onlyId);
+
+    const state = useClaudeChatStore.getState();
+    expect(state.tabs).toHaveLength(1);
+    expect(state.tabs[0].id).not.toBe(onlyId);
+    expect(state.tabs[0].title).toBe("New Chat");
+    expect(state.tabs[0].sessionId).toBeNull();
+    expect(state.tabs[0].messages).toEqual([]);
+    expect(state.activeTabId).toBe(state.tabs[0].id);
+    expect(state.sessionId).toBeNull();
+    await vi.waitFor(() => {
+      expect(useApprovalStore.getState().pending).toEqual({});
+    });
+  });
+
+  it("does not replace the last tab while it is streaming", () => {
+    const tabId = useClaudeChatStore.getState().activeTabId;
+    useClaudeChatStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === tabId
+          ? {
+              ...tab,
+              title: "Streaming",
+              isStreaming: true,
+              streamingStartedAt: 1,
+              activeAttemptId: "attempt-last",
+            }
+          : tab,
+      ),
+      isStreaming: true,
+    }));
+
+    useClaudeChatStore.getState().closeTab(tabId);
+
+    const state = useClaudeChatStore.getState();
+    expect(state.tabs).toHaveLength(1);
+    expect(state.tabs[0].id).toBe(tabId);
+    expect(state.tabs[0].title).toBe("Streaming");
+  });
+
+  it("does not replace the last tab while it is stopping", () => {
+    const tabId = useClaudeChatStore.getState().activeTabId;
+    useClaudeChatStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === tabId
+          ? {
+              ...tab,
+              title: "Stopping",
+              isStreaming: false,
+              cancelledAttempts: [
+                {
+                  attemptId: "attempt-stop",
+                  attemptEpoch: 1,
+                  runtime: "claude",
+                  mode: "terminate",
+                },
+              ],
+            }
+          : tab,
+      ),
+    }));
+
+    useClaudeChatStore.getState().closeTab(tabId);
+
+    const state = useClaudeChatStore.getState();
+    expect(state.tabs).toHaveLength(1);
+    expect(state.tabs[0].id).toBe(tabId);
+    expect(state.tabs[0].title).toBe("Stopping");
   });
 });

@@ -4,6 +4,8 @@ import {
   RuntimeEventReducer,
 } from "@/runtime/event-normalizer";
 import type { RuntimeEventEnvelope } from "@/runtime/types";
+import { routeRuntimeSideEffects } from "@/hooks/use-runtime-events";
+import { useApprovalStore } from "@/stores/approval-store";
 
 const validCodexDelta: RuntimeEventEnvelope = {
   runtime: "codex",
@@ -73,6 +75,46 @@ describe("normalizeRuntimeEnvelope", () => {
     if (!approval.ok) return;
     expect(approval.value.event.type).toBe("approvalRequested");
 
+    const resolved = normalizeRuntimeEnvelope({
+      ...validCodexDelta,
+      event: {
+        type: "approvalResolved",
+        requestId: "req_1",
+      },
+    });
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) {
+      expect(resolved.value.event).toEqual({
+        type: "approvalResolved",
+        requestId: "req_1",
+      });
+    }
+
+    const nested = normalizeRuntimeEnvelope({
+      ...validCodexDelta,
+      runtime: "claude",
+      event: {
+        type: "approvalRequested",
+        request: {
+          requestId: "req_1",
+          method: "claude/can_use_tool",
+          runtime: "claude",
+          title: "Allow Bash?",
+          command: "ls",
+        },
+      },
+    });
+    expect(nested.ok).toBe(true);
+    if (!nested.ok) return;
+    expect(nested.value.event).toMatchObject({
+      type: "approvalRequested",
+      request: {
+        requestId: "req_1",
+        method: "claude/can_use_tool",
+        command: "ls",
+      },
+    });
+
     const subagent = normalizeRuntimeEnvelope({
       ...validCodexDelta,
       event: {
@@ -134,5 +176,53 @@ describe("RuntimeEventReducer", () => {
       "authoritative text",
     );
     expect(reducer.items["codex:thread-1:item-1"]?.completed).toBe(true);
+  });
+});
+
+describe("routeRuntimeSideEffects", () => {
+  it("queues Claude tool permission prompts", () => {
+    useApprovalStore.getState().reset();
+    routeRuntimeSideEffects({
+      runtime: "claude",
+      windowLabel: "main",
+      tabId: "tab-1",
+      attemptId: "attempt-1",
+      sessionId: null,
+      turnId: "attempt-1",
+      sequence: 2,
+      event: {
+        type: "approvalRequested",
+        request: {
+          requestId: "req_1",
+          method: "claude/can_use_tool",
+          runtime: "claude",
+          threadId: "attempt-1",
+          turnId: "attempt-1",
+          tabId: "tab-1",
+          agentRunId: null,
+          title: "Allow Bash?",
+          command: "ls",
+          cwd: null,
+          diff: null,
+          permissions: null,
+          questions: [],
+          details: { command: "ls" },
+        },
+      },
+    });
+    expect(useApprovalStore.getState().pending["s:req_1"]?.method).toBe(
+      "claude/can_use_tool",
+    );
+    routeRuntimeSideEffects({
+      runtime: "claude",
+      windowLabel: "main",
+      tabId: "tab-1",
+      attemptId: "attempt-1",
+      sessionId: null,
+      turnId: "attempt-1",
+      sequence: 3,
+      event: { type: "approvalResolved", requestId: "req_1" },
+    });
+    expect(useApprovalStore.getState().pending["s:req_1"]).toBeUndefined();
   });
 });

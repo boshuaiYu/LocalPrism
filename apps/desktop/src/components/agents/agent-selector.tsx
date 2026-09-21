@@ -1,4 +1,6 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { BotIcon } from "lucide-react";
 import { useAgentStore } from "@/stores/agent-store";
 import { cn } from "@/lib/utils";
 import {
@@ -13,6 +15,7 @@ export interface AgentSelectorProps {
   projectPath?: string | null;
   agentId: string | null;
   busy?: boolean;
+  variant?: "select" | "pill";
   /** Called with the selected agent profile, or null for Default. */
   onAgentChange: (agent: AgentProfile | null) => void;
 }
@@ -22,6 +25,7 @@ export function AgentSelector({
   projectPath,
   agentId,
   busy = false,
+  variant = "select",
   onAgentChange,
 }: AgentSelectorProps) {
   const runtime: RuntimeKind = wireRuntimeFromPeer(peer);
@@ -39,6 +43,107 @@ export function AgentSelector({
   );
 
   const selected = options.find((agent) => agent.id === agentId) ?? null;
+  const [open, setOpen] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ left: 0, bottom: 0 });
+
+  useLayoutEffect(() => {
+    if (!open || !buttonRef.current) return;
+    const rect = buttonRef.current.getBoundingClientRect();
+    setPos({
+      left: rect.left,
+      bottom: window.innerHeight - rect.top + 4,
+    });
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (
+        menuRef.current?.contains(target) ||
+        buttonRef.current?.contains(target)
+      ) {
+        return;
+      }
+      setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [open]);
+
+  if (variant === "pill") {
+    return (
+      <>
+        <button
+          ref={buttonRef}
+          type="button"
+          title="Agent"
+          aria-label={`Select custom agent ${selected?.name ?? "Default"}`}
+          aria-expanded={open}
+          disabled={busy || loading}
+          onClick={() => setOpen((value) => !value)}
+          className="flex h-7 items-center gap-1 rounded-full px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <BotIcon className="size-3.5" />
+          <span className="max-w-28 truncate">
+            {selected?.name ?? "Default"}
+          </span>
+        </button>
+        {open &&
+          createPortal(
+            <div
+              ref={menuRef}
+              role="menu"
+              aria-label="Select custom agent"
+              className="fixed w-64 max-w-[calc(100vw-1rem)] overflow-hidden rounded-xl border border-border bg-popover/95 p-1.5 text-popover-foreground shadow-lg backdrop-blur-sm"
+              style={{ left: pos.left, bottom: pos.bottom, zIndex: 9999 }}
+            >
+              <p className="px-2 py-1 font-medium text-muted-foreground text-xs">
+                Agent
+              </p>
+              {[
+                { id: "", name: "Default", scope: "user" as const },
+                ...options,
+              ].map((agent) => {
+                const active = (selected?.id ?? "") === agent.id;
+                return (
+                  <button
+                    type="button"
+                    key={`${agent.scope}:${agent.id || "default"}`}
+                    role="menuitemradio"
+                    aria-checked={active}
+                    className={cn(
+                      "flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-xs",
+                      active
+                        ? "bg-accent text-accent-foreground"
+                        : "text-foreground hover:bg-muted",
+                    )}
+                    onClick={() => {
+                      onAgentChange(
+                        agent.id
+                          ? (options.find((item) => item.id === agent.id) ??
+                              null)
+                          : null,
+                      );
+                      setOpen(false);
+                    }}
+                  >
+                    <span className="truncate">
+                      {agent.name}
+                      {agent.scope === "project" ? " (project)" : ""}
+                    </span>
+                    {active && <span aria-hidden>✓</span>}
+                  </button>
+                );
+              })}
+            </div>,
+            document.body,
+          )}
+      </>
+    );
+  }
 
   return (
     <div className="px-2 pb-2">

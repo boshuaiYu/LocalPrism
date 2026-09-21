@@ -101,9 +101,7 @@ fn choose_default_slug(entries: &[CachedModelEntry]) -> Option<String> {
         .iter()
         .filter(|entry| {
             let id = entry.slug.trim();
-            !id.is_empty()
-                && !is_internal_codex_model_id(id)
-                && entry.visibility.trim() == "list"
+            !id.is_empty() && !is_internal_codex_model_id(id) && entry.visibility.trim() == "list"
         })
         .min_by(|left, right| {
             let left_priority = left.priority.unwrap_or(i64::MAX);
@@ -250,10 +248,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["gpt-5.6-sol", "gpt-5.5", "gpt-5.4"]
         );
-        assert_eq!(
-            models[0].reasoning_efforts,
-            vec!["low", "max", "ultra"]
-        );
+        assert_eq!(models[0].reasoning_efforts, vec!["low", "max", "ultra"]);
         assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("low"));
         assert!(models[0].is_default);
         assert!(!models[1].is_default);

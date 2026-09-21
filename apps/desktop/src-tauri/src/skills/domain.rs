@@ -23,6 +23,8 @@ pub struct RuntimeSkill {
     pub description: String,
     pub folder: String,
     pub source_path: String,
+    #[serde(default)]
+    pub source_url: Option<String>,
     pub targets: Vec<SkillTarget>,
     pub managed: bool,
     pub compatible_runtimes: Vec<RuntimeKind>,
@@ -55,6 +57,7 @@ mod tests {
             description: "Example skill".into(),
             folder: "example".into(),
             source_path: "C:/skills/example".into(),
+            source_url: None,
             targets: vec![SkillTarget {
                 runtime: RuntimeKind::Codex,
                 scope: SkillScope::User,

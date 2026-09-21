@@ -23,12 +23,7 @@ pub mod recovery;
 pub mod rpc;
 
 pub use app_server::CodexAppServerState;
-pub use approvals::{
-    ApprovalState, ResolveRuntimeRequest, RuntimeRequestDecision,
-};
-
-const RUNTIME_ACCOUNT_UPDATED_EVENT: &str = "runtime-account-updated";
-const RUNTIME_WARNING_EVENT: &str = "runtime-warning";
+pub use approvals::{ApprovalState, ResolveRuntimeRequest};
 
 async fn read_account_with_request<F, Fut>(
     installed: bool,
@@ -139,41 +134,6 @@ where
     }
 }
 
-pub(super) async fn login_start(
-    app: &tauri::AppHandle,
-    state: &CodexAppServerState,
-    mode: RuntimeLoginMode,
-    api_key: Option<String>,
-) -> Result<RuntimeLoginStartResult, String> {
-    let attempt = state.begin_login_attempt();
-    let outcome = match start_login_with_request(mode, api_key, |method, params| {
-        state.request(app, method, params)
-    })
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            state.abandon_login_attempt(attempt);
-            return Err(error);
-        }
-    };
-    let completion = match outcome.active_login_id {
-        Some(login_id) => state.finish_login_attempt(attempt, login_id)?,
-        None => {
-            state.finish_login_attempt_without_id(attempt)?;
-            None
-        }
-    };
-    let completion_error = if let Some(completion) = completion {
-        let completion_error = completion.warning.clone();
-        emit_buffered_login_completion(app, state, completion).await;
-        completion_error
-    } else {
-        None
-    };
-    login_result_after_buffered_completion(outcome.result, completion_error)
-}
-
 fn login_result_after_buffered_completion(
     result: RuntimeLoginStartResult,
     completion_error: Option<String>,
@@ -205,61 +165,6 @@ where
     Ok(Some(account))
 }
 
-async fn emit_buffered_login_completion(
-    app: &tauri::AppHandle,
-    state: &CodexAppServerState,
-    completion: app_server::BufferedLoginCompletion,
-) {
-    let account = read_buffered_login_account_with_request(
-        state,
-        &completion,
-        state.codex_version(),
-        |method, params| state.request(app, method, params),
-    )
-    .await;
-    match account {
-        Ok(Some(mut account)) => {
-            account.error = completion.warning.clone();
-            let _ = state.with_current_buffered_login_completion(&completion, || {
-                if let Some(warning) = completion.warning.as_ref() {
-                    let _ = app.emit(
-                        RUNTIME_WARNING_EVENT,
-                        serde_json::json!({
-                            "runtime": RuntimeKind::Codex,
-                            "message": warning,
-                        }),
-                    );
-                }
-                let _ = app.emit(RUNTIME_ACCOUNT_UPDATED_EVENT, account);
-            });
-        }
-        Ok(None) => {}
-        Err(error) => {
-            let refresh_error = sanitize_install_output(&error);
-            let _ = state.with_current_buffered_login_completion(&completion, || {
-                if let Some(warning) = completion.warning.as_ref() {
-                    let _ = app.emit(
-                        RUNTIME_WARNING_EVENT,
-                        serde_json::json!({
-                            "runtime": RuntimeKind::Codex,
-                            "message": warning,
-                        }),
-                    );
-                }
-                let _ = app.emit(
-                    RUNTIME_WARNING_EVENT,
-                    serde_json::json!({
-                        "runtime": RuntimeKind::Codex,
-                        "message": format!(
-                            "Failed to refresh Codex account after login: {refresh_error}"
-                        ),
-                    }),
-                );
-            });
-        }
-    }
-}
-
 async fn cancel_login_with_request<F, Fut>(login_id: String, mut request: F) -> Result<(), String>
 where
     F: FnMut(&'static str, Value) -> Fut,
@@ -274,21 +179,6 @@ where
         protocol::CancelLoginAccountStatus::Canceled
         | protocol::CancelLoginAccountStatus::NotFound => Ok(()),
     }
-}
-
-pub(super) async fn cancel_login(
-    app: &tauri::AppHandle,
-    state: &CodexAppServerState,
-    login_id: String,
-) -> Result<(), String> {
-    let result = cancel_login_with_request(login_id.clone(), |method, params| {
-        state.request(app, method, params)
-    })
-    .await;
-    if result.is_ok() {
-        state.take_matching_active_login(Some(&login_id));
-    }
-    result
 }
 
 async fn logout_with_request<F, Fut>(mut request: F) -> Result<(), String>
@@ -355,16 +245,16 @@ where
         })
         .map_err(|error| format!("Failed to serialize Codex model request: {error}"))?;
         let response = request("model/list", params).await?;
-        let response: protocol::ModelListResponse = match serde_json::from_value(response.clone())
-        {
+        let response: protocol::ModelListResponse = match serde_json::from_value(response.clone()) {
             Ok(parsed) => parsed,
             // One malformed entry in the catalog page shouldn't take down the
             // whole model list; fall back to parsing each item individually
             // and drop only the entries that fail to deserialize.
-            Err(whole_page_error) => parse_model_list_response_item_by_item(response)
-                .map_err(|error| {
+            Err(whole_page_error) => {
+                parse_model_list_response_item_by_item(response).map_err(|error| {
                     format!("Invalid Codex model response: {whole_page_error}; {error}")
-                })?,
+                })?
+            }
         };
         let next_cursor = response.next_cursor.clone();
         models.extend(response.into_visible_runtime_models());
@@ -416,18 +306,6 @@ where
     Ok(response.thread)
 }
 
-pub(super) async fn start_thread(
-    app: &tauri::AppHandle,
-    state: &CodexAppServerState,
-    project_path: String,
-    model: String,
-) -> Result<protocol::Thread, String> {
-    start_thread_with_request(project_path, model, |method, params| {
-        state.request(app, method, params)
-    })
-    .await
-}
-
 async fn resume_thread_with_request<F, Fut>(
     thread_id: String,
     mut request: F,
@@ -442,17 +320,6 @@ where
     let response: protocol::ThreadResumeResponse = serde_json::from_value(response)
         .map_err(|error| format!("Invalid Codex thread resume response: {error}"))?;
     Ok(response.thread)
-}
-
-pub(super) async fn resume_thread(
-    app: &tauri::AppHandle,
-    state: &CodexAppServerState,
-    thread_id: String,
-) -> Result<protocol::Thread, String> {
-    resume_thread_with_request(thread_id, |method, params| {
-        state.request(app, method, params)
-    })
-    .await
 }
 
 fn coerce_codex_reasoning_effort(effort: Option<String>) -> Option<String> {
@@ -489,24 +356,6 @@ where
     let response: protocol::TurnStartResponse = serde_json::from_value(response)
         .map_err(|error| format!("Invalid Codex turn start response: {error}"))?;
     Ok(response.turn)
-}
-
-pub(super) async fn start_turn(
-    app: &tauri::AppHandle,
-    state: &CodexAppServerState,
-    thread_id: String,
-    prompt: String,
-    model: String,
-    reasoning_effort: Option<String>,
-) -> Result<protocol::Turn, String> {
-    start_turn_with_request(
-        thread_id,
-        prompt,
-        model,
-        reasoning_effort,
-        |method, params| state.request(app, method, params),
-    )
-    .await
 }
 
 async fn interrupt_turn_with_request<F, Fut>(
@@ -1836,19 +1685,21 @@ mod tests {
         .await
         .unwrap();
 
+        let expected_thread_start = json!({
+            "cwd": r"C:\work\paper",
+            "model": "gpt-5.4",
+            "approvalPolicy": "never",
+            "sandbox": if cfg!(windows) {
+                "danger-full-access"
+            } else {
+                "workspace-write"
+            },
+            "threadSource": "user"
+        });
         assert_eq!(
             *calls.lock().unwrap(),
             vec![
-                (
-                    "thread/start".into(),
-                    json!({
-                        "cwd": r"C:\work\paper",
-                        "model": "gpt-5.4",
-                        "approvalPolicy": "never",
-                        "sandbox": "workspace-write",
-                        "threadSource": "user"
-                    })
-                ),
+                ("thread/start".into(), expected_thread_start),
                 ("thread/resume".into(), json!({ "threadId": "thread-new" })),
                 (
                     "turn/start".into(),

@@ -14,7 +14,7 @@ const mupdfWasmFile = path.resolve(
   "mupdf-wasm.wasm",
 );
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   plugins: [react(), topLevelAwait()],
   resolve: {
     alias: {
@@ -22,7 +22,10 @@ export default defineConfig({
     },
   },
   define: {
-    __MUPDF_WASM_FS_PATH__: JSON.stringify(mupdfWasmFile.replace(/\\/g, "/")),
+    __MUPDF_WASM_FS_PATH__: JSON.stringify(
+      command === "serve" ? mupdfWasmFile.replace(/\\/g, "/") : "",
+    ),
+    __MUPDF_USE_FS_WASM__: JSON.stringify(command === "serve"),
   },
   worker: {
     format: "es",
@@ -53,4 +56,4 @@ export default defineConfig({
     minify: !process.env.TAURI_ENV_DEBUG ? "esbuild" : false,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
   },
-});
+}));

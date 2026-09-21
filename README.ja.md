@@ -24,21 +24,21 @@
   <a href="https://claudeprism.delibae.dev?utm_source=github&utm_medium=readme&utm_campaign=launch_v054">
     <img src="https://img.shields.io/badge/Website-claudeprism.dev-blue?style=flat-square&logo=googlechrome&logoColor=white" alt="Website" />
   </a>&nbsp;
-  <a href="https://github.com/delibae/claude-prism/releases/latest/download/ClaudePrism-macOS.dmg">
+  <a href="https://github.com/boshuaiYu/claude-prism/releases/latest/download/LocalPrism-macOS.dmg">
     <img src="https://img.shields.io/badge/Download-macOS_(Apple_Silicon)-black?style=for-the-badge&logo=apple&logoColor=white" alt="macOS (Apple Silicon) をダウンロード" />
   </a>&nbsp;
-  <a href="https://github.com/delibae/claude-prism/releases/latest/download/ClaudePrism-macOS-Intel.dmg">
+  <a href="https://github.com/boshuaiYu/claude-prism/releases/latest/download/LocalPrism-macOS-Intel.dmg">
     <img src="https://img.shields.io/badge/Download-macOS_(Intel)-555555?style=for-the-badge&logo=apple&logoColor=white" alt="macOS (Intel) をダウンロード" />
   </a>&nbsp;
-  <a href="https://github.com/delibae/claude-prism/releases/latest/download/ClaudePrism-Windows-setup.exe">
+  <a href="https://github.com/boshuaiYu/claude-prism/releases/latest/download/LocalPrism-Windows-setup.exe">
     <img src="https://img.shields.io/badge/Download-Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 版をダウンロード" />
   </a>&nbsp;
-  <a href="https://github.com/delibae/claude-prism/releases/latest/download/ClaudePrism-Linux.AppImage">
+  <a href="https://github.com/boshuaiYu/claude-prism/releases/latest/download/LocalPrism-Linux.AppImage">
     <img src="https://img.shields.io/badge/Download-Linux_(AppImage)-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux 版をダウンロード" />
   </a>
 </p>
 <p align="center">
-  <a href="https://github.com/delibae/claude-prism/releases">
+  <a href="https://github.com/boshuaiYu/claude-prism/releases">
     <img src="https://img.shields.io/github/v/release/delibae/claude-prism?style=flat-square&label=Latest%20Release&color=green" alt="Latest Release" />
   </a>
 </p>
@@ -129,7 +129,7 @@ Tectonic がアプリに直接組み込まれています。パッケージは�
 
 ### キャプチャしてそのまま質問
 
-`⌘X` でキャプチャモードに入り、PDF 上の任意の領域をドラッグして選択すると、キャプチャした画像がチャット入力欄に固定され、そのまま Claude に質問できます。数式、図表、査読コメントについて質問するのに便利です。
+`⌘⇧X`（Windows/Linux：`Ctrl+Shift+X`）でキャプチャモードに入り、PDF 上の任意の領域をドラッグして選択すると、キャプチャした画像がチャット入力欄に固定され、そのまま Claude に質問できます。`⌘X` / `Ctrl+X` は切り取りのままです。数式、図表、査読コメントについて質問するのに便利です。
 
 <p align="center">
   <img src="./assets/demo/capture_ask.webp" alt="キャプチャ & 質問" width="700" />
@@ -159,7 +159,7 @@ CodeMirror 6 ベースのエディタで、LaTeX / BibTeX のシンタックス�
 
 ## インストール
 
-[GitHub Releases](https://github.com/delibae/claude-prism/releases) から最新ビルドをダウンロードしてください。
+[GitHub Releases](https://github.com/boshuaiYu/claude-prism/releases) から最新ビルドをダウンロードしてください。
 
 ## コントリビュート
 

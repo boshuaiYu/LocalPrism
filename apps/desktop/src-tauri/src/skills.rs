@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::io::{Read, Write};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 use tauri::{Emitter, Manager, WebviewWindow};
 
 pub mod domain;
 pub mod import;
 pub mod manifest;
+pub mod paperspine;
 pub mod paths;
 
 const TARBALL_URLS: &[&str] = &[
@@ -789,6 +791,7 @@ fn tarball_source_label(url: &str) -> &'static str {
 fn reset_download_workspace(tmp_dir: &Path) {
     let _ = std::fs::remove_dir_all(tmp_dir.join("repo"));
     let _ = std::fs::remove_dir_all(tmp_dir.join("repo-raw"));
+    let _ = std::fs::remove_dir_all(tmp_dir.join("raw"));
 }
 
 fn find_extracted_repo_dir(raw_dir: &Path) -> Option<PathBuf> {
@@ -812,28 +815,241 @@ fn find_extracted_repo_dir(raw_dir: &Path) -> Option<PathBuf> {
     candidates.into_iter().next()
 }
 
-fn unpack_tarball(bytes: &[u8], tmp_dir: &Path) -> Result<(), String> {
+fn short_skill_temp_dir(prefix: &str) -> PathBuf {
+    let id = uuid::Uuid::new_v4().to_string();
+    std::env::temp_dir()
+        .join("lps")
+        .join(format!("{prefix}-{}", &id[..8]))
+}
+
+fn unpack_tarball(bytes: &[u8], tmp_dir: &Path, subpath: Option<&str>) -> Result<(), String> {
     reset_download_workspace(tmp_dir);
 
-    let raw_dir = tmp_dir.join("repo-raw");
+    let raw_dir = tmp_dir.join("raw");
     std::fs::create_dir_all(&raw_dir)
         .map_err(|e| format!("Failed to create extraction dir: {}", e))?;
 
     let decoder = flate2::read::GzDecoder::new(bytes);
     let mut archive = tar::Archive::new(decoder);
+    archive.set_overwrite(true);
+    archive.set_preserve_permissions(false);
+    archive.set_preserve_mtime(false);
 
-    archive
-        .unpack(&raw_dir)
-        .map_err(|e| format!("Failed to extract tarball: {}", e))?;
+    let mut extracted_files = 0usize;
+    let mut last_error: Option<String> = None;
+    for entry in archive
+        .entries()
+        .map_err(|e| format!("Failed to read tarball: {e}"))?
+    {
+        let mut entry = entry.map_err(|e| format!("Failed to read tarball entry: {e}"))?;
+        let kind = entry.header().entry_type();
+        if kind.is_pax_global_extensions()
+            || kind.is_pax_local_extensions()
+            || kind.is_gnu_longname()
+            || kind.is_gnu_longlink()
+            || kind.is_symlink()
+            || kind.is_hard_link()
+            || kind.is_fifo()
+            || kind.is_block_special()
+            || kind.is_character_special()
+        {
+            continue;
+        }
+
+        let Some(src_path) = entry.path().ok().map(|path| path.into_owned()) else {
+            continue;
+        };
+        if !should_extract_tar_path(&src_path, &unpack_extract_prefixes(subpath)) {
+            continue;
+        }
+        let Some(rel_path) = sanitize_tar_relpath(&src_path) else {
+            continue;
+        };
+        if rel_path.as_os_str().is_empty() {
+            continue;
+        }
+
+        let dest = raw_dir.join(&rel_path);
+        if !dest.starts_with(&raw_dir) {
+            continue;
+        }
+        let is_dir = kind.is_dir() || src_path.as_os_str().to_string_lossy().ends_with('/');
+        if !is_dir && !(kind.is_file() || kind.is_contiguous() || kind.is_gnu_sparse()) {
+            continue;
+        }
+
+        match extract_tar_entry(&mut entry, &dest, is_dir) {
+            Ok(()) => {
+                if !is_dir {
+                    extracted_files += 1;
+                }
+            }
+            Err(error) => {
+                let message = format!("{} ({error})", dest.display());
+                last_error = Some(message.clone());
+                if is_required_skill_extract_path(&rel_path) {
+                    return Err(format!("Failed to extract tarball: {message}"));
+                }
+            }
+        }
+    }
+
+    if extracted_files == 0 {
+        return Err(last_error
+            .map(|error| format!("Failed to extract tarball: {error}"))
+            .unwrap_or_else(|| {
+                "Failed to extract tarball: archive had no usable files".into()
+            }));
+    }
 
     let repo_source = find_extracted_repo_dir(&raw_dir)
         .ok_or_else(|| "Downloaded tarball did not contain a repository directory".to_string())?;
 
-    std::fs::rename(&repo_source, tmp_dir.join("repo"))
-        .map_err(|e| format!("Failed to prepare extracted repo: {}", e))?;
+    let dest = tmp_dir.join("repo");
+    if dest.exists() {
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+    if let Err(error) = std::fs::rename(&repo_source, &dest) {
+        copy_dir_recursive(&repo_source, &dest).map_err(|copy_error| {
+            format!("Failed to prepare extracted repo: {error}; {copy_error}")
+        })?;
+    }
 
     let _ = std::fs::remove_dir_all(&raw_dir);
     Ok(())
+}
+
+fn extract_tar_entry<R: Read>(
+    entry: &mut tar::Entry<'_, R>,
+    dest: &Path,
+    is_dir: bool,
+) -> std::io::Result<()> {
+    if is_dir {
+        return std::fs::create_dir_all(dest);
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::File::create(dest)?;
+    std::io::copy(entry, &mut file)?;
+    Ok(())
+}
+
+fn unpack_extract_prefixes(subpath: Option<&str>) -> Vec<String> {
+    let Some(path) = subpath.filter(|value| !value.is_empty()) else {
+        return Vec::new();
+    };
+    let normalized = path.replace('\\', "/").trim_matches('/').to_string();
+    let mut prefixes = vec![normalized.clone()];
+    if normalized.eq_ignore_ascii_case("skills") {
+        prefixes.push("commands".into());
+    } else if let Some(parent) = normalized.strip_suffix("/skills") {
+        prefixes.push(format!("{parent}/commands"));
+    }
+    prefixes
+}
+
+fn should_extract_tar_path(path: &Path, prefixes: &[String]) -> bool {
+    if prefixes.is_empty() {
+        return true;
+    }
+    let relative = tar_path_after_repo_root(path);
+    if relative.as_os_str().is_empty() {
+        return true;
+    }
+    prefixes.iter().any(|wanted| {
+        let wanted_path = Path::new(wanted);
+        relative == wanted_path
+            || relative.starts_with(wanted_path)
+            || wanted_path.starts_with(&relative)
+    })
+}
+
+fn tar_path_after_repo_root(path: &Path) -> PathBuf {
+    path.components().skip(1).collect()
+}
+
+fn safe_import_subpath(subpath: &str) -> Option<String> {
+    let sanitized = sanitize_tar_relpath(Path::new(subpath))?;
+    sanitized
+        .to_str()
+        .map(str::to_string)
+        .filter(|value| !value.is_empty())
+}
+
+fn is_required_skill_extract_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.eq_ignore_ascii_case("SKILL.md") || name.eq_ignore_ascii_case("AGENT.md")
+        })
+}
+
+fn sanitize_tar_relpath(path: &Path) -> Option<PathBuf> {
+    let mut sanitized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(name) => {
+                let cleaned = sanitize_tar_component(&name.to_string_lossy());
+                if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+                    return None;
+                }
+                sanitized.push(cleaned);
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir => return None,
+        }
+    }
+    Some(sanitized)
+}
+
+fn sanitize_tar_component(name: &str) -> String {
+    let replaced: String = name
+        .chars()
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '|' | '?' | '*' => '_',
+            ch if ch.is_control() => '_',
+            ch => ch,
+        })
+        .collect();
+    let trimmed = replaced.trim_end_matches([' ', '.']);
+    if trimmed.is_empty() || trimmed.len() > 240 || trimmed == "." || trimmed == ".." {
+        return String::new();
+    }
+    let stem = trimmed
+        .split('.')
+        .next()
+        .unwrap_or(trimmed)
+        .to_ascii_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    ) {
+        format!("_{trimmed}")
+    } else {
+        trimmed.to_string()
+    }
 }
 
 async fn download_tarball_once(
@@ -889,7 +1105,7 @@ async fn download_tarball_once(
         }
     }
 
-    unpack_tarball(&bytes, tmp_dir)
+    unpack_tarball(&bytes, tmp_dir, None)
 }
 
 /// Download and extract tarball.
@@ -1087,6 +1303,10 @@ fn copy_skills(repo_dir: &Path, target_dir: &Path) -> Result<usize, String> {
         for skill_name in staged_names {
             let staged_skill = staging_dir.join(&skill_name);
             let target_skill = target_dir.join(&skill_name);
+            if import::find_skill_md(&target_skill).is_some() {
+                count += 1;
+                continue;
+            }
 
             replace_dir_from_staging(&staged_skill, &target_skill).map_err(|e| {
                 format!(
@@ -1245,27 +1465,313 @@ pub async fn skill_import(
         .map_err(|error| error.to_string())?;
         imported.append(&mut batch);
     }
+    let _ = crate::slash_commands::import_user_slash_commands_from_source(&source, true);
+    Ok(imported)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GithubImportSpec {
+    owner: String,
+    repo: String,
+    git_ref: String,
+    subpath: Option<String>,
+}
+
+fn strip_url_suffix(url: &str) -> &str {
+    url.split_once('#')
+        .map(|(head, _)| head)
+        .unwrap_or(url)
+        .split_once('?')
+        .map(|(head, _)| head)
+        .unwrap_or(url)
+        .trim_end_matches('/')
+}
+
+fn parse_github_import_url(url: &str) -> Option<GithubImportSpec> {
+    let cleaned = strip_url_suffix(url.trim());
+    let rest = cleaned
+        .strip_prefix("https://github.com/")
+        .or_else(|| cleaned.strip_prefix("http://github.com/"))?;
+    let mut parts = rest.split('/').filter(|part| !part.is_empty());
+    let owner = parts.next()?.to_string();
+    let repo = parts.next()?.trim_end_matches(".git").to_string();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    let kind = parts.next();
+    let (git_ref, subpath) = match kind {
+        Some("tree") | Some("blob") => {
+            let git_ref = parts.next().unwrap_or("main").to_string();
+            let remainder = parts.collect::<Vec<_>>().join("/");
+            (
+                git_ref,
+                if remainder.is_empty() {
+                    None
+                } else {
+                    Some(remainder)
+                },
+            )
+        }
+        _ => ("main".to_string(), None),
+    };
+    Some(GithubImportSpec {
+        owner,
+        repo,
+        git_ref,
+        subpath,
+    })
+}
+
+fn archive_urls_for_import(url: &str) -> Vec<String> {
+    if let Some(spec) = parse_github_import_url(url) {
+        let mut refs = vec![spec.git_ref.clone()];
+        if spec.git_ref == "main" {
+            refs.push("master".into());
+        } else if spec.git_ref == "master" {
+            refs.push("main".into());
+        }
+        let mut urls = Vec::new();
+        for git_ref in refs {
+            urls.push(format!(
+                "https://codeload.github.com/{}/{}/tar.gz/{}",
+                spec.owner, spec.repo, git_ref
+            ));
+            urls.push(format!(
+                "https://github.com/{}/{}/archive/refs/heads/{}.tar.gz",
+                spec.owner, spec.repo, git_ref
+            ));
+        }
+        return urls;
+    }
+    vec![url.trim().to_string()]
+}
+
+fn is_skill_markdown_url(url: &str) -> bool {
+    let cleaned = strip_url_suffix(url.trim()).to_ascii_lowercase();
+    cleaned.ends_with("/skill.md") || cleaned.ends_with("skill.md")
+}
+
+async fn download_url_bytes(
+    url: &str,
+    app: Option<&tauri::AppHandle>,
+) -> Result<Vec<u8>, String> {
+    let window = app.and_then(|handle| handle.get_webview_window("main"));
+    let client = build_skills_http_client(SKILLS_DOWNLOAD_TIMEOUT_SECS, window.as_ref())?;
+    if let Some(app) = app {
+        emit_install_log(app, "Downloading skills...");
+        emit_install_log(
+            app,
+            &format!("Downloading from {}...", tarball_source_label(url)),
+        );
+    }
+    let mut response = client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, "LocalPrism skills importer")
+        .send()
+        .await
+        .map_err(|error| format!("Failed to download {url}: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Download failed for {url} with status {}",
+            response.status()
+        ));
+    }
+    let total_size = response.content_length();
+    let mut bytes =
+        Vec::with_capacity(total_size.unwrap_or_default().min(64 * 1024 * 1024) as usize);
+    let mut downloaded = 0_u64;
+    let mut last_emitted_percent = 0_u64;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("Failed to read {url}: {error}"))?
+    {
+        downloaded += chunk.len() as u64;
+        bytes.extend_from_slice(&chunk);
+        let Some(app) = app else {
+            continue;
+        };
+        if let Some(total) = total_size.filter(|value| *value > 0) {
+            let percent = ((downloaded.saturating_mul(100)) / total).min(100);
+            if percent >= last_emitted_percent + 5 || percent == 100 {
+                emit_install_log(app, &format!("Download progress {percent}%"));
+                last_emitted_percent = percent;
+            }
+        } else if downloaded / (1024 * 1024) > last_emitted_percent {
+            last_emitted_percent = downloaded / (1024 * 1024);
+            emit_install_log(app, &format!("Downloaded {last_emitted_percent} MiB"));
+        }
+    }
+    if let Some(app) = app {
+        emit_install_log(app, "Download complete");
+    }
+    Ok(bytes)
+}
+
+fn skill_already_installed(
+    skill_dir: &Path,
+    targets: &[domain::SkillTarget],
+    project: Option<&Path>,
+) -> bool {
+    let Ok((parsed, _)) = import::validate_skill_dir(skill_dir) else {
+        return false;
+    };
+    targets.iter().all(|target| {
+        let Ok(root) = paths::resolve_skill_root(target.runtime, target.scope, project) else {
+            return false;
+        };
+        let Ok(destination) = paths::skill_destination(&root, &parsed.folder) else {
+            return false;
+        };
+        import::find_skill_md(&destination).is_some()
+    })
+}
+
+fn import_collected_skill_dirs(
+    skill_dirs: Vec<PathBuf>,
+    targets: &[domain::SkillTarget],
+    project: Option<&Path>,
+    source: manifest::SkillSource,
+    skip_existing: bool,
+) -> Result<Vec<domain::RuntimeSkill>, String> {
+    if skill_dirs.is_empty() {
+        return Err(
+            "Downloaded source does not contain any skills. A skill must contain SKILL.md.".into(),
+        );
+    }
+    let mut imported = Vec::new();
+    for skill_dir in skill_dirs {
+        if skip_existing && skill_already_installed(&skill_dir, targets, project) {
+            continue;
+        }
+        let mut batch =
+            import::import_skill_to_targets(&skill_dir, targets, project, source.clone())
+                .map_err(|error| error.to_string())?;
+        imported.append(&mut batch);
+    }
     Ok(imported)
 }
 
 #[tauri::command]
-pub async fn skill_list(
+pub async fn skill_import_url(
+    app: tauri::AppHandle,
+    source_url: String,
+    targets: Vec<domain::SkillTarget>,
     project_path: Option<String>,
+    skip_existing: Option<bool>,
 ) -> Result<Vec<domain::RuntimeSkill>, String> {
+    let source_url = source_url.trim().to_string();
+    if source_url.is_empty() {
+        return Err("Skill URL cannot be empty".into());
+    }
+    if !(source_url.starts_with("https://") || source_url.starts_with("http://")) {
+        return Err("Skill URL must start with http:// or https://".into());
+    }
+
+    let project = project_path.as_deref().map(Path::new);
+    let skip_existing = skip_existing.unwrap_or(false);
+    let source = manifest::SkillSource::Url {
+        url: source_url.clone(),
+    };
+    let tmp_dir = short_skill_temp_dir("imp");
+    std::fs::create_dir_all(&tmp_dir)
+        .map_err(|error| format!("Failed to create download workspace: {error}"))?;
+
+    let import_result = async {
+        if is_skill_markdown_url(&source_url) {
+            let bytes = download_url_bytes(&source_url, Some(&app)).await?;
+            let text = String::from_utf8(bytes)
+                .map_err(|error| format!("SKILL.md is not valid UTF-8: {error}"))?;
+            let folder = source_url
+                .rsplit('/')
+                .nth(1)
+                .map(sanitize_skill_folder_name)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "imported-skill".into());
+            let skill_dir = tmp_dir.join(folder);
+            std::fs::create_dir_all(&skill_dir)
+                .map_err(|error| format!("Failed to create skill folder: {error}"))?;
+            std::fs::write(skill_dir.join("SKILL.md"), text)
+                .map_err(|error| format!("Failed to write SKILL.md: {error}"))?;
+            emit_install_log(&app, "Copying skills...");
+            let imported = import_collected_skill_dirs(
+                vec![skill_dir],
+                &targets,
+                project,
+                source,
+                skip_existing,
+            )?;
+            emit_install_log(&app, &format!("Copied {} skills", imported.len()));
+            return Ok(imported);
+        }
+
+        let spec = parse_github_import_url(&source_url);
+        let subpath = spec
+            .as_ref()
+            .and_then(|value| value.subpath.as_deref())
+            .and_then(safe_import_subpath);
+        let mut last_error = None;
+        for archive_url in archive_urls_for_import(&source_url) {
+            match download_url_bytes(&archive_url, Some(&app)).await {
+                Ok(bytes) => match unpack_tarball(&bytes, &tmp_dir, subpath.as_deref()) {
+                    Ok(()) => {
+                        last_error = None;
+                        break;
+                    }
+                    Err(error) => last_error = Some(error),
+                },
+                Err(error) => last_error = Some(error),
+            }
+        }
+        if let Some(error) = last_error {
+            return Err(error);
+        }
+
+        let repo_dir = tmp_dir.join("repo");
+        let search_root = subpath
+            .as_ref()
+            .map(|path| repo_dir.join(path))
+            .filter(|path| path.exists() && path.starts_with(&repo_dir))
+            .unwrap_or(repo_dir);
+        let mut skill_dirs = Vec::new();
+        import::collect_skill_dirs(&search_root, &mut skill_dirs);
+        skill_dirs.sort();
+        emit_install_log(&app, "Copying skills...");
+        let imported = import_collected_skill_dirs(
+            skill_dirs,
+            &targets,
+            project,
+            source,
+            skip_existing,
+        )?;
+        let _ = crate::slash_commands::import_user_slash_commands_from_source(
+            &tmp_dir.join("repo"),
+            skip_existing,
+        );
+        emit_install_log(&app, &format!("Copied {} skills", imported.len()));
+        Ok(imported)
+    }
+    .await;
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    import_result
+}
+
+#[tauri::command]
+pub async fn skill_list(project_path: Option<String>) -> Result<Vec<domain::RuntimeSkill>, String> {
     import::list_runtime_skills(project_path.as_deref().map(Path::new))
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub async fn skill_delete_managed(
-    entry_id: String,
-    confirm_modified: bool,
-) -> Result<(), String> {
+pub async fn skill_delete_managed(entry_id: String, confirm_modified: bool) -> Result<(), String> {
     import::delete_managed_skill(&entry_id, confirm_modified).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub async fn skill_auto_import_project(project_path: String) -> Result<Vec<domain::RuntimeSkill>, String> {
+pub async fn skill_auto_import_project(
+    project_path: String,
+) -> Result<Vec<domain::RuntimeSkill>, String> {
     let path = PathBuf::from(&project_path);
     import::auto_import_project_skills(&path).map_err(|error| error.to_string())
 }
@@ -1334,11 +1840,13 @@ fn ensure_target_writable(target: &Path) -> Result<(), String> {
 }
 
 /// Emit a progress log event to the frontend + stderr for terminal debugging.
-fn emit_log(window: &WebviewWindow, msg: &str) {
+fn emit_install_log(app: &tauri::AppHandle, msg: &str) {
     eprintln!("[skills] {}", msg);
-    let _ = window
-        .app_handle()
-        .emit("skills-install-log", msg.to_string());
+    let _ = app.emit("skills-install-log", msg.to_string());
+}
+
+fn emit_log(window: &WebviewWindow, msg: &str) {
+    emit_install_log(window.app_handle(), msg);
 }
 
 async fn install_skills_with_timeout(
@@ -1381,13 +1889,7 @@ async fn install_skills_to(
     emit_log(window, "Directory permissions OK");
 
     // Create a temporary directory for the clone/download
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "scientific-agent-skills-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-    ));
+    let tmp_dir = short_skill_temp_dir("sas");
     std::fs::create_dir_all(&tmp_dir).map_err(|e| {
         let msg = format!("Failed to create temp dir: {}", e);
         emit_log(window, &msg);
@@ -1412,6 +1914,17 @@ async fn install_skills_to(
             e
         })?;
         emit_log(window, &format!("Copied {} skills", count));
+        match crate::slash_commands::import_user_slash_commands_from_source(&repo_dir, true) {
+            Ok(commands) => {
+                emit_log(
+                    window,
+                    &format!("Imported {commands} official slash commands into claude-home/slash"),
+                );
+            }
+            Err(error) => {
+                emit_log(window, &format!("Slash command import skipped: {error}"));
+            }
+        }
 
         let target_str = target.to_string_lossy().to_string();
 
@@ -1509,7 +2022,7 @@ pub async fn delete_installed_skill(skill_folder: String) -> Result<(), String> 
         .canonicalize()
         .map_err(|e| format!("Failed to resolve skill folder: {}", e))?;
     if !skill_canon.starts_with(&target_canon) {
-        return Err("Refusing to delete a skill outside ~/.claude/skills".into());
+        return Err("Refusing to delete a skill outside LocalPrism skills".into());
     }
 
     std::fs::remove_dir_all(&skill_canon)
@@ -1620,10 +2133,213 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_parse_github_import_url() {
+        assert_eq!(
+            parse_github_import_url("https://github.com/acme/writer-skill"),
+            Some(GithubImportSpec {
+                owner: "acme".into(),
+                repo: "writer-skill".into(),
+                git_ref: "main".into(),
+                subpath: None,
+            })
+        );
+        assert_eq!(
+            parse_github_import_url(
+                "https://github.com/acme/writer-skill/tree/develop/skills/writer"
+            ),
+            Some(GithubImportSpec {
+                owner: "acme".into(),
+                repo: "writer-skill".into(),
+                git_ref: "develop".into(),
+                subpath: Some("skills/writer".into()),
+            })
+        );
+        assert!(is_skill_markdown_url(
+            "https://raw.githubusercontent.com/acme/writer/main/skills/writer/SKILL.md"
+        ));
+        assert!(!is_skill_markdown_url(
+            "https://github.com/acme/writer-skill"
+        ));
+        assert_eq!(
+            parse_github_import_url(
+                "https://github.com/WUBING2023/PaperSpine/tree/main/dist/claude/skills"
+            ),
+            Some(GithubImportSpec {
+                owner: "WUBING2023".into(),
+                repo: "PaperSpine".into(),
+                git_ref: "main".into(),
+                subpath: Some("dist/claude/skills".into()),
+            })
+        );
+    }
+
+    fn gzip_tar(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            for (path, content) in files {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(content.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, path, *content)
+                    .expect("append tar data");
+            }
+            builder.finish().expect("finish tar");
+        }
+        let mut encoded = Vec::new();
+        {
+            let mut encoder =
+                flate2::write::GzEncoder::new(&mut encoded, flate2::Compression::fast());
+            encoder.write_all(&tar_bytes).expect("gzip tar");
+            encoder.finish().expect("finish gzip");
+        }
+        encoded
+    }
+
+    #[test]
+    fn test_should_extract_tar_path_filters_to_subpath() {
+        let skills = unpack_extract_prefixes(Some("dist/claude/skills"));
+        assert_eq!(
+            skills,
+            vec![
+                "dist/claude/skills".to_string(),
+                "dist/claude/commands".to_string()
+            ]
+        );
+        assert_eq!(
+            unpack_extract_prefixes(Some("skills")),
+            vec!["skills".to_string(), "commands".to_string()]
+        );
+        assert!(should_extract_tar_path(
+            Path::new("PaperSpine-main/dist/claude/skills/x/SKILL.md"),
+            &skills
+        ));
+        assert!(should_extract_tar_path(
+            Path::new("PaperSpine-main/dist/claude"),
+            &skills
+        ));
+        assert!(should_extract_tar_path(
+            Path::new("PaperSpine-main/dist/claude/commands/paperspine.md"),
+            &skills
+        ));
+        assert!(!should_extract_tar_path(
+            Path::new("PaperSpine-main/README.md"),
+            &skills
+        ));
+        assert!(should_extract_tar_path(
+            Path::new("PaperSpine-main/README.md"),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn test_sanitize_tar_relpath_rejects_parent_and_fixes_windows_names() {
+        assert_eq!(sanitize_tar_relpath(Path::new("repo/../x")), None);
+        assert_eq!(sanitize_tar_relpath(Path::new("repo/.. /x")), None);
+        assert_eq!(sanitize_tar_component("foo:bar"), "foo_bar");
+        assert_eq!(sanitize_tar_component("aux"), "_aux");
+        assert_eq!(sanitize_tar_component(".. "), "");
+        assert_eq!(sanitize_tar_component(".."), "");
+        assert_eq!(
+            sanitize_tar_relpath(Path::new("repo/good/SKILL.md")).as_deref(),
+            Some(Path::new("repo/good/SKILL.md"))
+        );
+        assert_eq!(
+            safe_import_subpath("dist/claude/skills").map(PathBuf::from),
+            Some(PathBuf::from("dist/claude/skills"))
+        );
+        assert_eq!(safe_import_subpath("../../etc"), None);
+        assert_eq!(safe_import_subpath("foo/../../../etc"), None);
+    }
+
+    #[test]
+    fn test_unpack_tarball_without_subpath_keeps_readme() {
+        let bytes = gzip_tar(&[
+            ("repo/README.md", b"keep"),
+            ("repo/skills/good/SKILL.md", b"# Good\n"),
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        unpack_tarball(&bytes, tmp.path(), None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("repo/README.md")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn test_unpack_tarball_keeps_skill_subpath_and_skips_noise() {
+        let bytes = gzip_tar(&[
+            ("repo/README.md", b"ignore me"),
+            ("repo/node_modules/x/very-long-file.txt", b"noise"),
+            (
+                "repo/dist/claude/skills/paper-spine-intake/SKILL.md",
+                b"# Skill\n",
+            ),
+            (
+                "repo/dist/claude/skills/paper-spine-intake/notes.md",
+                b"notes",
+            ),
+            (
+                "repo/dist/claude/commands/paperspine.md",
+                b"---\ndescription: Start PaperSpine\n---\n/paperspine\n",
+            ),
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        unpack_tarball(&bytes, tmp.path(), Some("dist/claude/skills")).unwrap();
+        let skill = tmp
+            .path()
+            .join("repo")
+            .join("dist/claude/skills/paper-spine-intake/SKILL.md");
+        assert_eq!(std::fs::read_to_string(skill).unwrap(), "# Skill\n");
+        assert_eq!(
+            std::fs::read_to_string(
+                tmp.path()
+                    .join("repo")
+                    .join("dist/claude/commands/paperspine.md")
+            )
+            .unwrap(),
+            "---\ndescription: Start PaperSpine\n---\n/paperspine\n"
+        );
+        assert!(!tmp.path().join("repo").join("README.md").exists());
+        assert!(!tmp.path().join("repo").join("node_modules").exists());
+    }
+
+    #[test]
+    fn test_unpack_real_paperspine_tarball_if_present() {
+        let archive = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../.tmp/paperspine-main.tar.gz");
+        if !archive.is_file() {
+            return;
+        }
+        let bytes = std::fs::read(&archive).expect("read PaperSpine tarball");
+        let tmp = tempfile::tempdir().unwrap();
+        unpack_tarball(&bytes, tmp.path(), Some("dist/claude/skills"))
+            .expect("unpack PaperSpine skill subpath");
+        assert!(
+            tmp.path()
+                .join("repo/dist/claude/skills/paper-spine/SKILL.md")
+                .is_file(),
+            "expected paper-spine SKILL.md after filtered extract"
+        );
+        assert!(
+            tmp.path()
+                .join("repo/dist/claude/commands/paperspine.md")
+                .is_file(),
+            "expected official /paperspine command after sibling extract"
+        );
+        assert!(
+            !tmp.path().join("repo/website").exists(),
+            "website assets should not be extracted"
+        );
+    }
+
+    #[test]
     fn test_skills_dir_global() {
         let temp = tempfile::tempdir().unwrap();
         let dir = skills_dir_with_home(Some(temp.path()), None).unwrap();
-        assert_eq!(dir, temp.path().join(".claude").join("skills"));
+        assert_eq!(dir, temp.path().join("claude-home").join("skills"));
     }
 
     #[test]
@@ -1632,7 +2348,7 @@ mod tests {
         let project = temp.path().join("my-project");
         let project_string = project.to_string_lossy().to_string();
         let dir = skills_dir_with_home(None, Some(&project_string)).unwrap();
-        assert_eq!(dir, project.join(".claude").join("skills"));
+        assert_eq!(dir, project.join(".localprism").join("skills"));
     }
 
     #[test]
@@ -1747,5 +2463,64 @@ mod tests {
         assert!(info.description.contains("RNA-seq"));
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn copy_skills_skips_existing_skill_folders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let target = tmp.path().join("target");
+        let src_skill = repo.join("skills").join("scanpy");
+        let dest_skill = target.join("scanpy");
+        std::fs::create_dir_all(&src_skill).unwrap();
+        std::fs::create_dir_all(&dest_skill).unwrap();
+        std::fs::write(src_skill.join("SKILL.md"), "# Scanpy replacement").unwrap();
+        std::fs::write(dest_skill.join("SKILL.md"), "# Scanpy original").unwrap();
+
+        let count = copy_skills(&repo, &target).unwrap();
+        assert_eq!(count, 1);
+        let kept = std::fs::read_to_string(dest_skill.join("SKILL.md")).unwrap();
+        assert_eq!(kept, "# Scanpy original");
+    }
+
+    #[test]
+    fn skill_already_installed_detects_user_scope_copy() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let previous = std::env::var_os("LOCALPRISM_HOME");
+        std::env::set_var("LOCALPRISM_HOME", &home);
+
+        let dest = home.join("claude-home").join("skills").join("writer");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(
+            dest.join("SKILL.md"),
+            "---\nname: writer\ndescription: Writes prose\n---\n# Writer\n",
+        )
+        .unwrap();
+
+        let source = tmp.path().join("source/writer");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            source.join("SKILL.md"),
+            "---\nname: writer\ndescription: Writes prose\n---\n# Writer\n",
+        )
+        .unwrap();
+
+        let installed = skill_already_installed(
+            &source,
+            &[domain::SkillTarget {
+                runtime: crate::runtime::RuntimeKind::Claude,
+                scope: domain::SkillScope::User,
+            }],
+            None,
+        );
+        if let Some(value) = previous {
+            std::env::set_var("LOCALPRISM_HOME", value);
+        } else {
+            std::env::remove_var("LOCALPRISM_HOME");
+        }
+        assert!(installed);
     }
 }

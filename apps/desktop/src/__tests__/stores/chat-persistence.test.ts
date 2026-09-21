@@ -4,6 +4,8 @@ import {
   migratePersistedChat,
   projectChatStorageKey,
   projectPersistedChat,
+  samePersistableTab,
+  samePersistableTabs,
   readPersistedChat,
   readPersistedChatForProject,
   writePersistedChat,
@@ -303,6 +305,37 @@ describe("chat persistence I/O", () => {
     expect(projectPersistedChat(null as never).tabs[0].runtime).toBe("claude");
   });
 
+  it("treats streaming and message-only changes as the same persistable tabs", () => {
+    const left = persistedTab({
+      messages: [{ type: "user" }],
+      isStreaming: false,
+      totalInputTokens: 1,
+    });
+    const right = persistedTab({
+      messages: [{ type: "assistant", text: "delta" }],
+      isStreaming: true,
+      streamingStatus: "thinking",
+      totalInputTokens: 99,
+    });
+    expect(samePersistableTab(left, right)).toBe(true);
+    expect(samePersistableTabs([left], [right])).toBe(true);
+    expect(samePersistableTab(left, persistedTab({ title: "Renamed" }))).toBe(
+      false,
+    );
+    expect(
+      samePersistableTab(
+        left,
+        persistedTab({
+          sessionRef: {
+            runtime: "claude",
+            sessionId: "other-session",
+            projectPath: "/project-a",
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
   it("uses a strict v2 whitelist and never stores chat content or secrets", () => {
     const projected = projectPersistedChat({
       activeTabId: "tab-persisted",
@@ -457,6 +490,15 @@ describe("chat store persistence integration", () => {
     useClaudeChatStore.getState()._setStreaming(tabId, true);
 
     expect(storage.setItem).not.toHaveBeenCalled();
+  });
+
+  it("does not clone tabs when streaming status is unchanged", () => {
+    useClaudeChatStore.getState().resetForProject("/project-a");
+    const tabId = useClaudeChatStore.getState().activeTabId;
+    useClaudeChatStore.getState()._setStreamingStatus(tabId, "working");
+    const tabsAfterSet = useClaudeChatStore.getState().tabs;
+    useClaudeChatStore.getState()._setStreamingStatus(tabId, "working");
+    expect(useClaudeChatStore.getState().tabs).toBe(tabsAfterSet);
   });
 
   it("does not rebind an existing session when only runtime or project changes", () => {

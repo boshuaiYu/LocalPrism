@@ -2,6 +2,25 @@ import { create } from "zustand";
 import { useDocumentStore } from "./document-store";
 import { useHistoryStore } from "./history-store";
 import { useClaudeSetupStore } from "./claude-setup-store";
+import {
+  resolveProviderRequestModel,
+  selectedProviderModel,
+  useProviderStore,
+} from "./provider-store";
+import {
+  lastTurnUsage as lastTurnUsageFromMessages,
+  mergeTokenUsageSnapshots,
+  parseUsageFields,
+  snapshotHasTokens,
+  type TokenUsageSnapshot,
+} from "@/lib/chat-token-usage";
+import {
+  FALLBACK_REASONING_EFFORTS,
+  normalizeReasoningEffortOptions,
+  resolveReasoningEffort,
+} from "@/lib/reasoning-effort";
+import { useSettingsStore } from "./settings-store";
+import { useChatLayoutStore } from "./chat-layout-store";
 import { createLogger } from "@/lib/debug/logger";
 import { cleanupTemporaryChatFiles } from "@/lib/chat-temporary-files";
 import {
@@ -9,7 +28,6 @@ import {
   runtimeReadConversation,
   startRuntimeTurn,
 } from "@/runtime/commands";
-import { coerceCodexReasoningEffort } from "@/components/runtime/runtime-selector";
 import type {
   ChangeTabRuntimeResult,
   ChatRuntimePeer,
@@ -18,12 +36,12 @@ import type {
   RuntimeStopMode,
 } from "@/runtime/types";
 import { peerFromTab, wireRuntimeFromPeer } from "@/runtime/types";
-import { useRuntimeStore } from "./runtime-store";
 import {
-  projectPersistedChat,
   readPersistedChatForProject,
+  samePersistableTabs,
   writePersistedChatForProject,
 } from "./chat-persistence";
+import { useApprovalStore } from "./approval-store";
 
 const log = createLogger("claude");
 export const CLAUDE_CODE_PROVIDER_ID = "__claude-code__";
@@ -88,6 +106,22 @@ export interface ContentBlock {
   signature?: string;
 }
 
+export interface TokenUsageFields {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cache_read_tokens?: number;
+  cache_creation_tokens?: number;
+  cached_tokens?: number;
+  input_tokens_details?: { cached_tokens?: number };
+  prompt_tokens_details?: { cached_tokens?: number };
+}
+
 export interface ClaudeStreamMessage {
   type: "system" | "assistant" | "user" | "result";
   subtype?: string;
@@ -97,9 +131,9 @@ export interface ClaudeStreamMessage {
   tools?: string[];
   message?: {
     content?: ContentBlock[];
-    usage?: { input_tokens: number; output_tokens: number };
+    usage?: TokenUsageFields;
   };
-  usage?: { input_tokens: number; output_tokens: number };
+  usage?: TokenUsageFields;
   cost_usd?: number;
   duration_ms?: number;
   duration_api_ms?: number;
@@ -131,6 +165,7 @@ export interface PromptContextOverride {
 export interface QueuedGuidance {
   id: string;
   prompt: string;
+  displayPrompt?: string;
   contextOverride?: PromptContextOverride;
   createdAt: number;
   displayedInChat?: boolean;
@@ -193,6 +228,7 @@ export interface TabState {
   error: string | null;
   totalInputTokens: number;
   totalOutputTokens: number;
+  lastTurnUsage?: TokenUsageSnapshot | null;
   draft: TabDraft;
   queuedGuidance?: QueuedGuidance[];
   forceQueuedGuidanceOnComplete?: boolean;
@@ -232,6 +268,7 @@ const TAB_FIELDS = [
   "error",
   "totalInputTokens",
   "totalOutputTokens",
+  "lastTurnUsage",
 ] as const;
 
 /**
@@ -246,6 +283,31 @@ export function chatPeerForTab(
   if (tab.runtime === "codex") return "codex";
   if (tab.chatPeer === "claude" || tab.chatPeer === "api") return tab.chatPeer;
   return peerFromTab(tab);
+}
+
+function inheritWritableTabSelection(
+  source: TabState | undefined,
+  selectedProviderCredentialId: string | null,
+): Partial<TabState> {
+  const inheritWritableSelection = !!source && source.runtime !== "codex";
+  const inheritedProviderKey = inheritWritableSelection
+    ? (source.providerKey ??
+      providerKeyForSelectedCredential(selectedProviderCredentialId))
+    : providerKeyForSelectedCredential(selectedProviderCredentialId);
+  if (!inheritWritableSelection || !source) {
+    return { providerKey: inheritedProviderKey };
+  }
+  return {
+    runtime: source.runtime,
+    chatPeer: peerFromTab({
+      runtime: source.runtime,
+      providerKey: inheritedProviderKey,
+    }),
+    runtimeModel: source.runtimeModel,
+    reasoningEffort: source.reasoningEffort,
+    agentId: source.agentId,
+    providerKey: inheritedProviderKey,
+  };
 }
 
 function makeDefaultTab(
@@ -275,6 +337,7 @@ function makeDefaultTab(
     error: null,
     totalInputTokens: 0,
     totalOutputTokens: 0,
+    lastTurnUsage: null,
     draft: { input: "", pinnedContexts: [] },
     queuedGuidance: [],
     forceQueuedGuidanceOnComplete: false,
@@ -578,40 +641,6 @@ function conversationHistoryMessages(
   return claudeHistoryMessages(items).map(sanitizeStoredUserMessageForDisplay);
 }
 
-function buildProviderSwitchContext(
-  messages: ClaudeStreamMessage[],
-  maxChars = 18000,
-): string | null {
-  const entries = messages
-    .filter((msg) => msg.type === "user" || msg.type === "assistant")
-    .map((msg) => {
-      const text = messageContentText(msg);
-      if (!text) return null;
-      return `${msg.type === "user" ? "User" : "Assistant"}:\n${text}`;
-    })
-    .filter((entry): entry is string => !!entry);
-
-  if (entries.length === 0) return null;
-
-  const selected: string[] = [];
-  let total = 0;
-  for (let i = entries.length - 1; i >= 0; i -= 1) {
-    const next = entries[i];
-    if (selected.length > 0 && total + next.length > maxChars) break;
-    selected.unshift(next);
-    total += next.length;
-  }
-
-  return [
-    "[Provider switch context]",
-    "The conversation below happened earlier in this same LocalPrism chat before switching model providers.",
-    "Use it as prior context. Do not repeat it; answer only the user's latest request after this block.",
-    "",
-    selected.join("\n\n"),
-    "[End provider switch context]",
-  ].join("\n");
-}
-
 let tabCounter = 0n;
 function nextTabId(): string {
   return `tab-${++tabCounter}`;
@@ -896,6 +925,7 @@ interface ClaudeChatState {
   error: string | null;
   totalInputTokens: number;
   totalOutputTokens: number;
+  lastTurnUsage?: TokenUsageSnapshot | null;
 
   // ── Tab state ──
   tabs: TabState[];
@@ -930,28 +960,33 @@ interface ClaudeChatState {
   requestPinnedContextRemoval: (labels: string[]) => void;
   consumePendingPinnedContextRemovals: () => string[];
 
-  /** Currently selected model (passed per-prompt to Claude CLI) */
-  selectedModel: "sonnet" | "opus" | "haiku" | "opusplan";
-  setSelectedModel: (model: "sonnet" | "opus" | "haiku" | "opusplan") => void;
+  /** Currently selected catalog model id for the active provider */
+  selectedModel: string;
+  setSelectedModel: (model: string) => void;
   selectedProviderCredentialId: string | null;
   setSelectedProviderCredentialId: (credentialId: string | null) => void;
   selectedProviderModels: Record<string, string>;
   setSelectedProviderModel: (credentialId: string, model: string) => void;
 
-  /** Effort level for Opus 4.6 adaptive reasoning */
-  effortLevel: "low" | "medium" | "high";
-  setEffortLevel: (level: "low" | "medium" | "high") => void;
+  /** Effort level for the active catalog model's reasoning slider */
+  effortLevel: string;
+  setEffortLevel: (level: string) => void;
 
   // Actions
   sendPrompt: (
     userPrompt: string,
     contextOverride?: PromptContextOverride,
-    options?: { tabId?: string; preserveTabProvider?: boolean },
+    options?: {
+      tabId?: string;
+      preserveTabProvider?: boolean;
+      displayPrompt?: string;
+    },
   ) => Promise<void>;
   queueGuidance: (
     tabId: string,
     prompt: string,
     contextOverride?: PromptContextOverride,
+    displayPrompt?: string,
   ) => void;
   consumeQueuedGuidance: (
     tabId: string,
@@ -986,6 +1021,7 @@ interface ClaudeChatState {
 
   // Tab actions
   createTab: () => string;
+  ensureWritableTab: () => string;
   closeTab: (tabId: string) => void;
   setActiveTab: (tabId: string) => void;
   saveDraft: (tabId: string, draft: TabDraft) => void;
@@ -1000,8 +1036,14 @@ interface ClaudeChatState {
   _setConversationTitle: (reference: ConversationRef, title: string) => void;
   _setStreaming: (tabId: string, streaming: boolean) => void;
   _setStreamingStatus: (tabId: string, status: string | null) => void;
+  _clearActiveAttempt: (tabId: string, attemptId: string) => void;
   _setError: (tabId: string, error: string | null) => void;
-  _addUsage: (tabId: string, inputTokens: number, outputTokens: number) => void;
+  _addUsage: (
+    tabId: string,
+    inputTokens: number,
+    outputTokens: number,
+    extras?: { cacheReadTokens?: number; cacheCreationTokens?: number },
+  ) => void;
   _consumeAttemptCancellation: (
     tabId: string,
     attemptId: string,
@@ -1021,13 +1063,14 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
   error: null,
   totalInputTokens: 0,
   totalOutputTokens: 0,
+  lastTurnUsage: null,
 
   // Tab state
   tabs: [makeDefaultTab(DEFAULT_TAB_ID)],
   activeTabId: DEFAULT_TAB_ID,
   activeProjectPath: null,
 
-  selectedModel: "opus",
+  selectedModel: "",
   setSelectedModel: (model) => set({ selectedModel: model }),
   selectedProviderCredentialId:
     loadSelectedProviderCredentialId() ?? CLAUDE_CODE_PROVIDER_ID,
@@ -1104,8 +1147,13 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
   sendPrompt: async (
     userPrompt: string,
     contextOverride?: PromptContextOverride,
-    options?: { tabId?: string; preserveTabProvider?: boolean },
+    options?: {
+      tabId?: string;
+      preserveTabProvider?: boolean;
+      displayPrompt?: string;
+    },
   ) => {
+    useChatLayoutStore.getState().reveal();
     let state = get();
     let activeTabId = options?.tabId ?? state.activeTabId;
     let activeTab = state.tabs.find((t) => t.id === activeTabId);
@@ -1185,69 +1233,51 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       }
     }
 
-    const runtime = activeTab.runtime;
-    const runtimeModel = activeTab.runtimeModel?.trim() || null;
-    let tabReasoningEffort = activeTab.reasoningEffort?.trim() || null;
-    const selectedAgentId = activeTab.agentId?.trim() || null;
-    if (runtime === "codex" && !runtimeModel) {
+    if (activeTab.runtime === "codex") {
       set((s) =>
         applyTabUpdate(s, activeTabId, {
-          error: "Select a Codex model before sending a message.",
+          error:
+            "This conversation is read-only. Start a new chat with the active provider.",
         }),
       );
       discardRejectedPrompt(activeTabId);
       return;
     }
-    if (runtime === "codex" && runtimeModel) {
-      const selectedCodexModel =
-        useRuntimeStore
-          .getState()
-          .models.codex.find((model) => model.id === runtimeModel) ?? null;
-      if (selectedCodexModel) {
-        const coercedEffort = coerceCodexReasoningEffort(
-          tabReasoningEffort,
-          selectedCodexModel,
-        );
-        if (!coercedEffort) {
-          set((s) =>
-            applyTabUpdate(s, activeTabId, {
-              error:
-                "Select a supported reasoning effort for this Codex model before sending.",
-            }),
-          );
-          discardRejectedPrompt(activeTabId);
-          return;
-        }
-        if (tabReasoningEffort !== coercedEffort) {
-          set((s) =>
-            applyTabUpdate(s, activeTabId, {
-              reasoningEffort: coercedEffort,
-            }),
-          );
-        }
-        tabReasoningEffort = coercedEffort;
-      } else if (
-        tabReasoningEffort === "max" ||
-        tabReasoningEffort === "ultra"
-      ) {
-        tabReasoningEffort = "xhigh";
-        set((s) =>
-          applyTabUpdate(s, activeTabId, {
-            reasoningEffort: "xhigh",
-          }),
-        );
-      }
+    if (!useProviderStore.getState().ready) {
+      set((s) =>
+        applyTabUpdate(s, activeTabId, {
+          error: useClaudeSetupStore.getState().isInstalling
+            ? "Installing the writing engine. You can send once it finishes."
+            : "Install the writing engine and activate a provider in Settings → Providers before sending.",
+        }),
+      );
+      discardRejectedPrompt(activeTabId);
+      return;
     }
-    const requestModel = runtimeModel ?? state.selectedModel;
+    const runtime = "claude" as const;
+    const runtimeModel = activeTab.runtimeModel?.trim() || null;
+    const tabReasoningEffort = activeTab.reasoningEffort?.trim() || null;
+    const selectedAgentId = activeTab.agentId?.trim() || null;
+    const requestModel =
+      resolveProviderRequestModel(
+        runtimeModel ?? state.selectedModel,
+        useProviderStore.getState().models,
+      ) ?? state.selectedModel;
+    const catalogModel = selectedProviderModel(
+      useProviderStore.getState().models,
+      requestModel,
+    );
+    const catalogEffortOptions = normalizeReasoningEffortOptions(
+      catalogModel?.reasoningEfforts,
+    );
+    const resolvedEffort = resolveReasoningEffort(
+      tabReasoningEffort ?? state.effortLevel,
+      catalogEffortOptions.length > 0
+        ? catalogEffortOptions
+        : [...FALLBACK_REASONING_EFFORTS],
+    );
     const attemptEpoch = (activeTab.attemptEpoch ?? 0) + 1;
     const attemptId = nextRuntimeAttemptId(activeTabId);
-    const isCurrentAttempt = () => {
-      const currentTab = get().tabs.find((tab) => tab.id === activeTabId);
-      return (
-        currentTab?.attemptEpoch === attemptEpoch &&
-        currentTab.activeAttemptId === attemptId
-      );
-    };
     const isCurrentPreflight = () => {
       const currentTab = get().tabs.find((tab) => tab.id === activeTabId);
       return (
@@ -1296,30 +1326,8 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         ? activeTab.sessionRef
         : null;
     const sessionId = sessionRef?.sessionId ?? null;
-    const { effortLevel, selectedProviderModels } = state;
-    const chatPeer = chatPeerForTab(activeTab);
-    let providerCredentialId: string | null = null;
-    if (runtime === "claude" && chatPeer === "api") {
-      const tabSelectedProviderCredentialId =
-        selectedCredentialForProviderKey(activeTab.providerKey) ??
-        state.selectedProviderCredentialId;
-      providerCredentialId =
-        tabSelectedProviderCredentialId &&
-        tabSelectedProviderCredentialId !== CLAUDE_CODE_PROVIDER_ID
-          ? tabSelectedProviderCredentialId
-          : null;
-
-      if (options?.preserveTabProvider && activeTab.providerKey) {
-        const tabProviderCredentialId = providerCredentialIdFromSessionKey(
-          activeTab.providerKey,
-        );
-        if (tabProviderCredentialId === CLAUDE_CODE_PROVIDER_ID) {
-          providerCredentialId = null;
-        } else if (tabProviderCredentialId !== undefined) {
-          providerCredentialId = tabProviderCredentialId;
-        }
-      }
-    }
+    const { selectedProviderModels } = state;
+    const providerCredentialId: string | null = null;
 
     const providerModelOverride =
       runtime === "claude" && providerCredentialId
@@ -1327,25 +1335,12 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         : null;
     const requestProviderKey =
       runtime === "claude" ? providerSessionKey(providerCredentialId) : null;
-    const previousProviderKey = activeTab.sessionProviderKey ?? null;
-    const providerChanged =
-      runtime === "claude" &&
-      !!sessionId &&
-      !!previousProviderKey &&
-      previousProviderKey !== requestProviderKey;
-    const switchingDirectProviderToClaudeCode =
-      providerChanged &&
-      requestProviderKey === CLAUDE_CODE_PROVIDER_ID &&
-      previousProviderKey !== CLAUDE_CODE_PROVIDER_ID;
-    const resumeSessionId = switchingDirectProviderToClaudeCode
-      ? null
-      : sessionId;
+    const resumeSessionId = sessionId;
 
     const sendStart = performance.now();
     const streamingStartedAt = Date.now();
     log.info("sendPrompt start", {
       sessionId: !!sessionId,
-      providerChanged,
       hasContext: !!contextOverride,
       tab: activeTabId,
     });
@@ -1368,10 +1363,13 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       }
     }
 
+    // Chat can show a short slash label while the engine still gets the body.
+    const visiblePrompt = options?.displayPrompt?.trim() || userPrompt;
+
     // Add user message to the list for display (with context label visible)
     const displayText = contextLabel
-      ? `${contextLabel}\n${userPrompt}`
-      : userPrompt;
+      ? `${contextLabel}\n${visiblePrompt}`
+      : visiblePrompt;
     const userMessage: ClaudeStreamMessage = {
       type: "user",
       message: {
@@ -1382,7 +1380,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     // Auto-set tab title from first prompt
     const isFirstMessage = activeTab && activeTab.messages.length === 0;
     const tabTitle = isFirstMessage
-      ? summarizeChatTitle(userPrompt)
+      ? summarizeChatTitle(visiblePrompt)
       : undefined;
 
     set((s) => {
@@ -1393,13 +1391,18 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         sessionId: resumeSessionId,
         isStreaming: true,
         streamingStartedAt,
-        streamingStatus: runtime === "codex" ? "Waiting for Codex…" : null,
+        streamingStatus: null,
         error: null,
+        lastTurnUsage: null,
         pendingTemporaryFilePaths: temporaryFilePathsForAttempt,
         attemptEpoch,
         activeAttemptId: attemptId,
         preflightAttemptEpoch: attemptEpoch,
         resumeRequestId: null,
+        // A new send must not inherit stop tombstones from a prior attempt.
+        cancelledAttempts: [],
+        ...(requestModel ? { runtimeModel: requestModel } : {}),
+        ...(resolvedEffort ? { reasoningEffort: resolvedEffort } : {}),
       };
       if (runtime === "claude") {
         tabUpdates.providerKey = requestProviderKey;
@@ -1474,14 +1477,6 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         }
         prompt = `${ctx}\n\n${userPrompt}`;
       }
-      if (switchingDirectProviderToClaudeCode) {
-        const priorContext = buildProviderSwitchContext(
-          activeTab?.messages ?? [],
-        );
-        if (priorContext) {
-          prompt = `${priorContext}\n\n${prompt}`;
-        }
-      }
       log.info("invoking CLI", {
         promptLength: prompt.length,
         mode: resumeSessionId ? "resume" : "new",
@@ -1500,10 +1495,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         sessionId: resumeSessionId,
         prompt,
         model: requestModel,
-        reasoningEffort:
-          runtime === "claude"
-            ? (tabReasoningEffort ?? effortLevel)
-            : tabReasoningEffort,
+        reasoningEffort: resolvedEffort,
         // Claude CLI accepts `--agent <slug>`; Codex projects selected-agent
         // model/effort/instructions into thread/turn params (no root agentId).
         agentId: selectedAgentId,
@@ -1511,6 +1503,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
           runtime === "claude" ? providerCredentialId : null,
         providerModelOverride:
           runtime === "claude" ? providerModelOverride : null,
+        permissionMode: useSettingsStore.getState().permissionMode,
       });
       pendingRuntimeStarts.set(attemptId, startPromise);
       try {
@@ -1543,9 +1536,11 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         );
       if (cancelledAttempt) {
         set((current) => {
-          const currentTab = current.tabs.find((tab) => tab.id === activeTabId);
+          const tab = current.tabs.find(
+            (candidate) => candidate.id === activeTabId,
+          );
           if (
-            !(currentTab?.cancelledAttempts ?? []).some(
+            !(tab?.cancelledAttempts ?? []).some(
               (cancellation) => cancellation.attemptId === attemptId,
             )
           ) {
@@ -1553,34 +1548,44 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
           }
           return applyTabUpdate(current, activeTabId, {
             isStreaming: true,
-            streamingStartedAt:
-              currentTab?.streamingStartedAt ?? streamingStartedAt,
+            streamingStartedAt: tab?.streamingStartedAt ?? streamingStartedAt,
             error:
               "Unable to confirm that the runtime stopped. Retry Stop before starting another turn.",
           });
         });
         return;
       }
-      if (!isCurrentAttempt() || !isCurrentPreflight()) return;
+      // Prefer surfacing the failure whenever this attempt still owns the tab.
+      const currentTab = get().tabs.find((tab) => tab.id === activeTabId);
+      const newerAttemptTookOver =
+        (currentTab?.attemptEpoch ?? 0) > attemptEpoch ||
+        (currentTab?.activeAttemptId != null &&
+          currentTab.activeAttemptId !== attemptId);
+      if (newerAttemptTookOver) return;
       log.error(
         `sendPrompt failed after ${(performance.now() - sendStart).toFixed(0)}ms`,
         { error: String(err) },
       );
+      const rawError = err?.message || String(err);
+      const error = /already has a nonterminal turn/i.test(rawError)
+        ? "Previous Codex turn was still marked active. Stop and send again."
+        : rawError;
       set((s) =>
         applyTabUpdate(s, activeTabId, {
           isStreaming: false,
           streamingStartedAt: null,
+          streamingStatus: null,
           preflightAttemptEpoch: null,
           activeAttemptId: null,
           pendingTemporaryFilePaths: [],
-          error: err?.message || String(err),
+          error,
         }),
       );
       cleanupDiscardedTemporaryFiles(temporaryFilePathsForAttempt);
     }
   },
 
-  queueGuidance: (tabId, prompt, contextOverride) => {
+  queueGuidance: (tabId, prompt, contextOverride, displayPrompt) => {
     const trimmed = prompt.trim();
     const temporaryFilePaths = contextOverride?.temporaryFilePaths ?? [];
     if (!trimmed) {
@@ -1598,6 +1603,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         {
           id: nextGuidanceId(),
           prompt: trimmed,
+          displayPrompt: displayPrompt?.trim() || undefined,
           contextOverride,
           createdAt: Date.now(),
         },
@@ -2029,6 +2035,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         streamingStartedAt: null,
         totalInputTokens: 0,
         totalOutputTokens: 0,
+        lastTurnUsage: null,
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
         forcedQueuedGuidanceId: null,
@@ -2091,6 +2098,10 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       CLAUDE_CODE_PROVIDER_ID;
     persistSelectedProviderCredentialId(nextSelectedProviderCredentialId);
 
+    for (const outgoing of state.tabs) {
+      void useApprovalStore.getState().cancelForTab(outgoing.id);
+    }
+
     set({
       tabs,
       activeTabId: tab.id,
@@ -2102,11 +2113,19 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       error: tab.error,
       totalInputTokens: tab.totalInputTokens,
       totalOutputTokens: tab.totalOutputTokens,
+      lastTurnUsage: tab.lastTurnUsage ?? null,
       pendingAttachments: [],
       pendingPinnedContextRemovalLabels: [],
       selectedProviderCredentialId: nextSelectedProviderCredentialId,
     });
     cleanupDiscardedTemporaryFiles(discardedTemporaryFilePaths);
+    if (
+      useProviderStore.getState().ready &&
+      get().tabs.find((candidate) => candidate.id === get().activeTabId)
+        ?.runtime === "codex"
+    ) {
+      get().ensureWritableTab();
+    }
     return "reset";
   },
 
@@ -2114,6 +2133,10 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     log.info("Starting new session");
     const { activeTabId, tabs } = get();
     const activeTab = tabs.find((t) => t.id === activeTabId);
+    if (activeTab?.runtime === "codex") {
+      get().ensureWritableTab();
+      return;
+    }
     const projectPath =
       get().activeProjectPath ??
       useDocumentStore.getState().projectRoot ??
@@ -2143,6 +2166,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         error: newTab.error,
         totalInputTokens: newTab.totalInputTokens,
         totalOutputTokens: newTab.totalOutputTokens,
+        lastTurnUsage: newTab.lastTurnUsage ?? null,
         selectedProviderCredentialId: selectedCredentialForProviderKey(
           newTab.providerKey,
         ),
@@ -2150,6 +2174,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       return;
     }
 
+    void useApprovalStore.getState().cancelForTab(activeTabId);
     const discardedTemporaryFilePaths = temporaryFilesOwnedByTab(activeTab);
     set((s) => ({
       ...applyTabUpdate(s, activeTabId, {
@@ -2165,6 +2190,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         streamingStartedAt: null,
         totalInputTokens: 0,
         totalOutputTokens: 0,
+        lastTurnUsage: null,
         title: "New Chat",
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
@@ -2196,14 +2222,22 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     }
     const nextRuntime = wireRuntimeFromPeer(nextPeer);
     const discardedTemporaryFilePaths = temporaryFilesOwnedByTab(tab);
+    void useApprovalStore.getState().cancelForTab(tabId);
     // Keep an API connection selected when entering the API peer so users can
     // switch Claude ↔ API without re-picking a credential every time.
-    const nextProviderKey =
-      nextPeer === "api" &&
-      tab.providerKey &&
-      tab.providerKey !== CLAUDE_CODE_PROVIDER_ID
-        ? tab.providerKey
-        : null;
+    let nextProviderKey: string | null = null;
+    if (nextPeer === "api") {
+      if (tab.providerKey && tab.providerKey !== CLAUDE_CODE_PROVIDER_ID) {
+        nextProviderKey = tab.providerKey;
+      } else if (
+        state.selectedProviderCredentialId &&
+        state.selectedProviderCredentialId !== CLAUDE_CODE_PROVIDER_ID
+      ) {
+        nextProviderKey = providerSessionKey(
+          state.selectedProviderCredentialId,
+        );
+      }
+    }
 
     set((current) => ({
       ...applyTabUpdate(current, tabId, {
@@ -2222,6 +2256,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         error: null,
         totalInputTokens: 0,
         totalOutputTokens: 0,
+        lastTurnUsage: null,
         title: "New Chat",
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
@@ -2316,11 +2351,15 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       if (isBusy(existingTab)) return;
     } else {
       const activeTab = tabs.find((tab) => tab.id === activeTabId);
-      if (activeTab && isBusy(activeTab)) {
+      const mustOpenNewTab =
+        !activeTab ||
+        isBusy(activeTab) ||
+        activeTab.runtime !== reference.runtime;
+      if (mustOpenNewTab) {
         const id = nextTabId();
         const newTab = {
           ...makeDefaultTab(id, reference.projectPath),
-          ...(activeTab.runtime === reference.runtime
+          ...(activeTab?.runtime === reference.runtime
             ? {
                 runtime: activeTab.runtime,
                 chatPeer: chatPeerForTab(activeTab),
@@ -2330,7 +2369,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
               }
             : {}),
           providerKey:
-            activeTab.providerKey ??
+            activeTab?.providerKey ??
             providerKeyForSelectedCredential(
               get().selectedProviderCredentialId,
             ),
@@ -2348,6 +2387,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
           error: newTab.error,
           totalInputTokens: newTab.totalInputTokens,
           totalOutputTokens: newTab.totalOutputTokens,
+          lastTurnUsage: newTab.lastTurnUsage ?? null,
           selectedProviderCredentialId: selectedCredentialForProviderKey(
             newTab.providerKey,
           ),
@@ -2360,6 +2400,36 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     const resumeRequestId = nextResumeRequestId(activeTabId);
     const discardedTemporaryFilePaths = temporaryFilesOwnedByTab(targetTab);
     const runtimeChanged = targetTab.runtime !== reference.runtime;
+    // Keep a rollback snapshot so a failed history read cannot erase the
+    // local draft the user was looking at (common when Codex app-server is cold).
+    const rollbackTab: Partial<TabState> = {
+      messages: targetTab.messages,
+      projectPath: targetTab.projectPath,
+      runtime: targetTab.runtime,
+      chatPeer: chatPeerForTab(targetTab),
+      sessionRef: targetTab.sessionRef,
+      sessionId: targetTab.sessionId,
+      runtimeModel: targetTab.runtimeModel,
+      reasoningEffort: targetTab.reasoningEffort,
+      agentId: targetTab.agentId,
+      providerKey: targetTab.providerKey,
+      sessionProviderKey: targetTab.sessionProviderKey,
+      error: targetTab.error,
+      isStreaming: targetTab.isStreaming,
+      streamingStartedAt: targetTab.streamingStartedAt,
+      totalInputTokens: targetTab.totalInputTokens,
+      totalOutputTokens: targetTab.totalOutputTokens,
+      lastTurnUsage: targetTab.lastTurnUsage,
+      title: targetTab.title,
+      queuedGuidance: targetTab.queuedGuidance,
+      forceQueuedGuidanceOnComplete: targetTab.forceQueuedGuidanceOnComplete,
+      forcedQueuedGuidanceId: targetTab.forcedQueuedGuidanceId,
+      pendingTemporaryFilePaths: targetTab.pendingTemporaryFilePaths,
+      attemptEpoch: targetTab.attemptEpoch,
+      activeAttemptId: targetTab.activeAttemptId,
+      preflightAttemptEpoch: targetTab.preflightAttemptEpoch,
+      resumeRequestId: null,
+    };
 
     set((s) => ({
       ...applyTabUpdate(s, activeTabId, {
@@ -2386,6 +2456,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         streamingStartedAt: null,
         totalInputTokens: 0,
         totalOutputTokens: 0,
+        lastTurnUsage: null,
         title: sessionTitle ?? "New Chat",
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
@@ -2430,10 +2501,22 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         return;
       }
 
-      const messages = conversationHistoryMessages(
+      const remoteMessages = conversationHistoryMessages(
         reference.runtime,
         history.items,
       );
+      // Codex (and cold app-server) can ack a thread while returning zero
+      // history items. Never replace a non-empty local draft with that empty
+      // remote snapshot — that is the "messages disappeared" failure mode.
+      const rollbackMessages = rollbackTab.messages ?? [];
+      const sameSessionAsRollback =
+        rollbackTab.sessionId === reference.sessionId ||
+        rollbackTab.sessionRef?.sessionId === reference.sessionId;
+      const preservedLocal =
+        remoteMessages.length === 0 &&
+        rollbackMessages.length > 0 &&
+        sameSessionAsRollback;
+      const messages = preservedLocal ? rollbackMessages : remoteMessages;
       const titleMessages =
         reference.runtime === "claude"
           ? claudeHistoryMessages(history.items)
@@ -2475,9 +2558,14 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         const nextState = applyTabUpdate(s, activeTabId, {
           messages,
           ...runtimeUpdates,
-          title: sessionTitle ?? titleForMessages(titleMessages) ?? "New Chat",
+          title:
+            sessionTitle ??
+            (preservedLocal ? rollbackTab.title : undefined) ??
+            titleForMessages(titleMessages) ??
+            "New Chat",
           totalInputTokens: totals.inputTokens,
           totalOutputTokens: totals.outputTokens,
+          lastTurnUsage: lastTurnUsageFromMessages(messages),
           resumeRequestId: null,
         });
         return reference.runtime === "claude" && s.activeTabId === activeTabId
@@ -2488,10 +2576,20 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
           : nextState;
       });
     } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : typeof err === "string"
+            ? err
+            : "Failed to load session history";
       log.error("Failed to load session history", { error: String(err) });
       set((s) =>
         ownsHistoryRequest(s)
-          ? applyTabUpdate(s, activeTabId, { resumeRequestId: null })
+          ? applyTabUpdate(s, activeTabId, {
+              ...rollbackTab,
+              error: message || "Failed to load session history",
+              resumeRequestId: null,
+            })
           : {},
       );
     }
@@ -2517,27 +2615,12 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       state.activeProjectPath ??
       useDocumentStore.getState().projectRoot ??
       null;
-    const inheritedProviderKey = activeTab
-      ? (activeTab.providerKey ??
-        providerKeyForSelectedCredential(state.selectedProviderCredentialId))
-      : providerKeyForSelectedCredential(state.selectedProviderCredentialId);
     const newTab = {
       ...makeDefaultTab(id, projectPath),
-      ...(activeTab
-        ? {
-            runtime: activeTab.runtime,
-            chatPeer: peerFromTab({
-              runtime: activeTab.runtime,
-              providerKey: inheritedProviderKey,
-            }),
-            runtimeModel: activeTab.runtimeModel,
-            reasoningEffort: activeTab.reasoningEffort,
-            agentId: activeTab.agentId,
-            providerKey: inheritedProviderKey,
-          }
-        : {
-            providerKey: inheritedProviderKey,
-          }),
+      ...inheritWritableTabSelection(
+        activeTab,
+        state.selectedProviderCredentialId,
+      ),
     };
     set((s) => ({
       tabs: [...s.tabs, newTab],
@@ -2551,6 +2634,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       error: newTab.error,
       totalInputTokens: newTab.totalInputTokens,
       totalOutputTokens: newTab.totalOutputTokens,
+      lastTurnUsage: newTab.lastTurnUsage ?? null,
       selectedProviderCredentialId: selectedCredentialForProviderKey(
         newTab.providerKey,
       ),
@@ -2558,17 +2642,70 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     return id;
   },
 
+  ensureWritableTab: () => {
+    const state = get();
+    const activeTab = state.tabs.find((tab) => tab.id === state.activeTabId);
+    if (activeTab && activeTab.runtime !== "codex") {
+      return activeTab.id;
+    }
+    const projectPath =
+      state.activeProjectPath ??
+      useDocumentStore.getState().projectRoot ??
+      null;
+    const existing = state.tabs.find(
+      (tab) =>
+        tab.runtime !== "codex" &&
+        (!projectPath || tab.projectPath === projectPath),
+    );
+    if (existing) {
+      get().setActiveTab(existing.id);
+      return existing.id;
+    }
+    return get().createTab();
+  },
+
   closeTab: (tabId: string) => {
     const state = get();
     const tab = state.tabs.find((t) => t.id === tabId);
     // Prevent closing a streaming or stopping tab.
     if (tab?.isStreaming || (tab?.cancelledAttempts?.length ?? 0) > 0) return;
-    // Prevent closing the last tab
-    if (state.tabs.length <= 1) return;
 
     const idx = state.tabs.findIndex((t) => t.id === tabId);
     if (idx === -1) return;
     const discardedTemporaryFilePaths = temporaryFilesOwnedByTab(tab);
+    void useApprovalStore.getState().cancelForTab(tabId);
+
+    if (state.tabs.length <= 1) {
+      const projectPath =
+        tab?.projectPath ??
+        state.activeProjectPath ??
+        useDocumentStore.getState().projectRoot ??
+        null;
+      const replacement = {
+        ...makeDefaultTab(nextTabId(), projectPath),
+        ...inheritWritableTabSelection(tab, state.selectedProviderCredentialId),
+      };
+      const nextSelectedProviderCredentialId =
+        selectedCredentialForProviderKey(replacement.providerKey) ??
+        CLAUDE_CODE_PROVIDER_ID;
+      persistSelectedProviderCredentialId(nextSelectedProviderCredentialId);
+      set({
+        tabs: [replacement],
+        activeTabId: replacement.id,
+        activeProjectPath: replacement.projectPath,
+        messages: replacement.messages,
+        sessionId: replacement.sessionId,
+        isStreaming: replacement.isStreaming,
+        streamingStartedAt: replacement.streamingStartedAt,
+        error: replacement.error,
+        totalInputTokens: replacement.totalInputTokens,
+        totalOutputTokens: replacement.totalOutputTokens,
+        lastTurnUsage: replacement.lastTurnUsage ?? null,
+        selectedProviderCredentialId: nextSelectedProviderCredentialId,
+      });
+      cleanupDiscardedTemporaryFiles(discardedTemporaryFilePaths);
+      return;
+    }
 
     const newTabs = state.tabs.filter((t) => t.id !== tabId);
 
@@ -2592,6 +2729,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         error: newActive.error,
         totalInputTokens: newActive.totalInputTokens,
         totalOutputTokens: newActive.totalOutputTokens,
+        lastTurnUsage: newActive.lastTurnUsage ?? null,
         selectedProviderCredentialId: nextSelectedProviderCredentialId,
       });
     } else {
@@ -2621,8 +2759,28 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       error: targetTab.error,
       totalInputTokens: targetTab.totalInputTokens,
       totalOutputTokens: targetTab.totalOutputTokens,
+      lastTurnUsage: targetTab.lastTurnUsage ?? null,
       selectedProviderCredentialId: nextSelectedProviderCredentialId,
     });
+
+    const emptyShell =
+      targetTab.messages.length === 0 &&
+      !targetTab.isStreaming &&
+      Boolean(targetTab.sessionRef?.sessionId || targetTab.sessionId);
+    if (emptyShell) {
+      const reference: ConversationRef | null =
+        targetTab.sessionRef ??
+        (targetTab.sessionId && targetTab.projectPath
+          ? {
+              runtime: targetTab.runtime,
+              projectPath: targetTab.projectPath,
+              sessionId: targetTab.sessionId,
+            }
+          : null);
+      if (reference) {
+        void get().resumeConversation(reference, targetTab.title);
+      }
+    }
   },
 
   saveDraft: (tabId: string, draft: TabDraft) => {
@@ -2637,9 +2795,13 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     set((state) => {
       const { input_tokens: inputDelta, output_tokens: outputDelta } =
         usageFromMessage(msg);
+      const incomingUsage = parseUsageFields(msg.usage || msg.message?.usage);
 
       const tab = state.tabs.find((t) => t.id === tabId);
       if (!tab) return {};
+      const lastTurnUsage = snapshotHasTokens(incomingUsage)
+        ? mergeTokenUsageSnapshots(tab.lastTurnUsage, incomingUsage)
+        : undefined;
 
       if (msg.type === "assistant" && msg.subtype === "streaming_delta") {
         const last = tab.messages[tab.messages.length - 1];
@@ -2658,6 +2820,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
               messages: [...tab.messages.slice(0, -1), merged],
               totalInputTokens: tab.totalInputTokens + inputDelta,
               totalOutputTokens: tab.totalOutputTokens + outputDelta,
+              ...(lastTurnUsage ? { lastTurnUsage } : {}),
             });
           }
         }
@@ -2680,6 +2843,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
             messages: [...tab.messages.slice(0, -1), finalized],
             totalInputTokens: tab.totalInputTokens + inputDelta,
             totalOutputTokens: tab.totalOutputTokens + outputDelta,
+            ...(lastTurnUsage ? { lastTurnUsage } : {}),
           });
         }
       }
@@ -2688,6 +2852,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         messages: [...tab.messages, msg],
         totalInputTokens: tab.totalInputTokens + inputDelta,
         totalOutputTokens: tab.totalOutputTokens + outputDelta,
+        ...(lastTurnUsage ? { lastTurnUsage } : {}),
       });
     });
   },
@@ -2754,21 +2919,45 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     });
   },
 
+  _clearActiveAttempt: (tabId: string, attemptId: string) => {
+    set((state) => {
+      const tab = state.tabs.find((candidate) => candidate.id === tabId);
+      if (!tab || tab.activeAttemptId !== attemptId) return {};
+      return applyTabUpdate(state, tabId, { activeAttemptId: null });
+    });
+  },
+
   _setStreamingStatus: (tabId: string, status: string | null) => {
-    set((state) => applyTabUpdate(state, tabId, { streamingStatus: status }));
+    set((state) => {
+      const tab = state.tabs.find((candidate) => candidate.id === tabId);
+      if (!tab || (tab.streamingStatus ?? null) === status) return {};
+      return applyTabUpdate(state, tabId, { streamingStatus: status });
+    });
   },
 
   _setError: (tabId: string, error: string | null) => {
     set((state) => applyTabUpdate(state, tabId, { error }));
   },
 
-  _addUsage: (tabId: string, inputTokens: number, outputTokens: number) => {
+  _addUsage: (
+    tabId: string,
+    inputTokens: number,
+    outputTokens: number,
+    extras?: { cacheReadTokens?: number; cacheCreationTokens?: number },
+  ) => {
     set((state) => {
       const tab = state.tabs.find((candidate) => candidate.id === tabId);
       if (!tab) return {};
+      const lastTurnUsage = mergeTokenUsageSnapshots(tab.lastTurnUsage, {
+        inputTokens,
+        outputTokens,
+        cacheReadTokens: extras?.cacheReadTokens || 0,
+        cacheCreationTokens: extras?.cacheCreationTokens || 0,
+      });
       return applyTabUpdate(state, tabId, {
         totalInputTokens: tab.totalInputTokens + inputTokens,
         totalOutputTokens: tab.totalOutputTokens + outputTokens,
+        lastTurnUsage,
       });
     });
   },
@@ -2803,19 +2992,18 @@ useClaudeChatStore.subscribe((state, previousState) => {
   if (projectPath === null) return;
   const tabs = state.tabs.filter((tab) => tab.projectPath === projectPath);
   if (tabs.length === 0) return;
-  const projected = projectPersistedChat({
-    activeTabId: state.activeTabId,
-    tabs,
-  });
   const previousTabs = previousState.tabs.filter(
     (tab) => tab.projectPath === projectPath,
   );
-  if (previousTabs.length > 0) {
-    const previousProjected = projectPersistedChat({
-      activeTabId: previousState.activeTabId,
-      tabs: previousTabs,
-    });
-    if (JSON.stringify(projected) === JSON.stringify(previousProjected)) return;
+  if (
+    previousTabs.length > 0 &&
+    state.activeTabId === previousState.activeTabId &&
+    samePersistableTabs(tabs, previousTabs)
+  ) {
+    return;
   }
-  writePersistedChatForProject(projectPath, projected);
+  writePersistedChatForProject(projectPath, {
+    activeTabId: state.activeTabId,
+    tabs,
+  });
 });

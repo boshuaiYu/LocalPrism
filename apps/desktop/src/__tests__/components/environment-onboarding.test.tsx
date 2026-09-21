@@ -3,13 +3,17 @@ import { createRoot, type Root } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EnvironmentOnboarding } from "@/components/environment-onboarding";
-import type { RuntimeAccount, RuntimeKind } from "@/runtime/types";
-import { useClaudeSetupStore } from "@/stores/claude-setup-store";
 import {
-  resetRuntimeStoreForTests,
-  type RuntimeState,
-  useRuntimeStore,
-} from "@/stores/runtime-store";
+  markWelcomeCompleted,
+  resetWelcomeCompletedForTests,
+} from "@/lib/welcome";
+import { useClaudeSetupStore } from "@/stores/claude-setup-store";
+import { useDocumentStore } from "@/stores/document-store";
+import {
+  resetProviderStoreForTests,
+  useProviderStore,
+} from "@/stores/provider-store";
+import { resetDefaultSkillPacksForTests } from "@/stores/skill-store";
 
 const mocks = vi.hoisted(() => ({
   uvCheckStatus: vi.fn().mockResolvedValue(undefined),
@@ -34,14 +38,13 @@ vi.mock("@/stores/uv-setup-store", () => {
 });
 
 vi.mock("@/components/runtime/runtime-settings", () => ({
-  RuntimeSettings: (props: { refreshOnMount?: boolean }) => {
+  RuntimeSettings: (props: {
+    refreshOnMount?: boolean;
+    showEngine?: boolean;
+  }) => {
     mocks.runtimeSettingsProps.push(props);
     return <div data-testid="runtime-settings">Runtime settings</div>;
   },
-}));
-
-vi.mock("@/components/claude-setup", () => ({
-  ClaudeSetup: () => <div>Legacy Claude setup</div>,
 }));
 
 vi.mock("@/components/ui/dialog", () => ({
@@ -64,51 +67,30 @@ vi.mock("@/components/ui/dialog", () => ({
   ),
 }));
 
-function account(
-  runtime: RuntimeKind,
-  overrides: Partial<RuntimeAccount> = {},
-): RuntimeAccount {
-  return {
-    runtime,
-    installed: false,
-    authenticated: false,
-    version: null,
-    accountLabel: null,
-    authMode: null,
-    capabilities: {
-      models: false,
-      skills: false,
-      customAgents: false,
-      subagents: false,
-      approvals: false,
-    },
-    error: null,
-    ...overrides,
-  };
-}
-
 describe("EnvironmentOnboarding", () => {
   let container: HTMLDivElement;
   let root: Root;
-  let refresh = vi.fn<RuntimeState["refresh"]>();
+  let refresh = vi.fn(async () => undefined);
   let checkClaudeStatus =
     vi.fn<ReturnType<typeof useClaudeSetupStore.getState>["checkStatus"]>();
 
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
+    resetDefaultSkillPacksForTests();
+    resetWelcomeCompletedForTests();
+    markWelcomeCompleted();
     mocks.uvCheckStatus.mockClear();
     mocks.finishUvInstall.mockClear();
     mocks.runtimeSettingsProps.length = 0;
-    resetRuntimeStoreForTests();
-    refresh = vi.fn<RuntimeState["refresh"]>().mockResolvedValue(undefined);
-    useRuntimeStore.setState((state) => ({
-      accounts: {
-        claude: account("claude"),
-        codex: account("codex"),
-      },
+    resetProviderStoreForTests();
+    useDocumentStore.setState({ projectRoot: null });
+    refresh = vi.fn(async () => undefined);
+    useProviderStore.setState({
+      ready: false,
+      engineInstalled: false,
+      activeAuthenticated: false,
       refresh,
-      loading: state.loading,
-    }));
+    });
     checkClaudeStatus = vi
       .fn<ReturnType<typeof useClaudeSetupStore.getState>["checkStatus"]>()
       .mockResolvedValue(undefined);
@@ -116,6 +98,7 @@ describe("EnvironmentOnboarding", () => {
       status: "not-installed",
       error: null,
       checkStatus: checkClaudeStatus,
+      ensureEngine: vi.fn(async () => undefined),
     });
 
     container = document.createElement("div");
@@ -129,7 +112,12 @@ describe("EnvironmentOnboarding", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
-    resetRuntimeStoreForTests();
+    resetProviderStoreForTests();
+    useDocumentStore.setState({ projectRoot: null });
+    useClaudeSetupStore.setState({
+      ensureEngine: useClaudeSetupStore.getInitialState().ensureEngine,
+      checkStatus: useClaudeSetupStore.getInitialState().checkStatus,
+    });
   });
 
   async function renderOnboarding(): Promise<void> {
@@ -140,128 +128,124 @@ describe("EnvironmentOnboarding", () => {
     });
   }
 
-  function doneButton(): HTMLButtonElement {
+  function buttonNamed(name: string): HTMLButtonElement {
     const button = Array.from(container.querySelectorAll("button")).find(
-      (candidate) => candidate.textContent === "Done",
+      (candidate) => candidate.textContent === name,
     );
     if (!(button instanceof HTMLButtonElement)) {
-      throw new Error("Done button was not rendered");
+      throw new Error(`${name} button was not rendered`);
     }
     return button;
   }
 
-  async function makeReady(runtime: RuntimeKind): Promise<void> {
+  async function makeReady(): Promise<void> {
     await act(async () => {
-      useRuntimeStore.setState((state) => ({
-        accounts: {
-          ...state.accounts,
-          [runtime]: account(runtime, {
-            installed: true,
-            authenticated: true,
-          }),
-        },
-      }));
+      useProviderStore.setState({
+        ready: true,
+        engineInstalled: true,
+        activeAuthenticated: true,
+      });
     });
   }
 
-  it("opens with runtime settings and disables Done when neither runtime is ready", async () => {
+  it("stays hidden while first-run welcome is still incomplete", async () => {
+    resetWelcomeCompletedForTests();
+    await renderOnboarding();
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it("allows entering the workspace when no provider is ready", async () => {
     await renderOnboarding();
 
     expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(container.textContent).toMatch(/API key/i);
+    expect(container.textContent).toMatch(/optional/i);
+    expect(container.textContent).not.toMatch(
+      /Pick one provider card — Claude Official/,
+    );
     expect(
       container.querySelector('[data-testid="runtime-settings"]'),
     ).not.toBeNull();
-    expect(doneButton().disabled).toBe(true);
+    const action = buttonNamed("Skip model setup");
+    expect(action.disabled).toBe(false);
+
+    await act(async () => action.click());
+
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
   });
 
   it("does not let nested settings repeat the completed startup refresh", async () => {
     await renderOnboarding();
 
     expect(refresh).toHaveBeenCalledTimes(1);
-    expect(refresh).toHaveBeenCalledWith(undefined, { silent: true });
     expect(
       mocks.runtimeSettingsProps[mocks.runtimeSettingsProps.length - 1],
     ).toEqual({
       refreshOnMount: false,
+      showEngine: false,
     });
   });
 
-  it("uses a silent startup refresh so hung status cannot fake Installing", async () => {
+  it("enables Done when the active provider becomes ready", async () => {
     await renderOnboarding();
+    await makeReady();
 
-    expect(refresh).toHaveBeenCalledWith(undefined, { silent: true });
-    expect(refresh.mock.calls[0]?.[1]).toEqual({ silent: true });
+    expect(buttonNamed("Done").disabled).toBe(false);
   });
 
-  it.each([
-    "claude",
-    "codex",
-  ] as const)("enables Done when only %s becomes ready", async (runtime) => {
-    await renderOnboarding();
-    await makeReady(runtime);
-
-    expect(doneButton().disabled).toBe(false);
-  });
-
-  it("allows one ready runtime even when the other runtime has an error", async () => {
-    await renderOnboarding();
-
-    await act(async () => {
-      useRuntimeStore.setState({
-        accounts: {
-          claude: account("claude", { error: "Claude unavailable" }),
-          codex: account("codex", {
-            installed: true,
-            authenticated: true,
-          }),
-        },
-      });
-    });
-
-    expect(doneButton().disabled).toBe(false);
-  });
-
-  it("does not check uv or skills because neither participates in the gate", async () => {
+  it("does not check uv because it does not participate in the gate", async () => {
     await renderOnboarding();
 
     expect(mocks.uvCheckStatus).not.toHaveBeenCalled();
-    expect(invoke).not.toHaveBeenCalled();
   });
 
-  it.each([
-    "claude",
-    "codex",
-  ] as const)("does not open on startup when %s is already ready", async (runtime) => {
-    useRuntimeStore.setState((state) => ({
-      accounts: {
-        ...state.accounts,
-        [runtime]: account(runtime, {
-          installed: true,
-          authenticated: true,
-        }),
-      },
-    }));
+  it("stays hidden while a project is open so account changes do not bounce home", async () => {
+    useDocumentStore.setState({ projectRoot: "C:/paper" });
+    useProviderStore.setState({
+      ready: false,
+      engineInstalled: true,
+      activeAuthenticated: false,
+    });
 
     await renderOnboarding();
 
     expect(container.querySelector('[role="dialog"]')).toBeNull();
   });
 
-  it("never opens when startup refresh authenticates a runtime before the initial check settles", async () => {
+  it("closes the homepage gate as soon as a project is opened", async () => {
+    await renderOnboarding();
+    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+
+    await act(async () => {
+      useDocumentStore.setState({ projectRoot: "C:/paper" });
+    });
+
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it("does not open on startup when a provider is already ready", async () => {
+    useProviderStore.setState({
+      ready: true,
+      engineInstalled: true,
+      activeAuthenticated: true,
+    });
+
+    await renderOnboarding();
+
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it("never opens when startup refresh authenticates a provider before the initial check settles", async () => {
     let finishRefresh: (() => void) | undefined;
     const refreshPending = new Promise<void>((resolve) => {
       finishRefresh = resolve;
     });
     refresh.mockImplementationOnce(async () => {
-      useRuntimeStore.setState((state) => ({
-        accounts: {
-          ...state.accounts,
-          codex: account("codex", {
-            installed: true,
-            authenticated: true,
-          }),
-        },
-      }));
+      useProviderStore.setState({
+        ready: true,
+        engineInstalled: true,
+        activeAuthenticated: true,
+      });
       await refreshPending;
     });
 
@@ -292,15 +276,11 @@ describe("EnvironmentOnboarding", () => {
       finishClaudeCheck = resolve;
     });
     refresh.mockImplementation(async () => {
-      useRuntimeStore.setState((state) => ({
-        accounts: {
-          ...state.accounts,
-          codex: account("codex", {
-            installed: true,
-            authenticated: true,
-          }),
-        },
-      }));
+      useProviderStore.setState({
+        ready: true,
+        engineInstalled: true,
+        activeAuthenticated: true,
+      });
       await refreshPending;
     });
     checkClaudeStatus.mockImplementation(async () => {
@@ -344,44 +324,37 @@ describe("EnvironmentOnboarding", () => {
 
   it("keeps an opened setup visible after authentication until Done is clicked", async () => {
     await renderOnboarding();
-    await makeReady("codex");
+    await makeReady();
 
     expect(container.querySelector('[role="dialog"]')).not.toBeNull();
-    expect(doneButton().disabled).toBe(false);
+    expect(buttonNamed("Done").disabled).toBe(false);
 
-    await act(async () => doneButton().click());
+    await act(async () => buttonNamed("Done").click());
 
     expect(container.querySelector('[role="dialog"]')).toBeNull();
   });
 
-  it("does not reopen a dismissed setup for an error while another runtime stays ready", async () => {
+  it("does not reopen after continuing without AI when provider readiness changes", async () => {
     await renderOnboarding();
-    await makeReady("codex");
-    await act(async () => doneButton().click());
 
-    await act(async () => {
-      useRuntimeStore.setState((state) => ({
-        accounts: {
-          ...state.accounts,
-          claude: account("claude", { error: "Claude unavailable" }),
-        },
-      }));
-    });
+    await act(async () => buttonNamed("Skip model setup").click());
+
+    await makeReady();
 
     expect(container.querySelector('[role="dialog"]')).toBeNull();
   });
 
-  it("finishes the initial check when both startup checks reject", async () => {
-    refresh.mockRejectedValueOnce(new Error("runtime status failed"));
+  it("still allows entering when both startup checks reject", async () => {
+    refresh.mockRejectedValueOnce(new Error("provider status failed"));
     checkClaudeStatus.mockRejectedValueOnce(new Error("legacy status failed"));
 
     await renderOnboarding();
 
     expect(container.querySelector('[role="dialog"]')).not.toBeNull();
-    expect(doneButton().disabled).toBe(true);
+    expect(buttonNamed("Skip model setup").disabled).toBe(false);
   });
 
-  it("uses a wide vertically scrollable dialog for both runtime cards", async () => {
+  it("uses a wide vertically scrollable dialog for provider cards", async () => {
     await renderOnboarding();
 
     const content = container.querySelector(

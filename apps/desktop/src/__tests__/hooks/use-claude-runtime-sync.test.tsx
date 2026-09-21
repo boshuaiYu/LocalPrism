@@ -10,7 +10,12 @@ import {
   vi,
 } from "vitest";
 import { useClaudeRuntimeSync } from "@/hooks/use-claude-runtime-sync";
+import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import { useClaudeSetupStore } from "@/stores/claude-setup-store";
+import {
+  resetProviderStoreForTests,
+  useProviderStore,
+} from "@/stores/provider-store";
 import {
   resetRuntimeStoreForTests,
   type RuntimeState,
@@ -26,11 +31,15 @@ describe("useClaudeRuntimeSync", () => {
   let container: HTMLDivElement;
   let root: Root;
   let refresh: Mock<RuntimeState["refresh"]>;
+  let providerRefresh: Mock;
 
   beforeEach(() => {
     resetRuntimeStoreForTests();
+    resetProviderStoreForTests();
     refresh = vi.fn<RuntimeState["refresh"]>().mockResolvedValue(undefined);
+    providerRefresh = vi.fn().mockResolvedValue(undefined);
     useRuntimeStore.setState({ refresh });
+    useProviderStore.setState({ refresh: providerRefresh });
     useClaudeSetupStore.setState({ status: "checking", error: null });
     container = document.createElement("div");
     document.body.append(container);
@@ -44,6 +53,7 @@ describe("useClaudeRuntimeSync", () => {
     await act(async () => root.unmount());
     container.remove();
     resetRuntimeStoreForTests();
+    resetProviderStoreForTests();
   });
 
   async function renderProbe() {
@@ -96,6 +106,82 @@ describe("useClaudeRuntimeSync", () => {
     });
 
     expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("snaps leftover Claude aliases onto the live provider catalog", async () => {
+    useClaudeChatStore.setState({
+      selectedModel: "opus",
+      tabs: [
+        {
+          ...useClaudeChatStore.getState().tabs[0],
+          runtimeModel: "sonnet",
+        },
+      ],
+    });
+    await renderProbe();
+
+    await act(async () => {
+      useProviderStore.setState({
+        activeId: "chatgpt-official",
+        models: [
+          {
+            id: "gpt-5.4",
+            displayName: "GPT-5.4",
+            reasoningEfforts: ["medium"],
+            isDefault: true,
+          },
+          {
+            id: "gpt-5.3-codex",
+            displayName: "Codex",
+            reasoningEfforts: ["medium"],
+            isDefault: false,
+          },
+        ],
+      });
+      await Promise.resolve();
+    });
+
+    expect(useClaudeChatStore.getState().selectedModel).toBe("gpt-5.4");
+    expect(useClaudeChatStore.getState().tabs[0]?.runtimeModel).toBe("gpt-5.4");
+  });
+
+  it("keeps an explicit Terra selection", async () => {
+    useClaudeChatStore.setState({
+      selectedModel: "gpt-5.6-terra",
+      tabs: [
+        {
+          ...useClaudeChatStore.getState().tabs[0],
+          runtimeModel: "gpt-5.6-terra",
+        },
+      ],
+    });
+    await renderProbe();
+
+    await act(async () => {
+      useProviderStore.setState({
+        activeId: "chatgpt-official",
+        models: [
+          {
+            id: "gpt-5.5",
+            displayName: "GPT-5.5",
+            reasoningEfforts: ["low", "medium", "high"],
+            isDefault: true,
+          },
+          {
+            id: "gpt-5.6-terra",
+            displayName: "GPT-5.6 Terra",
+            reasoningEfforts: ["low", "medium", "high", "xhigh"],
+            isDefault: false,
+          },
+        ],
+      });
+      await Promise.resolve();
+    });
+
+    expect(useClaudeChatStore.getState().selectedModel).toBe("gpt-5.6-terra");
+    expect(useClaudeChatStore.getState().tabs[0]?.runtimeModel).toBe(
+      "gpt-5.6-terra",
+    );
   });
 
   it("unsubscribes on unmount", async () => {

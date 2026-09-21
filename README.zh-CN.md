@@ -22,11 +22,11 @@
 
 <p align="center">
   <a href="https://claudeprism.delibae.dev?utm_source=github&utm_medium=readme&utm_campaign=launch_v054">官网</a> ·
-  <a href="https://github.com/delibae/claude-prism/releases/latest/download/ClaudePrism-macOS.dmg">macOS (Apple Silicon)</a> ·
-  <a href="https://github.com/delibae/claude-prism/releases/latest/download/ClaudePrism-macOS-Intel.dmg">macOS (Intel)</a> ·
-  <a href="https://github.com/delibae/claude-prism/releases/latest/download/ClaudePrism-Windows-setup.exe">Windows</a> ·
-  <a href="https://github.com/delibae/claude-prism/releases/latest/download/ClaudePrism-Linux.AppImage">Linux</a> ·
-  <a href="https://github.com/delibae/claude-prism/releases">所有版本</a>
+  <a href="https://github.com/boshuaiYu/claude-prism/releases/latest/download/LocalPrism-macOS.dmg">macOS (Apple Silicon)</a> ·
+  <a href="https://github.com/boshuaiYu/claude-prism/releases/latest/download/LocalPrism-macOS-Intel.dmg">macOS (Intel)</a> ·
+  <a href="https://github.com/boshuaiYu/claude-prism/releases/latest/download/LocalPrism-Windows-setup.exe">Windows</a> ·
+  <a href="https://github.com/boshuaiYu/claude-prism/releases/latest/download/LocalPrism-Linux.AppImage">Linux</a> ·
+  <a href="https://github.com/boshuaiYu/claude-prism/releases">所有版本</a>
 </p>
 
 ---
@@ -91,7 +91,7 @@ ClaudePrism 集成了 [uv](https://docs.astral.sh/uv/) — 快速的 Python 包�
 Tectonic 直接嵌入应用中。包在首次使用时下载一次并本地缓存。之后编译完全离线，无需安装 TeX Live。
 
 ### 截图询问
-按 `⌘X` 进入截图模式，拖动选择 PDF 中的任意区域 — 截图会固定到聊天输入框，您可以立即向 Claude 询问。非常适合询问公式、图表、表格或审稿意见。
+按 `⌘⇧X`（Windows/Linux：`Ctrl+Shift+X`）进入截图模式，拖动选择 PDF 中的任意区域 — 截图会固定到聊天输入框，您可以立即向 Claude 询问。`⌘X` / `Ctrl+X` 仍是剪切。非常适合询问公式、图表、表格或审稿意见。
 
 ### 实时 PDF 预览
 原生 MuPDF 渲染，支持 SyncTeX — 点击 PDF 中的位置跳转到相应的源代码行。支持缩放、文本选择和截图。
@@ -109,7 +109,7 @@ CodeMirror 6，支持 LaTeX/BibTeX 语法高亮、实时错误检查、查找和
 
 ## 安装
 
-从 [GitHub Releases](https://github.com/delibae/claude-prism/releases) 下载最新版本。
+从 [GitHub Releases](https://github.com/boshuaiYu/claude-prism/releases) 下载最新版本。
 
 ## 贡献
 

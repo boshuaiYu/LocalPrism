@@ -5,15 +5,24 @@ import { invoke } from "@tauri-apps/api/core";
 import { useAgentRunStore } from "@/stores/agent-run-store";
 import type { AgentRun } from "@/runtime/types";
 
-const chatState = {
+const chatState: {
+  activeTabId: string;
+  activeProjectPath: string;
+  tabs: Array<{
+    id: string;
+    sessionId: string;
+    runtime: "claude" | "codex";
+    chatPeer: "claude" | "codex" | "api";
+  }>;
+} = {
   activeTabId: "tab-1",
   activeProjectPath: "/tmp/paper",
   tabs: [
     {
       id: "tab-1",
       sessionId: "root",
-      runtime: "codex" as const,
-      chatPeer: "codex" as const,
+      runtime: "codex",
+      chatPeer: "codex",
     },
   ],
 };

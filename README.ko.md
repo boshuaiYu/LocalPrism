@@ -24,21 +24,21 @@
   <a href="https://claudeprism.delibae.dev?utm_source=github&utm_medium=readme&utm_campaign=launch_v054">
     <img src="https://img.shields.io/badge/Website-claudeprism.dev-blue?style=flat-square&logo=googlechrome&logoColor=white" alt="Website" />
   </a>&nbsp;
-  <a href="https://github.com/delibae/claude-prism/releases/latest/download/ClaudePrism-macOS.dmg">
+  <a href="https://github.com/boshuaiYu/claude-prism/releases/latest/download/LocalPrism-macOS.dmg">
     <img src="https://img.shields.io/badge/Download-macOS_(Apple_Silicon)-black?style=for-the-badge&logo=apple&logoColor=white" alt="macOS (Apple Silicon) 다운로드" />
   </a>&nbsp;
-  <a href="https://github.com/delibae/claude-prism/releases/latest/download/ClaudePrism-macOS-Intel.dmg">
+  <a href="https://github.com/boshuaiYu/claude-prism/releases/latest/download/LocalPrism-macOS-Intel.dmg">
     <img src="https://img.shields.io/badge/Download-macOS_(Intel)-555555?style=for-the-badge&logo=apple&logoColor=white" alt="macOS (Intel) 다운로드" />
   </a>&nbsp;
-  <a href="https://github.com/delibae/claude-prism/releases/latest/download/ClaudePrism-Windows-setup.exe">
+  <a href="https://github.com/boshuaiYu/claude-prism/releases/latest/download/LocalPrism-Windows-setup.exe">
     <img src="https://img.shields.io/badge/Download-Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 다운로드" />
   </a>&nbsp;
-  <a href="https://github.com/delibae/claude-prism/releases/latest/download/ClaudePrism-Linux.AppImage">
+  <a href="https://github.com/boshuaiYu/claude-prism/releases/latest/download/LocalPrism-Linux.AppImage">
     <img src="https://img.shields.io/badge/Download-Linux_(AppImage)-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux 다운로드" />
   </a>
 </p>
 <p align="center">
-  <a href="https://github.com/delibae/claude-prism/releases">
+  <a href="https://github.com/boshuaiYu/claude-prism/releases">
     <img src="https://img.shields.io/github/v/release/delibae/claude-prism?style=flat-square&label=Latest%20Release&color=green" alt="Latest Release" />
   </a>
 </p>
@@ -122,7 +122,7 @@ ClaudePrism은 빠른 Python 패키지 관리자인 [uv](https://docs.astral.sh/
 Tectonic이 앱에 직접 내장되어 있습니다. 패키지는 처음 사용 시 한 번 다운로드되어 로컬에 캐시됩니다. 이후에는 TeX Live 설치 없이 완전히 오프라인으로 컴파일됩니다.
 
 ### 캡처 & 질문
-`⌘X`를 눌러 캡처 모드에 진입하고 PDF의 원하는 영역을 드래그하면 — 캡처된 이미지가 채팅 입력창에 고정되어 바로 Claude에게 질문할 수 있습니다. 수식, 그림, 표, 리뷰어 코멘트에 대해 질문하기에 좋습니다.
+`⌘⇧X`(Windows/Linux: `Ctrl+Shift+X`)를 눌러 캡처 모드에 진입하고 PDF의 원하는 영역을 드래그하면 — 캡처된 이미지가 채팅 입력창에 고정되어 바로 Claude에게 질문할 수 있습니다. `⌘X` / `Ctrl+X`는 잘라내기로 유지됩니다. 수식, 그림, 표, 리뷰어 코멘트에 대해 질문하기에 좋습니다.
 
 <p align="center">
   <img src="./assets/demo/capture_ask.webp" alt="캡처 & 질문" width="700" />
@@ -149,7 +149,7 @@ LaTeX/BibTeX 구문 강조, 실시간 오류 린팅, 찾기 & 바꾸기(정규�
 
 ## 설치
 
-[GitHub Releases](https://github.com/delibae/claude-prism/releases)에서 최신 빌드를 다운로드하세요.
+[GitHub Releases](https://github.com/boshuaiYu/claude-prism/releases)에서 최신 빌드를 다운로드하세요.
 
 ## 기여
 

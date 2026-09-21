@@ -4,6 +4,7 @@ import {
   exists,
   mkdir,
   readDir,
+  readFile,
   readTextFile,
   remove,
   rename,
@@ -1165,6 +1166,43 @@ describe("useDocumentStore", () => {
         useDocumentStore.getState().files.map((file) => file.relativePath),
       ).toEqual(["latest.tex"]);
       expect(useDocumentStore.getState().files[0]?.content).toBe("latest");
+    });
+
+    it("does not bump contentGeneration when refresh only adds a non-tex file", async () => {
+      useDocumentStore.setState({
+        contentGeneration: 4,
+        fileTreeGeneration: 1,
+      });
+      vi.mocked(readDir).mockResolvedValue([
+        { name: "main.tex", isDirectory: false },
+        { name: "shot.png", isDirectory: false },
+      ] as any);
+      vi.mocked(readTextFile).mockResolvedValue("Hello World");
+      vi.mocked(stat).mockResolvedValue({ size: 16 } as any);
+      vi.mocked(readFile).mockResolvedValue(
+        new Uint8Array([1, 2, 3, 4]) as any,
+      );
+
+      await useDocumentStore.getState().refreshFiles();
+
+      expect(useDocumentStore.getState().contentGeneration).toBe(4);
+      expect(useDocumentStore.getState().fileTreeGeneration).toBe(2);
+      expect(
+        useDocumentStore.getState().files.map((file) => file.relativePath),
+      ).toEqual(["main.tex", "shot.png"]);
+    });
+
+    it("bumps contentGeneration when refresh sees tex content change", async () => {
+      useDocumentStore.setState({ contentGeneration: 4 });
+      vi.mocked(readDir).mockResolvedValue([
+        { name: "main.tex", isDirectory: false },
+      ] as any);
+      vi.mocked(readTextFile).mockResolvedValue("Changed tex");
+
+      await useDocumentStore.getState().refreshFiles();
+
+      expect(useDocumentStore.getState().contentGeneration).toBe(5);
+      expect(useDocumentStore.getState().files[0]?.content).toBe("Changed tex");
     });
 
     it("does not overwrite an unsaved edit made while a refresh is reading disk", async () => {

@@ -29,6 +29,7 @@ import {
   runProjectFsOperationAfterDrain,
 } from "@/lib/project-fs-operations";
 import { writeProjectTextFileInOrder } from "@/lib/project-file-writes";
+import { newProjectFileTemplate } from "@/lib/new-project-file";
 
 const log = createLogger("document");
 const PROJECT_RENAME_LOCK_RETRY_DELAYS_MS = [150, 300, 600, 1000];
@@ -61,6 +62,19 @@ function captureProjectOwner(state: DocumentState): ProjectOwner | null {
         projectGeneration: state.projectGeneration,
       }
     : null;
+}
+
+export function compileRelevantSignature(
+  files: readonly Pick<ProjectFile, "relativePath" | "type" | "content">[],
+): string {
+  return files
+    .filter(
+      (file) =>
+        file.type === "tex" || file.type === "bib" || file.type === "style",
+    )
+    .map((file) => `${file.relativePath}\u0000${file.content ?? ""}`)
+    .sort()
+    .join("\n");
 }
 
 function stillOwnsProject(
@@ -212,7 +226,7 @@ interface DocumentState {
   saveCurrentFile: () => Promise<void>;
   createNewFile: (
     name: string,
-    type: "tex" | "image",
+    type: "tex" | "image" | "markdown",
     folder?: string,
   ) => Promise<void>;
   createFolder: (name: string, parentFolder?: string) => Promise<void>;
@@ -607,10 +621,12 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
           f.type === "tex" ||
           f.type === "bib" ||
           f.type === "style" ||
+          f.type === "markdown" ||
           f.type === "other"
         ) {
           const isLargeNonEssential =
-            f.type === "other" && f.fileSize > LARGE_FILE_THRESHOLD;
+            (f.type === "other" || f.type === "markdown") &&
+            f.fileSize > LARGE_FILE_THRESHOLD;
           if (!isLargeNonEssential) {
             try {
               pf.content = await readTexFileContent(f.absolutePath);
@@ -1496,10 +1512,7 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
     if (!owner) return;
 
     const relativePath = folder ? `${folder}/${name}` : name;
-    const isTexFile = name.endsWith(".tex") || name.endsWith(".ltx");
-    const content = isTexFile
-      ? `\\documentclass{article}\n\n\\begin{document}\n\n% Your content here\n\n\\end{document}\n`
-      : "";
+    const content = newProjectFileTemplate(name, type);
 
     const fullPath = await runProjectFsOperation(owner, () =>
       createFileOnDisk(state.projectRoot!, relativePath, content),
@@ -1779,7 +1792,11 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
     const projectGeneration = state.projectGeneration;
     const refreshRequestGeneration = state.refreshRequestGeneration;
 
-    if (file.type === "tex" || file.type === "bib") {
+    if (
+      file.type === "tex" ||
+      file.type === "bib" ||
+      file.type === "markdown"
+    ) {
       const content = await readTexFileContent(file.absolutePath);
       set((s) => {
         if (
@@ -1867,10 +1884,11 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
             updated.type === "tex" ||
             updated.type === "bib" ||
             updated.type === "style" ||
+            updated.type === "markdown" ||
             updated.type === "other"
           ) {
             const isLargeNonEssential =
-              updated.type === "other" &&
+              (updated.type === "other" || updated.type === "markdown") &&
               fsFile.fileSize > LARGE_FILE_THRESHOLD;
             // Only reload if it was previously loaded (not a skipped large file)
             if (!isLargeNonEssential || updated.content !== undefined) {
@@ -1898,12 +1916,14 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
           fileSize: fsFile.fileSize,
         };
         const isLargeNonEssential =
-          pf.type === "other" && fsFile.fileSize > LARGE_FILE_THRESHOLD;
+          (pf.type === "other" || pf.type === "markdown") &&
+          fsFile.fileSize > LARGE_FILE_THRESHOLD;
         if (
           pf.type === "tex" ||
           pf.type === "bib" ||
           pf.type === "style" ||
-          (pf.type === "other" && !isLargeNonEssential)
+          ((pf.type === "other" || pf.type === "markdown") &&
+            !isLargeNonEssential)
         ) {
           try {
             pf.content = await readTexFileContent(pf.absolutePath);
@@ -1952,7 +1972,11 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
             activeFileId: merged.some((file) => file.id === s.activeFileId)
               ? s.activeFileId
               : newActiveId,
-            contentGeneration: s.contentGeneration + 1,
+            contentGeneration:
+              compileRelevantSignature(files) ===
+              compileRelevantSignature(merged)
+                ? s.contentGeneration
+                : s.contentGeneration + 1,
             fileTreeGeneration: s.fileTreeGeneration + 1,
           }
         : {},

@@ -81,11 +81,69 @@ fn canonical_tool_arguments(value: Value) -> Option<String> {
             if map.keys().any(|key| key.contains(':')) {
                 return None;
             }
-            Some(Value::Object(map).to_string())
+            Some(sanitize_tool_input(Value::Object(map)).to_string())
         }
         Value::Array(_) => Some(value.to_string()),
         _ => None,
     }
+}
+
+/// Claude Code Read rejects `pages: ""` (and other empty optionals).
+/// GPT-family models often emit those instead of omitting the key.
+pub(crate) fn sanitize_tool_input(value: Value) -> Value {
+    let Value::Object(mut map) = value else {
+        return value;
+    };
+    sanitize_optional_pages(&mut map);
+    Value::Object(map)
+}
+
+fn sanitize_optional_pages(map: &mut serde_json::Map<String, Value>) {
+    let Some(pages) = map.get("pages").cloned() else {
+        return;
+    };
+    match pages {
+        Value::Null => {
+            map.remove("pages");
+        }
+        Value::String(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || !is_valid_read_pages(trimmed) {
+                map.remove("pages");
+            } else if trimmed != raw {
+                map.insert("pages".into(), Value::String(trimmed.to_string()));
+            }
+        }
+        Value::Number(number) => {
+            if let Some(page) = number.as_u64().filter(|page| *page >= 1) {
+                map.insert("pages".into(), Value::String(page.to_string()));
+            } else {
+                map.remove("pages");
+            }
+        }
+        _ => {
+            map.remove("pages");
+        }
+    }
+}
+
+fn is_valid_read_pages(value: &str) -> bool {
+    value.split(',').all(|part| {
+        let part = part.trim();
+        if part.is_empty() {
+            return false;
+        }
+        if let Some((start, end)) = part.split_once('-') {
+            return page_index(start).is_some_and(|first| {
+                page_index(end).is_some_and(|last| last >= first)
+            });
+        }
+        page_index(part).is_some()
+    })
+}
+
+fn page_index(value: &str) -> Option<u32> {
+    value.trim().parse::<u32>().ok().filter(|page| *page >= 1)
 }
 
 fn trim_code_fence(value: &str) -> &str {
@@ -557,5 +615,29 @@ mod tests {
     #[test]
     fn preserves_provider_tool_call_ids() {
         assert_eq!(normalized_tool_call_id(Some("call_abc")), "call_abc");
+    }
+
+    #[test]
+    fn strips_empty_read_pages_argument() {
+        let repaired: Value = serde_json::from_str(&repair_tool_arguments(
+            r#"{"file_path":"main.tex","pages":"","limit":2000}"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            repaired,
+            json!({ "file_path": "main.tex", "limit": 2000 })
+        );
+        assert_eq!(
+            sanitize_tool_input(json!({ "file_path": "notes.md", "pages": "   " })),
+            json!({ "file_path": "notes.md" })
+        );
+        assert_eq!(
+            sanitize_tool_input(json!({ "file_path": "paper.pdf", "pages": "1-5" })),
+            json!({ "file_path": "paper.pdf", "pages": "1-5" })
+        );
+        assert_eq!(
+            sanitize_tool_input(json!({ "file_path": "paper.pdf", "pages": 3 })),
+            json!({ "file_path": "paper.pdf", "pages": "3" })
+        );
     }
 }

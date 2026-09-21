@@ -33,6 +33,16 @@ describe("getProviderDisplayName", () => {
     ).toBe("Acme AI");
   });
 
+  it("recognizes Cursor composer endpoints", () => {
+    expect(
+      getProviderDisplayName({
+        label: "Cursor",
+        baseUrl: "http://127.0.0.1:8080/v1",
+        model: "composer-2.5",
+      }),
+    ).toBe("Cursor");
+  });
+
   it("recognizes local Ollama endpoints", () => {
     const provider = {
       label: "Custom OpenAI API",

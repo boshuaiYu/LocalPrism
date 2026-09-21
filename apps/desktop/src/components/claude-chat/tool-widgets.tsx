@@ -20,6 +20,8 @@ import {
   useClaudeChatStore,
   type ContentBlock,
 } from "@/stores/claude-chat-store";
+import { toolResultDisplayText, toolResultText } from "@/lib/tool-result-text";
+import { isSkillToolName, skillToolDisplayName } from "@/lib/skill-tool-result";
 
 interface ToolWidgetProps {
   toolUse: ContentBlock;
@@ -51,6 +53,9 @@ export const ToolWidget: FC<ToolWidgetProps> = ({ toolUse, toolResult }) => {
     return <ExitPlanModeWidget input={toolUse.input} result={toolResult} />;
   if (name === "todowrite")
     return <TodoWriteWidget input={toolUse.input} result={toolResult} />;
+  if (isSkillToolName(toolUse.name)) {
+    return <SkillWidget input={toolUse.input} result={toolResult} />;
+  }
 
   return (
     <GenericWidget
@@ -150,16 +155,45 @@ const ReadWidget: FC<{ input: any; result?: ContentBlock }> = ({
   input,
   result,
 }) => {
+  const [expanded, setExpanded] = useState(false);
+  const displayText = toolResultDisplayText(result);
+  const canExpand = Boolean(displayText);
+
   return (
-    <div className="my-1.5 flex items-center gap-2 rounded-lg border border-border bg-muted/50 px-3 py-2 text-sm">
-      <StatusIcon result={result} />
-      <FileIcon className="size-3.5 shrink-0 text-muted-foreground" />
-      <span className="min-w-0 truncate text-muted-foreground">
-        {result ? "Read" : "Reading"}{" "}
-        <code className="rounded bg-muted px-1 text-xs">
-          {input?.file_path}
-        </code>
-      </span>
+    <div className="my-1.5 rounded-lg border border-border bg-muted/50 text-sm">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left"
+        onClick={() => canExpand && setExpanded(!expanded)}
+        disabled={!canExpand}
+      >
+        <StatusIcon result={result} />
+        <FileIcon className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 truncate text-muted-foreground">
+          {result ? "Read" : "Reading"}{" "}
+          <code className="rounded bg-muted px-1 text-xs">
+            {input?.file_path}
+          </code>
+        </span>
+        {canExpand ? (
+          expanded ? (
+            <ChevronDownIcon className="ml-auto size-3.5 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRightIcon className="ml-auto size-3.5 shrink-0 text-muted-foreground" />
+          )
+        ) : null}
+      </button>
+      {expanded && displayText ? (
+        <div className="max-h-40 overflow-auto border-border border-t px-3 py-2">
+          <pre
+            className={`whitespace-pre-wrap font-mono text-xs ${
+              result?.is_error ? "text-destructive" : "text-muted-foreground"
+            }`}
+          >
+            {truncate(displayText, 2000)}
+          </pre>
+        </div>
+      ) : null}
     </div>
   );
 };
@@ -173,8 +207,7 @@ const BashWidget: FC<{
 }> = ({ input, result, prefix = "$" }) => {
   const [expanded, setExpanded] = useState(false);
   const command = input?.command || input?.description || "";
-  const resultContent =
-    typeof result?.content === "string" ? result.content : "";
+  const resultContent = toolResultText(result);
 
   return (
     <div className="my-1.5 rounded-lg border border-border bg-muted/70 text-sm dark:bg-neutral-900">
@@ -505,6 +538,38 @@ const TodoWriteWidget: FC<{ input: any; result?: ContentBlock }> = ({
           ))}
         </div>
       )}
+    </div>
+  );
+};
+
+// ─── Skill Widget ───
+
+const SkillWidget: FC<{ input: any; result?: ContentBlock }> = ({
+  input,
+  result,
+}) => {
+  const skillName = skillToolDisplayName(input);
+  const errorText = result?.is_error ? toolResultText(result).trim() : "";
+  return (
+    <div
+      className="my-1.5 rounded-lg border border-border bg-muted/50 text-sm"
+      data-testid="chat-skill-widget"
+    >
+      <div className="flex items-center gap-2 px-3 py-2">
+        <StatusIcon result={result} />
+        <WrenchIcon className="size-3.5 text-muted-foreground" />
+        <span className="min-w-0 truncate text-muted-foreground">
+          {result ? "Ran" : "Running"} skill{" "}
+          <code className="rounded bg-muted px-1 text-xs">{skillName}</code>
+        </span>
+      </div>
+      {errorText ? (
+        <div className="max-h-32 overflow-auto border-border border-t px-3 py-2">
+          <pre className="whitespace-pre-wrap font-mono text-destructive text-xs">
+            {truncate(errorText, 400)}
+          </pre>
+        </div>
+      ) : null}
     </div>
   );
 };

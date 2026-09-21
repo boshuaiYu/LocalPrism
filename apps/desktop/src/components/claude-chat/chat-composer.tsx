@@ -1,7 +1,6 @@
 import {
   type CSSProperties,
   type FC,
-  type KeyboardEvent,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -21,12 +20,9 @@ import {
   ImageIcon,
   FileSpreadsheetIcon,
   PaperclipIcon,
-  CheckIcon,
   ChevronDownIcon,
-  SparklesIcon,
   PlusIcon,
   Trash2Icon,
-  Loader2Icon,
   CornerDownRightIcon,
   ListEndIcon,
 } from "lucide-react";
@@ -34,6 +30,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { writeFile, mkdir, exists, remove } from "@tauri-apps/plugin-fs";
 import { join, tempDir } from "@tauri-apps/api/path";
 import { invoke } from "@tauri-apps/api/core";
+import { useShallow } from "zustand/react/shallow";
 import {
   CLAUDE_CODE_PROVIDER_ID,
   chatPeerForTab,
@@ -42,10 +39,7 @@ import {
   type QueuedGuidance,
   useClaudeChatStore,
 } from "@/stores/claude-chat-store";
-import {
-  useClaudeSetupStore,
-  type OpenAiCompatibleCredentialInfo,
-} from "@/stores/claude-setup-store";
+import { useClaudeSetupStore } from "@/stores/claude-setup-store";
 import { useDocumentStore, type ProjectFile } from "@/stores/document-store";
 import { getUniqueTargetName } from "@/lib/tauri/fs";
 import { runProjectFsOperation } from "@/lib/project-fs-operations";
@@ -54,41 +48,37 @@ import {
   finishTemporaryChatAttachment,
   ownsChatAttachmentState,
 } from "@/lib/chat-attachment-commit";
+import { getProviderDisplayName } from "@/lib/provider-icons";
+import { getModelCapabilities } from "@/lib/model-capabilities";
 import {
-  getProviderDisplayName,
-  getProviderIconSrc,
-} from "@/lib/provider-icons";
-import {
-  getModelCapabilities,
-  isChatModelOption,
-  modelInfoId,
-  type OpenAiCompatibleModelInfo,
-  rememberModelListCapabilityMetadata,
-} from "@/lib/model-capabilities";
-import { ModelCapabilityBadges } from "@/components/model-capability-badges";
-import {
-  CLAUDE_MODEL_OPTIONS,
   CLAUDE_REASONING_EFFORT_OPTIONS,
   getSelectedCodexModel,
-  isRuntimeSelectionReady,
   isRuntimeSendDisabled,
   RuntimeSelector,
   runtimeSelectionSupportsImages,
 } from "@/components/runtime/runtime-selector";
-import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
-import { ClaudeSetup } from "@/components/claude-setup";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
+  formatReasoningEffortLabel,
+  normalizeReasoningEffortOptions,
+  resolveReasoningEffort,
+} from "@/lib/reasoning-effort";
+import { PermissionModePicker } from "@/components/runtime/permission-mode-picker";
+import { AgentSelector } from "@/components/agents/agent-selector";
+import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
 import { useRuntimeStore } from "@/stores/runtime-store";
+import {
+  resolveProviderRequestModel,
+  selectedProviderModel as findCatalogModel,
+  useProviderStore,
+} from "@/stores/provider-store";
+import { ChatTokenMeter } from "./chat-token-meter";
 import { SlashCommandPicker, type SlashCommand } from "./slash-command-picker";
+import {
+  resolveOutgoingSlashPrompt,
+  resolveSlashComposerValue,
+  resolveVisibleSlashMessage,
+} from "@/lib/slash-command-send";
 import { createLogger } from "@/lib/debug/logger";
 
 const log = createLogger("chat-composer");
@@ -195,9 +185,10 @@ function getFileIcon(file: ProjectFile) {
 }
 
 function formatGuidanceText(guidance: QueuedGuidance) {
+  const label = guidance.displayPrompt ?? guidance.prompt;
   return guidance.contextOverride?.label
-    ? `${guidance.contextOverride.label} - ${guidance.prompt}`
-    : guidance.prompt;
+    ? `${guidance.contextOverride.label} - ${label}`
+    : label;
 }
 
 function claudeModelDisplayName(model: string) {
@@ -238,15 +229,24 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
   const selectedProviderModels = useClaudeChatStore(
     (s) => s.selectedProviderModels,
   );
-  const setSelectedProviderModel = useClaudeChatStore(
-    (s) => s.setSelectedProviderModel,
-  );
   const effortLevel = useClaudeChatStore((s) => s.effortLevel);
   const setEffortLevel = useClaudeChatStore((s) => s.setEffortLevel);
   const activeTabId = useClaudeChatStore((s) => s.activeTabId);
-  const activeTab = useClaudeChatStore((s) =>
-    s.tabs.find((tab) => tab.id === s.activeTabId),
+  const activeTabMeta = useClaudeChatStore(
+    useShallow((s) => {
+      const tab = s.tabs.find((candidate) => candidate.id === s.activeTabId);
+      return {
+        runtime: tab?.runtime ?? "claude",
+        chatPeer: tab?.chatPeer,
+        providerKey: tab?.providerKey ?? null,
+        runtimeModel: tab?.runtimeModel ?? null,
+        reasoningEffort: tab?.reasoningEffort ?? null,
+        agentId: tab?.agentId ?? null,
+        isStopping: (tab?.cancelledAttempts?.length ?? 0) > 0,
+      };
+    }),
   );
+  const ensureWritableTab = useClaudeChatStore((s) => s.ensureWritableTab);
   const changeTabRuntime = useClaudeChatStore((s) => s.changeTabRuntime);
   const updateTabRuntimeSelection = useClaudeChatStore(
     (s) => s.updateTabRuntimeSelection,
@@ -264,8 +264,6 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
   const activeOpenAiCredentialId = useClaudeSetupStore(
     (s) => s.activeOpenAiCredentialId,
   );
-  const setupStatus = useClaudeSetupStore((s) => s.status);
-  const deleteApiCredential = useClaudeSetupStore((s) => s.deleteApiCredential);
   const claudeAccount = useRuntimeStore((s) => s.accounts.claude);
   const codexAccount = useRuntimeStore((s) => s.accounts.codex);
   const codexModels = useRuntimeStore((s) => s.models.codex);
@@ -290,46 +288,56 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
   // explicit OpenAI-compatible credential (or none, prompting to add one).
   const selectedProviderCredential =
     configuredOpenAiCredential ?? fallbackProviderCredential;
-  const chatPeer = activeTab ? chatPeerForTab(activeTab) : "claude";
+  const chatPeer = chatPeerForTab({
+    runtime: activeTabMeta.runtime,
+    chatPeer: activeTabMeta.chatPeer,
+    providerKey: activeTabMeta.providerKey,
+  });
+  const archivedCodex = activeTabMeta.runtime === "codex";
+  const providerReady = useProviderStore((state) => state.ready);
+  const engineInstalling = useClaudeSetupStore((state) => state.isInstalling);
+  const providerModels = useProviderStore((state) => state.models);
+  const activeProviderName =
+    useProviderStore(
+      (state) => state.cards.find((card) => card.isActive)?.name,
+    ) ?? "Provider";
   const claudeAvailable =
     claudeAccount.installed && claudeAccount.authenticated;
-  const apiAvailable = claudeAvailable && !!selectedProviderCredential;
+  // API peer needs Claude CLI installed (wire runtime) plus a credential;
+  // OAuth login is not required when using an OpenAI-compatible provider.
+  const apiAvailable = claudeAccount.installed && !!selectedProviderCredential;
   const selectedRuntimeModelId =
     chatPeer !== "codex"
-      ? (activeTab?.runtimeModel ?? selectedModel)
-      : (activeTab?.runtimeModel ?? null);
-  const selectedRuntimeEffort =
-    chatPeer !== "codex"
-      ? (activeTab?.reasoningEffort ?? effortLevel)
-      : (activeTab?.reasoningEffort ?? null);
+      ? resolveProviderRequestModel(
+          activeTabMeta.runtimeModel ?? selectedModel,
+          providerModels,
+        )
+      : (activeTabMeta.runtimeModel ?? null);
+  const catalogModel = findCatalogModel(
+    providerModels,
+    selectedRuntimeModelId ?? selectedModel,
+  );
+  const catalogEffortOptions = normalizeReasoningEffortOptions(
+    catalogModel?.reasoningEfforts?.length
+      ? catalogModel.reasoningEfforts
+      : CLAUDE_REASONING_EFFORT_OPTIONS,
+  );
+  const selectedRuntimeEffort = resolveReasoningEffort(
+    activeTabMeta.reasoningEffort ?? effortLevel,
+    catalogEffortOptions,
+  );
   const selectedClaudeModel =
     chatPeer !== "codex"
-      ? (CLAUDE_MODEL_OPTIONS.find(
-          (model) => model.id === selectedRuntimeModelId,
-        )?.id ?? selectedModel)
+      ? (selectedRuntimeModelId ?? selectedModel)
       : selectedModel;
-  const selectedClaudeEffort =
-    chatPeer !== "codex"
-      ? (CLAUDE_REASONING_EFFORT_OPTIONS.find(
-          (effort) => effort === selectedRuntimeEffort,
-        ) ?? effortLevel)
-      : effortLevel;
+  const selectedClaudeEffort = selectedRuntimeEffort ?? effortLevel;
   const selectedCodexModel = getSelectedCodexModel(
     codexModels,
     chatPeer === "codex" ? selectedRuntimeModelId : null,
   );
   const codexAvailable = codexAccount.installed && codexAccount.authenticated;
-  const runtimeSelectionReady = isRuntimeSelectionReady(
-    chatPeer,
-    claudeAvailable,
-    apiAvailable,
-    codexAvailable,
-    selectedCodexModel,
-    selectedRuntimeEffort,
-  );
-  const runtimeBusy =
-    !!activeTab &&
-    (activeTab.isStreaming || (activeTab.cancelledAttempts?.length ?? 0) > 0);
+  const runtimeSelectionReady = archivedCodex ? false : providerReady;
+  const runtimeBusy = isStreaming || activeTabMeta.isStopping;
   const selectedProviderModel = selectedProviderCredential
     ? selectedProviderModels[selectedProviderCredential.id] ||
       selectedProviderCredential.model
@@ -350,32 +358,6 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
         model: selectedProviderCredential.model,
       })
     : "Provider";
-  const selectedProviderIconSrc = selectedProviderCredential
-    ? getProviderIconSrc({
-        label: selectedProviderCredential.label,
-        baseUrl: selectedProviderCredential.base_url,
-        model: selectedProviderCredential.model,
-      })
-    : null;
-  const claudeCodeIconSrc = getProviderIconSrc({ label: "Anthropic" });
-  const [providerModelOptions, setProviderModelOptions] = useState<
-    Record<string, string[]>
-  >({});
-  const [providerModelLoadingId, setProviderModelLoadingId] = useState<
-    string | null
-  >(null);
-  const [providerModelError, setProviderModelError] = useState<string | null>(
-    null,
-  );
-  const [providerSetupOpen, setProviderSetupOpen] = useState(false);
-  const [providerDeleteTarget, setProviderDeleteTarget] =
-    useState<OpenAiCompatibleCredentialInfo | null>(null);
-  const [providerDeleteError, setProviderDeleteError] = useState<string | null>(
-    null,
-  );
-  const [deletingProviderId, setDeletingProviderId] = useState<string | null>(
-    null,
-  );
   const [input, setInput] = useState("");
   const hasInput = input.trim().length > 0;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -384,10 +366,6 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const modelPickerRef = useRef<HTMLDivElement>(null);
   const modelButtonRef = useRef<HTMLButtonElement>(null);
-  const providerModelListRef = useRef<HTMLDivElement>(null);
-  const providerModelItemRefs = useRef<
-    Record<string, HTMLButtonElement | null>
-  >({});
   const [pickerPos, setPickerPos] = useState<{ left: number; bottom: number }>({
     left: 0,
     bottom: 0,
@@ -403,8 +381,8 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
     });
   }, [modelPickerOpen]);
 
-  // API peer's `selectedProviderCredentialId` only needs to keep pointing at
-  // a real credential — Claude peer never reads it (sendPrompt forces null).
+  // API peer's `selectedProviderCredentialId` must point at a real credential
+  // so sendPrompt never starts a bare Claude OAuth turn. Claude peer ignores it.
   useEffect(() => {
     const selectedOpenAiCredentialMissing =
       selectedProviderCredentialId &&
@@ -414,135 +392,24 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
       );
     if (selectedOpenAiCredentialMissing) {
       setSelectedProviderCredentialId(fallbackProviderCredential?.id ?? null);
+      return;
+    }
+
+    if (
+      chatPeer === "api" &&
+      (!selectedProviderCredentialId ||
+        selectedProviderCredentialId === CLAUDE_CODE_PROVIDER_ID) &&
+      fallbackProviderCredential
+    ) {
+      setSelectedProviderCredentialId(fallbackProviderCredential.id);
     }
   }, [
+    chatPeer,
+    fallbackProviderCredential,
     fallbackProviderCredential?.id,
     openAiCredentials,
     selectedProviderCredentialId,
     setSelectedProviderCredentialId,
-  ]);
-
-  const handleDeleteProviderCredential = useCallback(
-    async (credentialId: string) => {
-      if (deletingProviderId) return;
-
-      const remainingCredentials = openAiCredentials.filter(
-        (credential) => credential.id !== credentialId,
-      );
-      const deletingSelected =
-        selectedProviderCredentialId === credentialId ||
-        selectedProviderCredential?.id === credentialId;
-
-      setDeletingProviderId(credentialId);
-      setProviderDeleteError(null);
-      try {
-        const success = await deleteApiCredential(credentialId);
-        if (!success) {
-          setProviderDeleteError("Failed to delete this provider.");
-          return;
-        }
-
-        setProviderModelOptions((prev) => {
-          const next = { ...prev };
-          delete next[credentialId];
-          return next;
-        });
-
-        if (deletingSelected) {
-          const nextCredential = remainingCredentials[0] ?? null;
-          if (nextCredential) {
-            setSelectedProviderCredentialId(nextCredential.id);
-          } else {
-            setSelectedProviderCredentialId(CLAUDE_CODE_PROVIDER_ID);
-          }
-        }
-        setProviderDeleteTarget(null);
-      } finally {
-        setDeletingProviderId(null);
-      }
-    },
-    [
-      deleteApiCredential,
-      deletingProviderId,
-      openAiCredentials,
-      selectedProviderCredential?.id,
-      selectedProviderCredentialId,
-      setSelectedProviderCredentialId,
-    ],
-  );
-
-  useEffect(() => {
-    if (!modelPickerOpen || chatPeer !== "api" || !selectedProviderCredential)
-      return;
-
-    const credentialId = selectedProviderCredential.id;
-    if (providerModelOptions[credentialId]) {
-      setProviderModelLoadingId((current) =>
-        current === credentialId ? null : current,
-      );
-      return;
-    }
-
-    let cancelled = false;
-    setProviderModelLoadingId(credentialId);
-    setProviderModelError(null);
-
-    invoke<Array<string | OpenAiCompatibleModelInfo>>(
-      "list_openai_compatible_credential_models",
-      {
-        credentialId,
-      },
-    )
-      .then((models) => {
-        if (cancelled) return;
-        rememberModelListCapabilityMetadata(
-          selectedProviderCredential.base_url,
-          models,
-        );
-        const modelIds = models
-          .filter((model) =>
-            isChatModelOption({
-              label: selectedProviderCredential.label,
-              baseUrl: selectedProviderCredential.base_url,
-              model: modelInfoId(model),
-              metadata: typeof model === "string" ? undefined : model.metadata,
-            }),
-          )
-          .map(modelInfoId);
-        const options = Array.from(new Set(modelIds.filter(Boolean)));
-        if (
-          selectedProviderCredential.model &&
-          !options.includes(selectedProviderCredential.model)
-        ) {
-          options.push(selectedProviderCredential.model);
-        }
-        setProviderModelOptions((prev) => ({
-          ...prev,
-          [credentialId]: options,
-        }));
-      })
-      .catch((err: any) => {
-        if (cancelled) return;
-        setProviderModelError(err?.message || String(err));
-        setProviderModelOptions((prev) => ({
-          ...prev,
-          [credentialId]: [selectedProviderCredential.model].filter(Boolean),
-        }));
-      })
-      .finally(() => {
-        setProviderModelLoadingId((current) =>
-          current === credentialId ? null : current,
-        );
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    chatPeer,
-    modelPickerOpen,
-    providerModelOptions,
-    selectedProviderCredential,
   ]);
 
   // Pinned contexts — supports multiple files/selections
@@ -568,7 +435,11 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
             ? `Codex ${selectedCodexModel?.displayName ?? selectedRuntimeModelId}`
             : chatPeer === "api"
               ? `${selectedProviderDisplayName} ${directProviderModel}`
-              : `Claude ${claudeModelDisplayName(selectedClaudeModel)}`
+              : `${activeProviderName} ${
+                  providerModels.find(
+                    (model) => model.id === selectedClaudeModel,
+                  )?.displayName ?? claudeModelDisplayName(selectedClaudeModel)
+                }`
         } does not support image input. Remove the pasted image or switch to a vision-capable model.`
       : null;
 
@@ -624,6 +495,17 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
       textareaRef.current.style.height = "auto";
     }
   }, [activeTabId]);
+
+  useEffect(() => {
+    return () => {
+      const tabId = prevTabIdRef.current;
+      if (!tabId) return;
+      useClaudeChatStore.getState().saveDraft(tabId, {
+        input: inputRef.current,
+        pinnedContexts: pinnedContextsRef.current,
+      });
+    };
+  }, []);
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
   const composerRef = useRef<HTMLDivElement>(null);
 
@@ -727,15 +609,16 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
     setMentionIndex(0);
   }, [mentionQuery, files]);
 
-  // Load slash commands when picker is activated (keep loaded after close for send resolution)
+  // Keep commands loaded so send can strip questionnaire leftovers even if the picker closed.
   useEffect(() => {
-    if (slashQuery === null) return;
     invoke<SlashCommand[]>("slash_commands_list", {
       projectPath: projectRoot ?? undefined,
     })
-      .then(setSlashCommands)
+      .then((commands) =>
+        setSlashCommands(Array.isArray(commands) ? commands : []),
+      )
       .catch(() => setSlashCommands([]));
-  }, [slashQuery !== null, projectRoot]);
+  }, [projectRoot]);
 
   const buildPinnedContextForFile = useCallback(
     async (file: ProjectFile): Promise<PinnedContext> => {
@@ -743,6 +626,7 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
         file.type === "tex" ||
         file.type === "bib" ||
         file.type === "style" ||
+        file.type === "markdown" ||
         file.type === "other";
 
       return {
@@ -781,10 +665,7 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
   );
 
   const selectSlashCommand = useCallback((command: SlashCommand) => {
-    // Insert command syntax into input (opcode-style)
-    const newInput = command.accepts_arguments
-      ? `${command.full_command} `
-      : `${command.full_command} `;
+    const newInput = resolveSlashComposerValue(inputRef.current, command);
 
     setInput(newInput);
     setSlashQuery(null);
@@ -1106,23 +987,10 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
       return;
     }
 
-    // Resolve slash commands: if input starts with /command, find the command and substitute $ARGUMENTS
-    // Skills (scope === "skill") are passed through as-is — Claude handles them via the Skill tool.
-    let finalPrompt = trimmed;
-    const slashMatch = trimmed.match(/^\/(\S+)\s*([\s\S]*)/);
-    if (slashMatch && slashCommands.length > 0) {
-      const cmdName = slashMatch[1];
-      const args = slashMatch[2].trim();
-      const matched = slashCommands.find(
-        (cmd) => cmd.full_command === `/${cmdName}` || cmd.name === cmdName,
-      );
-      if (matched && matched.scope !== "skill") {
-        finalPrompt = matched.content;
-        if (matched.accepts_arguments && args) {
-          finalPrompt = finalPrompt.replace(/\$ARGUMENTS/g, args);
-        }
-      }
-    }
+    // Chat shows the slash label. The engine still gets the expanded body
+    // (or /name for skills so Claude can invoke the Skill tool).
+    const visiblePrompt = resolveVisibleSlashMessage(trimmed, slashCommands);
+    const finalPrompt = resolveOutgoingSlashPrompt(trimmed, slashCommands);
 
     setInput("");
     setMentionQuery(null);
@@ -1144,11 +1012,13 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
     }
 
     if (isStreaming) {
-      queueGuidance(activeTabId, finalPrompt, contextOverride);
+      queueGuidance(activeTabId, finalPrompt, contextOverride, visiblePrompt);
     } else if (contextOverride) {
-      sendPrompt(finalPrompt, contextOverride);
+      sendPrompt(finalPrompt, contextOverride, {
+        displayPrompt: visiblePrompt,
+      });
     } else {
-      sendPrompt(finalPrompt);
+      sendPrompt(finalPrompt, undefined, { displayPrompt: visiblePrompt });
     }
     // Reset textarea height
     if (textareaRef.current) {
@@ -1178,7 +1048,9 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
       }
 
       removeQueuedGuidance(activeTabId, guidance.id);
-      void sendPrompt(guidance.prompt, guidance.contextOverride);
+      void sendPrompt(guidance.prompt, guidance.contextOverride, {
+        displayPrompt: guidance.displayPrompt,
+      });
     },
     [
       activeTabId,
@@ -1317,233 +1189,16 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [modelPickerOpen]);
 
-  const activeProviderModelOptions = selectedProviderCredential
-    ? Array.from(
-        new Set(
-          (
-            providerModelOptions[selectedProviderCredential.id] ?? [
-              selectedProviderCredential.model,
-            ]
-          )
-            .map(modelInfoId)
-            .filter(Boolean),
-        ),
-      ).filter((model) =>
-        isChatModelOption({
-          label: selectedProviderCredential.label,
-          baseUrl: selectedProviderCredential.base_url,
-          model,
-        }),
-      )
-    : [];
-  const activeProviderModelsLoading =
-    !!selectedProviderCredential &&
-    providerModelLoadingId === selectedProviderCredential.id;
-  const activeProviderModelOptionsKey = activeProviderModelOptions.join("\0");
-
-  const setProviderModelListNode = useCallback(
-    (node: HTMLDivElement | null) => {
-      providerModelListRef.current = node;
-    },
-    [],
-  );
-
-  useLayoutEffect(() => {
-    if (
-      !modelPickerOpen ||
-      chatPeer !== "api" ||
-      !selectedProviderCredential ||
-      activeProviderModelsLoading ||
-      activeProviderModelOptions.length === 0
-    ) {
-      return;
-    }
-
-    const selectedButton =
-      providerModelItemRefs.current[directProviderModel] ??
-      Array.from(
-        (
-          providerModelListRef.current ??
-          modelPickerRef.current?.querySelector<HTMLElement>(
-            '[aria-label="Runtime controls"]',
-          )
-        )?.querySelectorAll("button") ?? [],
-      ).find((button) => button.textContent?.trim() === directProviderModel);
-
-    selectedButton?.scrollIntoView({ block: "center" });
-  }, [
-    activeProviderModelOptions.length,
-    activeProviderModelOptionsKey,
-    activeProviderModelsLoading,
-    chatPeer,
-    directProviderModel,
-    modelPickerOpen,
-    selectedProviderCredential,
-  ]);
-
-  const apiProviderControls = (
-    <>
-      {openAiCredentials.map((credential) => {
-        const active = selectedProviderCredential?.id === credential.id;
-        const displayName = getProviderDisplayName({
-          label: credential.label,
-          baseUrl: credential.base_url,
-          model: credential.model,
-        });
-        const iconSrc = getProviderIconSrc({
-          label: credential.label,
-          baseUrl: credential.base_url,
-          model: credential.model,
-        });
-        const currentModel =
-          selectedProviderModels[credential.id] || credential.model;
-        const isDeleting = deletingProviderId === credential.id;
-        const providerDisabled = runtimeBusy || isDeleting;
-        const selectCredential = () => {
-          if (providerDisabled) return;
-          setSelectedProviderCredentialId(credential.id);
-        };
-
-        return (
-          <div
-            key={credential.id}
-            role="button"
-            tabIndex={providerDisabled ? -1 : 0}
-            aria-disabled={providerDisabled}
-            className={cn(
-              "group/provider flex w-full cursor-pointer items-center gap-2 rounded-lg py-2 pr-1 pl-3 text-left text-sm transition-colors",
-              active ? "bg-accent text-accent-foreground" : "hover:bg-muted",
-              providerDisabled && "pointer-events-none opacity-70",
-            )}
-            onClick={selectCredential}
-            onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                selectCredential();
-              }
-            }}
-          >
-            {iconSrc ? (
-              <img
-                src={iconSrc}
-                alt=""
-                className="size-4 shrink-0 object-contain"
-              />
-            ) : (
-              <SparklesIcon className="size-3.5 shrink-0" />
-            )}
-            <div className="min-w-0 flex-1">
-              <div className="truncate font-medium text-xs">{displayName}</div>
-              <div className="truncate text-muted-foreground text-xs">
-                {currentModel}
-              </div>
-            </div>
-            <div className="flex shrink-0 items-center gap-1">
-              {active && <CheckIcon className="size-3 shrink-0" />}
-              <button
-                type="button"
-                className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                aria-label={`Delete ${displayName}`}
-                title="Delete provider"
-                disabled={runtimeBusy || !!deletingProviderId}
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setProviderDeleteError(null);
-                  setProviderDeleteTarget(credential);
-                }}
-              >
-                {isDeleting ? (
-                  <Loader2Icon className="size-3.5 animate-spin" />
-                ) : (
-                  <Trash2Icon className="size-3.5" />
-                )}
-              </button>
-            </div>
-          </div>
-        );
-      })}
-      <button
-        type="button"
-        className="mt-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-muted-foreground text-sm transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-        disabled={runtimeBusy}
-        onClick={() => {
-          setModelPickerOpen(false);
-          setProviderSetupOpen(true);
-        }}
-      >
-        <PlusIcon className="size-3.5 shrink-0" />
-        <div className="min-w-0 flex-1">
-          <div className="truncate font-medium text-xs">Add Provider</div>
-          <div className="truncate text-xs">Save another API key</div>
-        </div>
-      </button>
-    </>
-  );
-
-  const apiModelControls = selectedProviderCredential ? (
-    <>
-      {activeProviderModelsLoading && (
-        <div className="px-3 py-1.5 text-muted-foreground text-xs">
-          Fetching models...
-        </div>
-      )}
-      {activeProviderModelOptions.map((modelId) => (
-        <button
-          type="button"
-          key={modelId}
-          aria-pressed={directProviderModel === modelId}
-          ref={(node) => {
-            if (node) {
-              providerModelItemRefs.current[modelId] = node;
-            } else {
-              delete providerModelItemRefs.current[modelId];
-            }
-          }}
-          className={cn(
-            "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-            directProviderModel === modelId
-              ? "bg-accent text-accent-foreground"
-              : "hover:bg-muted",
-          )}
-          disabled={runtimeBusy}
-          onClick={() => {
-            setSelectedProviderModel(selectedProviderCredential.id, modelId);
-          }}
-        >
-          <span className="flex min-w-0 flex-1 items-center gap-2">
-            <span className="min-w-0 truncate font-medium text-xs">
-              {modelId}
-            </span>
-            <ModelCapabilityBadges
-              label={selectedProviderCredential.label}
-              baseUrl={selectedProviderCredential.base_url}
-              model={modelId}
-            />
-          </span>
-          {directProviderModel === modelId && (
-            <CheckIcon className="size-3 shrink-0" />
-          )}
-        </button>
-      ))}
-      {providerModelError && (
-        <div className="px-3 py-1 text-amber-600 text-xs">
-          {providerModelError}
-        </div>
-      )}
-    </>
-  ) : undefined;
-
   return (
     <div
       ref={composerRef}
-      className="relative mx-auto w-full max-w-[44rem] shrink-0 px-4 pb-4"
+      className="relative mx-auto w-full max-w-[44rem] shrink-0 px-4 pt-1 pb-5"
       style={
         {
           "--composer-bg":
-            "color-mix(in oklab, var(--color-muted) 30%, var(--color-background))",
-          "--composer-radius": "1.5rem",
-          "--composer-padding": "8px",
+            "color-mix(in oklab, var(--color-muted) 22%, var(--color-background))",
+          "--composer-radius": "0.875rem",
+          "--composer-padding": "10px",
         } as CSSProperties
       }
     >
@@ -1582,12 +1237,10 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
               codexModelsLoading={codexModelsLoading}
               selectedModelId={selectedRuntimeModelId}
               reasoningEffort={selectedRuntimeEffort}
-              agentId={activeTab?.agentId ?? null}
+              agentId={activeTabMeta.agentId ?? null}
               projectPath={projectRoot}
               busy={runtimeBusy}
-              apiProviderControls={apiProviderControls}
-              apiModelControls={apiModelControls}
-              apiModelListRef={setProviderModelListNode}
+              apiProviderControls={null}
               selectedClaudeModel={selectedClaudeModel}
               selectedClaudeEffort={selectedClaudeEffort}
               onPeerChange={(nextPeer, options) =>
@@ -1603,103 +1256,6 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
           </div>,
           document.body,
         )}
-
-      <Dialog open={providerSetupOpen} onOpenChange={setProviderSetupOpen}>
-        <DialogContent className="max-h-[85vh] w-[min(42rem,calc(100vw-2rem))] overflow-y-auto overflow-x-hidden sm:max-w-none">
-          <DialogHeader>
-            <DialogTitle>Add AI Provider</DialogTitle>
-            <DialogDescription>
-              Configure Anthropic or another model provider for this project.
-            </DialogDescription>
-          </DialogHeader>
-          <ClaudeSetup
-            variant="provider-dialog"
-            onCancel={() => setProviderSetupOpen(false)}
-            onSaved={() => {
-              setProviderSetupOpen(false);
-              const setupState = useClaudeSetupStore.getState();
-              const lastCredential =
-                setupState.openAiCredentials[
-                  setupState.openAiCredentials.length - 1
-                ];
-              setSelectedProviderCredentialId(
-                setupState.activeOpenAiCredentialId ??
-                  lastCredential?.id ??
-                  CLAUDE_CODE_PROVIDER_ID,
-              );
-              setProviderModelOptions({});
-              setProviderModelError(null);
-            }}
-          />
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={!!providerDeleteTarget}
-        onOpenChange={(open) => {
-          if (!open && !deletingProviderId) {
-            setProviderDeleteTarget(null);
-            setProviderDeleteError(null);
-          }
-        }}
-      >
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Delete Provider</DialogTitle>
-            <DialogDescription>
-              Delete{" "}
-              <span className="font-medium text-foreground">
-                {providerDeleteTarget
-                  ? getProviderDisplayName({
-                      label: providerDeleteTarget.label,
-                      baseUrl: providerDeleteTarget.base_url,
-                      model: providerDeleteTarget.model,
-                    })
-                  : "this provider"}
-              </span>{" "}
-              with model{" "}
-              <span className="font-mono text-foreground">
-                {providerDeleteTarget?.model || "unknown"}
-              </span>
-              ? The API key will be removed from LocalPrism.
-            </DialogDescription>
-          </DialogHeader>
-          {providerDeleteError && (
-            <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-destructive text-xs">
-              {providerDeleteError}
-            </p>
-          )}
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => {
-                if (deletingProviderId) return;
-                setProviderDeleteTarget(null);
-                setProviderDeleteError(null);
-              }}
-              disabled={!!deletingProviderId}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => {
-                if (providerDeleteTarget) {
-                  void handleDeleteProviderCredential(providerDeleteTarget.id);
-                }
-              }}
-              disabled={!providerDeleteTarget || !!deletingProviderId}
-            >
-              {deletingProviderId ? (
-                <Loader2Icon className="size-3.5 animate-spin" />
-              ) : (
-                <Trash2Icon className="size-3.5" />
-              )}
-              Delete
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {/* @ mention dropdown */}
       {slashQuery === null &&
@@ -1742,257 +1298,261 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
           </div>
         )}
 
-      <div
-        className={cn(
-          "flex w-full flex-col gap-2 overflow-hidden rounded-(--composer-radius) border border-border/60 bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:border-border focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] dark:border-muted-foreground/15 dark:shadow-none dark:focus-within:border-muted-foreground/30",
-          isDragOver &&
-            "border-ring border-dashed bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))]",
-        )}
-      >
-        {visibleQueuedGuidance.length > 0 && (
-          <div className="max-h-20 overflow-y-auto rounded-xl border border-border/60 bg-background/60 text-xs">
-            {visibleQueuedGuidance.map((guidance) => {
-              const displayText = formatGuidanceText(guidance);
-              return (
-                <div
-                  key={guidance.id}
-                  className="flex min-h-8 items-center gap-1.5 border-border/50 border-b px-3 py-1 last:border-b-0"
-                >
-                  <ListEndIcon className="size-3 shrink-0 text-muted-foreground/60" />
-                  <span className="min-w-0 flex-1 truncate text-muted-foreground">
-                    {displayText}
-                  </span>
-                  <button
-                    type="button"
-                    className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2 font-normal text-muted-foreground transition-colors hover:bg-muted-foreground/15 hover:text-foreground/90 dark:hover:bg-muted"
-                    title={
-                      isStreaming ? "Guide this item now" : "Send this guidance"
-                    }
-                    onClick={() => handleGuideQueuedGuidance(guidance)}
+      {archivedCodex ? (
+        <div className="flex flex-col items-start gap-3 rounded-xl border border-border/60 bg-muted/30 px-4 py-3">
+          <p className="text-muted-foreground text-sm">
+            This conversation is read-only. Start a new chat with the active
+            provider.
+          </p>
+          <button
+            type="button"
+            onClick={() => ensureWritableTab()}
+            className="inline-flex h-8 items-center rounded-full bg-primary px-3 font-medium text-primary-foreground text-xs"
+          >
+            Start a new chat
+          </button>
+        </div>
+      ) : (
+        <div
+          data-composer-shell
+          className={cn(
+            "flex w-full flex-col gap-2.5 overflow-hidden rounded-(--composer-radius) border border-border/70 bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_20px_-10px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:border-border focus-within:shadow-[0_8px_28px_-12px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] dark:border-muted-foreground/15 dark:shadow-none dark:focus-within:border-muted-foreground/30",
+            isDragOver &&
+              "border-ring border-dashed bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))]",
+          )}
+        >
+          {visibleQueuedGuidance.length > 0 && (
+            <div className="max-h-20 overflow-y-auto rounded-xl border border-border/60 bg-background/60 text-xs">
+              {visibleQueuedGuidance.map((guidance) => {
+                const displayText = formatGuidanceText(guidance);
+                return (
+                  <div
+                    key={guidance.id}
+                    className="flex min-h-8 items-center gap-1.5 border-border/50 border-b px-3 py-1 last:border-b-0"
                   >
-                    <CornerDownRightIcon className="size-3" />
-                    Guide
-                  </button>
-                  <button
-                    type="button"
-                    aria-label="Remove queued guidance"
-                    className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-red-500/10 hover:text-red-600 dark:hover:bg-red-500/15 dark:hover:text-red-400"
-                    onClick={() => {
-                      void cleanupTemporaryFilePaths(
-                        guidance.contextOverride?.temporaryFilePaths,
-                      );
-                      removeQueuedGuidance(activeTabId, guidance.id);
-                    }}
-                  >
-                    <Trash2Icon className="size-3" />
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        )}
+                    <ListEndIcon className="size-3 shrink-0 text-muted-foreground/60" />
+                    <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                      {displayText}
+                    </span>
+                    <button
+                      type="button"
+                      className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2 font-normal text-muted-foreground transition-colors hover:bg-muted-foreground/15 hover:text-foreground/90 dark:hover:bg-muted"
+                      title={
+                        isStreaming
+                          ? "Guide this item now"
+                          : "Send this guidance"
+                      }
+                      onClick={() => handleGuideQueuedGuidance(guidance)}
+                    >
+                      <CornerDownRightIcon className="size-3" />
+                      Guide
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="Remove queued guidance"
+                      className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-red-500/10 hover:text-red-600 dark:hover:bg-red-500/15 dark:hover:text-red-400"
+                      onClick={() => {
+                        void cleanupTemporaryFilePaths(
+                          guidance.contextOverride?.temporaryFilePaths,
+                        );
+                        removeQueuedGuidance(activeTabId, guidance.id);
+                      }}
+                    >
+                      <Trash2Icon className="size-3" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
-        {/* Pinned context chips */}
-        {pinnedContexts.length > 0 && (
-          <div className="flex flex-wrap items-center gap-1.5 px-2.5">
-            {pinnedContexts.map((ctx, i) =>
-              ctx.imageDataUrl ? (
-                <div
-                  key={`${ctx.label}-${i}`}
-                  className="group relative overflow-hidden rounded-lg border border-border bg-muted"
-                >
-                  <img
-                    src={ctx.imageDataUrl}
-                    alt={ctx.label}
-                    className="block h-16 w-auto object-contain"
-                  />
-                  <button
-                    aria-label="Remove attachment"
-                    onClick={() => {
-                      void cleanupTemporaryPinnedContext(ctx);
-                      setPinnedContexts((prev) =>
-                        prev.filter((_, idx) => idx !== i),
-                      );
-                    }}
-                    className="absolute top-0.5 right-0.5 rounded-full bg-background/80 p-0.5 opacity-0 transition-opacity group-hover:opacity-100"
+          {/* Pinned context chips */}
+          {pinnedContexts.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 px-2.5">
+              {pinnedContexts.map((ctx, i) =>
+                ctx.imageDataUrl ? (
+                  <div
+                    key={`${ctx.label}-${i}`}
+                    className="group relative overflow-hidden rounded-lg border border-border bg-muted"
                   >
-                    <XIcon className="size-3" />
-                  </button>
-                </div>
-              ) : (
-                <span
-                  key={`${ctx.label}-${i}`}
-                  className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-0.5 font-mono text-muted-foreground text-xs"
-                >
-                  {ctx.label}
-                  <button
-                    aria-label="Remove context"
-                    onClick={() => {
-                      void cleanupTemporaryPinnedContext(ctx);
-                      setPinnedContexts((prev) =>
-                        prev.filter((_, idx) => idx !== i),
-                      );
-                    }}
-                    className="ml-0.5 rounded-sm p-0.5 transition-colors hover:bg-muted-foreground/20"
-                  >
-                    <XIcon className="size-3" />
-                  </button>
-                </span>
-              ),
-            )}
-          </div>
-        )}
-
-        {isDragOver ? (
-          <div className="flex min-h-10 items-center justify-center px-2.5 py-1 text-muted-foreground text-sm">
-            <PaperclipIcon className="mr-2 size-4" />
-            Drop files to attach
-          </div>
-        ) : (
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={handleInput}
-            onKeyDown={handleKeyDown}
-            onPaste={handlePaste}
-            placeholder={
-              isStreaming
-                ? "Add guidance for the next turn..."
-                : "Ask me anything (/ for commands, @ to mention)"
-            }
-            className="max-h-32 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base outline-none placeholder:text-muted-foreground/80"
-            rows={1}
-          />
-        )}
-
-        <div className="relative flex items-center justify-between">
-          {/* Attachments, model & settings selector */}
-          <div className="flex items-center gap-1">
-            <TooltipIconButton
-              tooltip="Attach files"
-              side="top"
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="size-7 rounded-full"
-              onClick={handleAttachFiles}
-              disabled={!projectRoot}
-            >
-              <PlusIcon className="size-4" />
-            </TooltipIconButton>
-            <button
-              ref={modelButtonRef}
-              type="button"
-              onClick={() => setModelPickerOpen((v) => !v)}
-              title="Switch provider or model"
-              disabled={runtimeBusy}
-              className="flex h-7 items-center gap-1.5 rounded-full px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {chatPeer === "codex" ? (
-                <>
-                  <SparklesIcon className="size-3" />
-                  <span>Codex</span>
-                  <span className="max-w-40 truncate text-muted-foreground/80">
-                    {selectedCodexModel?.displayName ?? "No model"}
-                  </span>
-                  <span className="max-w-20 truncate text-muted-foreground/60">
-                    {selectedRuntimeEffort ?? "No effort"}
-                  </span>
-                  <ChevronDownIcon className="size-3" />
-                </>
-              ) : chatPeer === "api" && selectedProviderCredential ? (
-                <>
-                  {selectedProviderIconSrc ? (
                     <img
-                      src={selectedProviderIconSrc}
-                      alt=""
-                      className="size-3.5 shrink-0 object-contain"
+                      src={ctx.imageDataUrl}
+                      alt={ctx.label}
+                      className="block h-16 w-auto object-contain"
                     />
-                  ) : (
-                    <SparklesIcon className="size-3" />
-                  )}
-                  <span>API</span>
-                  <span className="max-w-28 truncate">
-                    {selectedProviderDisplayName}
+                    <button
+                      aria-label="Remove attachment"
+                      onClick={() => {
+                        void cleanupTemporaryPinnedContext(ctx);
+                        setPinnedContexts((prev) =>
+                          prev.filter((_, idx) => idx !== i),
+                        );
+                      }}
+                      className="absolute top-0.5 right-0.5 rounded-full bg-background/80 p-0.5 opacity-0 transition-opacity group-hover:opacity-100"
+                    >
+                      <XIcon className="size-3" />
+                    </button>
+                  </div>
+                ) : (
+                  <span
+                    key={`${ctx.label}-${i}`}
+                    className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-0.5 font-mono text-muted-foreground text-xs"
+                  >
+                    {ctx.label}
+                    <button
+                      aria-label="Remove context"
+                      onClick={() => {
+                        void cleanupTemporaryPinnedContext(ctx);
+                        setPinnedContexts((prev) =>
+                          prev.filter((_, idx) => idx !== i),
+                        );
+                      }}
+                      className="ml-0.5 rounded-sm p-0.5 transition-colors hover:bg-muted-foreground/20"
+                    >
+                      <XIcon className="size-3" />
+                    </button>
                   </span>
-                  <span className="max-w-32 truncate text-muted-foreground/60">
-                    {directProviderModel}
-                  </span>
-                  <span className="text-muted-foreground/60">
-                    {selectedRuntimeEffort ?? effortLevel}
-                  </span>
-                  <ChevronDownIcon className="size-3" />
-                </>
-              ) : chatPeer === "api" ? (
-                <>
-                  <SparklesIcon className="size-3" />
-                  <span>API</span>
-                  <span className="text-muted-foreground/60">
-                    {setupStatus === "checking"
-                      ? "Loading"
-                      : "Add a connection"}
-                  </span>
-                  <ChevronDownIcon className="size-3" />
-                </>
-              ) : (
-                <>
-                  {claudeCodeIconSrc ? (
-                    <img
-                      src={claudeCodeIconSrc}
-                      alt=""
-                      className="size-3.5 shrink-0 object-contain"
-                    />
-                  ) : (
-                    <SparklesIcon className="size-3" />
-                  )}
-                  <span>Claude</span>
-                  <span className="max-w-32 truncate">
-                    {claudeModelDisplayName(
+                ),
+              )}
+            </div>
+          )}
+
+          {isDragOver ? (
+            <div className="flex min-h-10 items-center justify-center px-2.5 py-1 text-muted-foreground text-sm">
+              <PaperclipIcon className="mr-2 size-4" />
+              Drop files to attach
+            </div>
+          ) : (
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={handleInput}
+              onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
+              placeholder={
+                isStreaming
+                  ? "Add guidance for the next turn..."
+                  : engineInstalling
+                    ? "Installing writing engine…"
+                    : "Ask me anything (/ for commands, @ to mention)"
+              }
+              className="max-h-32 min-h-11 w-full resize-none bg-transparent px-2.5 py-1.5 text-base leading-relaxed outline-none placeholder:text-muted-foreground/70"
+              rows={1}
+            />
+          )}
+
+          <div className="relative flex items-center justify-between px-0.5">
+            {/* Attachments, model & settings selector */}
+            <div className="flex items-center gap-1.5">
+              <TooltipIconButton
+                tooltip="Attach files"
+                side="top"
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-8 rounded-full"
+                onClick={handleAttachFiles}
+                disabled={!projectRoot}
+              >
+                <PlusIcon className="size-4" />
+              </TooltipIconButton>
+              <PermissionModePicker busy={runtimeBusy} />
+              <AgentSelector
+                variant="pill"
+                peer="claude"
+                projectPath={projectRoot}
+                agentId={activeTabMeta.agentId ?? null}
+                busy={runtimeBusy}
+                onAgentChange={(agent) => {
+                  if (!agent) {
+                    updateTabRuntimeSelection(activeTabId, {
+                      runtimeModel: selectedRuntimeModelId,
+                      reasoningEffort: selectedRuntimeEffort,
+                      agentId: null,
+                    });
+                    return;
+                  }
+                  updateTabRuntimeSelection(activeTabId, {
+                    runtimeModel:
+                      agent.model ?? selectedRuntimeModelId ?? selectedModel,
+                    reasoningEffort:
+                      agent.reasoningEffort ?? selectedRuntimeEffort,
+                    agentId: agent.id,
+                  });
+                }}
+              />
+              <button
+                ref={modelButtonRef}
+                type="button"
+                onClick={() => setModelPickerOpen((v) => !v)}
+                title="Switch model"
+                disabled={runtimeBusy}
+                className="flex h-8 items-center gap-1.5 rounded-full px-2.5 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {(() => {
+                  const providerModel =
+                    providerModels.find(
+                      (model) => model.id === selectedRuntimeModelId,
+                    ) ??
+                    providerModels.find((model) => model.isDefault) ??
+                    providerModels[0];
+                  const modelLabel =
+                    providerModel?.displayName ??
+                    claudeModelDisplayName(
                       selectedRuntimeModelId ?? selectedModel,
-                    )}
-                  </span>
-                  <span className="text-muted-foreground/60">
-                    {selectedRuntimeEffort ?? effortLevel}
-                  </span>
-                  <ChevronDownIcon className="size-3" />
-                </>
-              )}
-            </button>
-          </div>
+                    );
+                  const effortLabel = formatReasoningEffortLabel(
+                    selectedRuntimeEffort ?? effortLevel ?? "medium",
+                  );
+                  return (
+                    <>
+                      <span className="max-w-40 truncate">{modelLabel}</span>
+                      <span className="text-muted-foreground/60">
+                        · {effortLabel}
+                      </span>
+                      <span className="sr-only">{activeProviderName}</span>
+                      <ChevronDownIcon className="size-3" />
+                    </>
+                  );
+                })()}
+              </button>
+              <ChatTokenMeter />
+            </div>
 
-          <div className="flex items-center gap-1">
-            <TooltipIconButton
-              tooltip={
-                isStreaming && !hasInput
-                  ? "Stop"
-                  : isStreaming
-                    ? "Queue guidance"
-                    : "Send"
-              }
-              side="top"
-              variant="default"
-              size="icon"
-              className="size-7 rounded-full"
-              onClick={
-                isStreaming && !hasInput
-                  ? () => void cancelExecution(activeTabId)
-                  : handleSend
-              }
-              disabled={isRuntimeSendDisabled(
-                isStreaming,
-                hasInput,
-                runtimeSelectionReady,
-              )}
-            >
-              {isStreaming && !hasInput ? (
-                <SquareIcon className="size-3.5 fill-current" />
-              ) : (
-                <ArrowUpIcon className="size-4" />
-              )}
-            </TooltipIconButton>
+            <div className="flex items-center gap-1.5">
+              <TooltipIconButton
+                tooltip={
+                  isStreaming && !hasInput
+                    ? "Stop"
+                    : isStreaming
+                      ? "Queue guidance"
+                      : "Send"
+                }
+                side="top"
+                variant="default"
+                size="icon"
+                className="size-8 rounded-full"
+                onClick={
+                  isStreaming && !hasInput
+                    ? () => void cancelExecution(activeTabId)
+                    : handleSend
+                }
+                disabled={isRuntimeSendDisabled(
+                  isStreaming,
+                  hasInput,
+                  runtimeSelectionReady,
+                )}
+              >
+                {isStreaming && !hasInput ? (
+                  <SquareIcon className="size-3.5 fill-current" />
+                ) : (
+                  <ArrowUpIcon className="size-4" />
+                )}
+              </TooltipIconButton>
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 };

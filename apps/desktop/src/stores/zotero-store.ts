@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { toast } from "sonner";
 import {
   validateApiKey,
   fetchCollections,
@@ -49,7 +50,7 @@ interface ZoteroState {
   isAuthenticated: boolean;
   isValidating: boolean;
   isSyncing: string | null; // collectionKey currently syncing, or null
-  syncProgress: { loaded: number; total: number } | null;
+  syncProgress: { loaded: number; total: number; writing?: boolean } | null;
   error: string | null;
   collections: ZoteroCollection[];
   isLoadingCollections: boolean;
@@ -70,6 +71,11 @@ interface ZoteroState {
   ) => Promise<void>;
   syncCollectionBib: (collectionKey: string | null) => Promise<void>;
   removeCollection: (collectionKey: string | null) => void;
+  renameSyncedBibFile: (
+    oldName: string,
+    newName: string,
+    projectRoot?: string | null,
+  ) => void;
 }
 
 const MYLIB_KEY = "__my_library__";
@@ -179,6 +185,83 @@ function normalizeProjectCollections(
   return normalized;
 }
 
+function fileBaseName(file: { name?: string; relativePath?: string }): string {
+  return (
+    file.name?.trim() || file.relativePath?.split(/[\\/]/).pop()?.trim() || ""
+  );
+}
+
+function sameBibFileName(left: string, right: string): boolean {
+  return left.trim().toLowerCase() === right.trim().toLowerCase();
+}
+
+function listProjectBibFileNames(
+  files:
+    | ReadonlyArray<{
+        name?: string;
+        relativePath?: string;
+        type?: string;
+      }>
+    | undefined,
+): string[] {
+  if (!files) return [];
+  const names: string[] = [];
+  for (const file of files) {
+    const name = fileBaseName(file);
+    const isBib =
+      file.type === "bib" ||
+      name.toLowerCase().endsWith(".bib") ||
+      file.relativePath?.toLowerCase().endsWith(".bib") === true;
+    if (isBib && name) names.push(name);
+  }
+  return names;
+}
+
+function reconcileRenamedBibFiles(
+  current: {
+    projectRoot: string | null;
+    projectGeneration: number;
+    files?: ReadonlyArray<{
+      name?: string;
+      relativePath?: string;
+      type?: string;
+    }>;
+  },
+  previous: {
+    projectRoot: string | null;
+    projectGeneration: number;
+    files?: ReadonlyArray<{
+      name?: string;
+      relativePath?: string;
+      type?: string;
+    }>;
+  },
+): void {
+  if (
+    !current.projectRoot ||
+    !previous.projectRoot ||
+    current.projectRoot !== previous.projectRoot ||
+    current.projectGeneration !== previous.projectGeneration
+  ) {
+    return;
+  }
+  const previousNames = listProjectBibFileNames(previous.files);
+  const currentNames = listProjectBibFileNames(current.files);
+  const removed = previousNames.filter(
+    (name) =>
+      !currentNames.some((candidate) => sameBibFileName(candidate, name)),
+  );
+  const added = currentNames.filter(
+    (name) =>
+      !previousNames.some((candidate) => sameBibFileName(candidate, name)),
+  );
+  if (removed.length === 1 && added.length === 1 && removed[0] !== added[0]) {
+    useZoteroStore
+      .getState()
+      .renameSyncedBibFile(removed[0], added[0], current.projectRoot);
+  }
+}
+
 function captureProjectOwner(): ProjectFsOwner | null {
   const state = useDocumentStore.getState();
   if (!state.projectRoot || state.isProjectMutating) return null;
@@ -228,15 +311,36 @@ function rootBibFilePath(owner: ProjectFsOwner, bibFileName: string): string {
 function findOwnedBibFile(request: ProjectSyncRequest, bibFileName: string) {
   if (!ownsMountedProject(request)) return null;
   const expectedPath = rootBibFilePath(request.owner, bibFileName);
-  return (
-    useDocumentStore
-      .getState()
-      .files.find(
-        (file) =>
-          file.type === "bib" &&
-          canonicalProjectPath(file.absolutePath) === expectedPath,
-      ) ?? null
+  const files = useDocumentStore.getState().files;
+  const exact = files.find(
+    (file) =>
+      file.type === "bib" &&
+      canonicalProjectPath(file.absolutePath) === expectedPath,
   );
+  if (exact) return exact;
+
+  const rootBibs = files.filter((file) => {
+    const name = fileBaseName(file);
+    const isBib =
+      file.type === "bib" ||
+      name.toLowerCase().endsWith(".bib") ||
+      file.relativePath.toLowerCase().endsWith(".bib");
+    const dir = file.relativePath.includes("/")
+      ? file.relativePath.substring(0, file.relativePath.lastIndexOf("/"))
+      : "";
+    return isBib && dir === "";
+  });
+  if (rootBibs.length !== 1) return null;
+  const remapped = rootBibs[0];
+  if (sameBibFileName(fileBaseName(remapped), bibFileName)) return remapped;
+  useZoteroStore
+    .getState()
+    .renameSyncedBibFile(
+      bibFileName,
+      fileBaseName(remapped),
+      request.owner.projectRoot,
+    );
+  return remapped;
 }
 
 function sanitizeFileName(name: string): string {
@@ -244,6 +348,18 @@ function sanitizeFileName(name: string): string {
     .replace(/[^a-zA-Z0-9_\-\s]/g, "")
     .replace(/\s+/g, "-")
     .toLowerCase();
+}
+
+const STARTING_SYNC_PROGRESS = { loaded: 0, total: 0 } as const;
+
+function writingSyncProgress(
+  current: { loaded: number; total: number } | null,
+): { loaded: number; total: number; writing: true } {
+  return {
+    loaded: current?.loaded ?? 0,
+    total: current?.total ?? 0,
+    writing: true,
+  };
 }
 
 /** Parse a .bib file into a map of citekey → full entry string */
@@ -427,7 +543,7 @@ export const useZoteroStore = create<ZoteroState>()(
           activeSyncRequestId: request.id,
           activeSyncProjectOwner: request.owner,
           isSyncing: sk,
-          syncProgress: null,
+          syncProgress: { ...STARTING_SYNC_PROGRESS },
           error: null,
         });
 
@@ -449,6 +565,11 @@ export const useZoteroStore = create<ZoteroState>()(
           // The network request is deliberately outside the filesystem
           // registry. Re-authorize its project immediately before committing.
           if (!ownsMountedProject(request)) return;
+          set((state) =>
+            state.activeSyncRequestId === request.id
+              ? { syncProgress: writingSyncProgress(state.syncProgress) }
+              : {},
+          );
 
           // Determine .bib file name
           const bibFileName = `${sanitizeFileName(name)}.bib`;
@@ -508,15 +629,24 @@ export const useZoteroStore = create<ZoteroState>()(
               ),
             };
           });
+          if (ownsMountedProject(request)) {
+            void get().loadCollections();
+            if (get().activeSyncRequestId === request.id) {
+              toast.success(`Imported ${name}`);
+            }
+          }
         } catch (err) {
           if (ownsMountedProject(request)) {
+            const message =
+              err instanceof Error ? err.message : "Import failed";
             set((state) =>
               state.activeSyncRequestId === request.id
-                ? {
-                    error: err instanceof Error ? err.message : "Import failed",
-                  }
+                ? { error: message }
                 : {},
             );
+            if (get().activeSyncRequestId === request.id) {
+              toast.error(message);
+            }
           }
         } finally {
           if (isLatestProjectRequest(request)) {
@@ -562,7 +692,7 @@ export const useZoteroStore = create<ZoteroState>()(
           activeSyncRequestId: request.id,
           activeSyncProjectOwner: request.owner,
           isSyncing: sk,
-          syncProgress: null,
+          syncProgress: { ...STARTING_SYNC_PROGRESS },
           error: null,
         });
 
@@ -593,6 +723,11 @@ export const useZoteroStore = create<ZoteroState>()(
             currentSyncInfo.bibFileName,
           );
           if (!currentBibFile) return;
+          set((state) =>
+            state.activeSyncRequestId === request.id
+              ? { syncProgress: writingSyncProgress(state.syncProgress) }
+              : {},
+          );
 
           if (collectionKey) {
             // For specific collections, syncCollection returns a full re-import
@@ -681,15 +816,23 @@ export const useZoteroStore = create<ZoteroState>()(
               };
             });
           }
+          if (ownsMountedProject(request)) {
+            void get().loadCollections();
+            if (get().activeSyncRequestId === request.id) {
+              toast.success(`Synced ${currentSyncInfo.name}`);
+            }
+          }
         } catch (err) {
           if (ownsMountedProject(request)) {
+            const message = err instanceof Error ? err.message : "Sync failed";
             set((state) =>
               state.activeSyncRequestId === request.id
-                ? {
-                    error: err instanceof Error ? err.message : "Sync failed",
-                  }
+                ? { error: message }
                 : {},
             );
+            if (get().activeSyncRequestId === request.id) {
+              toast.error(message);
+            }
           }
         } finally {
           if (isLatestProjectRequest(request)) {
@@ -745,6 +888,36 @@ export const useZoteroStore = create<ZoteroState>()(
           };
         });
       },
+
+      renameSyncedBibFile: (oldName, newName, projectRoot) => {
+        const root =
+          projectRoot?.trim() || captureProjectOwner()?.projectRoot || null;
+        if (!root) return;
+        const from = oldName.trim().split(/[\\/]/).pop() ?? "";
+        const to = newName.trim().split(/[\\/]/).pop() ?? "";
+        if (!from || !to || from === to) return;
+        set((s) => {
+          const projectColls = projectCollections(s.syncedCollections, root);
+          let changed = false;
+          const next: Record<string, CollectionSyncInfo> = {};
+          for (const [key, info] of Object.entries(projectColls)) {
+            if (sameBibFileName(info.bibFileName, from)) {
+              next[key] = { ...info, bibFileName: to };
+              changed = true;
+            } else {
+              next[key] = info;
+            }
+          }
+          if (!changed) return {};
+          return {
+            syncedCollections: withProjectCollections(
+              s.syncedCollections,
+              root,
+              next,
+            ),
+          };
+        });
+      },
     }),
     {
       name: "claude-prism-zotero",
@@ -773,6 +946,7 @@ useDocumentStore.subscribe((documentState, previousDocumentState) => {
     documentState.projectRoot === previousDocumentState.projectRoot &&
     documentState.projectGeneration === previousDocumentState.projectGeneration
   ) {
+    reconcileRenamedBibFiles(documentState, previousDocumentState);
     return;
   }
   const activeOwner = useZoteroStore.getState().activeSyncProjectOwner;

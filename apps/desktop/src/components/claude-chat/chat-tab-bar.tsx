@@ -1,15 +1,58 @@
-import { useCallback, useRef, useEffect } from "react";
+import { useCallback, useMemo, useRef, useEffect, type ReactNode } from "react";
 import { PlusIcon, XIcon } from "lucide-react";
+import { useStoreWithEqualityFn } from "zustand/traditional";
 import { cn } from "@/lib/utils";
-import { useClaudeChatStore, type TabState } from "@/stores/claude-chat-store";
+import {
+  pendingApprovalTabKey,
+  useApprovalStore,
+} from "@/stores/approval-store";
+import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import { SessionSelector } from "./session-selector";
+import { WorkspaceAccountButton } from "./workspace-account-button";
 
-export function ChatTabBar() {
-  const tabs = useClaudeChatStore((s) => s.tabs);
+type TabBarItem = {
+  id: string;
+  title: string;
+  isStreaming: boolean;
+  isStopping: boolean;
+};
+
+function sameTabBarItems(left: TabBarItem[], right: TabBarItem[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (item, index) =>
+        item.id === right[index].id &&
+        item.title === right[index].title &&
+        item.isStreaming === right[index].isStreaming &&
+        item.isStopping === right[index].isStopping,
+    )
+  );
+}
+
+export function ChatTabBar({ leading }: { leading?: ReactNode }) {
+  const tabs = useStoreWithEqualityFn(
+    useClaudeChatStore,
+    (s) =>
+      s.tabs.map((tab) => ({
+        id: tab.id,
+        title: tab.title,
+        isStreaming: tab.isStreaming,
+        isStopping: (tab.cancelledAttempts?.length ?? 0) > 0,
+      })),
+    sameTabBarItems,
+  );
   const activeTabId = useClaudeChatStore((s) => s.activeTabId);
   const setActiveTab = useClaudeChatStore((s) => s.setActiveTab);
   const createTab = useClaudeChatStore((s) => s.createTab);
   const closeTab = useClaudeChatStore((s) => s.closeTab);
+  const pendingTabKey = useApprovalStore((s) =>
+    pendingApprovalTabKey(s.pending),
+  );
+  const pendingTabIds = useMemo(
+    () => new Set(pendingTabKey.split("\0").filter(Boolean)),
+    [pendingTabKey],
+  );
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Scroll active tab into view when it changes
@@ -78,84 +121,100 @@ export function ChatTabBar() {
   );
 
   return (
-    <div className="flex items-center border-border border-b">
+    <div className="flex h-11 items-center border-border/70 border-b bg-background">
+      {leading}
       <div
         ref={scrollRef}
-        className="scrollbar-none flex min-w-0 flex-1 items-center overflow-x-auto"
+        className="scrollbar-none flex min-w-0 flex-1 items-center self-stretch overflow-x-auto"
       >
         {tabs.map((tab) => (
           <TabButton
             key={tab.id}
-            tab={tab}
+            tabId={tab.id}
+            title={tab.title}
             isActive={tab.id === activeTabId}
             isStreaming={tab.isStreaming}
-            isLastTab={tabs.length <= 1}
+            isStopping={tab.isStopping}
+            hasPendingApproval={pendingTabIds.has(tab.id)}
             onClick={() => setActiveTab(tab.id)}
             onClose={(e) => handleClose(e, tab.id)}
           />
         ))}
       </div>
-      <div className="flex shrink-0 items-center gap-0.5 pr-3">
+      <div className="flex shrink-0 items-center gap-1 pr-2.5">
         <button
           type="button"
           onClick={handleCreate}
-          className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           aria-label="New tab"
         >
           <PlusIcon className="size-3.5" />
         </button>
         <SessionSelector />
+        <WorkspaceAccountButton />
       </div>
     </div>
   );
 }
 
 function TabButton({
-  tab,
+  tabId,
+  title,
   isActive,
   isStreaming,
-  isLastTab,
+  isStopping,
+  hasPendingApproval,
   onClick,
   onClose,
 }: {
-  tab: TabState;
+  tabId: string;
+  title: string;
   isActive: boolean;
   isStreaming: boolean;
-  isLastTab: boolean;
+  isStopping: boolean;
+  hasPendingApproval: boolean;
   onClick: () => void;
   onClose: (e: React.MouseEvent) => void;
 }) {
-  const runtimeLabel = tab.runtime === "codex" ? "Codex" : "Claude";
-
   return (
     <button
       type="button"
-      data-tab-id={tab.id}
-      aria-label={`${runtimeLabel} runtime: ${tab.title}`}
+      data-tab-id={tabId}
+      aria-label={hasPendingApproval ? `${title} (needs approval)` : title}
       onClick={onClick}
       className={cn(
-        "group relative flex min-w-0 max-w-[160px] items-center gap-1.5 border-b-2 px-3 py-1.5 text-xs transition-colors",
+        "group relative flex h-full min-w-0 max-w-[11rem] items-center gap-1.5 border-b-2 px-3.5 text-xs transition-colors",
         isActive
-          ? "border-primary bg-muted/50 text-foreground"
-          : "border-transparent text-muted-foreground hover:bg-muted/30 hover:text-foreground",
+          ? "border-primary/80 bg-muted/40 text-foreground"
+          : "border-transparent text-muted-foreground hover:bg-muted/25 hover:text-foreground",
       )}
     >
-      {/* Streaming indicator */}
-      {isStreaming && (
-        <span className="relative flex size-2 shrink-0">
-          <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary/60" />
-          <span className="relative inline-flex size-2 rounded-full bg-primary" />
+      {(isStreaming || hasPendingApproval) && (
+        <span
+          className="relative flex size-2 shrink-0"
+          data-testid={
+            hasPendingApproval
+              ? "tab-approval-indicator"
+              : "tab-streaming-indicator"
+          }
+        >
+          <span
+            className={cn(
+              "absolute inline-flex size-full animate-ping rounded-full",
+              hasPendingApproval ? "bg-amber-500/70" : "bg-primary/60",
+            )}
+          />
+          <span
+            className={cn(
+              "relative inline-flex size-2 rounded-full",
+              hasPendingApproval ? "bg-amber-500" : "bg-primary",
+            )}
+          />
         </span>
       )}
-      <span
-        aria-hidden="true"
-        className="inline-flex shrink-0 items-center rounded-full bg-primary/15 px-1.5 py-0.5 font-semibold text-[9px] text-primary leading-none"
-      >
-        {runtimeLabel}
-      </span>
-      <span className="truncate">{tab.title}</span>
-      {/* Close button — hidden for the last remaining tab or when streaming on this tab */}
-      {!isLastTab && !isStreaming && (
+      <span className="truncate">{title}</span>
+      {/* Close button — hidden while this tab is streaming or stopping */}
+      {!isStreaming && !isStopping && (
         <span
           role="button"
           tabIndex={-1}

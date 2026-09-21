@@ -19,7 +19,6 @@ export function TemplateGallery() {
 
   const searchRef = useRef<HTMLInputElement>(null);
 
-  // Reset store when gallery mounts
   useEffect(() => {
     reset();
   }, [reset]);

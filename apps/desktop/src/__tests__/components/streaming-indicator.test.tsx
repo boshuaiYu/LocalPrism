@@ -24,15 +24,38 @@ describe("StreamingIndicator", () => {
     vi.useRealTimers();
   });
 
-  it("escalates generic Codex working status after 45s", async () => {
+  it("escalates Claude waiting copy after 45s without mentioning reconnects", async () => {
     const startedAt = Date.now() - 46_000;
 
     await act(async () => {
       root.render(
-        <StreamingIndicator startedAt={startedAt} status="Codex is working…" />,
+        <StreamingIndicator
+          startedAt={startedAt}
+          status="Thinking..."
+          runtime="claude"
+        />,
       );
     });
 
-    expect(container.textContent).toMatch(/Still waiting on Codex/i);
+    expect(container.textContent).toMatch(/Still waiting for the first reply/i);
+    expect(container.textContent).not.toMatch(/reconnect/i);
+  });
+
+  it("keeps Codex reconnect copy after 45s", async () => {
+    const startedAt = Date.now() - 46_000;
+
+    await act(async () => {
+      root.render(
+        <StreamingIndicator
+          startedAt={startedAt}
+          status="Thinking..."
+          runtime="codex"
+        />,
+      );
+    });
+
+    expect(container.textContent).toMatch(
+      /Still waiting \(reconnects can take 1–2 minutes\)/i,
+    );
   });
 });

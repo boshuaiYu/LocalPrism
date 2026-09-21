@@ -1,3 +1,5 @@
+import { HIT_TEMPLATES } from "@/lib/templates/hit-templates";
+
 // ─── Template Data Architecture ───
 
 export type TemplateCategory =
@@ -23,6 +25,11 @@ export interface TemplatePackage {
   description: string;
 }
 
+export interface TemplateExtraFile {
+  path: string;
+  content: string;
+}
+
 export interface TemplateDefinition {
   id: string;
   name: string;
@@ -35,6 +42,8 @@ export interface TemplateDefinition {
   mainFileName: string;
   content: string;
   packages: TemplatePackage[];
+  /** Extra files written next to the main TeX file (cover, chapters, cls extras). */
+  extraFiles?: TemplateExtraFile[];
   /** Accent color for thumbnail placeholder */
   accentColor: string;
   /** Whether template uses bibliography */
@@ -556,6 +565,389 @@ C.~Dwork and A.~Roth, \`\`The algorithmic foundations of differential privacy,''
 
 \\bibitem{mcmahan2018learning}
 H.~B. McMahan, D.~Ramage, K.~Talwar, and L.~Zhang, \`\`Learning differentially private recurrent language models,'' in \\textit{Proc. ICLR}, 2018.
+
+\\end{thebibliography}
+
+\\end{document}
+`,
+  },
+  {
+    id: "paper-arxiv",
+    name: "arXiv Preprint",
+    description: "Clean one-column preprint for arXiv submission",
+    category: "academic",
+    subcategory: "papers",
+    tags: [
+      "arxiv",
+      "preprint",
+      "article",
+      "research",
+      "academic",
+      "open access",
+    ],
+    icon: "FileText",
+    documentClass: "article",
+    mainFileName: "main.tex",
+    accentColor: "#b45309",
+    hasBibliography: true,
+    aspectRatio: "3/4",
+    packages: [
+      { name: "amsmath", description: "AMS mathematical typesetting" },
+      { name: "graphicx", description: "Enhanced graphics support" },
+      { name: "xcolor", description: "Color mixing for hyperref" },
+      { name: "geometry", description: "Page layout customization" },
+      { name: "hyperref", description: "Hyperlinks and PDF metadata" },
+      { name: "natbib", description: "Author--year citations" },
+      { name: "booktabs", description: "Professional table formatting" },
+    ],
+    content: `\\documentclass[11pt,a4paper]{article}
+\\usepackage[utf8]{inputenc}
+\\usepackage[T1]{fontenc}
+\\usepackage{lmodern}
+\\usepackage{amsmath,amssymb,amsthm}
+\\usepackage{graphicx}
+\\usepackage{xcolor}
+\\usepackage[margin=1in]{geometry}
+\\usepackage{booktabs}
+\\usepackage{microtype}
+\\usepackage{hyperref}
+
+\\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!70!black,
+  citecolor=green!50!black,
+  urlcolor=blue!80!black
+}
+
+\\newtheorem{theorem}{Theorem}[section]
+\\newtheorem{proposition}[theorem]{Proposition}
+
+\\title{Score-Based Calibration of Scientific Surrogate Models}
+\\author{
+  Nora I. Alvarez\\\\
+  Department of Applied Mathematics, University of Colorado Boulder\\\\
+  \\texttt{n.alvarez@colorado.edu}
+  \\and
+  Henrik S. Holm\\\\
+  Niels Bohr Institute, University of Copenhagen\\\\
+  \\texttt{hholm@nbi.ku.dk}
+}
+\\date{\\today}
+
+\\begin{document}
+
+\\maketitle
+
+\\begin{abstract}
+Surrogate models accelerate scientific simulation but are often miscalibrated out of distribution. We present a compact score-based calibration procedure that post-hoc adjusts a pretrained emulator using a small labeled holdout set. The method estimates a monotone transport map on residual scores and yields prediction intervals with near-nominal coverage on three benchmark PDE families. The preprint is written as a standard one-column article suitable for arXiv.
+\\end{abstract}
+
+\\noindent\\textit{Preprint. Comments welcome.}
+
+\\section{Introduction}
+
+High-fidelity solvers remain expensive for inverse problems and uncertainty quantification. Learned surrogates reduce wall-clock cost, yet their residual distributions drift when the operating regime changes~\\cite{raissi2019physics,karniadakis2021physics}. Calibration---rather than full retraining---is often sufficient when the emulator already captures the dominant solution manifold.
+
+This note describes a lightweight post-hoc procedure. Let $f_\\theta$ be a frozen surrogate and $s(x,y)$ a residual score. We fit a monotone map $T$ on a calibration split so that $T\\circ s$ is approximately uniform under the target measure, then invert $T$ to form intervals.
+
+\\section{Method}
+
+Given pairs $\\{(x_i,y_i)\\}_{i=1}^{n}$ from the calibration split, define
+\\begin{equation}
+  s_i = s(x_i, y_i) = \\|y_i - f_\\theta(x_i)\\|_2.
+\\end{equation}
+Let $\\hat{F}$ be the empirical distribution function of $\\{s_i\\}$. For a desired miscoverage $\\alpha$, the interval at a query $x$ is
+\\begin{equation}
+  \\bigl[f_\\theta(x) - \\hat{F}^{-1}(1-\\alpha),\\; f_\\theta(x) + \\hat{F}^{-1}(1-\\alpha)\\bigr]
+\\end{equation}
+in the scalar case, and an analogous Mahalanobis ball in the vector case. When a held-out score sequence is available we replace $\\hat{F}$ by an isotonic regression against ranks, which reduces finite-sample jitter.
+
+\\begin{proposition}
+If the calibration scores are exchangeable with the test score, the resulting intervals have coverage at least $1-\\alpha$ up to a $1/(n+1)$ discretization term.
+\\end{proposition}
+
+\\section{Experiments}
+
+We evaluate on Burgers, Darcy flow, and a reaction--diffusion system. Table~\\ref{tab:coverage} reports interval coverage and width relative to an uncalibrated residual baseline.
+
+\\begin{table}[t]
+\\centering
+\\caption{Empirical coverage (target $90\\%$) and mean interval width.}
+\\label{tab:coverage}
+\\begin{tabular}{@{}lcccc@{}}
+\\toprule
+\\textbf{System} & \\textbf{Base cov.} & \\textbf{Cal. cov.} & \\textbf{Base width} & \\textbf{Cal. width} \\\\
+\\midrule
+Burgers & 0.71 & 0.91 & 0.42 & 0.55 \\\\
+Darcy & 0.64 & 0.89 & 0.31 & 0.48 \\\\
+Reaction--diffusion & 0.77 & 0.92 & 0.28 & 0.36 \\\\
+\\bottomrule
+\\end{tabular}
+\\end{table}
+
+\\section{Related Work}
+
+Physics-informed networks and neural operators provide differentiable surrogates for continuum models~\\cite{raissi2019physics,karniadakis2021physics,li2021fno}. Conformal prediction supplies finite-sample coverage under exchangeability~\\cite{vovk2005}. The present note uses residual scores as the interface between the two: the emulator stays frozen, and only a one-dimensional monotone map is fit.
+
+\\section{Discussion}
+
+Calibration cannot repair a surrogate that misses a bifurcation. In that regime we recommend detecting score inflation and falling back to the numerical solver. When the holdout set is smaller than about fifty points the isotonic map becomes noisy; a parametric Gamma tail is then preferable. The construction adds no trainable weights to $f_\\theta$ and remains a standard one-column preprint.
+
+\\section{Conclusion}
+
+Score-based calibration is a cheap insurance policy for scientific emulators. The method requires only a labeled holdout set and produces intervals that track the target coverage on the studied PDE families. Code and a reproducibility checklist accompany the arXiv deposit.
+
+\\begin{thebibliography}{9}
+
+\\bibitem{raissi2019physics}
+M.~Raissi, P.~Perdikaris, and G.~E. Karniadakis, \`\`Physics-informed neural networks,'' \\textit{J. Comput. Phys.}, vol.~378, pp.~686--707, 2019.
+
+\\bibitem{karniadakis2021physics}
+G.~E. Karniadakis et~al., \`\`Physics-informed machine learning,'' \\textit{Nat. Rev. Phys.}, vol.~3, pp.~422--440, 2021.
+
+\\bibitem{li2021fno}
+Z.~Li et~al., \`\`Fourier neural operator for parametric partial differential equations,'' in \\textit{Proc. ICLR}, 2021.
+
+\\bibitem{vovk2005}
+V.~Vovk, A.~Gammerman, and G.~Shafer, \\textit{Algorithmic Learning in a Random World}. Springer, 2005.
+
+\\end{thebibliography}
+
+\\end{document}
+`,
+  },
+  {
+    id: "paper-elsevier",
+    name: "Elsevier Journal",
+    description: "Elsevier elsarticle journal preprint with front matter",
+    category: "academic",
+    subcategory: "papers",
+    tags: [
+      "elsevier",
+      "elsarticle",
+      "journal",
+      "preprint",
+      "academic",
+      "research",
+    ],
+    icon: "FileText",
+    documentClass: "elsarticle",
+    mainFileName: "main.tex",
+    accentColor: "#e11d48",
+    hasBibliography: true,
+    aspectRatio: "3/4",
+    packages: [
+      { name: "amsmath", description: "AMS mathematical typesetting" },
+      { name: "graphicx", description: "Enhanced graphics support" },
+      { name: "booktabs", description: "Professional table formatting" },
+    ],
+    content: `\\documentclass[preprint,12pt]{elsarticle}
+
+\\usepackage{amsmath,amssymb}
+\\usepackage{graphicx}
+\\usepackage{booktabs}
+
+\\journal{Journal of Computational Science}
+
+\\begin{document}
+
+\\begin{frontmatter}
+
+\\title{Residual Transport Maps for Calibrated Scientific Emulators}
+\\author[inst1]{Elena V. Petrov\\corref{cor1}}
+\\ead{epetrov@example.edu}
+\\author[inst1,inst2]{Minho Park}
+\\ead{mpark@example.edu}
+\\cortext[cor1]{Corresponding author}
+\\address[inst1]{Department of Applied Mathematics, Example University, Boston, 02115, United States}
+\\address[inst2]{Center for Scientific Computing, Example University, Boston, 02115, United States}
+
+\\begin{abstract}
+We describe a compiling \\texttt{elsarticle} manuscript for journal submission. A frozen scientific emulator is calibrated with a monotone residual transport map estimated on a small holdout set. The procedure improves interval coverage on three partial-differential-equation benchmarks without retraining the surrogate. The source uses the standard Elsevier front matter, keywords, and numbered bibliography so it typesets with a conventional TeX Live installation that provides \\texttt{elsarticle.cls}.
+\\end{abstract}
+
+\\begin{keyword}
+scientific machine learning \\sep uncertainty quantification \\sep elsarticle \\sep emulator calibration
+\\end{keyword}
+
+\\end{frontmatter}
+
+\\section{Introduction}
+
+Learned surrogates are now common in computational science, but their residual law is rarely calibrated when the operating envelope changes. Journal workflows still expect a familiar \\texttt{elsarticle} skeleton: title, authors, affiliations, abstract, keywords, numbered sections, and a compact bibliography.
+
+Let $f_\\theta$ denote a pretrained emulator. We treat calibration as estimating a monotone map on a scalar residual score, then inverting that map to form prediction intervals.
+
+\\section{Calibration}
+
+For a labeled holdout set $\\{(x_i,y_i)\\}_{i=1}^{n}$ define $s_i=\\|y_i-f_\\theta(x_i)\\|_2$. Write $\\hat F$ for the empirical distribution function of $\\{s_i\\}$. At a query $x$ the symmetric interval of level $1-\\alpha$ is
+\\begin{equation}
+  f_\\theta(x)\\pm \\hat F^{-1}(1-\\alpha).
+\\end{equation}
+Exchangeability of calibration and test scores yields the usual conformal $1/(n+1)$ coverage correction.
+
+\\section{Related work}
+
+Elsevier journals in computational science typically expect a short account of prior art before the method. Physics-informed networks and operator learning supply the frozen emulator~\\cite{raissi2019}. Conformal prediction supplies the coverage argument~\\cite{vovk2005}. We treat residual scores as a one-dimensional interface so that neither ingredient has to be rewritten.
+
+\\section{Numerical evidence}
+
+Table~\\ref{tab:elsevier-coverage} summarizes holdout coverage before and after calibration. Width increases modestly while coverage approaches the $90\\%$ target. A second split with $n=400$ changes coverage by less than $0.03$, which suggests that the empirical map is already stable at the smaller holdout size used in the main table.
+
+\\begin{table}[t]
+\\centering
+\\caption{Holdout coverage and mean interval width for a $90\\%$ target.}
+\\label{tab:elsevier-coverage}
+\\begin{tabular}{@{}lcc@{}}
+\\toprule
+Problem & Uncalibrated coverage & Calibrated coverage \\\\
+\\midrule
+Viscous Burgers equation & 0.73 & 0.90 \\\\
+Darcy flow & 0.66 & 0.88 \\\\
+Reaction--diffusion & 0.79 & 0.91 \\\\
+\\bottomrule
+\\end{tabular}
+\\end{table}
+
+\\section{Conclusion}
+
+The manuscript is intentionally short: it demonstrates a complete \\texttt{elsarticle} document that compiles, and it records a practical calibration baseline for scientific emulators.
+
+\\begin{thebibliography}{9}
+
+\\bibitem{raissi2019}
+M.~Raissi, P.~Perdikaris, G.~E. Karniadakis, Physics-informed neural networks, J. Comput. Phys. 378 (2019) 686--707.
+
+\\bibitem{vovk2005}
+V.~Vovk, A.~Gammerman, G.~Shafer, Algorithmic Learning in a Random World, Springer, 2005.
+
+\\end{thebibliography}
+
+\\end{document}
+`,
+  },
+  {
+    id: "paper-chinese",
+    name: "Chinese Paper",
+    description:
+      "Chinese journal article (ctexart). HITSZ dissertations use the hitszthesis template.",
+    category: "academic",
+    subcategory: "papers",
+    tags: [
+      "chinese",
+      "ctex",
+      "ctexart",
+      "xeCJK",
+      "journal",
+      "academic",
+      "中文",
+    ],
+    icon: "FileText",
+    documentClass: "ctexart",
+    mainFileName: "main.tex",
+    accentColor: "#dc2626",
+    hasBibliography: true,
+    aspectRatio: "3/4",
+    packages: [
+      { name: "ctex", description: "Chinese typesetting (ctexart)" },
+      { name: "amsmath", description: "AMS mathematical typesetting" },
+      { name: "graphicx", description: "Enhanced graphics support" },
+      { name: "xcolor", description: "Color mixing for hyperref" },
+      { name: "geometry", description: "Page layout customization" },
+      { name: "booktabs", description: "Professional table formatting" },
+    ],
+    content: `% !TEX program = XeLaTeX
+\\documentclass[UTF8,a4paper,11pt]{ctexart}
+
+\\usepackage{amsmath,amssymb}
+\\usepackage{graphicx}
+\\usepackage{xcolor}
+\\usepackage{booktabs}
+\\usepackage{geometry}
+\\geometry{margin=2.5cm}
+\\usepackage{hyperref}
+
+\\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!70!black,
+  citecolor=green!50!black,
+  urlcolor=blue!80!black
+}
+
+\\title{面向科学代理模型的残差校准方法}
+\\author{张伟\\quad 李娜}
+\\date{\\today}
+
+\\begin{document}
+
+\\maketitle
+
+\\begin{abstract}
+科学计算中的代理模型能够显著降低数值模拟成本，但在分布偏移下往往出现残差误校准。本文给出一种基于残差分数的事后校准流程：在较小的标注校准集上估计单调运输映射，并据此构造预测区间。该方法在三类偏微分方程算例上使区间覆盖率接近名义水平。文稿采用 \\texttt{ctexart} 文档类，以 UTF-8 中文排版，可用 XeLaTeX 或 LuaLaTeX 编译。
+\\end{abstract}
+
+\\noindent\\textbf{关键词：} 科学机器学习；不确定性量化；残差校准；中文论文
+
+\\section{引言}
+
+高保真求解器在反问题与不确定性量化中代价高昂。数据驱动代理模型可以缩短计算时间，但其残差分布常随工况漂移~\\cite{raissi2019,karniadakis2021}。当代理模型已经捕捉主要解流形时，事后校准通常比重新训练更经济。
+
+设 $f_\\theta$ 为固定代理模型，$s(x,y)$ 为残差分数。我们在校准集上拟合单调映射 $T$，使 $T\\circ s$ 近似服从目标分布，再反演 $T$ 得到区间。
+
+\\section{方法}
+
+给定校准样本 $\\{(x_i,y_i)\\}_{i=1}^{n}$，定义
+\\begin{equation}
+  s_i = \\|y_i - f_\\theta(x_i)\\|_2.
+\\end{equation}
+记 $\\hat{F}$ 为 $\\{s_i\\}$ 的经验分布函数。对目标误覆盖率 $\\alpha$，查询点 $x$ 处的对称区间为
+\\begin{equation}
+  f_\\theta(x) \\pm \\hat{F}^{-1}(1-\\alpha).
+\\end{equation}
+若校准分数与测试分数可交换，则覆盖率至少为 $1-\\alpha$，并带有 $1/(n+1)$ 的有限样本修正。
+
+\\section{数值实验}
+
+我们在 Burgers 方程、Darcy 流与反应--扩散系统上评估该方法。表~\\ref{tab:cn-coverage} 给出校准前后的区间覆盖率。
+
+\\begin{table}[t]
+\\centering
+\\caption{目标覆盖率 $90\\%$ 时的实验结果}
+\\label{tab:cn-coverage}
+\\begin{tabular}{@{}lcc@{}}
+\\toprule
+问题 & 校准前覆盖率 & 校准后覆盖率 \\\\
+\\midrule
+Burgers 方程 & 0.71 & 0.91 \\\\
+Darcy 流 & 0.64 & 0.89 \\\\
+反应--扩散 & 0.77 & 0.92 \\\\
+\\bottomrule
+\\end{tabular}
+\\end{table}
+
+\\section{相关工作}
+
+物理信息神经网络与神经算子为科学代理提供了可微函数类~\\cite{raissi2019,karniadakis2021}。共形推断从统计侧给出有限样本覆盖保证。本文将残差分数上的单调映射作为二者之间的最小接口，从而不必改写代理模型的训练流程。
+
+\\section{讨论}
+
+当代理模型错过分岔时，校准不能凭空恢复正确的解流形。此时应检测分数膨胀并回退到数值求解器。校准集小于约 50 个点时，经验分布抖动明显，宜改用带尾部约束的参数族。学位论文请改用本应用中的 \\texttt{hitszthesis} 模板。
+
+\\section{结论}
+
+残差校准是科学代理模型的一种低成本保险机制：它不修改 $f_\\theta$ 的可训练参数，只要求带标注的校准集，并在本文算例中使覆盖率回到名义水平。该稿可作为中文期刊论文初稿；哈尔滨工业大学（深圳）学位论文请使用 \\texttt{hitszthesis}。
+
+\\begin{thebibliography}{9}
+
+\\bibitem{raissi2019}
+M.~Raissi, P.~Perdikaris, G.~E. Karniadakis.
+Physics-informed neural networks.
+\\textit{Journal of Computational Physics}, 378:686--707, 2019.
+
+\\bibitem{karniadakis2021}
+G.~E. Karniadakis 等.
+Physics-informed machine learning.
+\\textit{Nature Reviews Physics}, 3:422--440, 2021.
 
 \\end{thebibliography}
 
@@ -2121,6 +2513,7 @@ Massachusetts Institute of Technology\\\\
 \\end{document}
 `,
   },
+  ...HIT_TEMPLATES,
   {
     id: "report-technical",
     name: "Technical Report",
@@ -3228,6 +3621,23 @@ export function getTemplateById(id: string): TemplateDefinition | undefined {
   return _templates.find((t) => t.id === id);
 }
 
+export const WELCOME_TEMPLATE_IDS = [
+  "paper-ieee",
+  "paper-arxiv",
+  "paper-elsevier",
+  "paper-chinese",
+] as const;
+
+export function getWelcomeTemplates(): TemplateDefinition[] {
+  return WELCOME_TEMPLATE_IDS.map((id) => {
+    const template = getTemplateById(id);
+    if (!template) {
+      throw new Error(`Missing welcome template: ${id}`);
+    }
+    return template;
+  });
+}
+
 export function getTemplatesByCategory(
   category: TemplateCategory,
 ): TemplateDefinition[] {
@@ -3257,11 +3667,28 @@ export function searchTemplates(query: string): TemplateDefinition[] {
   });
 }
 
+/** Files written when a user creates a project from a gallery template. */
+export function getTemplateProjectFiles(
+  template: TemplateDefinition,
+): TemplateExtraFile[] {
+  const files: TemplateExtraFile[] = [
+    { path: template.mainFileName, content: template.content },
+    ...(template.extraFiles ?? []),
+  ];
+  if (template.hasBibliography) {
+    const hasBib = files.some((file) => /\.bib$/i.test(file.path));
+    if (!hasBib) {
+      files.push({ path: "references.bib", content: BIB_TEMPLATE });
+    }
+  }
+  return files;
+}
+
 /**
  * Extract the skeleton (preamble only) from a template's content.
  * Keeps everything before \begin{document} (packages, styling, custom commands)
  * and adds an empty document body. The full `content` is preserved for
- * gallery preview / example rendering.
+ * gallery preview / example rendering and for new-project seed files.
  */
 export function getTemplateSkeleton(template: TemplateDefinition): string {
   const marker = "\\begin{document}";

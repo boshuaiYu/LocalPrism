@@ -50,6 +50,14 @@ type DynReader = Box<dyn AsyncRead + Unpin + Send>;
 type DynWriter = Box<dyn AsyncWrite + Unpin + Send>;
 type ServerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+fn codex_app_server_cli_args() -> Vec<String> {
+    vec![
+        "app-server".to_string(),
+        "--listen".to_string(),
+        "stdio://".to_string(),
+    ]
+}
+
 #[derive(Debug, Clone)]
 struct ProcessExit {
     success: bool,
@@ -99,11 +107,18 @@ impl AppServerSpawner for ProcessSpawner {
         Box::pin(async move {
             let mut command = Command::new(&self.executable);
             command
-                .args(["app-server", "--listen", "stdio://"])
+                .args(codex_app_server_cli_args())
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
+            crate::uv::apply_uv_isolation_env(&mut command);
+            command.env(
+                "PATH",
+                crate::uv::isolated_uv_path(&std::env::var("PATH").unwrap_or_default()),
+            );
+            command.env_remove("VIRTUAL_ENV");
+            command.env_remove("UV_PROJECT_ENVIRONMENT");
             isolate_process_tree(&mut command);
 
             let mut child = command
@@ -450,10 +465,10 @@ fn notification_scope(method: &str, params: &Value) -> Result<Option<Notificatio
 
 fn notification_is_terminal(method: &str, params: &Value) -> bool {
     match method {
-        "turn/completed" => params
-            .pointer("/turn/status")
-            .and_then(Value::as_str)
-            .is_none_or(|status| status != "inProgress"),
+        // Always release route ownership on turn/completed. A nonterminal status
+        // like `inProgress` is still a protocol error that must not leave the
+        // tab permanently busy ("already has a nonterminal turn").
+        "turn/completed" => true,
         "error" => params.get("willRetry").and_then(Value::as_bool) == Some(false),
         _ => false,
     }
@@ -718,8 +733,8 @@ struct RuntimeWarningPayload {
 fn emit_runtime_event(app: &tauri::AppHandle, event: RuntimeEventEnvelope) {
     // Global emit keeps long-running Codex turns (gpt-5.6 reconnect storms)
     // visible even if the webview label used for emit_to does not match.
-    if let RuntimeEvent::SubagentDiscovered { run }
-    | RuntimeEvent::SubagentStatusChanged { run } = &event.event
+    if let RuntimeEvent::SubagentDiscovered { run } | RuntimeEvent::SubagentStatusChanged { run } =
+        &event.event
     {
         let app = app.clone();
         let run = run.clone();
@@ -2110,8 +2125,7 @@ impl CodexAppServerState {
         let handle = if let Some(handle) = running {
             handle
         } else {
-            let binary = match tokio::task::spawn_blocking(probe_known_codex_binary_on_disk).await
-            {
+            let binary = match tokio::task::spawn_blocking(probe_known_codex_binary_on_disk).await {
                 Ok(Some(probed)) => probed,
                 _ => tokio::time::timeout_at(deadline, discover_codex_binary())
                     .await
@@ -3392,6 +3406,13 @@ mod tests {
                 "error": { "message": "Reconnecting... 5/5" }
             }),
         ));
+    }
+
+    #[test]
+    fn codex_app_server_cli_args_do_not_inject_localprism_http() {
+        let args = super::codex_app_server_cli_args();
+        assert_eq!(args, ["app-server", "--listen", "stdio://"]);
+        assert!(args.iter().all(|arg| !arg.contains("localprism_http")));
     }
 
     #[derive(Default)]

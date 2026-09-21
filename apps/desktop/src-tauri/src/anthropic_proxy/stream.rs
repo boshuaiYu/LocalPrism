@@ -16,7 +16,9 @@ struct OpenAiStreamState {
     thinking_block_index: Option<usize>,
     tool_blocks: HashMap<i64, StreamToolBlock>,
     stop_reason: Option<String>,
+    input_tokens: u64,
     output_tokens: u64,
+    cache_read_tokens: u64,
 }
 
 #[derive(Default)]
@@ -160,18 +162,10 @@ fn openai_stream_chunk_to_anthropic(
     credential: &OpenAiProxyCredential,
 ) -> String {
     let mut body = String::new();
-    ensure_stream_message_started(state, &mut body, chunk, anthropic_request, credential);
-
     if let Some(usage) = chunk.get("usage") {
-        state.output_tokens = usage_token(
-            usage,
-            &[
-                "completion_tokens",
-                "output_tokens",
-                "completion_token_count",
-            ],
-        );
+        apply_openai_usage(state, usage);
     }
+    ensure_stream_message_started(state, &mut body, chunk, anthropic_request, credential);
 
     let Some(choice) = chunk
         .get("choices")
@@ -257,8 +251,9 @@ fn ensure_stream_message_started(
                 "stop_reason": Value::Null,
                 "stop_sequence": Value::Null,
                 "usage": {
-                    "input_tokens": 0,
-                    "output_tokens": 0,
+                    "input_tokens": state.input_tokens,
+                    "output_tokens": state.output_tokens,
+                    "cache_read_input_tokens": state.cache_read_tokens,
                 },
             },
         }),
@@ -405,8 +400,9 @@ fn finish_anthropic_stream(state: &mut OpenAiStreamState) -> String {
                     "stop_reason": Value::Null,
                     "stop_sequence": Value::Null,
                     "usage": {
-                        "input_tokens": 0,
-                        "output_tokens": 0,
+                        "input_tokens": state.input_tokens,
+                        "output_tokens": state.output_tokens,
+                        "cache_read_input_tokens": state.cache_read_tokens,
                     },
                 },
             }),
@@ -499,7 +495,9 @@ fn finish_anthropic_stream(state: &mut OpenAiStreamState) -> String {
                 "stop_sequence": Value::Null,
             },
             "usage": {
+                "input_tokens": state.input_tokens,
                 "output_tokens": state.output_tokens,
+                "cache_read_input_tokens": state.cache_read_tokens,
             },
         }),
     );
@@ -735,10 +733,32 @@ fn push_sse(body: &mut String, event: &str, data: &Value) {
     body.push_str("\n\n");
 }
 
-fn usage_token(usage: &Value, keys: &[&str]) -> u64 {
-    keys.iter()
-        .find_map(|key| usage.get(*key).and_then(|value| value.as_u64()))
-        .unwrap_or(0)
+fn apply_openai_usage(state: &mut OpenAiStreamState, usage: &Value) {
+    let cache = super::usage::openai_cache_read_tokens(usage);
+    let input = super::usage::exclusive_openai_input_tokens(
+        super::usage::usage_token(
+            usage,
+            &["prompt_tokens", "input_tokens", "prompt_token_count"],
+        ),
+        cache,
+    );
+    let output = super::usage::usage_token(
+        usage,
+        &[
+            "completion_tokens",
+            "output_tokens",
+            "completion_token_count",
+        ],
+    );
+    if input > 0 {
+        state.input_tokens = input;
+    }
+    if output > 0 {
+        state.output_tokens = output;
+    }
+    if cache > 0 {
+        state.cache_read_tokens = cache;
+    }
 }
 
 #[cfg(test)]
@@ -921,5 +941,41 @@ mod tests {
         assert!(done.contains("\"text\":\"all done\""));
         assert!(done.contains("\"stop_reason\":\"end_turn\""));
         assert!(!done.contains("\"type\":\"tool_use\""));
+    }
+
+    #[test]
+    fn forwards_prompt_tokens_from_usage_only_chunks() {
+        let request = json!({ "model": "claude-sonnet-4" });
+        let mut state = OpenAiStreamState::default();
+        openai_stream_chunk_to_anthropic(
+            &mut state,
+            &json!({
+                "id": "chatcmpl_1",
+                "choices": [{
+                    "delta": { "content": "Hi" },
+                    "finish_reason": null
+                }]
+            }),
+            &request,
+            &credential(),
+        );
+        openai_stream_chunk_to_anthropic(
+            &mut state,
+            &json!({
+                "id": "chatcmpl_1",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 3588,
+                    "completion_tokens": 80,
+                    "prompt_tokens_details": { "cached_tokens": 200 }
+                }
+            }),
+            &request,
+            &credential(),
+        );
+        let done = finish_anthropic_stream(&mut state);
+        assert!(done.contains("\"input_tokens\":3388"));
+        assert!(done.contains("\"output_tokens\":80"));
+        assert!(done.contains("\"cache_read_input_tokens\":200"));
     }
 }

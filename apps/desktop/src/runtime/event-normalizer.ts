@@ -263,18 +263,39 @@ function normalizeRuntimeEvent(
           type: "usage",
           inputTokens: value.inputTokens,
           outputTokens: value.outputTokens,
+          cacheReadTokens:
+            typeof value.cacheReadTokens === "number"
+              ? value.cacheReadTokens
+              : 0,
         },
       };
     case "approvalRequested": {
-      const request = normalizeRuntimeRequest(value, runtime);
+      const request = normalizeRuntimeRequest(
+        flattenRuntimeRequestEvent(value),
+        runtime,
+      );
       if (!request.ok) return request;
       return {
         ok: true,
         value: { type: "approvalRequested", request: request.value },
       };
     }
+    case "approvalResolved":
+      if (
+        typeof value.requestId !== "string" ||
+        value.requestId.trim() === ""
+      ) {
+        return { ok: false, error: "approvalResolved requires requestId" };
+      }
+      return {
+        ok: true,
+        value: { type: "approvalResolved", requestId: value.requestId },
+      };
     case "userInputRequested": {
-      const request = normalizeRuntimeRequest(value, runtime);
+      const request = normalizeRuntimeRequest(
+        flattenRuntimeRequestEvent(value),
+        runtime,
+      );
       if (!request.ok) return request;
       return {
         ok: true,
@@ -317,6 +338,12 @@ function normalizeRuntimeEvent(
         },
       };
   }
+}
+
+function flattenRuntimeRequestEvent(
+  value: Record<string, unknown>,
+): Record<string, unknown> {
+  return isRecord(value.request) ? { ...value, ...value.request } : value;
 }
 
 function normalizeRuntimeRequest(

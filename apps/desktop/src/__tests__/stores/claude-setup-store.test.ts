@@ -1,6 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { useClaudeSetupStore } from "@/stores/claude-setup-store";
+import {
+  resetClaudeEngineAutoInstallForTests,
+  useClaudeSetupStore,
+} from "@/stores/claude-setup-store";
 
 // advanceSteps is module-private — replicate for testing
 type StepStatus = "pending" | "active" | "complete" | "error";
@@ -122,8 +125,9 @@ describe("useClaudeSetupStore.saveApiKey", () => {
     });
   });
 
-  it("requires Claude Code before saving provider credentials", async () => {
+  it("saves third-party credentials without requiring Claude Official login", async () => {
     useClaudeSetupStore.setState({ status: "not-installed" });
+    vi.mocked(invoke).mockResolvedValue(null);
 
     const success = await useClaudeSetupStore
       .getState()
@@ -134,11 +138,8 @@ describe("useClaudeSetupStore.saveApiKey", () => {
         "deepseek-v4-pro",
       );
 
-    expect(success).toBe(false);
-    expect(invoke).not.toHaveBeenCalled();
-    expect(useClaudeSetupStore.getState().error).toBe(
-      "Install Claude Code before configuring an AI provider.",
-    );
+    expect(success).toBe(true);
+    expect(invoke).toHaveBeenCalled();
   });
 
   it("verifies OpenAI-compatible credentials before saving them", async () => {
@@ -476,5 +477,71 @@ describe("useClaudeSetupStore.saveApiKey", () => {
     expect(useClaudeSetupStore.getState().providerModel).toBeNull();
     expect(useClaudeSetupStore.getState().providerBaseUrl).toBeNull();
     expect(useClaudeSetupStore.getState().isClearingApiKey).toBe(false);
+  });
+});
+
+describe("useClaudeSetupStore.ensureEngine", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetClaudeEngineAutoInstallForTests();
+    useClaudeSetupStore.setState({
+      status: "checking",
+      isInstalling: false,
+      autoInstallAttempted: false,
+      error: null,
+    });
+  });
+
+  afterEach(() => {
+    resetClaudeEngineAutoInstallForTests();
+    const initial = useClaudeSetupStore.getInitialState();
+    useClaudeSetupStore.setState({
+      checkStatus: initial.checkStatus,
+      install: initial.install,
+    });
+  });
+
+  it("skips install when the engine is already present", async () => {
+    const checkStatus = vi.fn(async () => {
+      useClaudeSetupStore.setState({ status: "ready" });
+    });
+    const install = vi.fn(async () => undefined);
+    useClaudeSetupStore.setState({ checkStatus, install });
+
+    await useClaudeSetupStore.getState().ensureEngine();
+
+    expect(checkStatus).toHaveBeenCalledTimes(1);
+    expect(install).not.toHaveBeenCalled();
+  });
+
+  it("skips install when Git is missing", async () => {
+    const checkStatus = vi.fn(async () => {
+      useClaudeSetupStore.setState({ status: "missing-git" });
+    });
+    const install = vi.fn(async () => undefined);
+    useClaudeSetupStore.setState({ checkStatus, install });
+
+    await useClaudeSetupStore.getState().ensureEngine();
+
+    expect(install).not.toHaveBeenCalled();
+    expect(useClaudeSetupStore.getState().autoInstallAttempted).toBe(false);
+  });
+
+  it("installs once when the CLI is missing", async () => {
+    const checkStatus = vi.fn(async () => {
+      useClaudeSetupStore.setState({ status: "not-installed" });
+    });
+    const install = vi.fn(async () => undefined);
+    useClaudeSetupStore.setState({ checkStatus, install });
+
+    const first = useClaudeSetupStore.getState().ensureEngine();
+    const second = useClaudeSetupStore.getState().ensureEngine();
+    await Promise.all([first, second]);
+
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(useClaudeSetupStore.getState().autoInstallAttempted).toBe(true);
+
+    await useClaudeSetupStore.getState().ensureEngine();
+    expect(install).toHaveBeenCalledTimes(1);
   });
 });

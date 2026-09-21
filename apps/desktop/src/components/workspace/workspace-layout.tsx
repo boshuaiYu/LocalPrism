@@ -14,8 +14,17 @@ import {
 import { Sidebar } from "./sidebar";
 import { LatexEditor } from "./editor/latex-editor";
 import { PdfPreview } from "./preview/pdf-preview";
+import { ChatRestoreButton } from "@/components/claude-chat/chat-restore-button";
+import { ClaudeChatDrawer } from "@/components/claude-chat/claude-chat-drawer";
+import { useRuntimeEvents } from "@/hooks/use-runtime-events";
+import { useApprovalStore } from "@/stores/approval-store";
 import { useDocumentStore } from "@/stores/document-store";
 import { usePreviewStore } from "@/stores/preview-store";
+import {
+  contentPaneSize,
+  useChatLayoutStore,
+} from "@/stores/chat-layout-store";
+import { useClaudeChatStore } from "@/stores/claude-chat-store";
 
 const SIDEBAR_DEFAULT_SIZE = 15;
 const SIDEBAR_MIN_SIZE = 10;
@@ -28,9 +37,21 @@ function easeInOutSmooth(progress: number) {
 }
 
 export function WorkspaceLayout() {
+  useRuntimeEvents();
   const initialized = useDocumentStore((s) => s.initialized);
   const previewVisible = usePreviewStore((s) => s.visible);
   const setPreviewVisible = usePreviewStore((s) => s.setVisible);
+  const chatVisible = useChatLayoutStore((s) => s.visible);
+  const setChatVisible = useChatLayoutStore((s) => s.setVisible);
+  const revealChat = useChatLayoutStore((s) => s.reveal);
+  const suppressAutoOpen = useChatLayoutStore((s) => s.suppressAutoOpen);
+  const chatNeedsAttention = useClaudeChatStore(
+    (s) =>
+      s.tabs.some((tab) => tab.isStreaming) || s.pendingAttachments.length > 0,
+  );
+  const hasPendingApproval = useApprovalStore(
+    (s) => Object.keys(s.pending).length > 0,
+  );
   const workspaceRef = useRef<HTMLDivElement>(null);
   const sidebarPanelRef = useRef<ImperativePanelHandle>(null);
   const sidebarAnimationFrameRef = useRef<number | null>(null);
@@ -130,6 +151,29 @@ export function WorkspaceLayout() {
     [codeVisible, setPreviewVisible],
   );
 
+  const setChatPaneVisible = useCallback(
+    (visible: boolean) => {
+      setChatVisible(visible);
+    },
+    [setChatVisible],
+  );
+
+  useEffect(() => {
+    if (
+      (chatNeedsAttention || hasPendingApproval) &&
+      !chatVisible &&
+      !suppressAutoOpen
+    ) {
+      revealChat();
+    }
+  }, [
+    chatNeedsAttention,
+    chatVisible,
+    hasPendingApproval,
+    revealChat,
+    suppressAutoOpen,
+  ]);
+
   // Cmd+\ / Ctrl+\ toggles the PDF preview pane.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -141,6 +185,29 @@ export function WorkspaceLayout() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [previewVisible, setPdfPaneVisible]);
+
+  // Cmd+Shift+A / Ctrl+Shift+A toggles the chat pane.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.repeat || e.altKey) return;
+      const target = e.target;
+      const typingInField =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        (target instanceof HTMLElement && target.isContentEditable);
+      if (typingInField) return;
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        e.shiftKey &&
+        (e.code === "KeyA" || e.key.toLowerCase() === "a")
+      ) {
+        e.preventDefault();
+        setChatPaneVisible(!chatVisible);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [chatVisible, setChatPaneVisible]);
 
   useEffect(() => {
     return () => {
@@ -171,6 +238,14 @@ export function WorkspaceLayout() {
     return () => resizeObserver.disconnect();
   }, [getCollapsedSidebarSize, sidebarCollapsed]);
 
+  const chatRestoreButton = !chatVisible ? (
+    <ChatRestoreButton
+      attention={chatNeedsAttention || hasPendingApproval}
+      onOpen={() => setChatPaneVisible(true)}
+      className="absolute right-4 bottom-6 z-20"
+    />
+  ) : null;
+
   if (!initialized) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -180,9 +255,11 @@ export function WorkspaceLayout() {
   }
 
   return (
-    <div ref={workspaceRef} className="h-full">
+    <div ref={workspaceRef} className="relative h-full">
       <PanelGroup direction="horizontal" className="h-full">
         <Panel
+          id="sidebar"
+          order={1}
           ref={sidebarPanelRef}
           defaultSize={SIDEBAR_DEFAULT_SIZE}
           minSize={SIDEBAR_MIN_SIZE}
@@ -203,9 +280,11 @@ export function WorkspaceLayout() {
             onToggleCollapsed={toggleSidebarCollapsed}
             layoutControls={{
               codeVisible,
+              chatVisible,
               pdfVisible: previewVisible,
               sidebarVisible: !sidebarCollapsed,
               setCodeVisible: setCodePaneVisible,
+              setChatVisible: setChatPaneVisible,
               setPdfVisible: setPdfPaneVisible,
               setSidebarVisible: (visible) => setSidebarPaneCollapsed(!visible),
             }}
@@ -216,28 +295,94 @@ export function WorkspaceLayout() {
 
         {codeVisible && (
           <Panel
-            defaultSize={previewVisible ? 42.5 : 85}
-            minSize={25}
+            id="code"
+            order={2}
+            defaultSize={contentPaneSize({
+              code: true,
+              chat: chatVisible,
+              pdf: previewVisible,
+              pane: "code",
+            })}
+            minSize={22}
             className="min-w-0"
           >
-            <LatexEditor />
+            {chatVisible ? (
+              <LatexEditor />
+            ) : (
+              <div className="relative h-full min-w-0">
+                <LatexEditor />
+                {chatRestoreButton}
+              </div>
+            )}
           </Panel>
         )}
 
-        {codeVisible && previewVisible && (
-          <PanelResizeHandle className="w-px bg-border transition-colors hover:bg-ring" />
+        {codeVisible && chatVisible && (
+          <PanelResizeHandle
+            data-testid="resize-code-chat"
+            className="w-px bg-border transition-colors hover:bg-ring"
+          />
+        )}
+
+        {codeVisible && !chatVisible && previewVisible && (
+          <PanelResizeHandle
+            data-testid="resize-code-pdf"
+            className="w-px bg-border transition-colors hover:bg-ring"
+          />
+        )}
+
+        {chatVisible && (
+          <Panel
+            id="chat"
+            order={3}
+            defaultSize={contentPaneSize({
+              code: codeVisible,
+              chat: true,
+              pdf: previewVisible,
+              pane: "chat",
+            })}
+            minSize={18}
+            collapsible
+            collapsedSize={0}
+            onCollapse={() => setChatPaneVisible(false)}
+            className="min-w-0 overflow-hidden"
+          >
+            <ClaudeChatDrawer />
+          </Panel>
+        )}
+
+        {chatVisible && previewVisible && (
+          <PanelResizeHandle
+            data-testid="resize-chat-pdf"
+            className="w-px bg-border transition-colors hover:bg-ring"
+          />
         )}
 
         {previewVisible && (
           <Panel
-            defaultSize={codeVisible ? 42.5 : 85}
-            minSize={25}
+            id="pdf"
+            order={4}
+            defaultSize={contentPaneSize({
+              code: codeVisible,
+              chat: chatVisible,
+              pdf: true,
+              pane: "pdf",
+            })}
+            minSize={22}
             className="min-w-0"
           >
-            <PdfPreview />
+            {!chatVisible && !codeVisible ? (
+              <div className="relative h-full min-w-0">
+                <PdfPreview />
+                {chatRestoreButton}
+              </div>
+            ) : (
+              <PdfPreview />
+            )}
           </Panel>
         )}
       </PanelGroup>
+      {!codeVisible && !previewVisible && chatRestoreButton}
     </div>
   );
 }

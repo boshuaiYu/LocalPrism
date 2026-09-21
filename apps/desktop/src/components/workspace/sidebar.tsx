@@ -26,6 +26,8 @@ import {
   FlaskConicalIcon,
   TerminalIcon,
   SettingsIcon,
+  MessageCircleIcon,
+  Bot as BotIcon,
   type LucideIcon,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -78,11 +80,13 @@ import { Input } from "@/components/ui/input";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
+import { useAgentStore } from "@/stores/agent-store";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import { ProjectCloseButton } from "@/components/workspace/project-close-button";
 import { UvSetupDialog } from "@/components/uv-setup";
 import { SettingsDialog } from "@/components/settings/settings-dialog";
 import { createLogger } from "@/lib/debug/logger";
+import { resolveNewProjectFile } from "@/lib/new-project-file";
 
 const log = createLogger("sidebar");
 const FILES_AUTO_REFRESH_INTERVAL_MS = 12_000;
@@ -328,6 +332,12 @@ function LayoutPaneSwitcher({
             onCheckedChange={controls.setCodeVisible}
           />
           <LayoutToggleRow
+            icon={MessageCircleIcon}
+            label="Chat"
+            checked={controls.chatVisible}
+            onCheckedChange={controls.setChatVisible}
+          />
+          <LayoutToggleRow
             icon={FileTextIcon}
             label="PDF"
             checked={controls.pdfVisible}
@@ -396,9 +406,11 @@ interface SidebarProps {
 
 interface LayoutControls {
   codeVisible: boolean;
+  chatVisible: boolean;
   pdfVisible: boolean;
   sidebarVisible: boolean;
   setCodeVisible: (visible: boolean) => void;
+  setChatVisible: (visible: boolean) => void;
   setPdfVisible: (visible: boolean) => void;
   setSidebarVisible: (visible: boolean) => void;
 }
@@ -951,8 +963,12 @@ export function Sidebar({
   const [projectRenameError, setProjectRenameError] = useState("");
   const [isRenamingProject, setIsRenamingProject] = useState(false);
   const [newFileName, setNewFileName] = useState("");
+  const [newFileKind, setNewFileKind] = useState<"tex" | "markdown">("tex");
   const [newFolderName, setNewFolderName] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<
+    "runtimes" | "skills" | "agents"
+  >("runtimes");
 
   // Folder expand/collapse
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(
@@ -1029,19 +1045,12 @@ export function Sidebar({
   const handleAddFile = () => {
     const name = newFileName.trim();
     if (!name) return;
-    if (nameExistsIn(name, addDialogFolder)) {
+    const resolved = resolveNewProjectFile(name, newFileKind);
+    if (nameExistsIn(resolved.name, addDialogFolder)) {
       setNameError("A file or folder with this name already exists");
       return;
     }
-    // Auto-append .tex if no extension provided
-    const finalName = /\.\w+$/.test(name) ? name : `${name}.tex`;
-    const lower = finalName.toLowerCase();
-    const type: "tex" | "image" = /\.(png|jpg|jpeg|gif|svg|bmp|webp)$/.test(
-      lower,
-    )
-      ? "image"
-      : "tex";
-    createNewFile(finalName, type, addDialogFolder);
+    createNewFile(resolved.name, resolved.type, addDialogFolder);
     setNewFileName("");
     setNameError("");
     setAddDialogOpen(false);
@@ -1126,6 +1135,7 @@ export function Sidebar({
   const openNewFileDialog = (folder?: string) => {
     setAddDialogFolder(folder);
     setNewFileName("");
+    setNewFileKind("tex");
     setNameError("");
     setAddDialogOpen(true);
   };
@@ -1195,6 +1205,25 @@ export function Sidebar({
         >
           <AppWindowIcon className="size-3.5" />
         </Button>
+        {layoutControls && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7 transition-transform duration-300 ease-in-out hover:scale-105"
+            onClick={() =>
+              layoutControls.setChatVisible(!layoutControls.chatVisible)
+            }
+            data-testid="sidebar-open-ai-assistant"
+            title={
+              layoutControls.chatVisible ? "Hide AI chat" : "Open AI Assistant"
+            }
+            aria-label={
+              layoutControls.chatVisible ? "Hide AI chat" : "Open AI Assistant"
+            }
+          >
+            <MessageCircleIcon className="size-3.5" />
+          </Button>
+        )}
       </div>
       <div className="flex h-9 w-full items-center justify-center border-sidebar-border border-t">
         <ProjectCloseButton
@@ -1448,8 +1477,14 @@ export function Sidebar({
             </Panel>
           </PanelGroup>
 
-          {/* Environment section — Python + Skills */}
-          <EnvironmentSection projectPath={projectRoot} />
+          {/* Environment section — Python + Skills + Agents */}
+          <EnvironmentSection
+            projectPath={projectRoot}
+            onOpenAgents={() => {
+              setSettingsTab("agents");
+              setSettingsOpen(true);
+            }}
+          />
 
           {/* Footer */}
           <div className="flex h-9 items-center justify-between border-sidebar-border border-t px-3 text-muted-foreground text-xs">
@@ -1503,7 +1538,14 @@ export function Sidebar({
             </div>
           </div>
 
-          <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+          <SettingsDialog
+            open={settingsOpen}
+            defaultTab={settingsTab}
+            onOpenChange={(open) => {
+              setSettingsOpen(open);
+              if (!open) setSettingsTab("runtimes");
+            }}
+          />
 
           {/* New File Dialog */}
           <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
@@ -1514,8 +1556,32 @@ export function Sidebar({
                 </DialogTitle>
               </DialogHeader>
               <div className="space-y-2 py-4">
+                <div className="flex gap-1.5">
+                  {(
+                    [
+                      ["tex", "LaTeX"],
+                      ["markdown", "Markdown"],
+                    ] as const
+                  ).map(([kind, label]) => (
+                    <button
+                      key={kind}
+                      type="button"
+                      className={cn(
+                        "rounded-full border px-2.5 py-1 text-xs transition-colors",
+                        newFileKind === kind
+                          ? "border-foreground bg-foreground text-background"
+                          : "border-border text-muted-foreground hover:bg-muted/60",
+                      )}
+                      onClick={() => setNewFileKind(kind)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
                 <Input
-                  placeholder="filename.tex"
+                  placeholder={
+                    newFileKind === "markdown" ? "notes.md" : "filename.tex"
+                  }
                   value={newFileName}
                   onChange={(e) => {
                     setNewFileName(e.target.value);
@@ -2005,7 +2071,7 @@ function FileTreeNode({
   );
 }
 
-// ─── Environment Section (Python + Skills) ───
+// ─── Environment Section (Python + Skills + Agents) ───
 
 interface SkillsStatus {
   installed: boolean;
@@ -2015,8 +2081,10 @@ interface SkillsStatus {
 
 function EnvironmentSection({
   projectPath: _projectPath,
+  onOpenAgents,
 }: {
   projectPath: string | null;
+  onOpenAgents: () => void;
 }) {
   // ── Python / uv ──
   const venvReady = useUvSetupStore((s) => s.venvReady);
@@ -2026,6 +2094,10 @@ function EnvironmentSection({
   // ── Scientific Skills ──
   const [skillsStatus, setSkillsStatus] = useState<SkillsStatus | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
+
+  // ── Agents ──
+  const agents = useAgentStore((state) => state.agents);
+  const refreshAgents = useAgentStore((state) => state.refresh);
 
   const checkSkillsStatus = useCallback(async () => {
     try {
@@ -2044,6 +2116,10 @@ function EnvironmentSection({
   useEffect(() => {
     checkSkillsStatus();
   }, [checkSkillsStatus]);
+
+  useEffect(() => {
+    void refreshAgents("claude");
+  }, [refreshAgents]);
 
   // Lazy import onboarding
   const [OnboardingComponent, setOnboardingComponent] =
@@ -2071,6 +2147,7 @@ function EnvironmentSection({
   const skillsLabel = skillsStatus?.installed
     ? `${skillsStatus.skill_count} skills`
     : "Not installed";
+  const agentsLabel = `${agents.length} agents`;
 
   return (
     <>
@@ -2125,6 +2202,28 @@ function EnvironmentSection({
               )}
             >
               {skillsLabel}
+            </span>
+          </button>
+          {/* Agents row — Settings → Agents */}
+          <button
+            className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-sidebar-accent/50"
+            onClick={onOpenAgents}
+            title="Manage custom subagents"
+          >
+            <BotIcon
+              className={cn(
+                "size-3.5 shrink-0",
+                agents.length > 0 ? "text-foreground" : "text-muted-foreground",
+              )}
+            />
+            <span className="min-w-0 flex-1 truncate text-xs">Agents</span>
+            <span
+              className={cn(
+                "shrink-0 text-xs",
+                agents.length > 0 ? "text-foreground" : "text-muted-foreground",
+              )}
+            >
+              {agentsLabel}
             </span>
           </button>
         </div>

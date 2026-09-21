@@ -23,11 +23,8 @@ import { useProjectStore } from "@/stores/project-store";
 import { useDocumentStore } from "@/stores/document-store";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import { exists, join } from "@/lib/tauri/fs";
-import {
-  getTemplateById,
-  getTemplateSkeleton,
-  BIB_TEMPLATE,
-} from "@/lib/template-registry";
+import { getTemplateById } from "@/lib/template-registry";
+import { materializeTemplateProject } from "@/lib/materialize-template";
 import { TemplateGallery } from "@/components/template-gallery";
 import { DEFAULT_PROJECT_INSTRUCTIONS } from "@/lib/default-claude-md";
 import { ensureProjectAgentsMd } from "@/lib/project-agents-md";
@@ -215,19 +212,7 @@ function ScratchForm({ onBack }: { onBack: () => void }) {
       // AGENTS.md only when Codex is explicitly enabled; never overwrite.
       await ensureProjectAgentsMd(projectPath, enableCodex);
 
-      const mainTexPath = await join(projectPath, template.mainFileName);
-      const mainExists = await exists(mainTexPath);
-      if (!mainExists) {
-        await writeTextFile(mainTexPath, getTemplateSkeleton(template));
-      }
-
-      if (template.hasBibliography) {
-        const bibPath = await join(projectPath, "references.bib");
-        const bibExists = await exists(bibPath);
-        if (!bibExists) {
-          await writeTextFile(bibPath, BIB_TEMPLATE);
-        }
-      }
+      await materializeTemplateProject(projectPath, template);
 
       const referenceFiles =
         attachments.length > 0
@@ -243,7 +228,7 @@ function ScratchForm({ onBack }: { onBack: () => void }) {
           `**Template:** \`${template.documentClass}\`  `,
           `**File:** \`${template.mainFileName}\``,
           "",
-          `> The file currently contains only the LaTeX preamble (packages, styling, custom commands) with an empty document body.`,
+          `> The project already contains a complete **${template.name}** example (not an empty preamble).`,
           "",
           `### What I want to create`,
           "",
@@ -251,7 +236,7 @@ function ScratchForm({ onBack }: { onBack: () => void }) {
           attachmentSection,
           `### Instructions`,
           "",
-          `Please generate the full document content based on my description. Keep the existing preamble and fill in the document body (between \`\\begin{document}\` and \`\\end{document}\`) with appropriate title, author, sections, and content. Make it a complete, well-structured **${template.name.toLowerCase()}** ready for me to refine.`,
+          `Please adapt the existing example to my description. Keep the document class, packages, and layout. Rewrite titles, authors, and body text so the result is a complete, well-structured **${template.name.toLowerCase()}** ready for me to refine.`,
         ].join("\n");
 
         useClaudeChatStore.getState().newSession();

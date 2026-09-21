@@ -43,6 +43,7 @@ export interface RuntimeSkill {
   description: string;
   folder: string;
   sourcePath: string;
+  sourceUrl?: string | null;
   targets: SkillTarget[];
   managed: boolean;
   compatibleRuntimes: RuntimeKind[];
@@ -124,6 +125,7 @@ export interface RuntimeTurnRequest {
   agentId: string | null;
   providerCredentialId: string | null;
   providerModelOverride: string | null;
+  permissionMode?: string | null;
 }
 
 export type ChangeTabRuntimeResult =
@@ -229,8 +231,14 @@ export type RuntimeEvent =
       output: string | null;
     }
   | { type: "fileChange"; itemId: string; path: string; diff: string | null }
-  | { type: "usage"; inputTokens: number; outputTokens: number }
+  | {
+      type: "usage";
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens?: number;
+    }
   | { type: "approvalRequested"; request: RuntimeRequest }
+  | { type: "approvalResolved"; requestId: string }
   | { type: "userInputRequested"; request: RuntimeRequest }
   | { type: "subagentDiscovered"; run: AgentRun }
   | { type: "subagentStatusChanged"; run: AgentRun }

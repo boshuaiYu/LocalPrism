@@ -30,6 +30,8 @@ type PendingRequest = {
   reject: (error: Error) => void;
 };
 
+const INIT_TIMEOUT_MS = 15_000;
+
 function createClient(): MupdfClient {
   const worker = new Worker(new URL("./mupdf-worker.ts", import.meta.url), {
     type: "module",
@@ -37,12 +39,32 @@ function createClient(): MupdfClient {
 
   const pending = new Map<number, PendingRequest>();
   let nextId = 1;
-  let ready: Promise<void>;
+  let readySettled = false;
   let resolveReady: () => void;
+  let rejectReady: (error: Error) => void;
 
-  ready = new Promise((resolve) => {
-    resolveReady = resolve;
+  const failReady = (error: Error) => {
+    if (readySettled) return;
+    readySettled = true;
+    instance = null;
+    worker.terminate();
+    rejectReady(error);
+  };
+
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = () => {
+      if (readySettled) return;
+      readySettled = true;
+      resolve();
+    };
+    rejectReady = reject;
   });
+
+  const initTimer = setTimeout(() => {
+    failReady(
+      new Error("MuPDF worker failed to start. Try recompiling the document."),
+    );
+  }, INIT_TIMEOUT_MS);
 
   worker.onmessage = (event: MessageEvent) => {
     const data = event.data as WorkerResponse;
@@ -50,6 +72,7 @@ function createClient(): MupdfClient {
 
     if (type === "INIT") {
       log.info("Worker initialized");
+      clearTimeout(initTimer);
       resolveReady();
       return;
     }
@@ -68,8 +91,10 @@ function createClient(): MupdfClient {
 
   worker.onerror = (event) => {
     log.error("Worker fatal error", { message: event.message });
-    // Nullify singleton so next getMupdfClient() creates a fresh worker
-    instance = null;
+    clearTimeout(initTimer);
+    failReady(
+      new Error(event.message || "MuPDF worker crashed while opening the PDF."),
+    );
   };
 
   const CALL_TIMEOUT_MS = 30_000;

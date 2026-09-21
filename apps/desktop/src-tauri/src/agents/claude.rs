@@ -1,4 +1,4 @@
-use crate::agents::{AgentProfile, AgentError};
+use crate::agents::{AgentError, AgentProfile};
 use crate::runtime::RuntimeKind;
 use crate::skills::domain::SkillScope;
 use serde_yaml::Value;
@@ -8,36 +8,30 @@ use std::path::{Path, PathBuf};
 
 pub fn agents_root(scope: SkillScope, project_path: Option<&Path>) -> Result<PathBuf, AgentError> {
     match scope {
-        SkillScope::User => {
-            let home = dirs::home_dir().ok_or_else(|| {
-                AgentError::from("Unable to resolve the user home directory")
-            })?;
-            Ok(home.join(".claude").join("agents"))
-        }
+        SkillScope::User => crate::providers::paths::user_agents_dir().map_err(AgentError::from),
         SkillScope::Project => {
-            let project = project_path.ok_or_else(|| {
-                AgentError::from("Project-scoped agents require a project path")
-            })?;
+            let project = project_path
+                .ok_or_else(|| AgentError::from("Project-scoped agents require a project path"))?;
             if !project.is_absolute() {
                 return Err(AgentError::from(
                     "Project-scoped agents require an absolute project path",
                 ));
             }
-            Ok(project.join(".claude").join("agents"))
+            Ok(project.join(".localprism").join("agents"))
         }
     }
 }
 
 fn yaml_string(value: &Value) -> Option<String> {
-    value.as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    value
+        .as_str()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn yaml_string_list(value: &Value) -> Vec<String> {
     match value {
-        Value::Sequence(items) => items
-            .iter()
-            .filter_map(yaml_string)
-            .collect(),
+        Value::Sequence(items) => items.iter().filter_map(yaml_string).collect(),
         Value::String(raw) => raw
             .split(',')
             .map(str::trim)
@@ -75,13 +69,7 @@ pub fn parse_claude_agent(path: &Path, scope: SkillScope) -> Result<AgentProfile
         };
         if !matches!(
             key_name,
-            "name"
-                | "description"
-                | "model"
-                | "effort"
-                | "permissionMode"
-                | "tools"
-                | "skills"
+            "name" | "description" | "model" | "effort" | "permissionMode" | "tools" | "skills"
         ) {
             unknown.insert(key_name.to_string(), value.clone());
         }
@@ -146,10 +134,7 @@ pub fn write_claude_agent(path: &Path, profile: &AgentProfile) -> Result<(), Age
         Value::String(profile.description.clone()),
     );
     if let Some(model) = &profile.model {
-        map.insert(
-            Value::String("model".into()),
-            Value::String(model.clone()),
-        );
+        map.insert(Value::String("model".into()), Value::String(model.clone()));
     }
     if let Some(effort) = &profile.reasoning_effort {
         map.insert(
@@ -166,14 +151,7 @@ pub fn write_claude_agent(path: &Path, profile: &AgentProfile) -> Result<(), Age
     if !profile.tools.is_empty() {
         map.insert(
             Value::String("tools".into()),
-            Value::Sequence(
-                profile
-                    .tools
-                    .iter()
-                    .cloned()
-                    .map(Value::String)
-                    .collect(),
-            ),
+            Value::Sequence(profile.tools.iter().cloned().map(Value::String).collect()),
         );
     }
     if !profile.skill_ids.is_empty() {

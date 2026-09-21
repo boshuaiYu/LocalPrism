@@ -181,7 +181,10 @@ mod tests {
         other.root_conversation_id = "other".into();
         state.apply(other).await;
 
-        assert_eq!(state.list_for_root(RuntimeKind::Codex, "root").await.len(), 1);
+        assert_eq!(
+            state.list_for_root(RuntimeKind::Codex, "root").await.len(),
+            1
+        );
 
         state
             .replace_recovered(
@@ -193,6 +196,9 @@ mod tests {
         let listed = state.list_for_root(RuntimeKind::Codex, "root").await;
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "c");
-        assert_eq!(state.list_for_root(RuntimeKind::Codex, "other").await.len(), 1);
+        assert_eq!(
+            state.list_for_root(RuntimeKind::Codex, "other").await.len(),
+            1
+        );
     }
 }

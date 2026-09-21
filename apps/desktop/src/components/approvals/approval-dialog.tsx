@@ -1,12 +1,21 @@
-import { useMemo, useState } from "react";
-import { useApprovalStore } from "@/stores/approval-store";
+import { useEffect, useMemo, useState } from "react";
+import { useApprovalStore, firstPendingForTab } from "@/stores/approval-store";
+import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import type { RuntimeRequest } from "@/runtime/types";
 
 export function ApprovalDialog() {
+  const activeTabId = useClaudeChatStore((state) => state.activeTabId);
   const pending = useApprovalStore((state) => state.pending);
   const respond = useApprovalStore((state) => state.respond);
-  const request = useMemo(() => Object.values(pending)[0] ?? null, [pending]);
+  const request = useMemo(
+    () => firstPendingForTab(pending, activeTabId),
+    [pending, activeTabId],
+  );
   const [answers, setAnswers] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    setAnswers({});
+  }, [request?.requestId]);
 
   if (!request) return null;
 
@@ -26,6 +35,8 @@ export function ApprovalDialog() {
       role="dialog"
       aria-modal="true"
       aria-label="Runtime approval"
+      data-testid="approval-dialog"
+      data-tab-id={request.tabId}
       onKeyDown={(event) => {
         if (event.key === "Escape") {
           event.preventDefault();

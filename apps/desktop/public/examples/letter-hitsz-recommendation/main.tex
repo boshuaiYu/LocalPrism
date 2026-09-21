@@ -1,0 +1,75 @@
+% !TEX program = XeLaTeX
+\documentclass[UTF8,a4paper,12pt]{ctexart}
+
+% HITSZ recommendation letter (Shenzhen campus).
+% Adapted from the HIT LoR layout for Shenzhen University Town
+% https://www.overleaf.com/latex/templates/hit-letter-of-recommendation-template/cchwdhcrhjtv
+
+\usepackage{geometry}
+\geometry{left=3.17cm,right=3.17cm,top=3.4cm,bottom=2.6cm}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{calc}
+\usepackage{setspace}
+\usepackage{hyperref}
+\usepackage{parskip}
+
+\definecolor{hitblue}{cmyk}{1,0.80,0,0}
+\definecolor{hitlightblue}{cmyk}{0.35,0.10,0,0}
+
+\pagestyle{empty}
+\setstretch{1.28}
+\hypersetup{colorlinks=true,urlcolor=hitblue}
+
+\newcommand{\hitszletterhead}{%
+  \begin{tikzpicture}[remember picture,overlay]
+    \fill[hitblue] (current page.north west) rectangle ($(current page.north east)+(0,-2.35)$);
+    \node[anchor=west,text=white,font=\bfseries\Large] at ($(current page.north west)+(1.15,-0.85)$)
+      {哈尔滨工业大学（深圳）};
+    \node[anchor=west,text=white,font=\small] at ($(current page.north west)+(1.15,-1.45)$)
+      {Harbin Institute of Technology, Shenzhen};
+    \node[anchor=east,text=white,font=\small\bfseries] at ($(current page.north east)+(-1.15,-0.85)$)
+      {推荐信 / Recommendation};
+    \node[anchor=east,text=white!90,font=\scriptsize] at ($(current page.north east)+(-1.15,-1.45)$)
+      {计算机科学与技术学院};
+    \fill[hitblue] ($(current page.south west)$) rectangle ($(current page.south east)+(0,0.28)$);
+    \fill[hitlightblue] ($(current page.south west)+(0,0.28)$) rectangle ($(current page.south east)+(0,0.40)$);
+    \node[anchor=south,text=hitblue,font=\scriptsize] at ($(current page.south)+(0,0.55)$)
+      {深圳市南山区深圳大学城哈工大校区 518055 \quad Tel: +86-755-2603-3483};
+  \end{tikzpicture}%
+}
+
+\begin{document}
+\hitszletterhead
+\vspace*{0.35cm}
+
+\begin{flushright}
+2026年3月18日
+\end{flushright}
+
+尊敬的招生委员会：
+
+我是哈尔滨工业大学（深圳）计算机科学与技术学院教授王雪，现担任科学机器学习实验室负责人。我怀着十分肯定的态度，推荐陈远同学申请贵校博士研究生。自2024年春季起，陈远作为我的硕士研究生，全程参与国家自然科学基金面上项目“科学代理模型的残差校准与可信外推”。
+
+陈远的研究工作把共形推断与可微物理代理结合起来。他在较小的标注校准集上估计单调运输映射，使 Burgers 方程、Darcy 流与反应--扩散系统上的区间覆盖率回到名义水平，并给出了当代理模型错过分岔时的失效检测方法。相关结果已整理为一篇中英双语预印本，陈远为第一作者。
+
+在实验室日常工作中，陈远负责维护可复现实验流水线，并为两位本科生开放了校准模块的接口文档。他表达严谨，从不夸大覆盖率数字，这在数据驱动科学计算方向尤为难得。
+
+综合学术潜力、工程能力与科研态度，我将陈远列为本实验室近五年硕士研究生中的前 5\%。我毫无保留地推荐他。如需补充材料，请随时与我联系。
+
+\vspace{1.0em}
+此致\\
+敬礼
+
+\vspace{1.3em}
+\textbf{王雪 教授}\\
+哈尔滨工业大学（深圳）计算机科学与技术学院\\
+科学机器学习实验室\\
+\href{mailto:wangxue@hit.edu.cn}{wangxue@hit.edu.cn} \quad +86-755-2603-3600
+
+\vspace{1.4em}
+\noindent\rule{\textwidth}{0.4pt}
+
+\noindent\textbf{English summary.} I recommend Mr.\,Yuan Chen without reservation for doctoral study. He led a residual-score calibration project for scientific emulators, restored nominal interval coverage on three PDE families, and maintains a reproducible experimental pipeline. I rank him in the top 5\% of M.S.\ students I have supervised in the last five years.
+
+\end{document}

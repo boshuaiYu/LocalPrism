@@ -1,0 +1,121 @@
+% !TEX program = XeLaTeX
+\documentclass[final,t]{beamer}
+
+% HITSZ academic poster. Layout follows the Overleaf HITSZ poster template
+% https://www.overleaf.com/latex/templates/harbin-institute-of-technology-shenzhen-hitsz-poster-template/pmfzwyhbsnth
+% (LPPL 1.3c). Compile with XeLaTeX or LuaLaTeX.
+
+\usepackage[orientation=portrait,size=a0,scale=1.24]{beamerposter}
+\usepackage{ctex}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{tikz}
+\usetikzlibrary{calc}
+\usepackage{multicol}
+\usefonttheme{serif}
+
+\definecolor{hitblue}{cmyk}{1,0.80,0,0}
+\definecolor{hitlightblue}{cmyk}{0.35,0.10,0,0}
+\definecolor{hitnavy}{RGB}{11,31,75}
+\definecolor{hitpanel}{RGB}{244,247,251}
+
+\setbeamercolor{background canvas}{bg=white}
+\setbeamercolor{headline}{fg=white,bg=hitnavy}
+\setbeamercolor{block title}{fg=white,bg=hitblue}
+\setbeamercolor{block body}{fg=black,bg=hitpanel}
+\setbeamertemplate{navigation symbols}{}
+
+\newlength{\colwidth}
+\setlength{\colwidth}{0.30\textwidth}
+\setlength{\columnsep}{0.8cm}
+
+\begin{document}
+\begin{frame}[t]
+\begin{tikzpicture}[remember picture,overlay]
+  \fill[hitnavy] (current page.north west) rectangle ($(current page.north east)+(0,-11.2cm)$);
+\end{tikzpicture}
+
+\vspace*{-0.4cm}
+\begin{center}
+  {\color{white}\fontsize{56}{64}\selectfont\bfseries
+  面向科学代理模型的残差校准方法}\\[0.55cm]
+  {\color{white}\fontsize{32}{40}\selectfont
+  Residual-Score Calibration of Scientific Surrogate Models}\\[0.7cm]
+  {\color{white}\fontsize{24}{30}\selectfont
+  陈远\,\textsuperscript{1} \quad 王雪\,\textsuperscript{1} \quad 李明\,\textsuperscript{2}}\\[0.35cm]
+  {\color{white!88}\fontsize{20}{26}\selectfont
+  \textsuperscript{1}哈尔滨工业大学（深圳）计算机科学与技术学院 \quad
+  \textsuperscript{2}哈尔滨工业大学计算学部}\\[0.2cm]
+  {\color{hitlightblue}\fontsize{18}{22}\selectfont
+  联系：yuan.chen@stu.hit.edu.cn \quad|\quad 中国计算机大会 2026 海报}
+\end{center}
+
+\vspace{1.5cm}
+
+\begin{columns}[t]
+\begin{column}{\colwidth}
+\begin{block}{研究动机}
+高保真 PDE 求解器在反问题与不确定性量化中代价高昂。数据驱动代理模型可以缩短计算时间，但残差分布常随工况漂移，导致区间覆盖率明显低于名义水平。
+
+\vspace{0.35em}
+本海报给出一种\textbf{事后、单调、可复现}的残差校准流程：不改动冻结代理 $f_\theta$，只在较小的标注校准集上估计运输映射。
+\end{block}
+
+\begin{block}{方法}
+对校准样本 $\{(x_i,y_i)\}_{i=1}^{n}$ 定义分数
+\[
+  s_i=\|y_i-f_\theta(x_i)\|_2.
+\]
+记 $\hat F$ 为经验分布。查询点 $x$ 处 $1-\alpha$ 对称区间为
+\[
+  f_\theta(x)\pm \hat F^{-1}(1-\alpha).
+\]
+若校准分数与测试分数可交换，则覆盖率至少为 $1-\alpha$，并带有 $1/(n+1)$ 的有限样本修正。当分数膨胀超过阈值时回退到数值求解器。
+\end{block}
+\end{column}
+
+\begin{column}{\colwidth}
+\begin{block}{实验设置}
+\begin{itemize}
+  \setlength{\itemsep}{6pt}
+  \item Burgers 方程、Darcy 流、反应--扩散
+  \item 冻结 Fourier Neural Operator 作为 $f_\theta$
+  \item 校准集 $n=200$，目标覆盖率 $90\%$
+  \item 对照：未校准残差、分位回归
+\end{itemize}
+\end{block}
+
+\begin{block}{主要结果}
+\renewcommand{\arraystretch}{1.25}
+{\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+问题 & 校准前 & 本方法 & 宽度比 \\
+\midrule
+Burgers & 0.71 & 0.91 & 1.31 \\
+Darcy & 0.64 & 0.89 & 1.55 \\
+反应--扩散 & 0.77 & 0.92 & 1.29 \\
+\bottomrule
+\end{tabular}}
+
+\vspace{0.45em}
+覆盖率回到名义水平；宽度增加可控。当代理错过分岔时，分数膨胀检测触发求解器回退。
+\end{block}
+\end{column}
+
+\begin{column}{\colwidth}
+\begin{block}{结论}
+残差校准是科学代理模型的低成本保险：不训练新权重，只要求带标注的校准集。该流程已在三类 PDE 上验证，并作为哈工深学位论文与预印本的共享基线。
+\end{block}
+
+\begin{block}{致谢与资料}
+感谢国家自然科学基金与哈尔滨工业大学（深圳）的支持。\\[0.3em]
+模板结构参考 Overleaf \emph{HITSZ Poster Template}（LPPL 1.3c）。\\[0.3em]
+{\footnotesize 预印本 / 代码二维码可替换为实际链接。}
+\end{block}
+\end{column}
+\end{columns}
+
+\end{frame}
+\end{document}

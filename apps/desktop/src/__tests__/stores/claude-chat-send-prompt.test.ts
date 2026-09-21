@@ -27,8 +27,15 @@ import {
   CLAUDE_CODE_PROVIDER_ID,
   useClaudeChatStore,
 } from "@/stores/claude-chat-store";
+import { useProviderStore } from "@/stores/provider-store";
+import { useSettingsStore } from "@/stores/settings-store";
 
 function resetClaudeChatStore() {
+  useProviderStore.setState({
+    ready: true,
+    engineInstalled: true,
+    activeAuthenticated: true,
+  });
   useClaudeChatStore.setState({
     messages: [],
     sessionId: null,
@@ -163,6 +170,25 @@ describe("useClaudeChatStore.sendPrompt context assembly", () => {
     expect(userText).toBe("@main.tex\nPlease revise this");
   });
 
+  it("shows a short slash label while sending the expanded command to the engine", async () => {
+    const expanded =
+      "Help the user install LocalPrism skills.\n\nUser notes:\nonly scanpy";
+
+    await useClaudeChatStore.getState().sendPrompt(expanded, undefined, {
+      displayPrompt: "/install-skills only scanpy",
+    });
+
+    const userText =
+      useClaudeChatStore.getState().messages[0].message?.content?.[0].text;
+    expect(userText).toBe("/install-skills only scanpy");
+    expect(userText).not.toContain("Help the user install");
+
+    const prompt = (vi.mocked(invoke).mock.calls[0]?.[1] as any)?.request
+      ?.prompt as string;
+    expect(prompt).toContain(expanded);
+    expect(prompt).toContain("[Currently open file: main.tex]");
+  });
+
   it("uses a line-range label and only the selected slice for selection context", async () => {
     const state = setMockDocumentState({
       files: [
@@ -208,6 +234,87 @@ describe("useClaudeChatStore.sendPrompt context assembly", () => {
     );
   });
 
+  it("maps leftover Claude opus onto the ChatGPT catalog default", async () => {
+    useProviderStore.setState({
+      models: [
+        {
+          id: "gpt-5.6-sol",
+          displayName: "GPT-5.6 Sol",
+          reasoningEfforts: ["medium", "high"],
+          isDefault: true,
+        },
+        {
+          id: "gpt-5.6-terra",
+          displayName: "GPT-5.6 Terra",
+          reasoningEfforts: ["medium"],
+          isDefault: false,
+        },
+      ],
+    });
+    useClaudeChatStore.setState({ selectedModel: "opus" });
+
+    await useClaudeChatStore.getState().sendPrompt("Use ChatGPT");
+
+    expect(invoke).toHaveBeenCalledWith("runtime_start_turn", {
+      request: expect.objectContaining({
+        runtime: "claude",
+        model: "gpt-5.6-sol",
+      }),
+    });
+    expect(useClaudeChatStore.getState().tabs[0]?.runtimeModel).toBe(
+      "gpt-5.6-sol",
+    );
+  });
+
+  it("clamps reasoning effort to the parsed model catalog", async () => {
+    useProviderStore.setState({
+      models: [
+        {
+          id: "gpt-5.6-terra",
+          displayName: "GPT-5.6 Terra",
+          reasoningEfforts: ["low", "xhigh"],
+          isDefault: true,
+        },
+      ],
+    });
+    useClaudeChatStore.setState((state) => ({
+      selectedModel: "gpt-5.6-terra",
+      effortLevel: "medium",
+      tabs: state.tabs.map((tab) =>
+        tab.id === "tab-default"
+          ? {
+              ...tab,
+              runtimeModel: "gpt-5.6-terra",
+              reasoningEffort: "medium",
+            }
+          : tab,
+      ),
+    }));
+
+    await useClaudeChatStore.getState().sendPrompt("Think harder");
+
+    expect(invoke).toHaveBeenCalledWith("runtime_start_turn", {
+      request: expect.objectContaining({
+        model: "gpt-5.6-terra",
+        reasoningEffort: "low",
+      }),
+    });
+    expect(useClaudeChatStore.getState().tabs[0]?.reasoningEffort).toBe("low");
+  });
+
+  it("sends the workspace approval policy with the turn", async () => {
+    useSettingsStore.setState({ permissionMode: "bypassPermissions" });
+
+    await useClaudeChatStore.getState().sendPrompt("Use ChatGPT");
+
+    expect(invoke).toHaveBeenCalledWith("runtime_start_turn", {
+      request: expect.objectContaining({
+        runtime: "claude",
+        permissionMode: "bypassPermissions",
+      }),
+    });
+  });
+
   it("sends Claude Code when the Claude provider option is selected", async () => {
     useClaudeChatStore.setState({
       selectedProviderCredentialId: CLAUDE_CODE_PROVIDER_ID,
@@ -224,7 +331,7 @@ describe("useClaudeChatStore.sendPrompt context assembly", () => {
     });
   });
 
-  it("starts Claude Code with prior context when switching from a direct provider", async () => {
+  it("continues the existing Claude session even if leftover sessionProviderKey is openai-compatible", async () => {
     useClaudeChatStore.setState((state) => ({
       sessionId: "qwen-session",
       selectedProviderCredentialId: CLAUDE_CODE_PROVIDER_ID,
@@ -264,15 +371,13 @@ describe("useClaudeChatStore.sendPrompt context assembly", () => {
     expect(invoke).toHaveBeenCalledWith("runtime_start_turn", {
       request: expect.objectContaining({
         runtime: "claude",
-        sessionId: null,
+        sessionId: "qwen-session",
         providerCredentialId: null,
         providerModelOverride: null,
-        prompt: expect.stringContaining("[Provider switch context]"),
       }),
     });
     const prompt = (vi.mocked(invoke).mock.calls[0]?.[1] as any).request.prompt;
-    expect(prompt).toContain("Old DS question");
-    expect(prompt).toContain("Old DS answer");
+    expect(prompt).not.toContain("[Provider switch context]");
     expect(prompt).toContain("Use Claude now");
   });
 
@@ -304,8 +409,8 @@ describe("useClaudeChatStore.sendPrompt context assembly", () => {
       request: expect.objectContaining({
         runtime: "claude",
         sessionId: "shared-session",
-        providerCredentialId: "deepseek-cred",
-        providerModelOverride: "deepseek-chat",
+        providerCredentialId: null,
+        providerModelOverride: null,
       }),
     });
   });
@@ -321,8 +426,8 @@ describe("useClaudeChatStore.sendPrompt context assembly", () => {
     expect(invoke).toHaveBeenCalledWith("runtime_start_turn", {
       request: expect.objectContaining({
         runtime: "claude",
-        providerCredentialId: "qwen-cred",
-        providerModelOverride: "qwen3.7-plus",
+        providerCredentialId: null,
+        providerModelOverride: null,
       }),
     });
   });

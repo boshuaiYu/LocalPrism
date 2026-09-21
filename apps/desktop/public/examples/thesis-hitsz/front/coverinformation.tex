@@ -1,0 +1,37 @@
+% !TEX root = ../main.tex
+\hitszsetup{
+ statesecrets={公开},
+ natclassifiedindex={TP181},
+ intclassifiedindex={004.8},
+ ctitleone={面向科学代理模型的},
+ ctitletwo={残差校准方法研究},
+ ctitlecover={面向科学代理模型的残差校准方法研究},
+ ctitle={面向科学代理模型的残差校准方法研究},
+ cxueke={工学},
+ cpostgraduatetype={学术},
+ csubject={计算机科学与技术},
+ caffil={计算机科学与技术学院},
+ cauthor={陈远},
+ csupervisor={王雪 教授},
+ cdate={2026年6月},
+ cdatesecond={2026年06月12日},
+ cstudentid={22S151234},
+ etitle={Residual-Score Calibration of Scientific Surrogate Models},
+ exueke={Engineering},
+ esubject={Computer Science and Technology},
+ eaffil={Harbin Institute of Technology, Shenzhen},
+ eauthor={Yuan Chen},
+ esupervisor={Prof. Xue Wang},
+ edate={June, 2026},
+ estudenttype={Master of Engineering},
+ ckeywords={科学机器学习, 不确定性量化, 残差校准, 代理模型, hitszthesis},
+ ekeywords={scientific machine learning, uncertainty quantification, residual calibration, surrogate model, hitszthesis},
+}
+
+\begin{cabstract}
+ 科学计算中的代理模型能够显著降低数值模拟成本，但在分布偏移下往往出现残差误校准。本文研究一种基于残差分数的事后校准方法：在较小的标注校准集上估计单调运输映射，并据此构造预测区间。方法在 Burgers 方程、Darcy 流与反应--扩散系统上使区间覆盖率接近名义水平，同时给出代理模型错过分岔时的失效检测规则。全文使用哈尔滨工业大学（深圳）学位论文模板 \texttt{hitszthesis} 排版。
+\end{cabstract}
+
+\begin{eabstract}
+ Surrogate models reduce the cost of scientific simulation but are often miscalibrated under distribution shift. This thesis studies a post-hoc calibration procedure that estimates a monotone transport map on residual scores and forms prediction intervals from a small labeled holdout set. The method restores near-nominal coverage on three PDE families and includes a fallback rule when the emulator misses a bifurcation. The dissertation is typeset with the official HITSZ class \texttt{hitszthesis}.
+\end{eabstract}

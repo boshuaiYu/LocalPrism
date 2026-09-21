@@ -260,7 +260,11 @@ fn npm_package_vendor_roots(package_root: &Path) -> Vec<PathBuf> {
 }
 
 fn native_binary_name(windows: bool) -> &'static str {
-    if windows { "codex.exe" } else { "codex" }
+    if windows {
+        "codex.exe"
+    } else {
+        "codex"
+    }
 }
 
 fn native_codex_in_vendor_root(vendor_root: &Path, windows: bool) -> Option<PathBuf> {
@@ -1163,7 +1167,8 @@ async fn discover_from_candidates<R: CandidateRunner>(
             match runner.run(&launch_path).await {
                 Ok(native_output)
                     if native_output.success
-                        && parse_codex_version(&native_output.stdout).as_ref() == Some(&version) =>
+                        && parse_codex_version(&native_output.stdout).as_ref()
+                            == Some(&version) =>
                 {
                     chosen_path = launch_path;
                 }
@@ -1814,7 +1819,12 @@ mod tests {
         // trailing candidates are skipped without changing the winner.
         assert_eq!(
             runner.visited,
-            vec![wrong_prefix, failed_exit, PathBuf::from("valid"), never_reached]
+            vec![
+                wrong_prefix,
+                failed_exit,
+                PathBuf::from("valid"),
+                never_reached
+            ]
         );
     }
 

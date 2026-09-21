@@ -1,13 +1,21 @@
+mod identity;
 mod messages;
 mod providers;
+pub(crate) mod responses;
 mod stream;
-mod tools;
+pub(crate) mod tools;
 mod transformers;
+mod usage;
 
 use self::messages::{anthropic_to_openai_request, openai_to_anthropic_message};
 use self::providers::apply_provider_request_transforms;
+use self::responses::{
+    anthropic_to_codex_responses, parse_sse_block, responses_headers, CodexProxyCredential,
+    ResponsesToAnthropic,
+};
 use self::stream::{sse_response, stream_openai_sse_to_anthropic};
 use self::transformers::ProxyTransformerChain;
+use crate::providers::openai_oauth::OPENAI_CODEX_API_ENDPOINT;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -49,6 +57,221 @@ pub(crate) async fn start_openai_anthropic_proxy(
     });
 
     Ok(format!("http://{}", addr))
+}
+
+pub(crate) async fn start_codex_responses_proxy(
+    credential: CodexProxyCredential,
+) -> Result<String, String> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(|err| format!("Failed to start Codex Responses proxy: {}", err))?;
+    let addr = listener
+        .local_addr()
+        .map_err(|err| format!("Failed to read Codex Responses proxy address: {}", err))?;
+    let credential = Arc::new(credential);
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let credential = Arc::clone(&credential);
+            tokio::spawn(async move {
+                if let Err(err) = handle_codex_connection(stream, credential).await {
+                    eprintln!("[codex-responses-proxy] request failed: {}", err);
+                }
+            });
+        }
+    });
+
+    Ok(format!("http://{}", addr))
+}
+
+async fn handle_codex_connection(
+    mut stream: TcpStream,
+    credential: Arc<CodexProxyCredential>,
+) -> Result<(), String> {
+    let request = read_http_request(&mut stream).await?;
+    let path = request_path_without_query(&request.path);
+    if request.method == "POST" && is_messages_path(path) {
+        match handle_codex_messages(&request, &credential, &mut stream).await {
+            Ok(()) => {
+                let _ = stream.shutdown().await;
+                return Ok(());
+            }
+            Err(err) => {
+                let response = json_response(
+                    502,
+                    &json!({
+                        "type": "error",
+                        "error": { "type": "api_error", "message": err },
+                    }),
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .map_err(|err| format!("Failed to write Codex proxy error: {err}"))?;
+                let _ = stream.shutdown().await;
+                return Ok(());
+            }
+        }
+    }
+    if request.method == "POST" && is_count_tokens_path(path) {
+        let response = handle_count_tokens(&request);
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .map_err(|err| format!("Failed to write Codex count_tokens: {err}"))?;
+        let _ = stream.shutdown().await;
+        return Ok(());
+    }
+    let response = json_response(
+        200,
+        &json!({ "ok": true, "service": "localprism-codex-responses-proxy" }),
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .map_err(|err| format!("Failed to write Codex proxy ping: {err}"))?;
+    let _ = stream.shutdown().await;
+    Ok(())
+}
+
+async fn handle_codex_messages(
+    request: &HttpRequest,
+    credential: &CodexProxyCredential,
+    stream: &mut TcpStream,
+) -> Result<(), String> {
+    let anthropic_request: Value = serde_json::from_slice(&request.body)
+        .map_err(|err| format!("Claude Code sent invalid Anthropic JSON: {err}"))?;
+    let body = anthropic_to_codex_responses(&anthropic_request, credential)?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+        .map_err(|err| format!("Failed to create Codex Responses client: {err}"))?;
+    let mut credential = credential.clone();
+    let mut retried_auth = false;
+    let mut response = loop {
+        let mut builder = client
+            .post(OPENAI_CODEX_API_ENDPOINT)
+            .body(body.to_string());
+        for (key, value) in responses_headers(&credential) {
+            builder = builder.header(key, value);
+        }
+        let response = builder
+            .send()
+            .await
+            .map_err(|err| {
+                format!(
+                    "Codex Responses request failed for {}: {err}",
+                    credential.model
+                )
+            })?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED && !retried_auth {
+            if let Some(refresh) = credential.refresh_token.clone() {
+                retried_auth = true;
+                let tokens = crate::providers::openai_oauth::refresh_tokens(&refresh).await?;
+                crate::providers::openai_oauth::persist_tokens(tokens.clone()).await?;
+                credential.access_token = tokens.access_token;
+                credential.refresh_token = tokens.refresh_token;
+                if tokens.account_id.is_some() {
+                    credential.account_id = tokens.account_id;
+                }
+                continue;
+            }
+        }
+        break response;
+    };
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_else(|_| String::new());
+        return Err(format!(
+            "Codex Responses returned HTTP {status} for {}: {text}",
+            credential.model
+        ));
+    }
+
+    stream
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n")
+        .await
+        .map_err(|err| format!("Failed to write Codex SSE headers: {err}"))?;
+
+    let mut translator = ResponsesToAnthropic::for_model(&credential.model);
+    let mut buffer = String::new();
+    let mut saw_output = false;
+    loop {
+        let idle = if saw_output {
+            std::time::Duration::from_secs(180)
+        } else {
+            std::time::Duration::from_secs(45)
+        };
+        let chunk = match tokio::time::timeout(idle, response.chunk()).await {
+            Ok(Ok(Some(bytes))) => bytes,
+            Ok(Ok(None)) => break,
+            Ok(Err(err)) => {
+                write_proxy_sse(
+                    stream,
+                    &translator.fail(&format!(
+                        "Codex Responses stream error for {}: {err}",
+                        credential.model
+                    )),
+                )
+                .await?;
+                return Ok(());
+            }
+            Err(_) => {
+                write_proxy_sse(
+                    stream,
+                    &translator.fail(&format!(
+                        "Codex Responses produced no output for {} within 45s. Switch to GPT-5.5 or GPT-5.6 Sol.",
+                        credential.model
+                    )),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some((block, rest)) = take_sse_block(&buffer) {
+            buffer = rest;
+            if let Some((event, data)) = parse_sse_block(&block) {
+                let translated = translator.handle_event(&event, &data);
+                if !translated.is_empty() {
+                    saw_output = true;
+                }
+                write_proxy_sse(stream, &translated).await?;
+            }
+        }
+    }
+    if !buffer.trim().is_empty() {
+        if let Some((event, data)) = parse_sse_block(&buffer) {
+            let translated = translator.handle_event(&event, &data);
+            write_proxy_sse(stream, &translated).await?;
+        }
+    }
+    write_proxy_sse(stream, &translator.close_stream()).await?;
+    Ok(())
+}
+
+fn take_sse_block(buffer: &str) -> Option<(String, String)> {
+    if let Some(index) = buffer.find("\n\n") {
+        return Some((buffer[..index].to_string(), buffer[index + 2..].to_string()));
+    }
+    if let Some(index) = buffer.find("\r\n\r\n") {
+        return Some((buffer[..index].to_string(), buffer[index + 4..].to_string()));
+    }
+    None
+}
+
+async fn write_proxy_sse(stream: &mut TcpStream, payload: &str) -> Result<(), String> {
+    if payload.is_empty() {
+        return Ok(());
+    }
+    stream
+        .write_all(payload.as_bytes())
+        .await
+        .map_err(|err| format!("Failed to write translated SSE: {err}"))
 }
 
 async fn handle_connection(

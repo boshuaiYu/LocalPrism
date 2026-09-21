@@ -60,10 +60,7 @@ impl ApprovalState {
         self.pending.lock().await.len()
     }
 
-    pub async fn register(
-        &self,
-        request: PendingRuntimeRequest,
-    ) -> Result<(), String> {
+    pub async fn register(&self, request: PendingRuntimeRequest) -> Result<(), String> {
         let key = rpc_id_key(&request.id);
         let mut pending = self.pending.lock().await;
         if pending.contains_key(&key) {
@@ -78,10 +75,7 @@ impl ApprovalState {
         self.pending.lock().await.remove(&key)
     }
 
-    pub async fn resolve(
-        &self,
-        request: ResolveRuntimeRequest,
-    ) -> Result<(), String> {
+    pub async fn resolve(&self, request: ResolveRuntimeRequest) -> Result<(), String> {
         let pending = self
             .take(&request.request_id)
             .await
@@ -196,9 +190,7 @@ pub fn map_decision_to_response(
                     "permissions": {},
                     "scope": "turn",
                 })),
-                RuntimeRequestDecision::Unsupported => {
-                    Err((-32601, "Method not found".into()))
-                }
+                RuntimeRequestDecision::Unsupported => Err((-32601, "Method not found".into())),
             }
         }
         "item/tool/requestUserInput" => {
@@ -212,10 +204,7 @@ pub fn map_decision_to_response(
             }
             let mut mapped = serde_json::Map::new();
             for (question_id, values) in answers {
-                mapped.insert(
-                    question_id.clone(),
-                    json!({ "answers": values }),
-                );
+                mapped.insert(question_id.clone(), json!({ "answers": values }));
             }
             Ok(json!({ "answers": mapped }))
         }
@@ -294,17 +283,15 @@ mod tests {
             RuntimeRequestDecision::Deny
         );
         assert_eq!(state.pending_count().await, 0);
-        assert!(
-            state
-                .resolve(ResolveRuntimeRequest {
-                    request_id: RpcId::Number(7),
-                    decision: RuntimeRequestDecision::Allow,
-                    persistence: None,
-                    answers: HashMap::new(),
-                })
-                .await
-                .is_err()
-        );
+        assert!(state
+            .resolve(ResolveRuntimeRequest {
+                request_id: RpcId::Number(7),
+                decision: RuntimeRequestDecision::Allow,
+                persistence: None,
+                answers: HashMap::new(),
+            })
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -369,20 +356,15 @@ mod tests {
             &answers,
         )
         .unwrap();
-        assert_eq!(
-            input,
-            json!({"answers":{"q1":{"answers":["yes"]}}})
-        );
+        assert_eq!(input, json!({"answers":{"q1":{"answers":["yes"]}}}));
 
-        assert!(
-            map_decision_to_response(
-                "future/method",
-                &json!({}),
-                &RuntimeRequestDecision::Allow,
-                None,
-                &HashMap::new(),
-            )
-            .is_err()
-        );
+        assert!(map_decision_to_response(
+            "future/method",
+            &json!({}),
+            &RuntimeRequestDecision::Allow,
+            None,
+            &HashMap::new(),
+        )
+        .is_err());
     }
 }

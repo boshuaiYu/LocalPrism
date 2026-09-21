@@ -264,6 +264,75 @@ export function migratePersistedChat(input: unknown): HydratedChatDocument {
   return { version: 2, activeTabId, tabs };
 }
 
+export interface PersistableSessionRefLike {
+  runtime?: unknown;
+  sessionId?: unknown;
+  projectPath?: unknown;
+}
+
+export interface PersistableTabLike {
+  id: string;
+  title: string;
+  projectPath: string | null;
+  runtime?: unknown;
+  chatPeer?: unknown;
+  sessionRef?: PersistableSessionRefLike | null;
+  providerKey?: string | null;
+  sessionProviderKey?: string | null;
+  runtimeModel?: string | null;
+  reasoningEffort?: string | null;
+  agentId?: string | null;
+}
+
+function sameSessionRef(
+  left: PersistableSessionRefLike | null | undefined,
+  right: PersistableSessionRefLike | null | undefined,
+): boolean {
+  if (left == null || right == null) return left == null && right == null;
+  return (
+    left.runtime === right.runtime &&
+    left.sessionId === right.sessionId &&
+    left.projectPath === right.projectPath
+  );
+}
+
+/** Field-level persist equality — avoids JSON.stringify on every chat tick. */
+export function samePersistableTab(
+  left: PersistableTabLike,
+  right: PersistableTabLike,
+): boolean {
+  const leftRuntime = runtimeKind(left.runtime);
+  const rightRuntime = runtimeKind(right.runtime);
+  const leftProvider = nullableString(left.providerKey);
+  const rightProvider = nullableString(right.providerKey);
+  return (
+    left.id === right.id &&
+    left.title === right.title &&
+    nullableString(left.projectPath) === nullableString(right.projectPath) &&
+    leftRuntime === rightRuntime &&
+    chatPeerKind(left.chatPeer, leftRuntime, leftProvider) ===
+      chatPeerKind(right.chatPeer, rightRuntime, rightProvider) &&
+    leftProvider === rightProvider &&
+    nullableString(left.sessionProviderKey) ===
+      nullableString(right.sessionProviderKey) &&
+    nullableString(left.runtimeModel) === nullableString(right.runtimeModel) &&
+    nullableString(left.reasoningEffort) ===
+      nullableString(right.reasoningEffort) &&
+    nullableString(left.agentId) === nullableString(right.agentId) &&
+    sameSessionRef(left.sessionRef, right.sessionRef)
+  );
+}
+
+export function samePersistableTabs(
+  left: readonly PersistableTabLike[],
+  right: readonly PersistableTabLike[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((tab, index) => samePersistableTab(tab, right[index]))
+  );
+}
+
 /** Projects live chat state through an explicit persistence whitelist. */
 export function projectPersistedChat(input: unknown): PersistedChatDocument {
   const state = isRecord(input) ? input : {};

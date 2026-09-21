@@ -100,6 +100,46 @@ enum TexEngine {
     LuaLaTeX,
 }
 
+const HIT_THESIS_NATBIB_OPTIONS: &str =
+    "\\PassOptionsToPackage{sort&compress,numbers}{natbib}";
+
+fn uses_hit_thesis_class(content: &str) -> bool {
+    content.lines().any(|line| {
+        let trimmed = line.trim();
+        if trimmed.starts_with('%') {
+            return false;
+        }
+        let Some(rest) = trimmed.strip_prefix("\\documentclass") else {
+            return false;
+        };
+        rest.contains("{hitszthesis}")
+            || rest.contains("{hithesis}")
+            || rest.contains("{hithesisbook}")
+    })
+}
+
+fn already_passes_natbib_options(content: &str) -> bool {
+    content.contains("\\PassOptionsToPackage") && content.contains("{natbib}")
+}
+
+/// hithesis/hitszthesis load natbib with `sort&compress` after gbt7714 (or another
+/// package) has already loaded it, which raises "Option clash for package natbib"
+/// at the following `\RequirePackage{subeqnarray}`.
+fn ensure_hit_thesis_natbib_options(content: &str) -> String {
+    if !uses_hit_thesis_class(content) || already_passes_natbib_options(content) {
+        return content.to_string();
+    }
+    let Some(idx) = content.find("\\documentclass") else {
+        return content.to_string();
+    };
+    let mut patched = String::with_capacity(content.len() + HIT_THESIS_NATBIB_OPTIONS.len() + 2);
+    patched.push_str(&content[..idx]);
+    patched.push_str(HIT_THESIS_NATBIB_OPTIONS);
+    patched.push('\n');
+    patched.push_str(&content[idx..]);
+    patched
+}
+
 /// Detect TeX engine from `% !TEX program = <engine>` magic comment in the first 20 lines.
 fn detect_tex_engine(content: &str) -> Option<TexEngine> {
     for line in content.lines().take(20) {
@@ -156,22 +196,91 @@ fn detect_bib_tool(content: &str) -> BibTool {
     BibTool::None
 }
 
-/// Resolve a TeXLive engine binary to its full path.
-/// GUI apps on macOS lack the user's shell PATH, so we check standard
-/// TeXLive installation locations and fall back to a login-shell query.
+fn tex_binary_filename(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    }
+}
+
+fn extra_tex_bin_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    #[cfg(target_os = "windows")]
+    {
+        let years = ["2026", "2025", "2024", "2023"];
+        let drives = ["C:", "D:", "E:"];
+        for drive in drives {
+            if let Ok(entries) = std::fs::read_dir(format!(r"{drive}\texlive")) {
+                for entry in entries.flatten() {
+                    dirs.push(entry.path().join("bin").join("windows"));
+                    dirs.push(entry.path().join("bin").join("win32"));
+                }
+            }
+            for year in years {
+                dirs.push(PathBuf::from(format!(r"{drive}\texlive\{year}\bin\windows")));
+                dirs.push(PathBuf::from(format!(r"{drive}\texlive\{year}\bin\win32")));
+            }
+        }
+
+        if let Ok(program_files) = std::env::var("ProgramFiles") {
+            dirs.push(PathBuf::from(format!(r"{program_files}\MiKTeX\miktex\bin\x64")));
+            dirs.push(PathBuf::from(format!(r"{program_files}\MiKTeX\miktex\bin")));
+            for year in years {
+                dirs.push(PathBuf::from(format!(
+                    r"{program_files}\texlive\{year}\bin\windows"
+                )));
+            }
+        }
+        if let Ok(program_files_x86) = std::env::var("ProgramFiles(x86)") {
+            dirs.push(PathBuf::from(format!(
+                r"{program_files_x86}\MiKTeX\miktex\bin"
+            )));
+        }
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            dirs.push(PathBuf::from(format!(
+                r"{local_app_data}\Programs\MiKTeX\miktex\bin\x64"
+            )));
+            dirs.push(PathBuf::from(format!(r"{local_app_data}\TinyTeX\bin\windows")));
+            dirs.push(PathBuf::from(format!(r"{local_app_data}\TinyTeX\bin\win32")));
+        }
+        if let Ok(app_data) = std::env::var("APPDATA") {
+            dirs.push(PathBuf::from(format!(r"{app_data}\MiKTeX\miktex\bin\x64")));
+            dirs.push(PathBuf::from(format!(r"{app_data}\TinyTeX\bin\windows")));
+            dirs.push(PathBuf::from(format!(r"{app_data}\TinyTeX\bin\win32")));
+        }
+        dirs.push(PathBuf::from(r"C:\CTEX\MiKTeX\miktex\bin"));
+        dirs.push(PathBuf::from(r"C:\Program Files\CTeX\MiKTeX\miktex\bin"));
+    }
+
+    dirs
+}
+
+fn resolve_latex_backend(want_texlive: bool, engine_found: bool) -> bool {
+    want_texlive && engine_found
+}
+
+/// Resolve a TeXLive / MiKTeX / TinyTeX engine binary to its full path.
+/// GUI apps often lack the user's shell PATH, so we check common install
+/// locations after `PATH` / `where`.
 fn find_texlive_binary(name: &str) -> Result<PathBuf, String> {
     // 1. Try PATH (works when launched from terminal)
     if let Ok(path) = which::which(name) {
         return Ok(path);
     }
 
-    // 2. Check standard TeXLive locations
+    let filename = tex_binary_filename(name);
+
+    // 2. Check standard TeXLive / MiKTeX / TinyTeX locations
     #[cfg(not(target_os = "windows"))]
     {
         let standard_paths = [
             format!("/Library/TeX/texbin/{}", name),
+            format!("/usr/local/texlive/2026/bin/universal-darwin/{}", name),
             format!("/usr/local/texlive/2025/bin/universal-darwin/{}", name),
             format!("/usr/local/texlive/2024/bin/universal-darwin/{}", name),
+            format!("/usr/local/texlive/2026/bin/x86_64-linux/{}", name),
             format!("/usr/local/texlive/2025/bin/x86_64-linux/{}", name),
             format!("/usr/local/texlive/2024/bin/x86_64-linux/{}", name),
             format!("/opt/homebrew/bin/{}", name),
@@ -185,16 +294,28 @@ fn find_texlive_binary(name: &str) -> Result<PathBuf, String> {
         }
     }
 
+    for dir in extra_tex_bin_dirs() {
+        let candidate = dir.join(&filename);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
     #[cfg(target_os = "windows")]
     {
-        let standard_paths = [
-            format!("C:\\texlive\\2025\\bin\\windows\\{}.exe", name),
-            format!("C:\\texlive\\2024\\bin\\windows\\{}.exe", name),
-        ];
-        for path_str in &standard_paths {
-            let p = PathBuf::from(path_str);
-            if p.exists() {
-                return Ok(p);
+        let mut cmd = std::process::Command::new("where");
+        cmd.arg(name)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .creation_flags(CREATE_NO_WINDOW);
+        if let Ok(output) = cmd.output() {
+            if output.status.success() {
+                if let Some(line) = String::from_utf8_lossy(&output.stdout).lines().next() {
+                    let resolved = PathBuf::from(line.trim());
+                    if resolved.exists() {
+                        return Ok(resolved);
+                    }
+                }
             }
         }
     }
@@ -826,7 +947,7 @@ pub async fn compile_latex(
     let _project_guard = project_lock.lock().await;
 
     let t0 = std::time::Instant::now();
-    let use_texlive = use_texlive.unwrap_or(false);
+    let want_texlive = use_texlive.unwrap_or(false);
 
     let main_file_name = Path::new(&main_file)
         .file_stem()
@@ -865,7 +986,7 @@ pub async fn compile_latex(
             "full copy"
         },
         if is_reuse { "reuse" } else { "first build" },
-        if use_texlive { "texlive" } else { "tectonic" }
+        if want_texlive { "texlive" } else { "tectonic" }
     );
 
     // Remove stale PDF so a failed compile doesn't return the previous result.
@@ -882,7 +1003,13 @@ pub async fn compile_latex(
     }
 
     // Detect TeX engine from magic comment
-    let main_tex_content = std::fs::read_to_string(&main_tex_path).unwrap_or_default();
+    let original_tex = std::fs::read_to_string(&main_tex_path).unwrap_or_default();
+    let main_tex_content = ensure_hit_thesis_natbib_options(&original_tex);
+    if main_tex_content != original_tex {
+        if let Err(error) = std::fs::write(&main_tex_path, &main_tex_content) {
+            eprintln!("[latex] failed to patch HIT thesis natbib options: {error}");
+        }
+    }
     let engine = detect_tex_engine(&main_tex_content);
 
     // Save engine name before `engine` is moved into the spawn_blocking closure
@@ -891,6 +1018,14 @@ pub async fn compile_latex(
         Some(TexEngine::Latex) => "pdflatex",
         Some(TexEngine::LuaLaTeX) => "lualatex",
     };
+    let texlive_engine_found = find_texlive_binary(engine_name_for_label).is_ok();
+    let use_texlive = resolve_latex_backend(want_texlive, texlive_engine_found);
+    if want_texlive && !use_texlive {
+        eprintln!(
+            "[latex] {} not found; falling back to bundled Tectonic",
+            engine_name_for_label
+        );
+    }
     let backend_label = if use_texlive {
         format!("TeXLive/{}", engine_name_for_label)
     } else {
@@ -1445,6 +1580,26 @@ Postamble:
     // --- detect_tex_engine ---
 
     #[test]
+    fn test_hit_thesis_natbib_options_are_injected_once() {
+        let source = "% !TEX program = XeLaTeX\n\\documentclass[type=master]{hitszthesis}\n";
+        let patched = ensure_hit_thesis_natbib_options(source);
+        assert!(patched.contains(HIT_THESIS_NATBIB_OPTIONS));
+        assert_eq!(
+            ensure_hit_thesis_natbib_options(&patched),
+            patched,
+            "already-patched sources must stay unchanged"
+        );
+        assert!(!ensure_hit_thesis_natbib_options(
+            "\\documentclass{article}\n"
+        )
+        .contains(HIT_THESIS_NATBIB_OPTIONS));
+        assert!(
+            ensure_hit_thesis_natbib_options("\\documentclass[doctor]{hithesis}\n")
+                .contains(HIT_THESIS_NATBIB_OPTIONS)
+        );
+    }
+
+    #[test]
     fn test_detect_tex_engine_xelatex() {
         let content = "% !TEX program = xelatex\n\\documentclass{article}\n";
         assert_eq!(detect_tex_engine(content), Some(TexEngine::XeLaTeX));
@@ -1677,6 +1832,27 @@ Postamble:
         assert!(!pdf_path.exists());
 
         // If compilation fails, pdf_path.exists() is false → error returned
+    }
+
+    #[test]
+    fn test_missing_texlive_falls_back_to_tectonic() {
+        assert!(!resolve_latex_backend(true, false));
+        assert!(resolve_latex_backend(true, true));
+        assert!(!resolve_latex_backend(false, true));
+        assert!(!resolve_latex_backend(false, false));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_tex_search_includes_miktex_tinytex_and_texlive() {
+        let joined = extra_tex_bin_dirs()
+            .iter()
+            .map(|path| path.to_string_lossy().to_lowercase())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("miktex"), "search should include MiKTeX: {joined}");
+        assert!(joined.contains("texlive"), "search should include TeXLive: {joined}");
+        assert!(joined.contains("tinytex"), "search should include TinyTeX: {joined}");
     }
 
     #[test]

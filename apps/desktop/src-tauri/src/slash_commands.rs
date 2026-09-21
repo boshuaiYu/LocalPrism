@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlashCommand {
@@ -193,7 +194,7 @@ fn find_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-/// Load skills from a `.claude/skills/` directory.
+/// Load skills from a LocalPrism skills directory.
 /// Each skill is a subdirectory containing a `SKILL.md` file.
 fn load_skills_from_dir(dir: &Path, scope: &str) -> Vec<SlashCommand> {
     if !dir.exists() {
@@ -252,7 +253,7 @@ fn load_skills_from_dir(dir: &Path, scope: &str) -> Vec<SlashCommand> {
             scope: scope.to_string(),
             namespace: None,
             file_path: skill_md.to_string_lossy().to_string(),
-            content,
+            content: truncate_skill_list_content(&body),
             description,
             allowed_tools: vec![],
             has_bash_commands: false,
@@ -263,6 +264,18 @@ fn load_skills_from_dir(dir: &Path, scope: &str) -> Vec<SlashCommand> {
 
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     skills
+}
+
+const SKILL_LIST_CONTENT_LIMIT: usize = 1_500;
+
+fn truncate_skill_list_content(text: &str) -> String {
+    let mut chars = text.chars();
+    let truncated: String = chars.by_ref().take(SKILL_LIST_CONTENT_LIMIT).collect();
+    if chars.next().is_some() {
+        format!("{truncated}\n\n[truncated]")
+    } else {
+        truncated
+    }
 }
 
 fn find_skill_md(skill_dir: &Path) -> Option<PathBuf> {
@@ -310,51 +323,243 @@ fn collect_skill_dirs(root: &Path, output: &mut Vec<PathBuf>) {
     }
 }
 
+fn builtin_slash_command(
+    id: &str,
+    name: &str,
+    description: &str,
+    content: &str,
+) -> SlashCommand {
+    SlashCommand {
+        id: format!("default-{id}"),
+        name: name.to_string(),
+        full_command: format!("/{name}"),
+        scope: "default".to_string(),
+        namespace: None,
+        file_path: String::new(),
+        content: content.to_string(),
+        description: Some(description.to_string()),
+        allowed_tools: vec![],
+        has_bash_commands: false,
+        has_file_references: false,
+        accepts_arguments: content.contains("$ARGUMENTS"),
+    }
+}
+
 fn create_default_commands() -> Vec<SlashCommand> {
     vec![
-        SlashCommand {
-            id: "default-add-dir".to_string(),
-            name: "add-dir".to_string(),
-            full_command: "/add-dir".to_string(),
-            scope: "default".to_string(),
-            namespace: None,
-            file_path: String::new(),
-            content: "Add additional working directories".to_string(),
-            description: Some("Add additional working directories".to_string()),
-            allowed_tools: vec![],
-            has_bash_commands: false,
-            has_file_references: false,
-            accepts_arguments: false,
-        },
-        SlashCommand {
-            id: "default-init".to_string(),
-            name: "init".to_string(),
-            full_command: "/init".to_string(),
-            scope: "default".to_string(),
-            namespace: None,
-            file_path: String::new(),
-            content: "Initialize project with CLAUDE.md guide".to_string(),
-            description: Some("Initialize project with CLAUDE.md guide".to_string()),
-            allowed_tools: vec![],
-            has_bash_commands: false,
-            has_file_references: false,
-            accepts_arguments: false,
-        },
-        SlashCommand {
-            id: "default-review".to_string(),
-            name: "review".to_string(),
-            full_command: "/review".to_string(),
-            scope: "default".to_string(),
-            namespace: None,
-            file_path: String::new(),
-            content: "Request code review".to_string(),
-            description: Some("Request code review".to_string()),
-            allowed_tools: vec![],
-            has_bash_commands: false,
-            has_file_references: false,
-            accepts_arguments: false,
-        },
+        builtin_slash_command(
+            "add-dir",
+            "add-dir",
+            "Add additional working directories",
+            "Add additional working directories",
+        ),
+        builtin_slash_command(
+            "init",
+            "init",
+            "Initialize project with CLAUDE.md guide",
+            "Initialize project with CLAUDE.md guide",
+        ),
+        builtin_slash_command(
+            "review",
+            "review",
+            "Request code review",
+            "Request code review",
+        ),
+        builtin_slash_command(
+            "install-skills",
+            "install-skills",
+            "Install skills after confirming source and destination",
+            INSTALL_SKILLS_COMMAND,
+        ),
+        builtin_slash_command(
+            "generate-academic-skill",
+            "generate-academic-skill",
+            "Draft an academic skill and write it only after the user confirms",
+            GENERATE_ACADEMIC_SKILL_COMMAND,
+        ),
+        builtin_slash_command(
+            "generate-subagent",
+            "generate-subagent",
+            "Draft a subagent and write it only after the user confirms",
+            GENERATE_SUBAGENT_COMMAND,
+        ),
     ]
+}
+
+const INSTALL_SKILLS_COMMAND: &str = r#"Help the user install LocalPrism skills. Reply in the user's language.
+
+User notes (may be empty):
+$ARGUMENTS
+
+Hard rules:
+- Default destination is the LocalPrism `claude-home/skills` folder (user scope). Project scope is the current paper's `.localprism/skills` — only use it if the user asks.
+- Preferred public source for academic writing: https://github.com/WUBING2023/PaperSpine (Claude skills live under dist/claude/skills).
+- Other public GitHub/skill URLs and local folders with SKILL.md are also valid.
+- Do not overwrite an existing skill folder unless the notes or a later reply say to replace it.
+
+Workflow:
+- If User notes are non-empty, treat them as the request and start the install. Do not restate the notes as a question and do not wait for confirmation unless a required source URL/folder is missing.
+- If User notes are empty, ask one question at a time for source and destination, then wait for an explicit yes before writing files.
+- Install via LocalPrism skill import (folder or URL) or write SKILL.md to the agreed folder.
+- Summarize what landed and what you skipped.
+"#;
+
+const GENERATE_ACADEMIC_SKILL_COMMAND: &str = r#"Help the user create a LocalPrism academic skill. Reply in the user's language.
+
+User notes (may be empty):
+$ARGUMENTS
+
+Hard rules:
+- A skill must contain SKILL.md with a clear name, description, when-to-use, and step-by-step workflow.
+- Default destination: LocalPrism `claude-home/skills/<slug>/SKILL.md`. Use the current paper `.localprism/skills` only if the user asks.
+- Do not overwrite an existing skill folder unless the notes or a later reply say to replace it.
+
+Workflow:
+- If User notes are non-empty, treat them as the brief and draft the skill immediately. Do not interview them about those notes. Ask only if a required field (domain or destination) is missing.
+- If User notes are empty, ask one question at a time about domain, audience, and tools, then wait for confirmation before writing files.
+- Write the skill files to the agreed folder once you have enough to produce SKILL.md.
+- Tell the user they can invoke it as /<slug>.
+"#;
+
+const GENERATE_SUBAGENT_COMMAND: &str = r#"Help the user create a LocalPrism subagent. Reply in the user's language.
+
+User notes (may be empty):
+$ARGUMENTS
+
+Hard rules:
+- Default destination: LocalPrism `claude-home/agents/<slug>.md`. Project scope is `.localprism/agents` only if the user asks.
+- Keep the agent narrowly scoped. Do not invent a specialist when notes already name the job.
+- Do not overwrite an existing agent file unless the notes or a later reply say to replace it.
+
+Workflow:
+- If User notes are non-empty, treat them as the brief and draft the subagent immediately. Do not interview them about those notes. Ask only if the role is missing.
+- If User notes are empty, ask one question at a time about the job, tools, and destination, then wait for an explicit yes before writing files.
+- Write the agent file to the agreed folder once you have enough to produce it.
+- Summarize how to pick this subagent in LocalPrism.
+"#;
+
+fn is_skipped_command_filename(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "readme.md" | "changelog.md" | "license.md" | "agents.md" | "claude.md" | "skill.md"
+    )
+}
+
+fn official_command_search_roots(root: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut push = |path: PathBuf| {
+        if path.is_dir() && !roots.iter().any(|existing| existing == &path) {
+            roots.push(path);
+        }
+    };
+    push(root.join("commands"));
+    push(root.join(".claude").join("commands"));
+    push(root.join("dist").join("claude").join("commands"));
+    if root
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("skills"))
+    {
+        if let Some(parent) = root.parent() {
+            push(parent.join("commands"));
+        }
+    }
+    roots
+}
+
+fn is_safe_command_relpath(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && path.components().all(|component| matches!(component, Component::Normal(_)))
+}
+
+/// Copy official skill-pack slash files into `claude-home/slash` using upstream names
+/// (`ars-plan.md` → `/ars-plan`, `paperspine.md` → `/paperspine`).
+pub fn import_user_slash_commands_from_source(
+    root: &Path,
+    skip_existing: bool,
+) -> Result<usize, String> {
+    let slash_dir = crate::providers::paths::user_slash_dir()?;
+    fs::create_dir_all(&slash_dir)
+        .map_err(|error| format!("Failed to create {}: {error}", slash_dir.display()))?;
+    let commands_dir = crate::providers::paths::localprism_home()
+        .map(|home| home.join(crate::providers::paths::CLAUDE_HOME_DIRNAME).join("commands"))
+        .ok();
+
+    let mut files = Vec::new();
+    for search in official_command_search_roots(root) {
+        let mut markdown = Vec::new();
+        find_markdown_files(&search, &mut markdown);
+        for file in markdown {
+            let Some(name) = file.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if is_skipped_command_filename(name) {
+                continue;
+            }
+            let Ok(rel) = file.strip_prefix(&search).map(Path::to_path_buf) else {
+                continue;
+            };
+            if !is_safe_command_relpath(&rel) {
+                continue;
+            }
+            files.push((file, rel));
+        }
+    }
+
+    let mut imported = 0usize;
+    let mut seen = HashSet::new();
+    for (source, rel) in files {
+        let key = rel.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        if !seen.insert(key) {
+            continue;
+        }
+        let dest_slash = slash_dir.join(&rel);
+        if dest_slash.exists() && skip_existing {
+            continue;
+        }
+        if let Some(parent) = dest_slash.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!("Failed to create {}: {error}", parent.display())
+            })?;
+        }
+        fs::copy(&source, &dest_slash).map_err(|error| {
+            format!(
+                "Failed to copy slash command {} to {}: {error}",
+                source.display(),
+                dest_slash.display()
+            )
+        })?;
+        if let Some(ref commands_dir) = commands_dir {
+            let dest_commands = commands_dir.join(&rel);
+            if !dest_commands.exists() || !skip_existing {
+                if let Some(parent) = dest_commands.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::copy(&source, &dest_commands);
+            }
+        }
+        imported += 1;
+    }
+    Ok(imported)
+}
+
+fn extend_commands_from_dir(commands: &mut Vec<SlashCommand>, dir: &Path, scope: &str) {
+    if !dir.exists() {
+        return;
+    }
+    let mut md_files = Vec::new();
+    find_markdown_files(dir, &mut md_files);
+    for file_path in md_files {
+        let Some(cmd) = load_command_from_file(&file_path, dir, scope) else {
+            continue;
+        };
+        if commands
+            .iter()
+            .any(|existing| existing.full_command == cmd.full_command)
+        {
+            continue;
+        }
+        commands.push(cmd);
+    }
 }
 
 #[tauri::command]
@@ -365,44 +570,46 @@ pub async fn slash_commands_list(
 
     commands.extend(create_default_commands());
 
-    // Load project commands
     if let Some(ref proj_path) = project_path {
-        let project_commands_dir = PathBuf::from(proj_path).join(".claude").join("commands");
-        if project_commands_dir.exists() {
-            let mut md_files = Vec::new();
-            find_markdown_files(&project_commands_dir, &mut md_files);
-            for file_path in md_files {
-                if let Some(cmd) =
-                    load_command_from_file(&file_path, &project_commands_dir, "project")
-                {
-                    commands.push(cmd);
-                }
-            }
-        }
+        let project = PathBuf::from(proj_path);
+        extend_commands_from_dir(
+            &mut commands,
+            &crate::providers::paths::project_slash_dir(&project),
+            "project",
+        );
+        extend_commands_from_dir(
+            &mut commands,
+            &project.join(".claude").join("commands"),
+            "project",
+        );
     }
 
-    // Load user commands
+    if let Ok(user_slash) = crate::providers::paths::user_slash_dir() {
+        extend_commands_from_dir(&mut commands, &user_slash, "user");
+    }
     if let Some(home_dir) = dirs::home_dir() {
-        let user_commands_dir = home_dir.join(".claude").join("commands");
-        if user_commands_dir.exists() {
-            let mut md_files = Vec::new();
-            find_markdown_files(&user_commands_dir, &mut md_files);
-            for file_path in md_files {
-                if let Some(cmd) = load_command_from_file(&file_path, &user_commands_dir, "user") {
-                    commands.push(cmd);
-                }
-            }
-        }
+        extend_commands_from_dir(
+            &mut commands,
+            &home_dir.join(".claude").join("commands"),
+            "user",
+        );
     }
 
-    // Load installed skills (project-level first, then global)
+    // Load installed skills (project-level first, then LocalPrism user)
     if let Some(proj_path) = &project_path {
-        let project_skills_dir = PathBuf::from(proj_path).join(".claude").join("skills");
-        commands.extend(load_skills_from_dir(&project_skills_dir, "skill"));
+        if let Ok(project_skills_dir) = crate::skills::paths::resolve_skill_root(
+            crate::runtime::RuntimeKind::Claude,
+            crate::skills::domain::SkillScope::Project,
+            Some(Path::new(proj_path)),
+        ) {
+            commands.extend(load_skills_from_dir(&project_skills_dir, "skill"));
+        }
     }
-    if let Some(home_dir) = dirs::home_dir() {
-        let global_skills_dir = home_dir.join(".claude").join("skills");
-        // Avoid duplicates if project and global have same skill
+    if let Ok(global_skills_dir) = crate::skills::paths::resolve_skill_root(
+        crate::runtime::RuntimeKind::Claude,
+        crate::skills::domain::SkillScope::User,
+        None,
+    ) {
         let existing_ids: std::collections::HashSet<String> =
             commands.iter().map(|c| c.id.clone()).collect();
         let global_skills = load_skills_from_dir(&global_skills_dir, "skill");
@@ -445,15 +652,12 @@ pub async fn slash_command_save(
 
     let base_dir = if scope == "project" {
         if let Some(proj_path) = project_path {
-            PathBuf::from(proj_path).join(".claude").join("commands")
+            crate::providers::paths::project_slash_dir(Path::new(&proj_path))
         } else {
             return Err("Project path required for project scope".to_string());
         }
     } else {
-        dirs::home_dir()
-            .ok_or_else(|| "Could not find home directory".to_string())?
-            .join(".claude")
-            .join("commands")
+        crate::providers::paths::user_slash_dir()?
     };
 
     let mut file_path = base_dir.clone();
@@ -721,12 +925,40 @@ mod tests {
             custom.description.is_none(),
             "No frontmatter = no description"
         );
+        assert_eq!(bio.content, "\n# Biopython\n\nBody.");
+    }
+
+    #[test]
+    fn test_load_skills_from_dir_truncates_huge_skill_md() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("paper-spine");
+        fs::create_dir_all(&skill_dir).unwrap();
+        let huge_body = "x".repeat(8_000);
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: paper-spine\ndescription: Host orchestrator.\n---\n\n{huge_body}"),
+        )
+        .unwrap();
+
+        let skills = load_skills_from_dir(dir.path(), "skill");
+        assert_eq!(skills.len(), 1);
+        assert!(
+            skills[0].content.len() < huge_body.len(),
+            "list payload must not include the full SKILL.md"
+        );
+        assert!(skills[0].content.contains("[truncated]"));
+        assert!(!skills[0].content.contains(&huge_body));
     }
 
     #[test]
     fn test_real_skills_dir() {
         // Test against actual installed skills if available
-        let skills_dir = dirs::home_dir().unwrap().join(".claude").join("skills");
+        let skills_dir = crate::skills::paths::resolve_skill_root(
+            crate::runtime::RuntimeKind::Claude,
+            crate::skills::domain::SkillScope::User,
+            None,
+        )
+        .unwrap_or_else(|_| std::path::PathBuf::from("__missing_localprism_skills__"));
         if !skills_dir.exists() {
             eprintln!("SKIP: no skills installed at {:?}", skills_dir);
             return;
@@ -932,13 +1164,83 @@ mod tests {
     // --- create_default_commands ---
 
     #[test]
+    fn imports_official_slash_names_and_skips_existing() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let previous = std::env::var_os("LOCALPRISM_HOME");
+        std::env::set_var("LOCALPRISM_HOME", &home);
+
+        let source = temp.path().join("repo");
+        fs::create_dir_all(source.join("commands")).unwrap();
+        fs::create_dir_all(source.join("dist/claude/commands")).unwrap();
+        fs::write(
+            source.join("commands/ars-plan.md"),
+            "---\nname: ars-plan\ndescription: ARS plan mode\n---\nTrigger academic-paper plan.\n",
+        )
+        .unwrap();
+        fs::write(
+            source.join("commands/README.md"),
+            "ignore\n",
+        )
+        .unwrap();
+        fs::write(
+            source.join("dist/claude/commands/paperspine.md"),
+            "---\ndescription: Start PaperSpine\n---\nStart PaperSpine.\n",
+        )
+        .unwrap();
+
+        let first = import_user_slash_commands_from_source(&source, true).unwrap();
+        let second = import_user_slash_commands_from_source(&source, true).unwrap();
+        fs::write(
+            source.join("commands/ars-plan.md"),
+            "---\nname: ars-plan\ndescription: updated\n---\nUpdated body.\n",
+        )
+        .unwrap();
+        let forced = import_user_slash_commands_from_source(&source, false).unwrap();
+
+        if let Some(value) = previous {
+            std::env::set_var("LOCALPRISM_HOME", value);
+        } else {
+            std::env::remove_var("LOCALPRISM_HOME");
+        }
+
+        let slash = home.join("claude-home").join("slash");
+        assert_eq!(first, 2);
+        assert_eq!(second, 0);
+        assert_eq!(forced, 2);
+        assert!(slash.join("ars-plan.md").is_file());
+        assert!(slash.join("paperspine.md").is_file());
+        assert!(!slash.join("README.md").exists());
+        assert!(fs::read_to_string(slash.join("ars-plan.md"))
+            .unwrap()
+            .contains("Updated body"));
+        assert!(home
+            .join("claude-home")
+            .join("commands")
+            .join("ars-plan.md")
+            .is_file());
+    }
+
+    #[test]
     fn test_create_default_commands_structure() {
         let cmds = create_default_commands();
-        assert_eq!(cmds.len(), 3);
+        assert_eq!(cmds.len(), 6);
         let names: Vec<&str> = cmds.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"add-dir"));
         assert!(names.contains(&"init"));
         assert!(names.contains(&"review"));
+        assert!(names.contains(&"install-skills"));
+        assert!(names.contains(&"generate-academic-skill"));
+        assert!(names.contains(&"generate-subagent"));
+        let install = cmds
+            .iter()
+            .find(|cmd| cmd.name == "install-skills")
+            .expect("install-skills");
+        assert!(install.accepts_arguments);
+        assert!(install.content.contains("If User notes are non-empty"));
+        assert!(!install.content.contains("Restate what you think"));
         for cmd in &cmds {
             assert_eq!(cmd.scope, "default");
             assert!(cmd.full_command.starts_with('/'));
@@ -972,8 +1274,8 @@ mod tests {
         // Verify file was created
         let file = dir
             .path()
-            .join(".claude")
-            .join("commands")
+            .join(".localprism")
+            .join("slash")
             .join("test-cmd.md");
         assert!(file.exists());
         assert_eq!(fs::read_to_string(&file).unwrap(), "Do something");
@@ -1000,7 +1302,11 @@ mod tests {
         assert_eq!(cmd.allowed_tools, vec!["Bash", "Read"]);
 
         // Verify frontmatter in file
-        let file = dir.path().join(".claude").join("commands").join("lint.md");
+        let file = dir
+            .path()
+            .join(".localprism")
+            .join("slash")
+            .join("lint.md");
         let content = fs::read_to_string(&file).unwrap();
         assert!(content.starts_with("---\n"));
         assert!(content.contains("description: Lint all files"));
@@ -1031,8 +1337,8 @@ mod tests {
         // Verify nested directory structure
         let file = dir
             .path()
-            .join(".claude")
-            .join("commands")
+            .join(".localprism")
+            .join("slash")
             .join("tools")
             .join("rust")
             .join("clippy.md");

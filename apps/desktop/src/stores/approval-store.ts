@@ -20,8 +20,35 @@ interface ApprovalStoreState {
     threadId: string,
     turnId: string,
   ) => Promise<void>;
+  cancelForTab: (tabId: string) => Promise<void>;
   rejectUnknown: (request: RuntimeRequest) => Promise<void>;
+  dismiss: (requestId: string | number) => void;
+  dismissForTab: (tabId: string) => void;
   reset: () => void;
+}
+
+export function firstPendingForTab(
+  pending: Record<string, RuntimeRequest>,
+  tabId: string,
+): RuntimeRequest | null {
+  if (!tabId) return null;
+  return (
+    Object.values(pending).find((request) => request.tabId === tabId) ?? null
+  );
+}
+
+export function pendingApprovalTabKey(
+  pending: Record<string, RuntimeRequest>,
+): string {
+  return [
+    ...new Set(
+      Object.values(pending)
+        .map((request) => request.tabId)
+        .filter((tabId) => tabId.length > 0),
+    ),
+  ]
+    .sort()
+    .join("\0");
 }
 
 async function sendResponse(
@@ -43,6 +70,14 @@ export const useApprovalStore = create<ApprovalStoreState>((set, get) => ({
   inFlight: {},
 
   enqueue: (request) => {
+    if (!request.tabId.trim()) {
+      void sendResponse(request.requestId, {
+        decision: "unsupported",
+        persistence: null,
+        answers: {},
+      }).catch(() => undefined);
+      return;
+    }
     const key = requestKey(request.requestId);
     set((state) => {
       if (state.pending[key] || state.inFlight[key]) {
@@ -104,12 +139,65 @@ export const useApprovalStore = create<ApprovalStoreState>((set, get) => ({
     }
   },
 
+  cancelForTab: async (tabId) => {
+    if (!tabId) return;
+    const matches = Object.values(get().pending).filter(
+      (request) => request.tabId === tabId,
+    );
+    if (matches.length === 0) return;
+    set((state) => {
+      const pending = { ...state.pending };
+      const inFlight = { ...state.inFlight };
+      for (const request of matches) {
+        const key = requestKey(request.requestId);
+        delete pending[key];
+        delete inFlight[key];
+      }
+      return { pending, inFlight };
+    });
+    await Promise.all(
+      matches.map(async (request) => {
+        try {
+          await sendResponse(request.requestId, {
+            decision: "cancel",
+            persistence: null,
+            answers: {},
+          });
+        } catch {
+          // The conversation is gone; do not restore the prompt.
+        }
+      }),
+    );
+  },
+
   rejectUnknown: async (request) => {
     get().enqueue(request);
     await get().respond(request.requestId, {
       decision: "unsupported",
       persistence: null,
       answers: {},
+    });
+  },
+
+  dismiss: (requestId) => {
+    const key = requestKey(requestId);
+    set((state) => {
+      const pending = { ...state.pending };
+      const inFlight = { ...state.inFlight };
+      delete pending[key];
+      delete inFlight[key];
+      return { pending, inFlight };
+    });
+  },
+
+  dismissForTab: (tabId) => {
+    set((state) => {
+      const pending = { ...state.pending };
+      const inFlight = { ...state.inFlight };
+      for (const [key, request] of Object.entries(pending)) {
+        if (request.tabId === tabId) delete pending[key];
+      }
+      return { pending, inFlight };
     });
   },
 

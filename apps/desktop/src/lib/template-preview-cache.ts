@@ -36,6 +36,43 @@ export function getTemplatePdfUrl(templateId: string): string {
 }
 
 /**
+ * True when the bytes are a PDF. Missing `/examples/{id}/main.pdf` is served
+ * as the SPA `index.html` (200), and MuPDF must not be asked to open that.
+ */
+export function isPdfBuffer(buffer: ArrayBuffer): boolean {
+  const view = new Uint8Array(buffer);
+  const limit = Math.min(view.length, 1024);
+  for (let i = 0; i <= limit - 5; i++) {
+    if (
+      view[i] === 0x25 &&
+      view[i + 1] === 0x50 &&
+      view[i + 2] === 0x44 &&
+      view[i + 3] === 0x46 &&
+      view[i + 4] === 0x2d
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Fetch the gallery PDF and reject SPA HTML / other non-PDF responses. */
+export async function fetchTemplatePdf(
+  templateId: string,
+): Promise<ArrayBuffer> {
+  const url = getTemplatePdfUrl(templateId);
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const buffer = await response.arrayBuffer();
+  if (!isPdfBuffer(buffer)) {
+    throw new Error(
+      `Not a PDF at ${url} (${buffer.byteLength} bytes). Run generate-previews.`,
+    );
+  }
+  return buffer;
+}
+
+/**
  * Load the static PDF and render page 1 as a thumbnail data URL.
  */
 export async function generateThumbnail(
@@ -51,10 +88,7 @@ export async function generateThumbnail(
 
   const promise = (async (): Promise<string | null> => {
     try {
-      const url = getTemplatePdfUrl(templateId);
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const buffer = await response.arrayBuffer();
+      const buffer = await fetchTemplatePdf(templateId);
 
       const client = getMupdfClient();
       const docId = await client.openDocument(buffer);

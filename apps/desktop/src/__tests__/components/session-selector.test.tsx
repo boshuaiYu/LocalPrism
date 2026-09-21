@@ -143,6 +143,19 @@ function findMenuItem(title: string): HTMLElement {
   return item;
 }
 
+function setSearchQuery(value: string) {
+  const input = document.querySelector('[aria-label="Search chats"]');
+  if (!(input instanceof HTMLInputElement)) {
+    throw new Error("Search chats input not found");
+  }
+  const assign = Object.getOwnPropertyDescriptor(
+    window.HTMLInputElement.prototype,
+    "value",
+  )?.set;
+  assign?.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 describe("SessionSelector runtime conversation ownership", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -228,45 +241,59 @@ describe("SessionSelector runtime conversation ownership", () => {
     });
   }
 
-  it("lists, filters, and resumes only the active runtime and project", async () => {
-    const activeRef = reference("codex", "/project-a", "current-codex");
-    const listedRef = reference("codex", "/project-a", "codex-session");
-    switchActiveContext(activeRef);
+  it("lists Claude chats and read-only Codex history for the current project", async () => {
+    const listedCodex = reference("codex", "/project-a", "codex-session");
+    const listedClaude = reference("claude", "/project-a", "claude-session");
     const resumeConversation = vi.fn();
     useClaudeChatStore.setState({ resumeConversation });
-    runtimeListConversations.mockResolvedValue([
-      conversation(listedRef, "Codex session"),
-      conversation(
-        reference("claude", "/project-a", "codex-session"),
-        "Wrong runtime",
-      ),
-      conversation(
-        reference("codex", "/project-b", "codex-session"),
-        "Wrong project",
-      ),
-    ]);
+    runtimeListConversations.mockImplementation((runtime, projectPath) => {
+      if (projectPath !== "/project-a") {
+        return Promise.resolve([
+          conversation(
+            reference(runtime, projectPath, "other"),
+            "Wrong project",
+          ),
+        ]);
+      }
+      if (runtime === "claude") {
+        return Promise.resolve([
+          conversation(listedClaude, "Claude session"),
+          conversation(
+            reference("codex", "/project-b", "codex-session"),
+            "Wrong project",
+          ),
+        ]);
+      }
+      return Promise.resolve([conversation(listedCodex, "Codex session")]);
+    });
 
     await renderAndOpen();
 
     expect(runtimeListConversations).toHaveBeenCalledWith(
+      "claude",
+      "/project-a",
+    );
+    expect(runtimeListConversations).toHaveBeenCalledWith(
       "codex",
       "/project-a",
     );
+    expect(document.body.textContent).toContain("Claude session");
     expect(document.body.textContent).toContain("Codex session");
-    expect(document.body.textContent).not.toContain("Wrong runtime");
+    expect(document.body.textContent).toContain("Read-only");
     expect(document.body.textContent).not.toContain("Wrong project");
 
     await act(async () => findMenuItem("Codex session").click());
-    expect(resumeConversation).toHaveBeenCalledWith(listedRef, "Codex session");
+    expect(resumeConversation).toHaveBeenCalledWith(
+      listedCodex,
+      "Codex session",
+    );
   });
 
   it("ignores a late list after runtime and project ownership changes", async () => {
     const projectA = deferred<RuntimeConversation[]>();
     const projectB = deferred<RuntimeConversation[]>();
-    runtimeListConversations.mockImplementation((runtime, projectPath) =>
-      runtime === "claude" && projectPath === "/project-a"
-        ? projectA.promise
-        : projectB.promise,
+    runtimeListConversations.mockImplementation((_runtime, projectPath) =>
+      projectPath === "/project-a" ? projectA.promise : projectB.promise,
     );
 
     await renderAndOpen();
@@ -439,13 +466,11 @@ describe("SessionSelector runtime conversation ownership", () => {
     const newRef = reference("codex", "/project-b", "shared-session");
     const newSession = vi.fn();
     useClaudeChatStore.setState({ newSession });
-    runtimeListConversations.mockImplementation((runtime, projectPath) =>
+    runtimeListConversations.mockImplementation((_runtime, projectPath) =>
       Promise.resolve([
         conversation(
-          runtime === "claude" && projectPath === "/project-a"
-            ? oldRef
-            : newRef,
-          runtime === "claude" ? "Old Claude" : "New Codex",
+          projectPath === "/project-a" ? oldRef : newRef,
+          projectPath === "/project-a" ? "Old Claude" : "New Codex",
         ),
       ]),
     );
@@ -479,7 +504,8 @@ describe("SessionSelector runtime conversation ownership", () => {
     let projectAListCount = 0;
     useClaudeChatStore.setState({ newSession });
     runtimeListConversations.mockImplementation((runtime, projectPath) => {
-      if (runtime === "claude" && projectPath === "/project-a") {
+      if (projectPath === "/project-a") {
+        if (runtime === "codex") return Promise.resolve([]);
         projectAListCount += 1;
         return Promise.resolve([
           conversation(
@@ -522,7 +548,8 @@ describe("SessionSelector runtime conversation ownership", () => {
     const target = reference("claude", "/project-a", "shared-session");
     const staleList = deferred<RuntimeConversation[]>();
     let listCount = 0;
-    runtimeListConversations.mockImplementation(() => {
+    runtimeListConversations.mockImplementation((runtime) => {
+      if (runtime === "codex") return Promise.resolve([]);
       listCount += 1;
       return listCount === 1
         ? Promise.resolve([conversation(target, "Archive me")])
@@ -540,5 +567,107 @@ describe("SessionSelector runtime conversation ownership", () => {
 
     expect(document.body.textContent).not.toContain("Resurrected");
     expect(document.body.textContent).toContain("No previous sessions");
+  });
+
+  it("falls back to the first user line or Untitled chat", async () => {
+    const untitledRef = reference("claude", "/project-a", "empty-title");
+    const firstLineRef = reference("claude", "/project-a", "first-line");
+    const current = useClaudeChatStore.getState().tabs[0];
+    useClaudeChatStore.setState({
+      tabs: [
+        {
+          ...current,
+          id: "tab-first-line",
+          title: "New Chat",
+          projectPath: firstLineRef.projectPath,
+          sessionId: firstLineRef.sessionId,
+          sessionRef: firstLineRef,
+          messages: [
+            {
+              type: "user",
+              message: {
+                content: [{ type: "text", text: "Tighten the abstract" }],
+              },
+            },
+          ],
+        },
+      ],
+      activeTabId: "tab-first-line",
+    });
+    runtimeListConversations.mockImplementation((runtime) => {
+      if (runtime === "codex") return Promise.resolve([]);
+      return Promise.resolve([
+        conversation(untitledRef, "   "),
+        conversation(firstLineRef, "New Chat"),
+      ]);
+    });
+
+    await renderAndOpen();
+
+    expect(document.body.textContent).toContain("Untitled chat");
+    expect(document.body.textContent).toContain("Tighten the abstract");
+    expect(findButton("Delete Untitled chat")).toBeTruthy();
+    expect(findButton("Delete Tighten the abstract")).toBeTruthy();
+  });
+
+  it("filters sessions by title search", async () => {
+    runtimeListConversations.mockImplementation((runtime, projectPath) => {
+      if (projectPath !== "/project-a") return Promise.resolve([]);
+      if (runtime === "claude") {
+        return Promise.resolve([
+          conversation(
+            reference("claude", "/project-a", "claude-session"),
+            "Claude session",
+          ),
+        ]);
+      }
+      return Promise.resolve([
+        conversation(
+          reference("codex", "/project-a", "codex-session"),
+          "Codex session",
+        ),
+      ]);
+    });
+
+    await renderAndOpen();
+    await act(async () => {
+      setSearchQuery("claude");
+    });
+    expect(document.body.textContent).toContain("Claude session");
+    expect(document.body.textContent).not.toContain("Codex session");
+
+    await act(async () => {
+      setSearchQuery("missing-title");
+    });
+    expect(document.body.textContent).toContain("No matching chats");
+  });
+
+  it("groups chats by recency", async () => {
+    const now = Date.now() / 1000;
+    runtimeListConversations.mockImplementation((runtime) => {
+      if (runtime === "codex") return Promise.resolve([]);
+      return Promise.resolve([
+        {
+          ...conversation(
+            reference("claude", "/project-a", "today-session"),
+            "Today session",
+          ),
+          updatedAt: now,
+        },
+        {
+          ...conversation(
+            reference("claude", "/project-a", "old-session"),
+            "Old session",
+          ),
+          updatedAt: now - 20 * 86_400,
+        },
+      ]);
+    });
+
+    await renderAndOpen();
+    expect(document.body.textContent).toContain("Today");
+    expect(document.body.textContent).toContain("Older");
+    expect(document.body.textContent).toContain("Today session");
+    expect(document.body.textContent).toContain("Old session");
   });
 });

@@ -1,6 +1,8 @@
 # Dual Claude and Codex Runtime Design
 
-**Status:** Approved in conversation on 2026-07-15; independent-review amendment requested on 2026-07-16
+**Status:** SUPERSEDED for chat execution and login by [2026-09-17 Single-Provider Runtime Design](./2026-09-17-single-provider-runtime-design.md). Keep this document only as historical context for skills/agents work that still mentions `RuntimeKind`.
+
+**Previous status:** Approved in conversation on 2026-07-15; independent-review amendment requested on 2026-07-16
 
 **Scope:** Add a first-class Codex runtime while preserving all existing Claude Code and OpenAI-compatible behavior. Extend skill management to Claude and Codex, add runtime-native custom agents with assigned skills, expose subagent activity, and keep the Windows installer workflow.
 

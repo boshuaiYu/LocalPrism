@@ -39,6 +39,11 @@ window.addEventListener("storage", (e) => {
   if (e.key === "debug") _debugEnabled = !!e.newValue;
 });
 
+/** Cheap gate so hot paths skip string-building when debug is off. */
+export function isDebugLoggingEnabled(): boolean {
+  return _debugEnabled;
+}
+
 // Track whether a debug window is connected (set when it requests sync)
 let _debugWindowConnected = false;
 

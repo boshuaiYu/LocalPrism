@@ -22,6 +22,7 @@ export type ProjectFileType =
   | "pdf"
   | "bib"
   | "style"
+  | "markdown"
   | "other";
 
 export interface FsProjectFile {
@@ -99,6 +100,7 @@ export function getProjectFileType(name: string): ProjectFileType | null {
   }
   if (lower.endsWith(".tex") || lower.endsWith(".ltx")) return "tex";
   if (lower.endsWith(".bib")) return "bib";
+  if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "markdown";
   if (lower.endsWith(".pdf")) return "pdf";
   for (const ext of IMAGE_EXTENSIONS) {
     if (lower.endsWith(ext)) return "image";
@@ -138,7 +140,7 @@ export async function scanProjectFolder(rootPath: string): Promise<ScanResult> {
           // Only stat files that may be skipped by the large-file threshold
           // (image and other). tex/bib/style are always loaded, pdf is always lazy.
           let fileSize = 0;
-          if (type === "image" || type === "other") {
+          if (type === "image" || type === "other" || type === "markdown") {
             try {
               const info = await stat(entryPath);
               fileSize = info.size;

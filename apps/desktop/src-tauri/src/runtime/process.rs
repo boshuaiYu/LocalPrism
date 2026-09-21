@@ -435,6 +435,18 @@ impl RuntimeProcessRegistry {
         self.routes.remove(route_key)
     }
 
+    /// Clears any in-flight / pending turn for a route while keeping the route
+    /// and its bound Codex thread so the next attempt can resume the session.
+    fn force_release_route_turn(&mut self, route_key: &RouteKey) -> Option<TurnRoute> {
+        self.pending_turns.remove(route_key);
+        self.turn_owners
+            .retain(|_, owner| owner.route_key != *route_key);
+        let route = self.routes.get_mut(route_key)?;
+        let released = route.clone();
+        route.turn_id = None;
+        Some(released)
+    }
+
     fn insert_route(&mut self, route: TurnRoute) {
         let route_key = Self::route_key(&route);
         self.remove_route(&route_key);
@@ -924,10 +936,19 @@ impl RuntimeProcessState {
                 owner.route_key == route_key && owner.generation == registry.transport_generation
             });
         if route_is_busy {
-            return Err(RuntimeProcessError::TurnAlreadyInFlight {
-                window_label: route_key.0,
-                tab_id: route_key.1,
-            });
+            let previous_attempt = previous_route
+                .as_ref()
+                .map(|route| route.attempt_id.as_str());
+            // A new user attempt must be able to recover from a zombie nonterminal
+            // turn (for example after a hung Codex turn/completed). Same-attempt
+            // duplicates still fail so double-starts stay rejected.
+            if previous_attempt == Some(desired.attempt_id.as_str()) {
+                return Err(RuntimeProcessError::TurnAlreadyInFlight {
+                    window_label: route_key.0,
+                    tab_id: route_key.1,
+                });
+            }
+            registry.force_release_route_turn(&route_key);
         }
         if let Some(thread_id) = desired.session_id.as_deref() {
             if registry.pending_turns.values().any(|pending| {
@@ -1258,6 +1279,18 @@ impl RuntimeProcessState {
             }
         };
         registry.bind_turn_for_key(&route_key, thread_id, turn_id, generation)
+    }
+
+    /// Force-clear a stuck nonterminal turn on one tab. Keeps the thread/session
+    /// binding so the next send can continue the conversation.
+    pub async fn force_release_codex_route_turn(
+        &self,
+        window: &str,
+        tab: &str,
+    ) -> Option<TurnRoute> {
+        let mut registry = self.registry.write().await;
+        let route_key = RuntimeProcessRegistry::key(window, tab);
+        registry.force_release_route_turn(&route_key)
     }
 
     pub async fn finish_codex_turn(
@@ -2173,6 +2206,129 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(binding.route().turn_id.as_deref(), Some("turn-b"));
+    }
+
+    #[tokio::test]
+    async fn begin_codex_turn_supersedes_stale_busy_route_for_a_new_attempt() {
+        let state = RuntimeProcessState::default();
+        let generation = state.transport_generation().await;
+        let first = reserved(
+            state
+                .begin_codex_turn(codex_attempt_route(
+                    "window-a",
+                    "tab-2",
+                    Some("thread-1"),
+                    "attempt-old",
+                ))
+                .await
+                .unwrap(),
+        );
+        state
+            .bind_codex_thread_for_reservation(&first, "thread-1")
+            .await
+            .unwrap();
+        state
+            .bind_codex_turn_for_reservation(&first, "thread-1", "turn-stuck")
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .get("window-a", "tab-2")
+                .await
+                .and_then(|route| route.turn_id),
+            Some("turn-stuck".into())
+        );
+        assert!(state
+            .begin_codex_turn(codex_attempt_route(
+                "window-a",
+                "tab-2",
+                Some("thread-1"),
+                "attempt-old",
+            ))
+            .await
+            .is_err());
+
+        let retry = reserved(
+            state
+                .begin_codex_turn(codex_attempt_route(
+                    "window-a",
+                    "tab-2",
+                    Some("thread-1"),
+                    "attempt-new",
+                ))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(retry.generation, generation);
+        assert_eq!(
+            state
+                .get("window-a", "tab-2")
+                .await
+                .and_then(|route| route.turn_id),
+            None
+        );
+        assert_eq!(
+            state
+                .get("window-a", "tab-2")
+                .await
+                .map(|route| route.attempt_id),
+            Some("attempt-new".into())
+        );
+        assert!(state
+            .codex_turn_owner("thread-1", "turn-stuck", generation)
+            .await
+            .is_none());
+        state.abort_codex_turn(&retry, false).await;
+    }
+
+    #[tokio::test]
+    async fn force_release_clears_bound_turn_without_removing_session() {
+        let state = RuntimeProcessState::default();
+        let generation = state.transport_generation().await;
+        let reservation = reserved(
+            state
+                .begin_codex_turn(codex_attempt_route(
+                    "window-a",
+                    "tab-2",
+                    Some("thread-1"),
+                    "attempt-a",
+                ))
+                .await
+                .unwrap(),
+        );
+        state
+            .bind_codex_thread_for_reservation(&reservation, "thread-1")
+            .await
+            .unwrap();
+        state
+            .bind_codex_turn_for_reservation(&reservation, "thread-1", "turn-a")
+            .await
+            .unwrap();
+
+        let released = state
+            .force_release_codex_route_turn("window-a", "tab-2")
+            .await
+            .unwrap();
+        assert_eq!(released.turn_id.as_deref(), Some("turn-a"));
+        assert_eq!(
+            state
+                .get("window-a", "tab-2")
+                .await
+                .and_then(|route| route.session_id),
+            Some("thread-1".into())
+        );
+        assert_eq!(
+            state
+                .get("window-a", "tab-2")
+                .await
+                .and_then(|route| route.turn_id),
+            None
+        );
+        assert!(state
+            .codex_turn_owner("thread-1", "turn-a", generation)
+            .await
+            .is_none());
+        assert!(state.snapshot().await.pending_codex_turns.is_empty());
     }
 
     #[tokio::test]

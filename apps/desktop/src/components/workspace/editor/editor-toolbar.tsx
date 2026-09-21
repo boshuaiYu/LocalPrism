@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/select";
 import { useDocumentStore } from "@/stores/document-store";
 import { useSettingsStore } from "@/stores/settings-store";
+import { findCiteAtSelection, type CiteAtCursor } from "@/lib/latex-cite-edit";
 import { CitationPickerDialog } from "@/components/workspace/editor/citation-picker-dialog";
 
 interface EditorInfo {
@@ -107,6 +108,7 @@ export function EditorToolbar({
 
   const [editors, setEditors] = useState<EditorInfo[]>([]);
   const [citationPickerOpen, setCitationPickerOpen] = useState(false);
+  const [editingCite, setEditingCite] = useState<CiteAtCursor | null>(null);
 
   useEffect(() => {
     invoke<EditorInfo[]>("detect_editors")
@@ -153,16 +155,28 @@ export function EditorToolbar({
     view.focus();
   };
 
+  const openCitationPicker = () => {
+    const view = editorView.current;
+    if (view) {
+      const { from, to } = view.state.selection.main;
+      setEditingCite(findCiteAtSelection(view.state.doc.toString(), from, to));
+    } else {
+      setEditingCite(null);
+    }
+    setCitationPickerOpen(true);
+  };
+
   const insertCitationCommand = (citeCommand: string) => {
     if (useDocumentStore.getState().isProjectMutating) return;
     const view = editorView.current;
     if (!view) return;
 
-    const { from, to } = view.state.selection.main;
+    const { from, to } = editingCite ?? view.state.selection.main;
     view.dispatch({
       changes: { from, to, insert: citeCommand },
       selection: { anchor: from + citeCommand.length },
     });
+    setEditingCite(null);
     view.focus();
   };
 
@@ -336,8 +350,8 @@ export function EditorToolbar({
       </TooltipIconButton>
       <div className="mx-2 h-4 w-px bg-border" />
       <TooltipIconButton
-        tooltip="Insert citation (\\cite)"
-        onClick={() => setCitationPickerOpen(true)}
+        tooltip="Insert or edit citation (\\cite)"
+        onClick={openCitationPicker}
       >
         <BookMarkedIcon className="size-4" />
       </TooltipIconButton>
@@ -387,8 +401,13 @@ export function EditorToolbar({
       )}
       <CitationPickerDialog
         open={citationPickerOpen}
-        onOpenChange={setCitationPickerOpen}
+        onOpenChange={(open) => {
+          setCitationPickerOpen(open);
+          if (!open) setEditingCite(null);
+        }}
         onInsert={insertCitationCommand}
+        initialKeys={editingCite?.keys}
+        citePrefix={editingCite?.prefix}
       />
     </div>
   );

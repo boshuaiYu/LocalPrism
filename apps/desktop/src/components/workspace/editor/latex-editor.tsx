@@ -36,6 +36,7 @@ import {
   rejectChunk,
 } from "@codemirror/merge";
 import { latex, latexLinter } from "codemirror-lang-latex";
+import { markdown } from "@codemirror/lang-markdown";
 import { bibtex } from "./lang-bibtex";
 import {
   linter,
@@ -53,7 +54,10 @@ import {
   type PromptContextOverride,
 } from "@/stores/claude-chat-store";
 import { useHistoryStore, type FileDiff } from "@/stores/history-store";
-import { resolveCompileTarget } from "@/lib/latex-compiler";
+import {
+  resolveCompileTarget,
+  activeCompileUsesTexlive,
+} from "@/lib/latex-compiler";
 import { runOwnedProjectCompile } from "@/lib/project-compile";
 import { completeProposedChangeAction } from "@/lib/proposed-change-resolution";
 import { useSettingsStore } from "@/stores/settings-store";
@@ -76,7 +80,6 @@ import {
   CopyIcon,
   XIcon,
 } from "lucide-react";
-import { ClaudeChatDrawer } from "@/components/claude-chat/claude-chat-drawer";
 import { ProposedChangesPanel } from "@/components/claude-chat/proposed-changes-panel";
 import { ImagePreview } from "./image-preview";
 import { SearchPanel } from "./search-panel";
@@ -114,6 +117,7 @@ export function LatexEditor() {
     activeFile?.type === "tex" ||
     activeFile?.type === "bib" ||
     activeFile?.type === "style" ||
+    activeFile?.type === "markdown" ||
     activeFile?.type === "other";
   const activeFileContent = activeFile?.content;
   const isLargeFileNotLoaded =
@@ -422,7 +426,7 @@ export function LatexEditor() {
       owner,
       rootFileId: rootId,
       targetPath,
-      useTexlive: useSettingsStore.getState().compilerBackend === "texlive",
+      useTexlive: activeCompileUsesTexlive(),
       beforeCompile: async () => {
         try {
           await useHistoryStore
@@ -558,6 +562,20 @@ export function LatexEditor() {
       return true;
     };
 
+    const cutSelection = (view: EditorView): boolean => {
+      const range = view.state.selection.main;
+      if (range.empty) return false;
+      const text = view.state.sliceDoc(range.from, range.to);
+      if (navigator.clipboard?.writeText) {
+        void navigator.clipboard.writeText(text).catch(() => {});
+      }
+      view.dispatch({
+        changes: { from: range.from, to: range.to, insert: "" },
+        selection: { anchor: range.from },
+      });
+      return true;
+    };
+
     const compileKeymap = Prec.highest(
       keymap.of([
         {
@@ -627,6 +645,12 @@ export function LatexEditor() {
           key: "Mod-/",
           run: toggleComment,
         },
+        {
+          // Keep Mod-x as cut even if a global Capture & Ask handler also
+          // listens for X. Capture is Ctrl/Cmd+Shift+X only.
+          key: "Mod-x",
+          run: cutSelection,
+        },
       ]),
     );
 
@@ -644,7 +668,11 @@ export function LatexEditor() {
           ...defaultKeymap,
           ...historyKeymap,
         ]),
-        activeFile?.type === "bib" ? bibtex() : latex({ enableLinting: false }),
+        activeFile?.type === "bib"
+          ? bibtex()
+          : activeFile?.type === "markdown"
+            ? markdown()
+            : latex({ enableLinting: false }),
         ...(activeFile?.type === "tex"
           ? [
               linter((view) => {
@@ -1209,7 +1237,7 @@ export function LatexEditor() {
           </div>
         </div>
       )}
-      {/* Main content area — single wrapper keeps ClaudeChatDrawer stable */}
+      {/* Main content area */}
       <div
         ref={isPdf || isImage ? undefined : parentRef}
         className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
@@ -1379,8 +1407,6 @@ export function LatexEditor() {
             )}
           </>
         )}
-        {/* Chat drawer — single stable instance across all file types */}
-        <ClaudeChatDrawer />
       </div>
       {/* Text-editor-only bottom panels */}
       {!isPdf &&

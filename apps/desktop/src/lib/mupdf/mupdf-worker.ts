@@ -1,4 +1,5 @@
 import type { PDFDocument } from "mupdf";
+import { resolveMupdfWasmUrl } from "./mupdf-wasm-url";
 
 type MupdfModule = typeof import("mupdf");
 
@@ -12,17 +13,15 @@ const wasmModuleConfig = ((
   }
 ).$libmupdf_wasm_Module ??= {});
 
-// In Vite dev, requests for /node_modules/.../mupdf-wasm.wasm can fall back to
-// index.html. Pointing MuPDF at Vite's @fs URL keeps worker startup on the
-// actual binary during local development without changing packaged builds.
-if (import.meta.env.DEV) {
-  const devWasmUrl = `/@fs/${__MUPDF_WASM_FS_PATH__}`;
-  wasmModuleConfig.locateFile = (path: string) => {
-    if (path.endsWith("mupdf-wasm.wasm")) {
-      return devWasmUrl;
-    }
-    return path;
-  };
+// Vite's worker production build does not reliably replace import.meta.env.DEV.
+// A compile-time define keeps the @fs rewrite out of packaged installers; the
+// leftover /@fs path otherwise resolves to index.html and WASM instantiate fails.
+if (__MUPDF_USE_FS_WASM__) {
+  wasmModuleConfig.locateFile = (path: string) =>
+    resolveMupdfWasmUrl(path, {
+      useDevFs: true,
+      devFsPath: __MUPDF_WASM_FS_PATH__,
+    });
 }
 
 const mupdf: MupdfModule = await import("mupdf");

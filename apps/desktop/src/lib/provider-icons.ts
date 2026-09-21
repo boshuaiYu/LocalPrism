@@ -53,6 +53,14 @@ export function getProviderDisplayName(input: ProviderIconInput): string {
     return "DeepSeek";
   }
 
+  if (
+    haystack.includes("cursor") ||
+    haystack.includes("composer-2") ||
+    haystack.includes("composer-1")
+  ) {
+    return "Cursor";
+  }
+
   if (haystack.includes("siliconflow")) {
     return "SiliconFlow";
   }
@@ -130,6 +138,14 @@ export function getProviderIconSrc(input: ProviderIconInput): string | null {
 
   if (haystack.includes("deepseek")) {
     return deepseekIcon;
+  }
+
+  if (
+    haystack.includes("cursor") ||
+    haystack.includes("composer-2") ||
+    haystack.includes("composer-1")
+  ) {
+    return openaiIcon;
   }
 
   if (haystack.includes("siliconflow")) {

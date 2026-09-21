@@ -102,6 +102,7 @@ vi.mock("@tauri-apps/plugin-fs", () => ({
 
 // Mock @tauri-apps/plugin-shell
 vi.mock("@tauri-apps/plugin-shell", () => ({
+  open: vi.fn(() => Promise.resolve()),
   Command: {
     create: vi.fn(),
   },

@@ -302,6 +302,10 @@ impl ModelListResponse {
 pub(crate) struct ThreadStartParams {
     cwd: String,
     model: String,
+    /// Pin Responses HTTP provider (Hermes-aligned). Omit only when the
+    /// caller intentionally wants Codex's default provider selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_provider: Option<String>,
     approval_policy: &'static str,
     sandbox: &'static str,
     thread_source: &'static str,
@@ -309,14 +313,32 @@ pub(crate) struct ThreadStartParams {
 
 impl ThreadStartParams {
     pub(crate) fn new(cwd: String, model: String) -> Self {
+        Self::with_provider(cwd, model, None)
+    }
+
+    pub(crate) fn with_provider(
+        cwd: String,
+        model: String,
+        model_provider: Option<String>,
+    ) -> Self {
         Self {
             cwd,
             model,
+            model_provider,
             // Local desktop writing trusts the open project workspace. Using
             // on-request without a UI approval bridge leaves turns stuck or
             // auto-declined, so Codex cannot edit LaTeX/files for the user.
             approval_policy: "never",
-            sandbox: "workspace-write",
+            // Windows `workspace-write` frequently rejects even in-workspace
+            // shell reads (e.g. Get-Content .\main.tex) with a sandbox ACL /
+            // restricted-token error after the user already approved the tool.
+            // Desktop already scopes Codex to the opened project cwd, so use
+            // full access on Windows; keep workspace-write elsewhere.
+            sandbox: if cfg!(windows) {
+                "danger-full-access"
+            } else {
+                "workspace-write"
+            },
             thread_source: "user",
         }
     }
@@ -948,7 +970,30 @@ mod tests {
                 "cwd": r"C:\work\paper",
                 "model": "gpt-5.4",
                 "approvalPolicy": "never",
-                "sandbox": "workspace-write",
+                "sandbox": if cfg!(windows) {
+                    "danger-full-access"
+                } else {
+                    "workspace-write"
+                },
+                "threadSource": "user"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(ThreadStartParams::with_provider(
+                r"C:\work\paper".into(),
+                "gpt-5.4".into(),
+                Some("archive-provider".into()),
+            ))?,
+            json!({
+                "cwd": r"C:\work\paper",
+                "model": "gpt-5.4",
+                "modelProvider": "archive-provider",
+                "approvalPolicy": "never",
+                "sandbox": if cfg!(windows) {
+                    "danger-full-access"
+                } else {
+                    "workspace-write"
+                },
                 "threadSource": "user"
             })
         );

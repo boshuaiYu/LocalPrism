@@ -8,33 +8,36 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { RuntimeSettings } from "@/components/runtime/runtime-settings";
+import { isWelcomeCompleted } from "@/lib/welcome";
 import { useClaudeSetupStore } from "@/stores/claude-setup-store";
-import { hasReadyRuntime, useRuntimeStore } from "@/stores/runtime-store";
+import { useDocumentStore } from "@/stores/document-store";
+import { useProviderStore } from "@/stores/provider-store";
+import { useSkillStore } from "@/stores/skill-store";
 
-type RuntimeRefresh = ReturnType<typeof useRuntimeStore.getState>["refresh"];
+type ProviderRefresh = ReturnType<typeof useProviderStore.getState>["refresh"];
 type ClaudeStatusCheck = ReturnType<
   typeof useClaudeSetupStore.getState
 >["checkStatus"];
 
 const initialChecks = new WeakMap<
-  RuntimeRefresh,
+  ProviderRefresh,
   WeakMap<ClaudeStatusCheck, Promise<void>>
 >();
 
 function initialCheckFor(
-  refreshRuntimes: RuntimeRefresh,
+  refreshProviders: ProviderRefresh,
   checkClaudeStatus: ClaudeStatusCheck,
 ): Promise<void> {
-  let checksForRefresh = initialChecks.get(refreshRuntimes);
+  let checksForRefresh = initialChecks.get(refreshProviders);
   if (!checksForRefresh) {
     checksForRefresh = new WeakMap();
-    initialChecks.set(refreshRuntimes, checksForRefresh);
+    initialChecks.set(refreshProviders, checksForRefresh);
   }
 
   let pending = checksForRefresh.get(checkClaudeStatus);
   if (!pending) {
     const operation = Promise.allSettled([
-      refreshRuntimes(undefined, { silent: true }),
+      refreshProviders(),
       checkClaudeStatus(),
     ]).then(() => undefined);
     const cached = operation.finally(() => {
@@ -53,37 +56,49 @@ export function EnvironmentOnboarding() {
   const [hasOpenedForSetup, setHasOpenedForSetup] = useState(false);
   const [completedDismissed, setCompletedDismissed] = useState(false);
 
-  const accounts = useRuntimeStore((state) => state.accounts);
-  const refreshRuntimes = useRuntimeStore((state) => state.refresh);
+  const refreshProviders = useProviderStore((state) => state.refresh);
+  const runtimeReady = useProviderStore((state) => state.ready);
   const checkClaudeStatus = useClaudeSetupStore((state) => state.checkStatus);
-  const runtimeReady = hasReadyRuntime(accounts);
+  const projectOpen = Boolean(useDocumentStore((state) => state.projectRoot));
 
   useEffect(() => {
     let cancelled = false;
 
-    void initialCheckFor(refreshRuntimes, checkClaudeStatus).then(() => {
-      if (!cancelled) setInitialCheckComplete(true);
+    void initialCheckFor(refreshProviders, checkClaudeStatus).then(() => {
+      if (cancelled) return;
+      setInitialCheckComplete(true);
+      void useClaudeSetupStore.getState().ensureEngine();
+      void useSkillStore.getState().ensureDefaultSkillPacks();
     });
 
     return () => {
       cancelled = true;
     };
-  }, [checkClaudeStatus, refreshRuntimes]);
+  }, [checkClaudeStatus, refreshProviders]);
 
   useEffect(() => {
-    if (!initialCheckComplete || runtimeReady) return;
+    if (
+      projectOpen ||
+      !initialCheckComplete ||
+      runtimeReady ||
+      completedDismissed
+    ) {
+      return;
+    }
     setHasOpenedForSetup(true);
-    setCompletedDismissed(false);
-  }, [initialCheckComplete, runtimeReady]);
+  }, [completedDismissed, initialCheckComplete, projectOpen, runtimeReady]);
 
   const setupComplete = initialCheckComplete && runtimeReady;
+  const welcomeCompleted = isWelcomeCompleted();
   const shouldShow =
+    welcomeCompleted &&
+    !projectOpen &&
     initialCheckComplete &&
     !completedDismissed &&
     (!runtimeReady || hasOpenedForSetup);
 
   const handleDone = () => {
-    if (!setupComplete) return;
+    if (!initialCheckComplete) return;
     setHasOpenedForSetup(false);
     setCompletedDismissed(true);
   };
@@ -107,21 +122,22 @@ export function EnvironmentOnboarding() {
               LocalPrism
             </DialogTitle>
             <DialogDescription className="max-w-xl text-sm leading-relaxed">
-              Install and sign in to at least one AI runtime before entering the
-              workspace. Claude and Codex can be configured independently.
+              Paste an API key from DeepSeek, Kimi, Qwen, or another provider.
+              Official Claude or ChatGPT browser sign-in is optional. You can
+              skip model setup and configure this later in Settings.
             </DialogDescription>
           </DialogHeader>
         </div>
 
-        <RuntimeSettings refreshOnMount={false} />
+        <RuntimeSettings refreshOnMount={false} showEngine={false} />
 
         <div className="flex justify-center px-6 pt-1 pb-5">
           <Button
-            disabled={!setupComplete}
             className="h-10 min-w-28 justify-center rounded-full px-7"
+            variant={setupComplete ? "default" : "outline"}
             onClick={handleDone}
           >
-            Done
+            {setupComplete ? "Done" : "Skip model setup"}
           </Button>
         </div>
       </DialogContent>

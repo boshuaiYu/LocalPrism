@@ -128,9 +128,14 @@ pub enum RuntimeEvent {
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+        #[serde(default)]
+        cache_read_tokens: u64,
     },
     ApprovalRequested {
         request: RuntimeRequest,
+    },
+    ApprovalResolved {
+        request_id: String,
     },
     UserInputRequested {
         request: RuntimeRequest,
@@ -343,6 +348,7 @@ mod tests {
                 RuntimeEvent::Usage {
                     input_tokens: 3,
                     output_tokens: 5,
+                    cache_read_tokens: 0,
                 },
                 "usage",
             ),
@@ -353,21 +359,23 @@ mod tests {
                 "approvalRequested",
             ),
             (
+                RuntimeEvent::ApprovalResolved {
+                    request_id: "req_1".into(),
+                },
+                "approvalResolved",
+            ),
+            (
                 RuntimeEvent::UserInputRequested {
                     request: sample_request(),
                 },
                 "userInputRequested",
             ),
             (
-                RuntimeEvent::SubagentDiscovered {
-                    run: sample_run(),
-                },
+                RuntimeEvent::SubagentDiscovered { run: sample_run() },
                 "subagentDiscovered",
             ),
             (
-                RuntimeEvent::SubagentStatusChanged {
-                    run: sample_run(),
-                },
+                RuntimeEvent::SubagentStatusChanged { run: sample_run() },
                 "subagentStatusChanged",
             ),
             (

@@ -6,6 +6,7 @@ import {
   type OpenAiCompatibleModelInfo,
   rememberModelListCapabilityMetadata,
 } from "@/lib/model-capabilities";
+import { useProviderStore } from "@/stores/provider-store";
 
 const MOONSHOT_OFFICIAL_ORIGIN = "https://api.moonshot.ai";
 
@@ -71,9 +72,12 @@ interface ClaudeSetupState {
   // Login progress
   loginSteps: StepInfo[];
 
+  autoInstallAttempted: boolean;
+
   // Actions
   checkStatus: () => Promise<void>;
   install: () => Promise<void>;
+  ensureEngine: () => Promise<void>;
   login: () => Promise<void>;
   saveApiKey: (
     apiKey: string,
@@ -176,6 +180,29 @@ function advanceSteps(
   });
 }
 
+let ensureEngineInFlight: Promise<void> | null = null;
+
+async function ensureClaudeEngineInstalled(): Promise<void> {
+  const store = useClaudeSetupStore.getState();
+  if (store.autoInstallAttempted) return;
+  if (store.isInstalling) return;
+
+  await store.checkStatus();
+
+  const afterCheck = useClaudeSetupStore.getState();
+  if (afterCheck.status === "missing-git") return;
+  if (afterCheck.status !== "not-installed") return;
+  if (afterCheck.autoInstallAttempted || afterCheck.isInstalling) return;
+
+  useClaudeSetupStore.setState({ autoInstallAttempted: true });
+  await afterCheck.install();
+}
+
+export function resetClaudeEngineAutoInstallForTests(): void {
+  ensureEngineInFlight = null;
+  useClaudeSetupStore.setState({ autoInstallAttempted: false });
+}
+
 // ─── Store ───
 
 export const useClaudeSetupStore = create<ClaudeSetupState>((set, get) => ({
@@ -199,6 +226,7 @@ export const useClaudeSetupStore = create<ClaudeSetupState>((set, get) => ({
   installLogsVisible: false,
 
   loginSteps: [],
+  autoInstallAttempted: false,
 
   checkStatus: async () => {
     set({ status: "checking", error: null });
@@ -315,6 +343,16 @@ export const useClaudeSetupStore = create<ClaudeSetupState>((set, get) => ({
     }
   },
 
+  ensureEngine: async () => {
+    if (ensureEngineInFlight) return ensureEngineInFlight;
+    ensureEngineInFlight = ensureClaudeEngineInstalled()
+      .catch(() => undefined)
+      .finally(() => {
+        ensureEngineInFlight = null;
+      });
+    return ensureEngineInFlight;
+  },
+
   login: async () => {
     const initialSteps = LOGIN_STEPS.map((s, i) => ({
       ...s,
@@ -345,14 +383,6 @@ export const useClaudeSetupStore = create<ClaudeSetupState>((set, get) => ({
     model?: string,
     credentialLabel?: string,
   ) => {
-    const status = get().status;
-    if (status === "missing-git" || status === "not-installed") {
-      set({
-        error: "Install Claude Code before configuring an AI provider.",
-      });
-      return false;
-    }
-
     const key = apiKey.trim();
     const rawUrl = baseUrl?.trim() ?? "";
     const url =
@@ -569,7 +599,11 @@ export const useClaudeSetupStore = create<ClaudeSetupState>((set, get) => ({
               status: "complete" as const,
             })),
           }));
-          get().checkStatus();
+          void get()
+            .checkStatus()
+            .then(() => {
+              void useProviderStore.getState().refresh();
+            });
         }, 500);
       }, 800);
     } else {

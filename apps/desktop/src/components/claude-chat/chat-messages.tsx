@@ -16,6 +16,11 @@ import { cn } from "@/lib/utils";
 import { MarkdownRenderer } from "./markdown-renderer";
 import { StreamingIndicator } from "./streaming-indicator";
 import { ThinkingWidget, ToolWidget } from "./tool-widgets";
+import {
+  isSkillInstructionDump,
+  isSkillToolName,
+  isSkillToolResultEcho,
+} from "@/lib/skill-tool-result";
 
 const EMPTY_PENDING_GUIDANCE: QueuedGuidance[] = [];
 const THREAD_MAX_WIDTH = "max-w-[44rem]";
@@ -68,6 +73,9 @@ export const ChatMessages: FC = () => {
   const isStreaming = useClaudeChatStore((s) => s.isStreaming);
   const streamingStartedAt = useClaudeChatStore((s) => s.streamingStartedAt);
   const streamingStatus = useClaudeChatStore((s) => s.streamingStatus);
+  const streamingRuntime = useClaudeChatStore(
+    (s) => s.tabs.find((tab) => tab.id === s.activeTabId)?.runtime ?? "claude",
+  );
   const queuedGuidance =
     useClaudeChatStore(
       (s) => s.tabs.find((tab) => tab.id === s.activeTabId)?.queuedGuidance,
@@ -123,24 +131,41 @@ export const ChatMessages: FC = () => {
             (b: any) => b.type === "tool_result",
           );
           if (hasOnlyToolResults) return false;
+          const text = msg.message.content
+            .filter((block) => block.type === "text" && block.text)
+            .map((block) => block.text)
+            .join("\n");
+          if (text && isSkillInstructionDump(text)) return false;
+        } else if (
+          typeof msg.message.content === "string" &&
+          isSkillInstructionDump(msg.message.content)
+        ) {
+          return false;
         }
       }
       if (msg.type === "result" && msg.result) {
         if (assistantTexts.has(msg.result.trim())) return false;
+        if (isSkillInstructionDump(msg.result)) return false;
       }
       return true;
     });
   }, [messages]);
 
-  // Auto-scroll to bottom (only if user hasn't scrolled up)
+  // Auto-scroll to bottom (only if user hasn't scrolled up).
+  // Instant + rAF while streaming — CSS/JS smooth scroll on every token janks.
   useEffect(() => {
-    if (shouldAutoScrollRef.current && viewportRef.current) {
-      viewportRef.current.scrollTo({
-        top: viewportRef.current.scrollHeight,
-        behavior: "smooth",
+    if (!shouldAutoScrollRef.current || !viewportRef.current) return;
+    const instant = isStreaming;
+    const frame = window.requestAnimationFrame(() => {
+      const el = viewportRef.current;
+      if (!el || !shouldAutoScrollRef.current) return;
+      el.scrollTo({
+        top: el.scrollHeight,
+        behavior: instant ? "auto" : "smooth",
       });
-    }
-  }, [displayMessages, pendingGuidance]);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [displayMessages, pendingGuidance, isStreaming]);
 
   // Reset auto-scroll when streaming stops
   useEffect(() => {
@@ -168,13 +193,13 @@ export const ChatMessages: FC = () => {
     <div
       ref={viewportRef}
       onScroll={handleScroll}
-      className="absolute inset-0 overflow-y-auto scroll-smooth px-4 pt-4"
+      className="absolute inset-0 overflow-y-auto scroll-smooth px-5 pt-5 pb-2"
     >
       {displayMessages.length === 0 &&
         pendingGuidance.length === 0 &&
         !isStreaming && (
-          <div className="flex h-full items-center justify-center text-muted-foreground text-sm">
-            Ask Claude about your LaTeX document...
+          <div className="flex h-full items-center justify-center px-6 text-center text-muted-foreground text-sm leading-relaxed">
+            Ask about this paper
           </div>
         )}
 
@@ -189,6 +214,7 @@ export const ChatMessages: FC = () => {
           <StreamingIndicator
             startedAt={streamingStartedAt}
             status={streamingStatus}
+            runtime={streamingRuntime === "codex" ? "codex" : "claude"}
           />
         </div>
       )}
@@ -207,21 +233,40 @@ export const ChatMessages: FC = () => {
 
 // ─── Message Bubble ───
 
+function toolUseIds(message: ClaudeStreamMessage): string[] {
+  const content = message.message?.content;
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((block) =>
+    block.type === "tool_use" && block.id ? [block.id] : [],
+  );
+}
+
 const MessageBubble: FC<{
   message: ClaudeStreamMessage;
   toolResultMap: Map<string, ContentBlock>;
-}> = memo(({ message, toolResultMap }) => {
-  if (message.type === "user") {
-    return <UserMessage message={message} />;
-  }
-  if (message.type === "assistant") {
-    return <AssistantMessage message={message} toolResultMap={toolResultMap} />;
-  }
-  if (message.type === "result") {
-    return <ResultMessage message={message} />;
-  }
-  return null;
-});
+}> = memo(
+  ({ message, toolResultMap }) => {
+    if (message.type === "user") {
+      return <UserMessage message={message} />;
+    }
+    if (message.type === "assistant") {
+      return (
+        <AssistantMessage message={message} toolResultMap={toolResultMap} />
+      );
+    }
+    if (message.type === "result") {
+      return <ResultMessage message={message} />;
+    }
+    return null;
+  },
+  (prev, next) => {
+    if (prev.message !== next.message) return false;
+    if (prev.message.type !== "assistant") return true;
+    return toolUseIds(prev.message).every(
+      (id) => prev.toolResultMap.get(id) === next.toolResultMap.get(id),
+    );
+  },
+);
 
 // ─── User Message ───
 
@@ -236,7 +281,7 @@ const UserMessage: FC<{ message: ClaudeStreamMessage }> = ({ message }) => {
       ? rawContent
       : "";
 
-  if (!textContent) return null;
+  if (!textContent || isSkillInstructionDump(textContent)) return null;
 
   const firstLineMatch = textContent.match(/^([^\n]+)\n([\s\S]*)$/);
   const firstLine = firstLineMatch?.[1]?.trim() ?? "";
@@ -268,9 +313,9 @@ const UserMessage: FC<{ message: ClaudeStreamMessage }> = ({ message }) => {
     errors: { message: string; location?: string }[],
     prompt: string,
   ) => (
-    <div className="fade-in slide-in-from-bottom-1 grid w-full animate-in auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 py-3 duration-150 [&:where(>*)]:col-start-2">
+    <div className="fade-in slide-in-from-bottom-1 grid w-full animate-in auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 py-4 duration-150 [&:where(>*)]:col-start-2">
       <div className="relative col-start-2 min-w-0">
-        <div className="wrap-break-word rounded-xl bg-muted px-4 py-2 text-foreground text-sm empty:hidden">
+        <div className="wrap-break-word rounded-2xl bg-muted px-4 py-2.5 text-foreground text-sm leading-relaxed empty:hidden">
           <div className="mb-2 rounded-lg border border-red-500/20 bg-red-500/10 px-2.5 py-2">
             <div className="mb-1.5 font-medium text-red-400 text-xs">
               {title}
@@ -339,9 +384,9 @@ const UserMessage: FC<{ message: ClaudeStreamMessage }> = ({ message }) => {
   }
 
   return (
-    <div className="fade-in slide-in-from-bottom-1 grid w-full animate-in auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 py-3 duration-150 [&:where(>*)]:col-start-2">
+    <div className="fade-in slide-in-from-bottom-1 grid w-full animate-in auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 py-4 duration-150 [&:where(>*)]:col-start-2">
       <div className="relative col-start-2 min-w-0">
-        <div className="wrap-break-word rounded-xl bg-muted px-4 py-2 text-foreground text-sm empty:hidden">
+        <div className="wrap-break-word rounded-2xl bg-muted px-4 py-2.5 text-foreground text-sm leading-relaxed empty:hidden">
           {contextLabel && (
             <span className="mb-1 inline-flex items-center rounded-md bg-background/60 px-1.5 py-0.5 font-mono text-muted-foreground text-xs">
               {contextLabel}
@@ -367,24 +412,25 @@ const PendingGuidanceMessage: FC<{ guidance: QueuedGuidance }> = ({
   guidance,
 }) => {
   const contextLabel = guidance.contextOverride?.label ?? null;
+  const visiblePrompt = guidance.displayPrompt ?? guidance.prompt;
   const copyText = contextLabel
-    ? `${contextLabel}\n${guidance.prompt}`
-    : guidance.prompt;
+    ? `${contextLabel}\n${visiblePrompt}`
+    : visiblePrompt;
 
   return (
-    <div className="fade-in slide-in-from-bottom-1 grid w-full animate-in auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 py-3 duration-150 [&:where(>*)]:col-start-2">
+    <div className="fade-in slide-in-from-bottom-1 grid w-full animate-in auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 py-4 duration-150 [&:where(>*)]:col-start-2">
       <div className="relative col-start-2 min-w-0">
-        <div className="wrap-break-word rounded-xl bg-muted px-4 py-2 text-foreground text-sm empty:hidden">
+        <div className="wrap-break-word rounded-2xl bg-muted px-4 py-2.5 text-foreground text-sm leading-relaxed empty:hidden">
           {contextLabel && (
             <span className="mb-1 inline-flex items-center rounded-md bg-background/60 px-1.5 py-0.5 font-mono text-muted-foreground text-xs">
               {contextLabel}
             </span>
           )}
-          {contextLabel && guidance.prompt && <br />}
+          {contextLabel && visiblePrompt && <br />}
           <div className="flex min-w-0 items-start gap-2">
             <CornerDownRightIcon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground/70" />
             <MarkdownRenderer
-              content={guidance.prompt}
+              content={visiblePrompt}
               className="prose prose-sm dark:prose-invert min-w-0 max-w-none flex-1 break-words [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
             />
           </div>
@@ -404,9 +450,23 @@ const AssistantMessage: FC<{
   const content = message.message?.content;
   if (!Array.isArray(content) || content.length === 0) return null;
 
+  const skillResults = content.flatMap((block) => {
+    if (
+      block.type !== "tool_use" ||
+      !block.id ||
+      !isSkillToolName(block.name)
+    ) {
+      return [];
+    }
+    const result = toolResultMap.get(block.id);
+    return result ? [result] : [];
+  });
+  const isHiddenSkillText = (text: string) =>
+    isSkillToolResultEcho(text, skillResults);
+
   const hasRenderableContent = content.some(
     (block) =>
-      (block.type === "text" && block.text) ||
+      (block.type === "text" && block.text && !isHiddenSkillText(block.text)) ||
       (block.type === "thinking" && block.thinking) ||
       (block.type === "tool_use" && block.id),
   );
@@ -414,15 +474,21 @@ const AssistantMessage: FC<{
   if (!hasRenderableContent) return null;
 
   const copyText = content
-    .filter((block) => block.type === "text" && block.text)
+    .filter(
+      (block) =>
+        block.type === "text" && block.text && !isHiddenSkillText(block.text),
+    )
     .map((block) => block.text)
     .join("\n\n");
 
   return (
-    <div className="fade-in slide-in-from-bottom-1 relative mx-auto w-full animate-in py-3 duration-150">
-      <div className="wrap-break-word px-2 text-foreground text-sm leading-relaxed">
+    <div className="fade-in slide-in-from-bottom-1 relative mx-auto w-full animate-in py-4 duration-150">
+      <div className="wrap-break-word px-2 text-foreground text-sm leading-7">
         {content.map((block, idx) => {
           if (block.type === "text" && block.text) {
+            if (isHiddenSkillText(block.text)) {
+              return null;
+            }
             return (
               <MarkdownRenderer
                 key={idx}
@@ -460,11 +526,11 @@ const ResultMessage: FC<{ message: ClaudeStreamMessage }> = ({ message }) => {
   const isError = message.is_error || message.subtype === "error";
   const resultText = message.result;
 
-  if (!resultText) return null;
+  if (!resultText || isSkillInstructionDump(resultText)) return null;
 
   return (
-    <div className="fade-in slide-in-from-bottom-1 relative mx-auto w-full animate-in py-3 duration-150">
-      <div className="wrap-break-word px-2 text-foreground text-sm leading-relaxed">
+    <div className="fade-in slide-in-from-bottom-1 relative mx-auto w-full animate-in py-4 duration-150">
+      <div className="wrap-break-word px-2 text-foreground text-sm leading-7">
         {isError ? (
           <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-destructive text-sm">
             {resultText}

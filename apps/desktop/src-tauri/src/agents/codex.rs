@@ -1,4 +1,4 @@
-use crate::agents::{AgentProfile, AgentError};
+use crate::agents::{AgentError, AgentProfile};
 use crate::runtime::RuntimeKind;
 use crate::skills::domain::SkillScope;
 use std::fs;
@@ -7,22 +7,16 @@ use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value};
 
 pub fn agents_root(scope: SkillScope, project_path: Option<&Path>) -> Result<PathBuf, AgentError> {
     match scope {
-        SkillScope::User => {
-            let home = dirs::home_dir().ok_or_else(|| {
-                AgentError::from("Unable to resolve the user home directory")
-            })?;
-            Ok(home.join(".codex").join("agents"))
-        }
+        SkillScope::User => crate::providers::paths::user_agents_dir().map_err(AgentError::from),
         SkillScope::Project => {
-            let project = project_path.ok_or_else(|| {
-                AgentError::from("Project-scoped agents require a project path")
-            })?;
+            let project = project_path
+                .ok_or_else(|| AgentError::from("Project-scoped agents require a project path"))?;
             if !project.is_absolute() {
                 return Err(AgentError::from(
                     "Project-scoped agents require an absolute project path",
                 ));
             }
-            Ok(project.join(".codex").join("agents"))
+            Ok(project.join(".localprism").join("agents"))
         }
     }
 }

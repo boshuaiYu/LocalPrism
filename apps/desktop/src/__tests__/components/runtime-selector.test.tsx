@@ -1,7 +1,7 @@
 import { act, type ComponentType, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatComposer } from "@/components/claude-chat/chat-composer";
 import * as runtimeSelectorModule from "@/components/runtime/runtime-selector";
 import {
@@ -30,6 +30,10 @@ import {
 import { useClaudeSetupStore } from "@/stores/claude-setup-store";
 import { useDocumentStore } from "@/stores/document-store";
 import { useRuntimeStore } from "@/stores/runtime-store";
+import {
+  resetProviderStoreForTests,
+  useProviderStore,
+} from "@/stores/provider-store";
 
 const codexModel: RuntimeModel = {
   runtime: "codex",
@@ -41,6 +45,28 @@ const codexModel: RuntimeModel = {
   inputModalities: ["text", "image"],
   isDefault: true,
 };
+
+function runtimeAccount(
+  runtime: RuntimeKind,
+  authenticated: boolean,
+): RuntimeAccount {
+  return {
+    runtime,
+    installed: true,
+    authenticated,
+    version: "1.0.0",
+    accountLabel: null,
+    authMode: null,
+    capabilities: {
+      models: true,
+      skills: true,
+      customAgents: true,
+      subagents: true,
+      approvals: true,
+    },
+    error: null,
+  };
+}
 
 const secondCodexModel: RuntimeModel = {
   runtime: "codex",
@@ -152,6 +178,24 @@ describe("runtime selector helpers", () => {
     ]);
   });
 
+  it("uses the parsed model's efforts for Claude and API peers", () => {
+    const parsed = {
+      ...backendClaudeModel,
+      reasoningEfforts: ["low", "max", "high"],
+    };
+    expect(getReasoningEffortOptions("claude", parsed)).toEqual([
+      "low",
+      "high",
+      "xhigh",
+    ]);
+    expect(getReasoningEffortOptions("api", parsed)).toEqual([
+      "low",
+      "high",
+      "xhigh",
+    ]);
+    expect(normalizeReasoningEffort("claude", "max", parsed)).toBe("xhigh");
+  });
+
   it("uses only the selected Codex model's arbitrary backend efforts", () => {
     expect(getReasoningEffortOptions("codex", codexModel)).toEqual([
       "none",
@@ -221,7 +265,7 @@ describe("runtime selector helpers", () => {
 
   it("normalizes unsupported Claude/API efforts to the documented medium default", () => {
     expect(normalizeReasoningEffort("claude", "low", null)).toBe("low");
-    expect(normalizeReasoningEffort("claude", "minimal", null)).toBe("medium");
+    expect(normalizeReasoningEffort("claude", "minimal", null)).toBe("low");
     expect(normalizeReasoningEffort("claude", null, null)).toBe("medium");
     expect(normalizeReasoningEffort("api", null, null)).toBe("medium");
   });
@@ -284,16 +328,14 @@ interface RuntimeSelectorTestProps {
   busy: boolean;
   apiProviderControls: ReactNode;
   apiModelControls?: ReactNode;
-  selectedClaudeModel: "sonnet" | "opus" | "haiku" | "opusplan";
+  selectedClaudeModel: string;
   selectedClaudeEffort: "low" | "medium" | "high";
   onPeerChange: (
     peer: ChatRuntimePeer,
     options?: { confirmSessionReset?: boolean },
   ) => ChangeTabRuntimeResult;
   onSelectionChange: (selection: RuntimeSelection) => string;
-  onClaudeModelChange: (
-    model: "sonnet" | "opus" | "haiku" | "opusplan",
-  ) => void;
+  onClaudeModelChange: (model: string) => void;
   onClaudeEffortChange: (effort: "low" | "medium" | "high") => void;
   onRefreshCodexModels: () => Promise<void>;
 }
@@ -340,6 +382,33 @@ async function mountSelector(
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
+  useProviderStore.setState({
+    ready: true,
+    cards: [
+      {
+        id: "chatgpt-official",
+        kind: "official-chatgpt",
+        name: "ChatGPT Official",
+        authenticated: true,
+        isActive: true,
+        accountLabel: null,
+      },
+    ],
+    models: [
+      {
+        id: "gpt-5.6-sol",
+        displayName: "GPT-5.6 Sol",
+        reasoningEfforts: ["low", "medium", "high", "xhigh"],
+        isDefault: true,
+      },
+      {
+        id: "gpt-5.6-terra",
+        displayName: "GPT-5.6 Terra",
+        reasoningEfforts: ["low", "medium", "high"],
+        isDefault: false,
+      },
+    ],
+  });
   let props = { ...defaultSelectorProps, ...overrides };
   (
     globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -367,6 +436,7 @@ async function mountSelector(
     unmount: async () => {
       await act(async () => root.unmount());
       container.remove();
+      resetProviderStoreForTests();
     },
   };
 }
@@ -383,227 +453,46 @@ function buttonByLabel(
 }
 
 describe("RuntimeSelector", () => {
-  it("shows three independent peers: Claude, API, and Codex", async () => {
+  it("shows the active provider and no Claude/API/Codex peer buttons", async () => {
     const view = await mountSelector();
     try {
+      expect(view.container.textContent).toContain(
+        "ChatGPT Official · switch providers in Settings",
+      );
       expect(
-        buttonByLabel(view.container, "Claude peer").getAttribute(
-          "aria-pressed",
-        ),
-      ).toBe("false");
-      expect(
-        buttonByLabel(view.container, "API peer").getAttribute("aria-pressed"),
-      ).toBe("false");
-      expect(
-        buttonByLabel(view.container, "Codex peer").getAttribute(
-          "aria-pressed",
-        ),
-      ).toBe("true");
-    } finally {
-      await view.unmount();
-    }
-  });
-
-  it("exposes the selected model and effort with pressed semantics", async () => {
-    const view = await mountSelector();
-    try {
-      expect(
-        buttonByLabel(view.container, "Select model GPT-5.4").getAttribute(
-          "aria-pressed",
-        ),
-      ).toBe("true");
-      expect(
-        buttonByLabel(view.container, "Select model GPT-5.4 Mini").getAttribute(
-          "aria-pressed",
-        ),
-      ).toBe("false");
-      expect(
-        buttonByLabel(view.container, "Reasoning effort low").getAttribute(
-          "aria-pressed",
-        ),
-      ).toBe("true");
-      expect(
-        buttonByLabel(view.container, "Reasoning effort high").getAttribute(
-          "aria-pressed",
-        ),
-      ).toBe("false");
-      expect(
-        view.container.querySelector(
-          'button[aria-label="Reasoning effort minimal"]',
-        ),
+        view.container.querySelector('button[aria-label="Claude peer"]'),
       ).toBeNull();
-    } finally {
-      await view.unmount();
-    }
-  });
-
-  it("renders only dynamic backend Codex models without a fallback", async () => {
-    const view = await mountSelector();
-    try {
-      expect(view.container.textContent).toContain("GPT-5.4");
-      expect(view.container.textContent).toContain("GPT-5.4 Mini");
-      expect(view.container.textContent).not.toContain("Sonnet");
-      expect(view.container.textContent).not.toContain("API provider");
-    } finally {
-      await view.unmount();
-    }
-  });
-
-  it("shows only Claude aliases and efforts for the Claude peer, with no provider list", async () => {
-    const view = await mountSelector({
-      peer: "claude",
-      selectedClaudeModel: "opus",
-      selectedClaudeEffort: "high",
-    });
-    try {
-      expect(view.container.textContent).toContain("Sonnet");
-      expect(view.container.textContent).toContain("Opus");
       expect(
-        buttonByLabel(view.container, "Select model Opus").getAttribute(
-          "aria-pressed",
-        ),
-      ).toBe("true");
-      expect(view.container.textContent).not.toContain("API provider");
-      expect(view.container.textContent).not.toContain("GPT-5.4");
-    } finally {
-      await view.unmount();
-    }
-  });
-
-  it("keeps compatible provider and model controls inside the API branch", async () => {
-    const view = await mountSelector({
-      peer: "api",
-      selectedModelId: "provider-model",
-      reasoningEffort: "medium",
-      apiProviderControls: (
-        <button type="button">OpenAI-compatible provider</button>
-      ),
-      apiModelControls: <button type="button">OpenAI-compatible model</button>,
-    });
-    try {
-      expect(view.container.textContent).toContain(
-        "OpenAI-compatible provider",
-      );
-      expect(view.container.textContent).toContain("OpenAI-compatible model");
-      expect(view.container.textContent).not.toContain(
-        "Fast, efficient for most tasks",
-      );
-    } finally {
-      await view.unmount();
-    }
-  });
-
-  it("prompts to add a connection when the API peer has no model controls yet", async () => {
-    const view = await mountSelector({
-      peer: "api",
-      apiModelControls: undefined,
-    });
-    try {
-      expect(view.container.textContent).toContain(
-        "Select an API connection to see its models",
-      );
-    } finally {
-      await view.unmount();
-    }
-  });
-
-  it("shows a clear empty state and marks Codex selection as not ready", async () => {
-    const view = await mountSelector({
-      codexModels: [],
-      selectedModelId: null,
-      reasoningEffort: null,
-    });
-    try {
-      expect(view.container.textContent).toContain("No Codex models available");
+        view.container.querySelector('button[aria-label="API peer"]'),
+      ).toBeNull();
       expect(
-        view.container
-          .querySelector('[aria-label="Runtime controls"]')
-          ?.getAttribute("data-runtime-ready"),
-      ).toBe("false");
-      expect(view.container.textContent).not.toContain("Sonnet");
+        view.container.querySelector('button[aria-label="Codex peer"]'),
+      ).toBeNull();
+      expect(view.container.textContent).toContain("GPT-5.6 Sol");
+      expect(view.container.textContent).toContain("GPT-5.6 Terra");
     } finally {
       await view.unmount();
     }
   });
 
-  it("marks cached Codex models as not ready after authentication is lost", async () => {
+  it("selects a provider model and effort", async () => {
+    const onSelectionChange = vi.fn().mockReturnValue("changed");
     const view = await mountSelector({
-      peer: "codex",
-      codexAvailable: false,
-      codexModels: [codexModel],
-      selectedModelId: codexModel.id,
+      selectedModelId: "gpt-5.6-sol",
       reasoningEffort: "low",
-    });
-    try {
-      expect(
-        view.container
-          .querySelector('[aria-label="Runtime controls"]')
-          ?.getAttribute("data-runtime-ready"),
-      ).toBe("false");
-      expect(
-        buttonByLabel(view.container, "Select model GPT-5.4").disabled,
-      ).toBe(true);
-    } finally {
-      await view.unmount();
-    }
-  });
-
-  it("marks the API peer as not ready without a connection, ready once available", async () => {
-    const view = await mountSelector({ peer: "api", apiAvailable: false });
-    try {
-      expect(
-        view.container
-          .querySelector('[aria-label="Runtime controls"]')
-          ?.getAttribute("data-runtime-ready"),
-      ).toBe("false");
-      await view.rerender({ apiAvailable: true });
-      expect(
-        view.container
-          .querySelector('[aria-label="Runtime controls"]')
-          ?.getAttribute("data-runtime-ready"),
-      ).toBe("true");
-    } finally {
-      await view.unmount();
-    }
-  });
-
-  it("normalizes model changes and exposes arbitrary backend efforts", async () => {
-    const onSelectionChange = vi
-      .fn<RuntimeSelectorTestProps["onSelectionChange"]>()
-      .mockReturnValue("changed");
-    const view = await mountSelector({
-      selectedModelId: "gpt-5.4-mini",
-      reasoningEffort: "ultra",
       onSelectionChange,
     });
     try {
-      await act(async () =>
-        buttonByLabel(view.container, "Select model GPT-5.4").click(),
-      );
-      // Catalog "ultra" coerces to API-stable "xhigh".
-      expect(onSelectionChange).toHaveBeenLastCalledWith({
-        runtimeModel: "gpt-5.4",
-        reasoningEffort: "xhigh",
-        agentId: null,
-      });
-
-      await view.rerender({
-        selectedModelId: "gpt-5.4",
-        reasoningEffort: "xhigh",
-      });
       expect(
-        view.container.querySelector(
-          'button[aria-label="Reasoning effort minimal"]',
+        buttonByLabel(view.container, "Select model GPT-5.6 Sol").getAttribute(
+          "aria-pressed",
         ),
-      ).toBeNull();
-      expect(
-        buttonByLabel(view.container, "Reasoning effort xhigh"),
-      ).not.toBeNull();
+      ).toBe("true");
       await act(async () =>
-        buttonByLabel(view.container, "Reasoning effort low").click(),
+        buttonByLabel(view.container, "Select model GPT-5.6 Terra").click(),
       );
-      expect(onSelectionChange).toHaveBeenLastCalledWith({
-        runtimeModel: "gpt-5.4",
+      expect(onSelectionChange).toHaveBeenCalledWith({
+        runtimeModel: "gpt-5.6-terra",
         reasoningEffort: "low",
         agentId: null,
       });
@@ -612,229 +501,130 @@ describe("RuntimeSelector", () => {
     }
   });
 
-  it("normalizes an existing Codex model effort when catalog metadata changes", async () => {
-    const initialModel: RuntimeModel = {
-      ...codexModel,
-      id: "gpt-X",
-      displayName: "GPT-X",
-      reasoningEfforts: ["medium", "high"],
-      defaultReasoningEffort: "medium",
-    };
-    const highOnlyModel: RuntimeModel = {
-      ...initialModel,
-      reasoningEfforts: ["high"],
-      defaultReasoningEffort: "high",
-    };
-    const firstFallbackModel: RuntimeModel = {
-      ...initialModel,
-      reasoningEfforts: ["none", "xhigh"],
-      defaultReasoningEffort: "medium",
-    };
-    const noEffortModel: RuntimeModel = {
-      ...initialModel,
-      reasoningEfforts: [],
-      defaultReasoningEffort: "high",
-    };
-    const onSelectionChange = vi
-      .fn<RuntimeSelectorTestProps["onSelectionChange"]>()
-      .mockReturnValue("changed");
-    const view = await mountSelector({
-      codexModels: [initialModel],
-      selectedModelId: initialModel.id,
-      reasoningEffort: "medium",
-      onSelectionChange,
-    });
-    const runtimeReady = () =>
-      view.container
-        .querySelector('[aria-label="Runtime controls"]')
-        ?.getAttribute("data-runtime-ready");
-
+  it("shows an empty catalog when no provider models are loaded", async () => {
+    const view = await mountSelector();
+    useProviderStore.setState({ models: [], ready: false });
+    await view.rerender();
     try {
-      expect(runtimeReady()).toBe("true");
-      expect(onSelectionChange).not.toHaveBeenCalled();
-
-      await view.rerender({ codexModels: [highOnlyModel], busy: true });
-      expect(runtimeReady()).toBe("false");
-      expect(onSelectionChange).not.toHaveBeenCalled();
-
-      await view.rerender({ busy: false });
-      expect(onSelectionChange).toHaveBeenLastCalledWith({
-        runtimeModel: "gpt-X",
-        reasoningEffort: "high",
-        agentId: null,
-      });
-      expect(onSelectionChange).toHaveBeenCalledTimes(1);
-
-      await view.rerender({ reasoningEffort: "high" });
-      expect(runtimeReady()).toBe("true");
-      expect(onSelectionChange).toHaveBeenCalledTimes(1);
-
-      await view.rerender({
-        codexModels: [firstFallbackModel],
-        reasoningEffort: "high",
-      });
-      expect(runtimeReady()).toBe("false");
-      expect(onSelectionChange).toHaveBeenLastCalledWith({
-        runtimeModel: "gpt-X",
-        reasoningEffort: "none",
-        agentId: null,
-      });
-      expect(onSelectionChange).toHaveBeenCalledTimes(2);
-
-      await view.rerender({ reasoningEffort: "none" });
-      expect(runtimeReady()).toBe("true");
-      expect(onSelectionChange).toHaveBeenCalledTimes(2);
-
-      await view.rerender({
-        codexModels: [noEffortModel],
-        reasoningEffort: "none",
-      });
-      expect(runtimeReady()).toBe("false");
-      expect(onSelectionChange).toHaveBeenLastCalledWith({
-        runtimeModel: "gpt-X",
-        reasoningEffort: null,
-        agentId: null,
-      });
-      expect(onSelectionChange).toHaveBeenCalledTimes(3);
-
-      await view.rerender({ reasoningEffort: null });
-      expect(runtimeReady()).toBe("true");
-      expect(onSelectionChange).toHaveBeenCalledTimes(3);
-    } finally {
-      await view.unmount();
-    }
-  });
-
-  it("keeps session state untouched on cancel and applies defaults after confirm", async () => {
-    const onPeerChange = vi
-      .fn<RuntimeSelectorTestProps["onPeerChange"]>()
-      .mockImplementation((_peer, options) =>
-        options?.confirmSessionReset ? "changed" : "confirmation-required",
-      );
-    const onSelectionChange = vi
-      .fn<RuntimeSelectorTestProps["onSelectionChange"]>()
-      .mockReturnValue("changed");
-    const view = await mountSelector({
-      peer: "claude",
-      codexModels: [secondCodexModel, codexModel],
-      selectedModelId: "sonnet",
-      reasoningEffort: "medium",
-      onPeerChange,
-      onSelectionChange,
-    });
-    try {
-      await act(async () =>
-        buttonByLabel(view.container, "Codex peer").click(),
-      );
-      expect(
-        view.container.querySelector('[role="alertdialog"]'),
-      ).not.toBeNull();
-      await act(async () =>
-        buttonByLabel(view.container, "Cancel peer switch").click(),
-      );
-      expect(onPeerChange).toHaveBeenCalledTimes(1);
-      expect(onSelectionChange).not.toHaveBeenCalled();
-
-      await act(async () =>
-        buttonByLabel(view.container, "Codex peer").click(),
-      );
-      await act(async () =>
-        buttonByLabel(view.container, "Confirm switch to Codex").click(),
-      );
-      expect(onPeerChange).toHaveBeenLastCalledWith("codex", {
-        confirmSessionReset: true,
-      });
-      expect(onSelectionChange).toHaveBeenLastCalledWith({
-        runtimeModel: "gpt-5.4",
-        reasoningEffort: "none",
-        agentId: null,
-      });
-    } finally {
-      await view.unmount();
-    }
-  });
-
-  it("mentions API in the confirmation dialog when switching to/from the API peer", async () => {
-    const onPeerChange = vi
-      .fn<RuntimeSelectorTestProps["onPeerChange"]>()
-      .mockReturnValue("confirmation-required");
-    const view = await mountSelector({
-      peer: "claude",
-      onPeerChange,
-    });
-    try {
-      await act(async () => buttonByLabel(view.container, "API peer").click());
       expect(view.container.textContent).toContain(
-        "Switching to API will clear this tab's current session and messages.",
+        "Choose a provider in Settings → Providers",
       );
       expect(
-        buttonByLabel(view.container, "Confirm switch to API"),
-      ).not.toBeNull();
+        view.container
+          .querySelector('[aria-label="Runtime controls"]')
+          ?.getAttribute("data-runtime-ready"),
+      ).toBe("false");
     } finally {
       await view.unmount();
     }
   });
 
-  it("focuses the safe confirmation action and restores its trigger on Escape", async () => {
-    const onPeerChange = vi
-      .fn<RuntimeSelectorTestProps["onPeerChange"]>()
-      .mockReturnValue("confirmation-required");
+  it("keeps approvals and agents out of the model list", async () => {
+    const view = await mountSelector();
+    try {
+      expect(view.container.textContent).toContain("Model");
+      expect(
+        view.container.querySelector('[data-testid="reasoning-effort-slider"]'),
+      ).not.toBeNull();
+      expect(view.container.textContent).not.toContain("Approvals");
+      expect(view.container.textContent).not.toContain("Ask each time");
+      expect(view.container.querySelector("#composer-agent-select")).toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  it("uses a slider of the selected model's parsed efforts", async () => {
+    const onSelectionChange = vi.fn().mockReturnValue("changed");
     const view = await mountSelector({
-      peer: "claude",
-      selectedModelId: "sonnet",
+      selectedModelId: "gpt-5.6-sol",
       reasoningEffort: "medium",
-      onPeerChange,
+      onSelectionChange,
     });
     try {
-      const trigger = buttonByLabel(view.container, "Codex peer");
-      trigger.focus();
-      await act(async () => trigger.click());
-
-      const dialog = view.container.querySelector('[role="alertdialog"]');
-      const cancel = buttonByLabel(view.container, "Cancel peer switch");
-      expect(dialog?.getAttribute("aria-modal")).toBe("true");
-      expect(document.activeElement).toBe(cancel);
+      expect(
+        view.container.querySelector(
+          'button[aria-label="Reasoning effort low"]',
+        ),
+      ).toBeNull();
+      const slider = view.container.querySelector(
+        '[data-testid="reasoning-effort-slider"]',
+      );
+      if (!(slider instanceof HTMLInputElement)) {
+        throw new Error("Reasoning slider missing");
+      }
+      expect(slider.max).toBe("3");
+      expect(slider.getAttribute("aria-valuetext")).toBe("Medium");
 
       await act(async () => {
-        cancel.dispatchEvent(
-          new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
-        );
+        slider.value = "3";
+        slider.dispatchEvent(new Event("input", { bubbles: true }));
       });
-      expect(view.container.querySelector('[role="alertdialog"]')).toBeNull();
-      expect(document.activeElement).toBe(trigger);
-      expect(onPeerChange).toHaveBeenCalledTimes(1);
+      expect(onSelectionChange).toHaveBeenCalledWith({
+        runtimeModel: "gpt-5.6-sol",
+        reasoningEffort: "xhigh",
+        agentId: null,
+      });
+
+      await view.rerender({
+        selectedModelId: "gpt-5.6-terra",
+        reasoningEffort: "medium",
+      });
+      const next = view.container.querySelector(
+        '[data-testid="reasoning-effort-slider"]',
+      );
+      if (!(next instanceof HTMLInputElement)) {
+        throw new Error("Reasoning slider missing after model change");
+      }
+      expect(next.max).toBe("2");
+      expect(
+        view.container.querySelector(
+          '[data-testid="reasoning-effort-fast-toggle"]',
+        ),
+      ).toBeNull();
     } finally {
       await view.unmount();
     }
   });
 
-  it("changes a sessionless peer immediately and writes Claude defaults", async () => {
-    const onPeerChange = vi
-      .fn<RuntimeSelectorTestProps["onPeerChange"]>()
-      .mockReturnValue("changed");
-    const onSelectionChange = vi
-      .fn<RuntimeSelectorTestProps["onSelectionChange"]>()
-      .mockReturnValue("changed");
-    const onClaudeModelChange = vi.fn();
-    const onClaudeEffortChange = vi.fn();
+  it("shows a fast toggle only when the catalog has a distinct sibling", async () => {
+    const onSelectionChange = vi.fn().mockReturnValue("changed");
     const view = await mountSelector({
-      selectedClaudeModel: "opus",
-      selectedClaudeEffort: "high",
-      onPeerChange,
+      selectedModelId: "gpt-5.6-luna",
+      reasoningEffort: "medium",
       onSelectionChange,
-      onClaudeModelChange,
-      onClaudeEffortChange,
     });
     try {
-      await act(async () =>
-        buttonByLabel(view.container, "Claude peer").click(),
+      useProviderStore.setState({
+        models: [
+          {
+            id: "gpt-5.6-luna",
+            displayName: "GPT-5.6 Luna",
+            reasoningEfforts: ["low", "medium", "high", "xhigh"],
+            isDefault: true,
+          },
+          {
+            id: "gpt-5.6-luna-fast",
+            displayName: "GPT-5.6 Luna Fast",
+            reasoningEfforts: ["low", "medium", "high", "xhigh"],
+            isDefault: false,
+          },
+        ],
+      });
+      await view.rerender({ selectedModelId: "gpt-5.6-luna" });
+      const toggle = view.container.querySelector(
+        '[data-testid="reasoning-effort-fast-toggle"]',
       );
-      expect(onPeerChange).toHaveBeenCalledWith("claude", undefined);
-      expect(onClaudeModelChange).toHaveBeenCalledWith("opus");
-      expect(onClaudeEffortChange).toHaveBeenCalledWith("high");
+      if (!(toggle instanceof HTMLButtonElement)) {
+        throw new Error("fast toggle missing");
+      }
+      expect(toggle.getAttribute("aria-pressed")).toBe("false");
+      await act(async () => {
+        toggle.click();
+      });
       expect(onSelectionChange).toHaveBeenCalledWith({
-        runtimeModel: "opus",
-        reasoningEffort: "high",
+        runtimeModel: "gpt-5.6-luna-fast",
+        reasoningEffort: "medium",
         agentId: null,
       });
     } finally {
@@ -842,133 +632,60 @@ describe("RuntimeSelector", () => {
     }
   });
 
-  it("disables peer, model, and effort changes while streaming or stopping", async () => {
-    const onPeerChange = vi.fn();
+  it("disables model changes while busy", async () => {
     const onSelectionChange = vi.fn();
-    const view = await mountSelector({
-      busy: true,
-      onPeerChange,
-      onSelectionChange,
-    });
+    const view = await mountSelector({ busy: true, onSelectionChange });
     try {
-      expect(buttonByLabel(view.container, "Claude peer").disabled).toBe(true);
       expect(
-        buttonByLabel(view.container, "Select model GPT-5.4 Mini").disabled,
-      ).toBe(true);
-      expect(
-        buttonByLabel(view.container, "Reasoning effort xhigh").disabled,
+        buttonByLabel(view.container, "Select model GPT-5.6 Terra").disabled,
       ).toBe(true);
       await act(async () =>
-        buttonByLabel(view.container, "Select model GPT-5.4 Mini").click(),
+        buttonByLabel(view.container, "Select model GPT-5.6 Terra").click(),
       );
-      expect(onPeerChange).not.toHaveBeenCalled();
       expect(onSelectionChange).not.toHaveBeenCalled();
-    } finally {
-      await view.unmount();
-    }
-  });
-
-  it("refreshes an authenticated empty Codex list once without a render loop", async () => {
-    const onRefreshCodexModels = vi.fn().mockResolvedValue(undefined);
-    const view = await mountSelector({
-      codexModels: [],
-      selectedModelId: null,
-      onRefreshCodexModels,
-    });
-    try {
-      expect(onRefreshCodexModels).toHaveBeenCalledTimes(1);
-      await view.rerender({ codexModels: [], codexModelsLoading: false });
-      await view.rerender({ codexModels: [], codexModelsLoading: false });
-      expect(onRefreshCodexModels).toHaveBeenCalledTimes(1);
-    } finally {
-      await view.unmount();
-    }
-  });
-
-  it("retries Codex model refresh after a failed one-shot fetch", async () => {
-    const onRefreshCodexModels = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("transient"))
-      .mockResolvedValueOnce(undefined);
-    const view = await mountSelector({
-      codexModels: [],
-      selectedModelId: null,
-      onRefreshCodexModels,
-    });
-    try {
-      expect(onRefreshCodexModels).toHaveBeenCalledTimes(1);
-      await vi.waitFor(() => {
-        expect(onRefreshCodexModels).toHaveBeenCalledTimes(1);
-      });
-      await view.rerender({
-        codexModels: [],
-        codexModelsLoading: true,
-      });
-      await view.rerender({
-        codexModels: [],
-        codexModelsLoading: false,
-      });
-      await vi.waitFor(() => {
-        expect(onRefreshCodexModels).toHaveBeenCalledTimes(2);
-      });
-    } finally {
-      await view.unmount();
-    }
-  });
-
-  it("offers a manual Refresh models button for the Codex peer", async () => {
-    const onRefreshCodexModels = vi.fn().mockResolvedValue(undefined);
-    const view = await mountSelector({ onRefreshCodexModels });
-    try {
-      await act(async () =>
-        buttonByLabel(view.container, "Refresh Codex models").click(),
-      );
-      expect(onRefreshCodexModels).toHaveBeenCalled();
-    } finally {
-      await view.unmount();
-    }
-  });
-
-  it("shows unavailable runtime status and still renders the agent control", async () => {
-    const view = await mountSelector({ codexAvailable: false });
-    try {
-      const codex = buttonByLabel(view.container, "Codex peer");
-      expect(codex.disabled).toBe(true);
-      expect(codex.textContent).toContain("Not authenticated");
-      const agent = view.container.querySelector(
-        'select[aria-label="Select custom agent"]',
-      );
-      expect(agent).toBeInstanceOf(HTMLSelectElement);
     } finally {
       await view.unmount();
     }
   });
 });
 
-function runtimeAccount(
-  runtime: RuntimeKind,
-  authenticated: boolean,
-): RuntimeAccount {
-  return {
-    runtime,
-    installed: true,
-    authenticated,
-    version: "test",
-    accountLabel: null,
-    authMode: null,
-    capabilities: {
-      models: true,
-      skills: true,
-      customAgents: false,
-      subagents: false,
-      approvals: true,
-    },
-    error: null,
-  };
-}
+describe("ChatComposer provider wiring", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke).mockResolvedValue([] as never);
+  });
 
-describe("ChatComposer runtime peer wiring", () => {
-  it("shows the active tab's Claude model consistently after switching tabs", async () => {
+  function seedClaudeProvider() {
+    useProviderStore.setState({
+      ready: true,
+      cards: [
+        {
+          id: "claude-official",
+          kind: "official-claude",
+          name: "Claude Official",
+          authenticated: true,
+          isActive: true,
+          accountLabel: null,
+        },
+      ],
+      models: [
+        {
+          id: "opus",
+          displayName: "Opus",
+          reasoningEfforts: ["low", "medium", "high"],
+          isDefault: false,
+        },
+        {
+          id: "haiku",
+          displayName: "Haiku",
+          reasoningEfforts: ["low", "medium", "high"],
+          isDefault: true,
+        },
+      ],
+    });
+  }
+
+  it("shows the active tab model after switching tabs", async () => {
     const chatSnapshot = useClaudeChatStore.getState();
     const setupSnapshot = useClaudeSetupStore.getState();
     const documentSnapshot = useDocumentStore.getState();
@@ -977,6 +694,7 @@ describe("ChatComposer runtime peer wiring", () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
+    seedClaudeProvider();
 
     useDocumentStore.setState({ projectRoot: "C:/project" });
     useClaudeSetupStore.setState({
@@ -1046,37 +764,28 @@ describe("ChatComposer runtime peer wiring", () => {
         await Promise.resolve();
       });
 
-      const trigger = document.querySelector(
-        'button[title="Switch provider or model"]',
-      );
+      expect(
+        document.querySelector('[aria-label^="Approval policy"]'),
+      ).toBeTruthy();
+      expect(
+        document.querySelector('[aria-label^="Select custom agent"]'),
+      ).toBeTruthy();
+
+      const trigger = document.querySelector('button[title="Switch model"]');
       if (!(trigger instanceof HTMLButtonElement)) {
         throw new Error("Composer runtime trigger not found");
       }
       expect(trigger.textContent).toContain("Opus");
       await act(async () => trigger.click());
-
-      const selectedModelButton = buttonByLabel(
-        document.body,
-        "Select model Opus",
-      );
-      const activeTab = useClaudeChatStore
-        .getState()
-        .tabs.find((tab) => tab.id === "tab-a");
-
-      expect({
-        trigger: trigger.textContent,
-        rightModelPressed: selectedModelButton.getAttribute("aria-pressed"),
-        sendModel: activeTab?.runtimeModel,
-        staleGlobalModel: useClaudeChatStore.getState().selectedModel,
-      }).toEqual({
-        trigger: expect.stringContaining("Opus"),
-        rightModelPressed: "true",
-        sendModel: "opus",
-        staleGlobalModel: "haiku",
-      });
+      expect(
+        buttonByLabel(document.body, "Select model Opus").getAttribute(
+          "aria-pressed",
+        ),
+      ).toBe("true");
     } finally {
       await act(async () => root.unmount());
       container.remove();
+      resetProviderStoreForTests();
       useClaudeChatStore.setState(chatSnapshot, true);
       useClaudeSetupStore.setState(setupSnapshot, true);
       useDocumentStore.setState(documentSnapshot, true);
@@ -1084,7 +793,7 @@ describe("ChatComposer runtime peer wiring", () => {
     }
   });
 
-  it("blocks a stale Codex effort and sends only after catalog normalization", async () => {
+  it("keeps archived Codex conversations read-only", async () => {
     const chatSnapshot = useClaudeChatStore.getState();
     const setupSnapshot = useClaudeSetupStore.getState();
     const documentSnapshot = useDocumentStore.getState();
@@ -1093,14 +802,8 @@ describe("ChatComposer runtime peer wiring", () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
-    const highOnlyModel: RuntimeModel = {
-      ...codexModel,
-      id: "gpt-X",
-      displayName: "GPT-X",
-      reasoningEfforts: ["high"],
-      defaultReasoningEffort: "high",
-    };
     vi.mocked(invoke).mockResolvedValue(undefined as never);
+    seedClaudeProvider();
 
     useDocumentStore.setState({ projectRoot: "C:/project" });
     useClaudeSetupStore.setState({
@@ -1115,7 +818,7 @@ describe("ChatComposer runtime peer wiring", () => {
         claude: runtimeAccount("claude", true),
         codex: runtimeAccount("codex", true),
       },
-      models: { claude: [], codex: [highOnlyModel] },
+      models: { claude: [], codex: [codexModel] },
       loading: {},
       login: {},
     });
@@ -1127,16 +830,13 @@ describe("ChatComposer runtime peer wiring", () => {
           projectPath: "C:/project",
           runtime: "codex",
           chatPeer: "codex",
-          runtimeModel: "gpt-X",
-          reasoningEffort: "medium",
-          agentId: null,
+          runtimeModel: "gpt-5.4",
+          reasoningEffort: "high",
           messages: [],
         },
       ],
       activeTabId: "tab-codex",
       activeProjectPath: "C:/project",
-      selectedProviderCredentialId: CLAUDE_CODE_PROVIDER_ID,
-      selectedProviderModels: {},
       messages: [],
       sessionId: null,
       isStreaming: false,
@@ -1154,76 +854,19 @@ describe("ChatComposer runtime peer wiring", () => {
         );
         await Promise.resolve();
       });
-      const textarea = container.querySelector("textarea");
-      if (!(textarea instanceof HTMLTextAreaElement)) {
-        throw new Error("Composer textarea not found");
-      }
-      const setTextareaValue = Object.getOwnPropertyDescriptor(
-        HTMLTextAreaElement.prototype,
-        "value",
-      )?.set;
-      if (!setTextareaValue) {
-        throw new Error("Native textarea setter not found");
-      }
-      await act(async () => {
-        setTextareaValue.call(textarea, "Use the normalized effort");
-        textarea.dispatchEvent(new Event("input", { bubbles: true }));
-        await Promise.resolve();
-      });
-      const sendButton = Array.from(container.querySelectorAll("button")).find(
-        (button) => button.textContent?.trim() === "Send",
-      );
-      if (!(sendButton instanceof HTMLButtonElement)) {
-        throw new Error("Composer send button not found");
-      }
-      expect(sendButton.disabled).toBe(true);
-
-      const trigger = document.querySelector(
-        'button[title="Switch provider or model"]',
-      );
-      if (!(trigger instanceof HTMLButtonElement)) {
-        throw new Error("Composer runtime trigger not found");
-      }
-      await act(async () => {
-        trigger.click();
-        await Promise.resolve();
-      });
+      expect(container.textContent).toContain("read-only");
+      expect(container.textContent).toContain("Start a new chat");
+      expect(container.textContent).not.toContain("Codex (archived)");
       expect(
-        useClaudeChatStore.getState().tabs.find((tab) => tab.id === "tab-codex")
-          ?.reasoningEffort,
-      ).toBe("high");
-      expect(sendButton.disabled).toBe(false);
-
-      await act(async () => {
-        sendButton.click();
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      });
-      const runtimeStartCalls = vi
-        .mocked(invoke)
-        .mock.calls.filter(([command]) => command === "runtime_start_turn");
-      expect(runtimeStartCalls).toHaveLength(1);
-      expect(runtimeStartCalls[0]?.[1]).toEqual({
-        request: expect.objectContaining({
-          runtime: "codex",
-          model: "gpt-X",
-          reasoningEffort: "high",
-          providerCredentialId: null,
-        }),
-      });
-      expect(
-        runtimeStartCalls.some(
-          ([, args]) =>
-            (
-              args as {
-                request?: { reasoningEffort?: string | null };
-              }
-            )?.request?.reasoningEffort === "medium",
-        ),
+        vi
+          .mocked(invoke)
+          .mock.calls.some(([command]) => command === "runtime_start_turn"),
       ).toBe(false);
     } finally {
       await act(async () => root.unmount());
       container.remove();
       vi.mocked(invoke).mockReset();
+      resetProviderStoreForTests();
       useClaudeChatStore.setState(chatSnapshot, true);
       useClaudeSetupStore.setState(setupSnapshot, true);
       useDocumentStore.setState(documentSnapshot, true);
@@ -1231,7 +874,7 @@ describe("ChatComposer runtime peer wiring", () => {
     }
   });
 
-  it("sends the Claude peer without a providerCredentialId even with saved API credentials", async () => {
+  it("sends Claude turns without a providerCredentialId", async () => {
     const chatSnapshot = useClaudeChatStore.getState();
     const setupSnapshot = useClaudeSetupStore.getState();
     const documentSnapshot = useDocumentStore.getState();
@@ -1241,6 +884,7 @@ describe("ChatComposer runtime peer wiring", () => {
     document.body.append(container);
     const root = createRoot(container);
     vi.mocked(invoke).mockResolvedValue(undefined as never);
+    seedClaudeProvider();
 
     useDocumentStore.setState({ projectRoot: "C:/project" });
     useClaudeSetupStore.setState({
@@ -1315,7 +959,9 @@ describe("ChatComposer runtime peer wiring", () => {
         await Promise.resolve();
       });
       const sendButton = Array.from(container.querySelectorAll("button")).find(
-        (button) => button.textContent?.trim() === "Send",
+        (button) =>
+          button.getAttribute("title") === "Send" ||
+          button.textContent?.trim() === "Send",
       );
       if (!(sendButton instanceof HTMLButtonElement)) {
         throw new Error("Composer send button not found");
@@ -1340,6 +986,7 @@ describe("ChatComposer runtime peer wiring", () => {
       await act(async () => root.unmount());
       container.remove();
       vi.mocked(invoke).mockReset();
+      resetProviderStoreForTests();
       useClaudeChatStore.setState(chatSnapshot, true);
       useClaudeSetupStore.setState(setupSnapshot, true);
       useDocumentStore.setState(documentSnapshot, true);
@@ -1347,7 +994,7 @@ describe("ChatComposer runtime peer wiring", () => {
     }
   });
 
-  it("uses saved Claude defaults when switching from a colliding Codex selection", async () => {
+  it("updates only the active tab model from the provider catalog", async () => {
     const chatSnapshot = useClaudeChatStore.getState();
     const setupSnapshot = useClaudeSetupStore.getState();
     const documentSnapshot = useDocumentStore.getState();
@@ -1356,276 +1003,7 @@ describe("ChatComposer runtime peer wiring", () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
-    const collidingCodexModel: RuntimeModel = {
-      ...codexModel,
-      id: "opus",
-      displayName: "Codex Opus Alias",
-      reasoningEfforts: ["high"],
-      defaultReasoningEffort: "high",
-    };
-
-    useDocumentStore.setState({ projectRoot: "C:/project" });
-    useClaudeSetupStore.setState({
-      status: "ready",
-      providerKind: "claude-code",
-      claudeProviderConfigured: true,
-      openAiCredentials: [],
-      activeOpenAiCredentialId: null,
-    });
-    useRuntimeStore.setState({
-      accounts: {
-        claude: runtimeAccount("claude", true),
-        codex: runtimeAccount("codex", true),
-      },
-      models: { claude: [], codex: [collidingCodexModel] },
-      loading: {},
-      login: {},
-    });
-    useClaudeChatStore.setState({
-      tabs: [
-        {
-          ...baseTab,
-          id: "tab-codex-alias",
-          projectPath: "C:/project",
-          runtime: "codex",
-          chatPeer: "codex",
-          runtimeModel: "opus",
-          reasoningEffort: "high",
-          agentId: null,
-          sessionRef: null,
-          sessionId: null,
-          messages: [],
-        },
-      ],
-      activeTabId: "tab-codex-alias",
-      activeProjectPath: "C:/project",
-      selectedModel: "haiku",
-      effortLevel: "low",
-      selectedProviderCredentialId: CLAUDE_CODE_PROVIDER_ID,
-      selectedProviderModels: {},
-      messages: [],
-      sessionId: null,
-      isStreaming: false,
-    });
-    (
-      globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
-    ).IS_REACT_ACT_ENVIRONMENT = true;
-
-    try {
-      await act(async () => {
-        root.render(
-          <TooltipProvider>
-            <ChatComposer />
-          </TooltipProvider>,
-        );
-        await Promise.resolve();
-      });
-      const trigger = document.querySelector(
-        'button[title="Switch provider or model"]',
-      );
-      if (!(trigger instanceof HTMLButtonElement)) {
-        throw new Error("Composer runtime trigger not found");
-      }
-      await act(async () => trigger.click());
-      await act(async () =>
-        buttonByLabel(document.body, "Claude peer").click(),
-      );
-
-      const state = useClaudeChatStore.getState();
-      const activeTab = state.tabs.find((tab) => tab.id === "tab-codex-alias");
-      expect({
-        runtime: activeTab?.runtime,
-        runtimeModel: activeTab?.runtimeModel,
-        reasoningEffort: activeTab?.reasoningEffort,
-        selectedModel: state.selectedModel,
-        effortLevel: state.effortLevel,
-      }).toEqual({
-        runtime: "claude",
-        runtimeModel: "haiku",
-        reasoningEffort: "low",
-        selectedModel: "haiku",
-        effortLevel: "low",
-      });
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-      useClaudeChatStore.setState(chatSnapshot, true);
-      useClaudeSetupStore.setState(setupSnapshot, true);
-      useDocumentStore.setState(documentSnapshot, true);
-      useRuntimeStore.setState(runtimeSnapshot, true);
-    }
-  });
-
-  it("discards a peer confirmation when its owning tab is no longer active", async () => {
-    const chatSnapshot = useClaudeChatStore.getState();
-    const setupSnapshot = useClaudeSetupStore.getState();
-    const documentSnapshot = useDocumentStore.getState();
-    const runtimeSnapshot = useRuntimeStore.getState();
-    const baseTab = chatSnapshot.tabs[0];
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    const tabAMessages = [
-      {
-        type: "user" as const,
-        message: {
-          content: [{ type: "text" as const, text: "Tab A message" }],
-        },
-      },
-    ];
-    const tabBMessages = [
-      {
-        type: "user" as const,
-        message: {
-          content: [{ type: "text" as const, text: "Tab B message" }],
-        },
-      },
-    ];
-
-    useDocumentStore.setState({ projectRoot: "C:/project" });
-    useClaudeSetupStore.setState({
-      status: "ready",
-      providerKind: "claude-code",
-      claudeProviderConfigured: true,
-      openAiCredentials: [],
-      activeOpenAiCredentialId: null,
-    });
-    useRuntimeStore.setState({
-      accounts: {
-        claude: runtimeAccount("claude", true),
-        codex: runtimeAccount("codex", true),
-      },
-      models: { claude: [], codex: [codexModel] },
-      loading: {},
-      login: {},
-    });
-    useClaudeChatStore.setState({
-      tabs: [
-        {
-          ...baseTab,
-          id: "tab-a",
-          projectPath: "C:/project",
-          runtime: "claude",
-          chatPeer: "claude",
-          sessionRef: {
-            runtime: "claude",
-            projectPath: "C:/project",
-            sessionId: "session-a",
-          },
-          sessionId: "session-a",
-          runtimeModel: "sonnet",
-          reasoningEffort: "medium",
-          providerKey: null,
-          sessionProviderKey: null,
-          messages: tabAMessages,
-        },
-        {
-          ...baseTab,
-          id: "tab-b",
-          projectPath: "C:/project",
-          runtime: "claude",
-          chatPeer: "claude",
-          sessionRef: {
-            runtime: "claude",
-            projectPath: "C:/project",
-            sessionId: "session-b",
-          },
-          sessionId: "session-b",
-          runtimeModel: "opus",
-          reasoningEffort: "high",
-          providerKey: null,
-          sessionProviderKey: null,
-          messages: tabBMessages,
-        },
-      ],
-      activeTabId: "tab-a",
-      activeProjectPath: "C:/project",
-      selectedModel: "sonnet",
-      effortLevel: "medium",
-      selectedProviderCredentialId: CLAUDE_CODE_PROVIDER_ID,
-      selectedProviderModels: {},
-      messages: tabAMessages,
-      sessionId: "session-a",
-      isStreaming: false,
-    });
-    (
-      globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
-    ).IS_REACT_ACT_ENVIRONMENT = true;
-
-    try {
-      await act(async () => {
-        root.render(
-          <TooltipProvider>
-            <ChatComposer />
-          </TooltipProvider>,
-        );
-        await Promise.resolve();
-      });
-      const trigger = document.querySelector(
-        'button[title="Switch provider or model"]',
-      );
-      if (!(trigger instanceof HTMLButtonElement)) {
-        throw new Error("Composer runtime trigger not found");
-      }
-      await act(async () => trigger.click());
-      await act(async () => buttonByLabel(document.body, "Codex peer").click());
-      expect(
-        document.body.querySelector('[role="alertdialog"]'),
-      ).not.toBeNull();
-
-      await act(async () => {
-        useClaudeChatStore.getState().setActiveTab("tab-b");
-        await Promise.resolve();
-      });
-      const staleConfirm = document.body.querySelector(
-        'button[aria-label="Confirm switch to Codex"]',
-      );
-      if (staleConfirm instanceof HTMLButtonElement) {
-        await act(async () => staleConfirm.click());
-      }
-      const stateAfterStaleConfirm = useClaudeChatStore.getState();
-      const tabB = stateAfterStaleConfirm.tabs.find(
-        (tab) => tab.id === "tab-b",
-      );
-
-      expect({
-        staleConfirmationPresent: staleConfirm !== null,
-        activeTabId: stateAfterStaleConfirm.activeTabId,
-        runtime: tabB?.runtime,
-        sessionRef: tabB?.sessionRef,
-        sessionId: tabB?.sessionId,
-        messages: tabB?.messages,
-      }).toEqual({
-        staleConfirmationPresent: false,
-        activeTabId: "tab-b",
-        runtime: "claude",
-        sessionRef: {
-          runtime: "claude",
-          projectPath: "C:/project",
-          sessionId: "session-b",
-        },
-        sessionId: "session-b",
-        messages: tabBMessages,
-      });
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-      useClaudeChatStore.setState(chatSnapshot, true);
-      useClaudeSetupStore.setState(setupSnapshot, true);
-      useDocumentStore.setState(documentSnapshot, true);
-      useRuntimeStore.setState(runtimeSnapshot, true);
-    }
-  });
-
-  it("preserves the active tab's Claude effort and model across separate edits", async () => {
-    const chatSnapshot = useClaudeChatStore.getState();
-    const setupSnapshot = useClaudeSetupStore.getState();
-    const documentSnapshot = useDocumentStore.getState();
-    const runtimeSnapshot = useRuntimeStore.getState();
-    const baseTab = chatSnapshot.tabs[0];
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
+    seedClaudeProvider();
 
     useDocumentStore.setState({ projectRoot: "C:/project" });
     useClaudeSetupStore.setState({
@@ -1687,9 +1065,7 @@ describe("ChatComposer runtime peer wiring", () => {
         );
         await Promise.resolve();
       });
-      const trigger = document.querySelector(
-        'button[title="Switch provider or model"]',
-      );
+      const trigger = document.querySelector('button[title="Switch model"]');
       if (!(trigger instanceof HTMLButtonElement)) {
         throw new Error("Composer runtime trigger not found");
       }
@@ -1697,153 +1073,18 @@ describe("ChatComposer runtime peer wiring", () => {
       await act(async () =>
         buttonByLabel(document.body, "Select model Haiku").click(),
       );
-
-      let activeTab = useClaudeChatStore
+      const activeTab = useClaudeChatStore
         .getState()
         .tabs.find((tab) => tab.id === "tab-active");
       expect(activeTab?.runtimeModel).toBe("haiku");
-      expect(activeTab?.reasoningEffort).toBe("high");
       expect(
         useClaudeChatStore.getState().tabs.find((tab) => tab.id === "tab-other")
           ?.reasoningEffort,
       ).toBe("low");
-
-      await act(async () => {
-        useClaudeChatStore.setState({ selectedModel: "sonnet" });
-      });
-      await act(async () =>
-        buttonByLabel(document.body, "Reasoning effort low").click(),
-      );
-      activeTab = useClaudeChatStore
-        .getState()
-        .tabs.find((tab) => tab.id === "tab-active");
-      expect(activeTab?.runtimeModel).toBe("haiku");
-      expect(activeTab?.reasoningEffort).toBe("low");
     } finally {
       await act(async () => root.unmount());
       container.remove();
-      useClaudeChatStore.setState(chatSnapshot, true);
-      useClaudeSetupStore.setState(setupSnapshot, true);
-      useDocumentStore.setState(documentSnapshot, true);
-      useRuntimeStore.setState(runtimeSnapshot, true);
-    }
-  });
-
-  it("scrolls the selected compatible-provider model into view when opened", async () => {
-    const chatSnapshot = useClaudeChatStore.getState();
-    const setupSnapshot = useClaudeSetupStore.getState();
-    const documentSnapshot = useDocumentStore.getState();
-    const runtimeSnapshot = useRuntimeStore.getState();
-    const baseTab = chatSnapshot.tabs[0];
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
-    const scrollIntoView = vi.fn();
-    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
-      configurable: true,
-      value: scrollIntoView,
-    });
-    vi.mocked(invoke).mockImplementation(async (command) => {
-      if (command === "list_openai_compatible_credential_models") {
-        return ["first-model", "selected-model", "last-model"];
-      }
-      return [];
-    });
-
-    useDocumentStore.setState({ projectRoot: "C:/project" });
-    useClaudeSetupStore.setState({
-      status: "ready",
-      providerKind: "openai-compatible",
-      claudeProviderConfigured: true,
-      openAiCredentials: [
-        {
-          id: "provider-a",
-          label: "OpenAI",
-          base_url: "https://api.openai.com/v1",
-          model: "first-model",
-        },
-      ],
-      activeOpenAiCredentialId: "provider-a",
-    });
-    useRuntimeStore.setState({
-      accounts: {
-        claude: runtimeAccount("claude", true),
-        codex: runtimeAccount("codex", true),
-      },
-    });
-    useClaudeChatStore.setState({
-      tabs: [
-        {
-          ...baseTab,
-          id: "tab-provider",
-          projectPath: "C:/project",
-          runtime: "claude",
-          chatPeer: "api",
-          runtimeModel: "sonnet",
-          reasoningEffort: "medium",
-        },
-      ],
-      activeTabId: "tab-provider",
-      activeProjectPath: "C:/project",
-      selectedProviderCredentialId: "provider-a",
-      selectedProviderModels: { "provider-a": "selected-model" },
-      messages: [],
-      sessionId: null,
-      isStreaming: false,
-    });
-    (
-      globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
-    ).IS_REACT_ACT_ENVIRONMENT = true;
-
-    try {
-      await act(async () => {
-        root.render(
-          <TooltipProvider>
-            <ChatComposer />
-          </TooltipProvider>,
-        );
-        await Promise.resolve();
-      });
-      const trigger = document.querySelector(
-        'button[title="Switch provider or model"]',
-      );
-      if (!(trigger instanceof HTMLButtonElement)) {
-        throw new Error("Composer runtime trigger not found");
-      }
-      await act(async () => {
-        trigger.click();
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      });
-
-      const selectedModelButton = Array.from(
-        document.body.querySelectorAll("button"),
-      ).find((button) => button.textContent?.trim() === "selected-model");
-      const firstModelButton = Array.from(
-        document.body.querySelectorAll("button"),
-      ).find((button) => button.textContent?.trim() === "first-model");
-      expect(invoke).toHaveBeenCalledWith(
-        "list_openai_compatible_credential_models",
-        { credentialId: "provider-a" },
-      );
-      expect(selectedModelButton).toBeInstanceOf(HTMLButtonElement);
-      expect(selectedModelButton?.getAttribute("aria-pressed")).toBe("true");
-      expect(firstModelButton?.getAttribute("aria-pressed")).toBe("false");
-      await vi.waitFor(() => {
-        expect(scrollIntoView).toHaveBeenCalledWith({ block: "center" });
-      });
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-      vi.mocked(invoke).mockReset();
-      if (originalScrollIntoView) {
-        Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
-          configurable: true,
-          value: originalScrollIntoView,
-        });
-      } else {
-        Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
-      }
+      resetProviderStoreForTests();
       useClaudeChatStore.setState(chatSnapshot, true);
       useClaudeSetupStore.setState(setupSnapshot, true);
       useDocumentStore.setState(documentSnapshot, true);

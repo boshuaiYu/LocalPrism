@@ -23,6 +23,7 @@ import {
   useClaudeChatStore,
 } from "@/stores/claude-chat-store";
 import { projectChatStorageKey } from "@/stores/chat-persistence";
+import { useProviderStore } from "@/stores/provider-store";
 
 const projectPath = "/project";
 
@@ -61,6 +62,11 @@ function makeTab(overrides: Partial<TabState> = {}): TabState {
 }
 
 function resetStore(tab = makeTab()) {
+  useProviderStore.setState({
+    ready: true,
+    engineInstalled: true,
+    activeAuthenticated: true,
+  });
   useClaudeChatStore.setState({
     messages: tab.messages,
     sessionId: tab.sessionId,
@@ -111,6 +117,17 @@ function runtimeRequest() {
   return (call?.[1] as { request?: Record<string, unknown> })?.request;
 }
 
+function activeTab(): TabState | undefined {
+  const state = useClaudeChatStore.getState();
+  return state.tabs.find((tab) => tab.id === state.activeTabId);
+}
+
+function tabBySession(sessionId: string): TabState | undefined {
+  return useClaudeChatStore
+    .getState()
+    .tabs.find((tab) => tab.sessionId === sessionId);
+}
+
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason?: unknown) => void;
@@ -142,6 +159,7 @@ describe("dual-runtime chat dispatch", () => {
       prompt: "First prompt",
       model: "opus",
       reasoningEffort: "medium",
+      permissionMode: "acceptEdits",
       agentId: null,
       providerCredentialId: null,
       providerModelOverride: null,
@@ -241,10 +259,11 @@ describe("dual-runtime chat dispatch", () => {
     );
   });
 
-  it("preserves OpenAI-compatible credential and model overrides on Claude runtime", async () => {
+  it("sends Claude turns through the managed provider instead of a tab API credential", async () => {
     resetStore(
       makeTab({
         runtime: "claude",
+        chatPeer: "api",
         providerKey: "openai-compatible:provider-1",
       }),
     );
@@ -259,53 +278,39 @@ describe("dual-runtime chat dispatch", () => {
       expect.objectContaining({
         runtime: "claude",
         model: "opus",
-        providerCredentialId: "provider-1",
-        providerModelOverride: "gpt-5-compatible",
+        providerCredentialId: null,
+        providerModelOverride: null,
       }),
     );
   });
 
-  it("routes Codex by tab runtime even when its model name looks like Claude", async () => {
-    resetStore(
-      makeTab({
-        runtime: "codex",
-        runtimeModel: "claude-opus-looking-model",
-        reasoningEffort: "high",
-        agentId: "reviewer",
-        providerKey: "openai-compatible:must-not-forward",
-        sessionProviderKey: "openai-compatible:must-not-forward",
-      }),
-    );
-
-    await useClaudeChatStore.getState().sendPrompt("Review this");
-
-    expect(runtimeRequest()).toEqual({
-      runtime: "codex",
-      projectPath,
-      tabId: "tab-runtime",
-      attemptId: expect.any(String),
-      sessionId: null,
-      prompt: "Review this",
-      model: "claude-opus-looking-model",
-      reasoningEffort: "high",
-      agentId: "reviewer",
-      providerCredentialId: null,
-      providerModelOverride: null,
+  it("does not send when the provider workspace is not ready", async () => {
+    resetStore(makeTab());
+    useProviderStore.setState({
+      ready: false,
+      engineInstalled: true,
+      activeAuthenticated: false,
     });
-    expect(useClaudeChatStore.getState().tabs[0]).toEqual(
-      expect.objectContaining({
-        providerKey: "openai-compatible:must-not-forward",
-        sessionProviderKey: "openai-compatible:must-not-forward",
-      }),
-    );
+    const before = useClaudeChatStore.getState().tabs[0];
+
+    await useClaudeChatStore.getState().sendPrompt("Must not send");
+
+    const after = useClaudeChatStore.getState().tabs[0];
+    expect(invoke).not.toHaveBeenCalled();
+    expect(after.messages).toEqual(before.messages);
+    expect(after.isStreaming).toBe(false);
+    expect(after.error).toMatch(/activate a provider/i);
   });
 
-  it("resumes Codex only from a matching Codex session ref", async () => {
+  it("refuses to send on an archived Codex conversation", async () => {
+    const document = setupDocument({
+      files: [{ id: "dirty", isDirty: true }],
+      saveAllFiles: vi.fn(() => Promise.resolve()),
+    });
     resetStore(
       makeTab({
         runtime: "codex",
         runtimeModel: "gpt-5.4",
-        sessionId: "stale-shadow",
         sessionRef: {
           runtime: "codex",
           sessionId: "codex-thread-1",
@@ -313,47 +318,9 @@ describe("dual-runtime chat dispatch", () => {
         },
       }),
     );
-
-    await useClaudeChatStore.getState().sendPrompt("Continue Codex");
-
-    expect(runtimeRequest()).toEqual(
-      expect.objectContaining({
-        runtime: "codex",
-        sessionId: "codex-thread-1",
-      }),
-    );
-  });
-
-  it("trims the Codex model and normalizes blank optional selections to null", async () => {
-    resetStore(
-      makeTab({
-        runtime: "codex",
-        runtimeModel: "  gpt-5.4  ",
-        reasoningEffort: "   ",
-        agentId: "   ",
-      }),
-    );
-
-    await useClaudeChatStore.getState().sendPrompt("Normalize options");
-
-    expect(runtimeRequest()).toEqual(
-      expect.objectContaining({
-        model: "gpt-5.4",
-        reasoningEffort: null,
-        agentId: null,
-      }),
-    );
-  });
-
-  it("does not start or mutate a Codex turn without a selected model", async () => {
-    const document = setupDocument({
-      files: [{ id: "dirty", isDirty: true }],
-      saveAllFiles: vi.fn(() => Promise.resolve()),
-    });
-    resetStore(makeTab({ runtime: "codex", runtimeModel: "  " }));
     const before = useClaudeChatStore.getState().tabs[0];
 
-    await useClaudeChatStore.getState().sendPrompt("Must not send");
+    await useClaudeChatStore.getState().sendPrompt("Continue Codex");
 
     const after = useClaudeChatStore.getState().tabs[0];
     expect(invoke).not.toHaveBeenCalled();
@@ -361,7 +328,7 @@ describe("dual-runtime chat dispatch", () => {
     expect(createSnapshotMock).not.toHaveBeenCalled();
     expect(after.messages).toEqual(before.messages);
     expect(after.isStreaming).toBe(false);
-    expect(after.error).toMatch(/model/i);
+    expect(after.error).toMatch(/read-only/i);
   });
 
   it.each([
@@ -1321,9 +1288,9 @@ describe("temporary chat file ownership", () => {
       tab: () => makeTab(),
     },
     {
-      name: "a Codex model is missing",
+      name: "the Codex conversation is archived",
       setup: () => setupDocument(),
-      tab: () => makeTab({ runtime: "codex", runtimeModel: "  " }),
+      tab: () => makeTab({ runtime: "codex", runtimeModel: "gpt-5.4" }),
     },
   ])("cleans an abandoned prompt when $name", async ({ setup, tab }) => {
     setup();
@@ -1563,7 +1530,7 @@ describe("per-tab runtime selection lifecycle", () => {
     resetStore();
   });
 
-  it("inherits the active Codex selection when creating a tab", () => {
+  it("creates a writable Claude tab instead of inheriting archived Codex", () => {
     resetStore(
       makeTab({
         runtime: "codex",
@@ -1587,14 +1554,17 @@ describe("per-tab runtime selection lifecycle", () => {
       useClaudeChatStore.getState().tabs.find((tab) => tab.id === newTabId),
     ).toEqual(
       expect.objectContaining({
-        runtime: "codex",
-        runtimeModel: "gpt-5.4",
-        reasoningEffort: "high",
-        agentId: "reviewer",
-        providerKey: "openai-compatible:provider-1",
+        runtime: "claude",
         sessionId: null,
         sessionRef: null,
         messages: [],
+      }),
+    );
+    expect(useClaudeChatStore.getState().tabs[0]).toEqual(
+      expect.objectContaining({
+        id: "tab-runtime",
+        runtime: "codex",
+        messages: [{ type: "user", result: "old message" }],
       }),
     );
   });
@@ -1618,7 +1588,7 @@ describe("per-tab runtime selection lifecycle", () => {
         ],
       },
     },
-  ])("inherits the $name Codex tab selection for a new session", ({
+  ])("opens a writable Claude tab when starting a new session from a $name Codex tab", ({
     busyState,
   }) => {
     resetStore(
@@ -1638,19 +1608,21 @@ describe("per-tab runtime selection lifecycle", () => {
     expect(state.tabs).toHaveLength(2);
     expect(state.tabs.find((tab) => tab.id === state.activeTabId)).toEqual(
       expect.objectContaining({
-        runtime: "codex",
-        runtimeModel: "gpt-5.4",
-        reasoningEffort: "high",
-        agentId: "reviewer",
-        providerKey: "openai-compatible:busy-provider",
+        runtime: "claude",
         sessionId: null,
         sessionRef: null,
         messages: [],
       }),
     );
+    expect(state.tabs[0]).toEqual(
+      expect.objectContaining({
+        id: "tab-runtime",
+        runtime: "codex",
+      }),
+    );
   });
 
-  it("preserves an idle tab's Codex selection when starting a new session", () => {
+  it("keeps idle Codex history and switches to a writable Claude tab on new session", () => {
     resetStore(
       makeTab({
         runtime: "codex",
@@ -1669,18 +1641,31 @@ describe("per-tab runtime selection lifecycle", () => {
 
     useClaudeChatStore.getState().newSession();
 
-    expect(useClaudeChatStore.getState().tabs).toEqual([
+    const state = useClaudeChatStore.getState();
+    expect(state.tabs).toHaveLength(2);
+    expect(state.tabs[0]).toEqual(
       expect.objectContaining({
         id: "tab-runtime",
         runtime: "codex",
-        runtimeModel: "gpt-5.4",
-        reasoningEffort: "high",
-        agentId: "reviewer",
+        sessionId: "old-thread",
+        messages: [{ type: "user", result: "old message" }],
+      }),
+    );
+    expect(state.tabs.find((tab) => tab.id === state.activeTabId)).toEqual(
+      expect.objectContaining({
+        runtime: "claude",
         sessionId: null,
-        sessionRef: null,
         messages: [],
       }),
-    ]);
+    );
+  });
+
+  it("ensureWritableTab is a no-op on an already writable Claude tab", () => {
+    resetStore(makeTab({ runtime: "claude" }));
+    const before = useClaudeChatStore.getState();
+    const id = useClaudeChatStore.getState().ensureWritableTab();
+    expect(id).toBe(before.activeTabId);
+    expect(useClaudeChatStore.getState().tabs).toHaveLength(1);
   });
 });
 
@@ -1716,7 +1701,9 @@ describe("typed conversation resume", () => {
     expect(invoke).toHaveBeenCalledWith("runtime_read_conversation", {
       reference,
     });
-    const tab = useClaudeChatStore.getState().tabs[0];
+    const tab = useClaudeChatStore
+      .getState()
+      .tabs.find((candidate) => candidate.sessionId === "thread-7");
     expect(tab).toEqual(
       expect.objectContaining({
         runtime: "codex",
@@ -1725,7 +1712,7 @@ describe("typed conversation resume", () => {
         title: "Codex history",
       }),
     );
-    expect(tab.messages).toEqual([
+    expect(tab?.messages).toEqual([
       {
         type: "user",
         message: { content: [{ type: "text", text: "Question" }] },
@@ -1793,7 +1780,7 @@ describe("typed conversation resume", () => {
       request: expect.objectContaining({
         runtime: "claude",
         tabId: newTabId,
-        providerCredentialId: "provider-1",
+        providerCredentialId: null,
       }),
     });
   });
@@ -1826,7 +1813,56 @@ describe("typed conversation resume", () => {
     );
   });
 
-  it("clears incompatible runtime selection when reusing a cross-runtime tab", async () => {
+  it("opens a new tab when resuming Codex from a writable Claude conversation", async () => {
+    const claudeRef = {
+      runtime: "claude" as const,
+      sessionId: "claude-live",
+      projectPath,
+    };
+    const codexRef = {
+      runtime: "codex" as const,
+      sessionId: "codex-old",
+      projectPath,
+    };
+    resetStore(
+      makeTab({
+        runtime: "claude",
+        sessionId: claudeRef.sessionId,
+        sessionRef: claudeRef,
+        messages: [{ type: "user", result: "keep me" }],
+        title: "Claude live",
+      }),
+    );
+    vi.mocked(invoke).mockResolvedValueOnce({
+      reference: codexRef,
+      items: [{ type: "agentMessage", text: "archived" }],
+    });
+
+    await useClaudeChatStore
+      .getState()
+      .resumeConversation(codexRef, "Codex old");
+
+    const state = useClaudeChatStore.getState();
+    const claudeTab = state.tabs.find(
+      (tab) => tab.sessionId === claudeRef.sessionId,
+    );
+    const codexTab = state.tabs.find(
+      (tab) => tab.sessionId === codexRef.sessionId,
+    );
+    expect(claudeTab).toMatchObject({
+      runtime: "claude",
+      title: "Claude live",
+      messages: [{ type: "user", result: "keep me" }],
+    });
+    expect(codexTab).toMatchObject({
+      runtime: "codex",
+      title: "Codex old",
+    });
+    expect(state.activeTabId).toBe(codexTab?.id);
+    expect(codexTab?.id).not.toBe(claudeTab?.id);
+  });
+
+  it("clears incompatible runtime selection on a new tab when resuming across runtimes", async () => {
     const reference = {
       runtime: "codex" as const,
       sessionId: "thread-cross-runtime",
@@ -1844,7 +1880,18 @@ describe("typed conversation resume", () => {
 
     await useClaudeChatStore.getState().resumeConversation(reference);
 
-    expect(useClaudeChatStore.getState().tabs[0]).toEqual(
+    const state = useClaudeChatStore.getState();
+    expect(state.tabs[0]).toEqual(
+      expect.objectContaining({
+        runtime: "claude",
+        runtimeModel: "claude-opus-4-6",
+        reasoningEffort: "high",
+        agentId: "claude-agent",
+      }),
+    );
+    expect(
+      state.tabs.find((tab) => tab.sessionId === reference.sessionId),
+    ).toEqual(
       expect.objectContaining({
         runtime: "codex",
         runtimeModel: null,
@@ -2094,10 +2141,11 @@ describe("typed conversation resume", () => {
     });
     await resumeA;
 
-    const tab = useClaudeChatStore.getState().tabs[0];
-    expect(tab.sessionRef).toEqual(referenceB);
-    expect(tab.title).toBe("B");
-    expect(tab.messages[0]?.message?.content?.[0]?.text).toBe("winner");
+    const tab = tabBySession(referenceB.sessionId);
+    expect(tab?.sessionRef).toEqual(referenceB);
+    expect(tab?.title).toBe("B");
+    expect(tab?.messages[0]?.message?.content?.[0]?.text).toBe("winner");
+    expect(activeTab()?.id).toBe(tab?.id);
   });
 
   it("lets the second same-reference request win over a late first response", async () => {
@@ -2131,9 +2179,9 @@ describe("typed conversation resume", () => {
     });
     await firstResume;
 
-    const tab = useClaudeChatStore.getState().tabs[0];
-    expect(tab.sessionRef).toEqual(reference);
-    expect(tab.messages).toEqual([
+    const tab = tabBySession(reference.sessionId);
+    expect(tab?.sessionRef).toEqual(reference);
+    expect(tab?.messages).toEqual([
       {
         type: "assistant",
         message: { content: [{ type: "text", text: "winner" }] },
@@ -2163,9 +2211,9 @@ describe("typed conversation resume", () => {
     });
     await resuming;
 
-    const tab = useClaudeChatStore.getState().tabs[0];
-    expect(tab.messages).toEqual([]);
-    expect(tab.resumeRequestId).toBeNull();
+    const tab = tabBySession(reference.sessionId);
+    expect(tab?.messages).toEqual([]);
+    expect(tab?.resumeRequestId).toBeNull();
   });
 
   it("rejects a backend history response whose echoed reference differs", async () => {
@@ -2181,10 +2229,10 @@ describe("typed conversation resume", () => {
 
     await useClaudeChatStore.getState().resumeConversation(reference);
 
-    const tab = useClaudeChatStore.getState().tabs[0];
-    expect(tab.sessionRef).toEqual(reference);
-    expect(tab.messages).toEqual([]);
-    expect(tab.resumeRequestId).toBeNull();
+    const tab = tabBySession(reference.sessionId);
+    expect(tab?.sessionRef).toEqual(reference);
+    expect(tab?.messages).toEqual([]);
+    expect(tab?.resumeRequestId).toBeNull();
   });
 
   it("rejects an echoed reference with the requested session but wrong runtime", async () => {
@@ -2200,10 +2248,10 @@ describe("typed conversation resume", () => {
 
     await useClaudeChatStore.getState().resumeConversation(reference);
 
-    const tab = useClaudeChatStore.getState().tabs[0];
-    expect(tab.sessionRef).toEqual(reference);
-    expect(tab.messages).toEqual([]);
-    expect(tab.resumeRequestId).toBeNull();
+    const tab = tabBySession(reference.sessionId);
+    expect(tab?.sessionRef).toEqual(reference);
+    expect(tab?.messages).toEqual([]);
+    expect(tab?.resumeRequestId).toBeNull();
   });
 
   it("rejects an echoed reference with the requested runtime and session but wrong project", async () => {
@@ -2219,9 +2267,41 @@ describe("typed conversation resume", () => {
 
     await useClaudeChatStore.getState().resumeConversation(reference);
 
+    const tab = tabBySession(reference.sessionId);
+    expect(tab?.sessionRef).toEqual(reference);
+    expect(tab?.messages).toEqual([]);
+    expect(tab?.resumeRequestId).toBeNull();
+  });
+
+  it("keeps local same-session messages when remote history returns empty", async () => {
+    const reference = {
+      runtime: "codex" as const,
+      sessionId: "thread-keep-local",
+      projectPath,
+    };
+    const localMessage = {
+      type: "user" as const,
+      message: {
+        content: [{ type: "text" as const, text: "keep me" }],
+      },
+    };
+    resetStore(
+      makeTab({
+        runtime: "codex",
+        sessionId: reference.sessionId,
+        sessionRef: reference,
+        messages: [localMessage],
+        title: "Local draft",
+      }),
+    );
+    vi.mocked(invoke).mockResolvedValueOnce({ reference, items: [] });
+
+    await useClaudeChatStore.getState().resumeConversation(reference);
+
     const tab = useClaudeChatStore.getState().tabs[0];
     expect(tab.sessionRef).toEqual(reference);
-    expect(tab.messages).toEqual([]);
+    expect(tab.messages).toEqual([localMessage]);
+    expect(tab.title).toBe("Local draft");
     expect(tab.resumeRequestId).toBeNull();
   });
 });
@@ -2368,6 +2448,32 @@ describe("changeTabRuntime", () => {
 
     expect(result).toBe("unchanged");
     expect(useClaudeChatStore.getState()).toEqual(before);
+  });
+
+  it("carries a selected OpenAI credential onto the API peer providerKey", () => {
+    resetStore(
+      makeTab({
+        runtime: "claude",
+        chatPeer: "claude",
+        providerKey: CLAUDE_CODE_PROVIDER_ID,
+      }),
+    );
+    useClaudeChatStore.setState({
+      selectedProviderCredentialId: "provider-1",
+    });
+
+    const result = useClaudeChatStore
+      .getState()
+      .changeTabRuntime("tab-runtime", "api");
+
+    expect(result).toBe("changed");
+    expect(useClaudeChatStore.getState().tabs[0]).toEqual(
+      expect.objectContaining({
+        chatPeer: "api",
+        runtime: "claude",
+        providerKey: "openai-compatible:provider-1",
+      }),
+    );
   });
 
   it("reports a missing tab without changing state", () => {

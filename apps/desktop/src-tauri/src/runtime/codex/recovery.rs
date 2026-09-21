@@ -24,13 +24,10 @@ pub fn recover_agent_runs_from_threads(
         if !is_descendant_of(thread, root_conversation_id, &by_id) {
             continue;
         }
-        let parent_id = thread
-            .parent_thread_id
-            .clone()
-            .or_else(|| {
-                // Fall back to root when ancestry confirms membership but parent is absent.
-                Some(root_conversation_id.to_owned())
-            });
+        let parent_id = thread.parent_thread_id.clone().or_else(|| {
+            // Fall back to root when ancestry confirms membership but parent is absent.
+            Some(root_conversation_id.to_owned())
+        });
         let status = map_thread_status(thread.status_name());
         let agent_name = thread
             .nickname
@@ -69,11 +66,7 @@ pub fn recover_agent_runs_from_threads(
     recovered
 }
 
-fn is_descendant_of(
-    thread: &Thread,
-    root: &str,
-    by_id: &HashMap<&str, &Thread>,
-) -> bool {
+fn is_descendant_of(thread: &Thread, root: &str, by_id: &HashMap<&str, &Thread>) -> bool {
     if thread
         .ancestor_thread_id
         .as_deref()
@@ -177,7 +170,9 @@ mod tests {
         assert_eq!(recovered[0].status, AgentRunStatus::Running);
         assert_eq!(recovered[1].parent_id.as_deref(), Some("child"));
         assert_eq!(recovered[1].status, AgentRunStatus::Completed);
-        assert!(recovered.iter().all(|run| run.root_conversation_id == "root"));
+        assert!(recovered
+            .iter()
+            .all(|run| run.root_conversation_id == "root"));
         assert!(recovered.iter().all(|run| run.transcript_available));
     }
 

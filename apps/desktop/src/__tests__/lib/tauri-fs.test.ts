@@ -19,7 +19,8 @@ describe("tauri fs helpers", () => {
       expect(getProjectFileType("output.pdf")).toBe("pdf");
       expect(getProjectFileType("figure.png")).toBe("image");
       expect(getProjectFileType("custom.sty")).toBe("style");
-      expect(getProjectFileType("notes.md")).toBe("other");
+      expect(getProjectFileType("notes.md")).toBe("markdown");
+      expect(getProjectFileType("README.markdown")).toBe("markdown");
       expect(getProjectFileType("script.py")).toBe("other");
     });
 

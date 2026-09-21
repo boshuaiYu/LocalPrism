@@ -417,25 +417,29 @@ pub(crate) fn apply_proxy_env_to_command(cmd: &mut Command, window: Option<&Webv
 }
 
 fn get_claude_prism_auth_path() -> Result<PathBuf, String> {
-    let config_dir = dirs::config_dir()
-        .or_else(dirs::home_dir)
-        .ok_or("Could not find config directory")?;
-    Ok(config_dir.join("ClaudePrism").join("anthropic-auth.json"))
+    crate::providers::paths::legacy_anthropic_auth_path()
 }
 
-fn read_claude_prism_auth_config() -> Result<ClaudePrismAuthConfig, String> {
-    let path = get_claude_prism_auth_path()?;
-    if !path.exists() {
-        return Ok(ClaudePrismAuthConfig::default());
-    }
-
-    let content = std::fs::read_to_string(&path)
+fn read_auth_config_from_path(path: &Path) -> Result<ClaudePrismAuthConfig, String> {
+    let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read auth settings: {}", e))?;
     let content = content.trim_start_matches('\u{feff}');
     let config = serde_json::from_str(content)
         .map_err(|e| format!("Failed to parse auth settings: {}", e))?;
-    restrict_auth_file_permissions(&path)?;
+    restrict_auth_file_permissions(path)?;
     Ok(config)
+}
+
+fn read_claude_prism_auth_config() -> Result<ClaudePrismAuthConfig, String> {
+    let path = crate::providers::paths::anthropic_auth_path()?;
+    if path.exists() {
+        return read_auth_config_from_path(&path);
+    }
+    let legacy = get_claude_prism_auth_path()?;
+    if !legacy.exists() {
+        return Ok(ClaudePrismAuthConfig::default());
+    }
+    read_auth_config_from_path(&legacy)
 }
 
 fn restrict_auth_file_permissions(path: &Path) -> Result<(), String> {
@@ -473,19 +477,23 @@ fn read_claude_prism_auth_config_for_update() -> Result<ClaudePrismAuthConfig, S
     match read_claude_prism_auth_config() {
         Ok(config) => Ok(config),
         Err(err) => {
-            let path = get_claude_prism_auth_path()?;
+            let path = crate::providers::paths::anthropic_auth_path()?;
             if path.exists() {
                 backup_corrupt_auth_config(&path, &err)?;
-                Ok(ClaudePrismAuthConfig::default())
-            } else {
-                Err(err)
+                return Ok(ClaudePrismAuthConfig::default());
             }
+            let legacy = get_claude_prism_auth_path()?;
+            if legacy.exists() {
+                backup_corrupt_auth_config(&legacy, &err)?;
+                return Ok(ClaudePrismAuthConfig::default());
+            }
+            Err(err)
         }
     }
 }
 
 fn write_claude_prism_auth_config(config: &ClaudePrismAuthConfig) -> Result<(), String> {
-    let path = get_claude_prism_auth_path()?;
+    let path = crate::providers::paths::anthropic_auth_path()?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create auth settings dir: {}", e))?;
@@ -1293,6 +1301,40 @@ fn expand_env_vars(s: &str) -> String {
     OsString::from_wide(&buf).to_string_lossy().to_string()
 }
 
+pub(crate) struct ClaudeEngineProbe {
+    pub installed: bool,
+    pub version: Option<String>,
+    pub missing_git: bool,
+}
+
+pub(crate) fn probe_claude_engine() -> ClaudeEngineProbe {
+    #[cfg(target_os = "windows")]
+    let missing_git = find_git_bash().is_none();
+    #[cfg(not(target_os = "windows"))]
+    let missing_git = false;
+
+    let Ok(binary_path) = find_claude_binary() else {
+        return ClaudeEngineProbe {
+            installed: false,
+            version: None,
+            missing_git,
+        };
+    };
+    let version_output = new_sync_command(&binary_path).arg("--version").output();
+    match version_output {
+        Ok(output) if output.status.success() => ClaudeEngineProbe {
+            installed: true,
+            version: Some(String::from_utf8_lossy(&output.stdout).trim().to_string()),
+            missing_git,
+        },
+        _ => ClaudeEngineProbe {
+            installed: false,
+            version: None,
+            missing_git,
+        },
+    }
+}
+
 /// Discover the claude binary on the system.
 /// Search order: ~/.local/bin 鈫?NVM_BIN 鈫?which 鈫?registry PATH (Windows) 鈫?/// login shell (Unix) 鈫?npm/nvm global 鈫?standard paths 鈫?user-specific paths.
 /// Returns Err if not found.
@@ -1865,6 +1907,16 @@ fn create_command(
     // Set effort level (default: low for fast responses)
     cmd.env("CLAUDE_CODE_EFFORT_LEVEL", effort_level.unwrap_or("low"));
 
+    // Keep skills/agents inside LocalPrism instead of sharing ~/.claude with Claude Code.
+    if let Ok(config_dir) = crate::skills::paths::prepare_isolated_claude_home(Some(
+        std::path::Path::new(clean_cwd.as_ref()),
+    )) {
+        cmd.env("CLAUDE_CONFIG_DIR", config_dir);
+    }
+
+    // Keep uv/python cache, managed interpreters, and tools inside LocalPrism home.
+    crate::uv::apply_uv_isolation_env(&mut cmd);
+
     if let Some(credential) = stored_claude_credential() {
         for (key, value) in claude_credential_env_values(&credential) {
             if std::env::var(key)
@@ -1946,6 +1998,9 @@ fn create_command(
         }
     }
 
+    // Prefer LocalPrism's uv binary/tools, then a project .venv if present.
+    current_path = crate::uv::isolated_uv_path(&current_path);
+
     // Auto-detect project venv and inject VIRTUAL_ENV + PATH
     let venv_dir = std::path::Path::new(cwd).join(".venv");
     if venv_dir.exists() {
@@ -1958,6 +2013,9 @@ fn create_command(
         #[cfg(target_os = "windows")]
         let venv_bin = venv_dir.join("Scripts");
         current_path = format!("{}{}{}", venv_bin.to_string_lossy(), sep, current_path);
+    } else {
+        cmd.env_remove("VIRTUAL_ENV");
+        cmd.env_remove("UV_PROJECT_ENVIRONMENT");
     }
 
     cmd.env("PATH", current_path);
@@ -1990,15 +2048,12 @@ fn clear_anthropic_provider_env(cmd: &mut Command) {
 
 fn with_prompt_transport(mut args: Vec<String>, prompt: String) -> (Vec<String>, Option<String>) {
     args.push("-p".to_string());
-    #[cfg(target_os = "windows")]
-    {
-        (args, Some(prompt))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        args.push(prompt);
-        (args, None)
-    }
+    args.push("--input-format".to_string());
+    args.push("stream-json".to_string());
+    (
+        args,
+        Some(crate::claude_permissions::user_stream_line(&prompt)),
+    )
 }
 
 fn push_agent_arg(args: &mut Vec<String>, agent_id: Option<&str>) {
@@ -2813,24 +2868,34 @@ pub async fn logout_claude() -> Result<(), String> {
 /// Normalize an explicit Claude permission mode for `--permission-mode`.
 /// Never falls back to `--dangerously-skip-permissions`.
 fn normalize_claude_permission_mode(permission_mode: Option<&str>) -> &'static str {
-    match permission_mode.map(str::trim).filter(|value| !value.is_empty()) {
+    match permission_mode
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         Some("acceptEdits") => "acceptEdits",
         Some("bypassPermissions") => "bypassPermissions",
         Some("plan") => "plan",
         Some("dontAsk") => "dontAsk",
         Some("default") => "default",
-        _ => "default",
+        _ => "acceptEdits",
     }
 }
 
 fn resolve_claude_permission_mode(
     project_path: &str,
     agent_id: Option<&str>,
+    requested: Option<&str>,
 ) -> Option<String> {
-    let agent_id = agent_id?.trim();
-    if agent_id.is_empty() {
-        return None;
+    let requested = requested
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    if requested.is_some() {
+        return requested;
     }
+    let Some(agent_id) = agent_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return None;
+    };
     let project = if project_path.trim().is_empty() {
         None
     } else {
@@ -2867,34 +2932,112 @@ fn common_claude_args() -> Vec<String> {
 }
 
 fn common_claude_args_with_permission_mode(permission_mode: Option<&str>) -> Vec<String> {
+    common_claude_args_for_turn(permission_mode, None)
+}
+
+fn common_claude_args_for_turn(
+    permission_mode: Option<&str>,
+    model: Option<&str>,
+) -> Vec<String> {
     let mode = normalize_claude_permission_mode(permission_mode);
+    let identity = crate::providers::active_provider_identity();
     vec![
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--verbose".to_string(),
+        "--permission-prompt-tool".to_string(),
+        "stdio".to_string(),
         "--permission-mode".to_string(),
         mode.to_string(),
-        "--append-system-prompt".to_string(),
-        concat!(
-            "You are an AI assistant integrated into a LaTeX document editor (Prism). ",
-            "Follow these rules strictly:\n",
-            "1. PLANNING FIRST: Before making changes, use TodoWrite to create a step-by-step plan. ",
-            "Break large tasks into small, incremental steps (one section or one logical unit per step).\n",
-            "2. INCREMENTAL EDITS: Use the Edit tool to make small, targeted changes — one step at a time. ",
-            "NEVER write or rewrite an entire file at once. Always prefer editing existing content over replacing it wholesale.\n",
-            "3. STEP BY STEP: After each edit, mark the todo item as completed, then proceed to the next step. ",
-            "This lets the user review changes incrementally.\n",
-            "4. PRESERVE EXISTING CONTENT: Always read the file first. Keep the existing preamble, packages, ",
-            "and structure intact. Only add or modify what is needed for the current step.\n",
-            "5. LaTeX BEST PRACTICES: Use proper sectioning (\\chapter, \\section, \\subsection), ",
-            "citations (\\cite), cross-references (\\label, \\ref), and BibTeX for bibliographies.\n",
-            "6. SKILLS: If scientific skills are installed in .claude/skills/, follow their guidelines ",
-            "for domain-specific tasks. Use skill-provided LaTeX packages (.sty) and code patterns.\n",
-            "7. PYTHON: If a .venv/ exists in the project, it is already activated. ",
-            "Use `uv pip install` to add packages and `python` to run scripts."
-        )
-        .to_string(),
+        system_prompt_flag(identity).to_string(),
+        prism_system_prompt(model, identity),
     ]
+}
+
+fn openai_compatible_turn_args(
+    extra_prefix: Vec<String>,
+    permission_mode: Option<&str>,
+    model: &str,
+) -> Vec<String> {
+    let mut args = extra_prefix;
+    args.extend(common_claude_args_for_turn(
+        permission_mode,
+        Some(model),
+    ));
+    args
+}
+
+fn system_prompt_flag(identity: crate::providers::ActiveProviderIdentity) -> &'static str {
+    match identity {
+        crate::providers::ActiveProviderIdentity::ChatGptOfficial
+        | crate::providers::ActiveProviderIdentity::ThirdParty => "--system-prompt",
+        crate::providers::ActiveProviderIdentity::ClaudeOfficial
+        | crate::providers::ActiveProviderIdentity::Unknown => "--append-system-prompt",
+    }
+}
+
+fn is_claude_catalog_model(model: &str) -> bool {
+    crate::providers::is_legacy_claude_alias(model)
+        || model.trim().to_ascii_lowercase().starts_with("claude")
+}
+
+fn uses_claude_identity(
+    model: Option<&str>,
+    identity: crate::providers::ActiveProviderIdentity,
+) -> bool {
+    match identity {
+        crate::providers::ActiveProviderIdentity::ClaudeOfficial => true,
+        crate::providers::ActiveProviderIdentity::ChatGptOfficial
+        | crate::providers::ActiveProviderIdentity::ThirdParty => false,
+        crate::providers::ActiveProviderIdentity::Unknown => model
+            .map(is_claude_catalog_model)
+            .unwrap_or(false),
+    }
+}
+
+fn prism_system_prompt(
+    model: Option<&str>,
+    identity: crate::providers::ActiveProviderIdentity,
+) -> String {
+    let model = model.map(str::trim).filter(|value| !value.is_empty());
+    let identity_line = if uses_claude_identity(model, identity) {
+        match model {
+            Some(id) => format!(
+                "You are {id} in LocalPrism, a LaTeX document editor. When asked who you are or which model you are, answer with {id}."
+            ),
+            None => {
+                "You are Claude in LocalPrism, a LaTeX document editor.".to_string()
+            }
+        }
+    } else {
+        match model {
+            Some(id) => format!(
+                "CRITICAL IDENTITY: You are {id} in LocalPrism, a LaTeX document editor. Claude Code is only the local tool host, not your identity. You are not Claude, not Anthropic, and not Claude Code. When asked who you are or which model you are, answer only with the selected model id: {id}."
+            ),
+            None => {
+                "CRITICAL IDENTITY: You are the selected LocalPrism model. Claude Code is only the local tool host, not your identity. You are not Claude, not Anthropic, and not Claude Code.".to_string()
+            }
+        }
+    };
+    format!(
+        "{identity_line} Follow these rules strictly:\n\
+         1. PLANNING FIRST: Before making changes, use TodoWrite to create a step-by-step plan. \
+         Break large tasks into small, incremental steps (one section or one logical unit per step).\n\
+         2. INCREMENTAL EDITS: Use the Edit tool to make small, targeted changes — one step at a time. \
+         NEVER write or rewrite an entire file at once. Always prefer editing existing content over replacing it wholesale.\n\
+         3. STEP BY STEP: After each edit, mark the todo item as completed, then proceed to the next step. \
+         This lets the user review changes incrementally.\n\
+         4. PRESERVE EXISTING CONTENT: Always read the file first. Keep the existing preamble, packages, \
+         and structure intact. Only add or modify what is needed for the current step.\n\
+         5. LaTeX BEST PRACTICES: Use proper sectioning (\\chapter, \\section, \\subsection), \
+         citations (\\cite), cross-references (\\label, \\ref), and BibTeX for bibliographies.\n\
+         6. SKILLS: If scientific skills are installed in claude-home/skills/, follow their guidelines \
+         for domain-specific tasks. Use skill-provided LaTeX packages (.sty) and code patterns.\n\
+         7. PYTHON: If a .venv/ exists in the project, it is already activated. \
+         Use `uv pip install` to add packages and `python` to run scripts.\n\
+         8. READ TOOL: Never pass pages as an empty string. Omit pages for text/markdown/code. \
+         For PDFs only, use a 1-indexed range such as \"1\", \"3\", or \"1-5\"."
+    )
 }
 
 // 鈹€鈹€鈹€ Tauri Commands 鈹€鈹€鈹€
@@ -3294,6 +3437,7 @@ async fn execute_openai_compatible_via_claude_proxy(
     effort_level: Option<String>,
     credential: StoredOpenAiCompatibleCredential,
     reservation: ClaudeStartReservation,
+    permission_mode: Option<String>,
 ) -> Result<(), String> {
     let model_transformers = credential
         .model_transformers
@@ -3313,7 +3457,11 @@ async fn execute_openai_compatible_via_claude_proxy(
     let (mut args, stdin_payload) = with_prompt_transport(args_prefix, prompt);
     args.push("--model".to_string());
     args.push("sonnet".to_string());
-    args.extend(common_claude_args());
+    args.extend(openai_compatible_turn_args(
+        Vec::new(),
+        permission_mode.as_deref(),
+        credential.model.as_str(),
+    ));
 
     let mut cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
     clear_anthropic_provider_env(&mut cmd);
@@ -3345,6 +3493,7 @@ async fn execute_openai_compatible_provider(
     effort_level: Option<String>,
     credential: StoredOpenAiCompatibleCredential,
     reservation: ClaudeStartReservation,
+    permission_mode: Option<String>,
 ) -> Result<(), String> {
     ensure_secure_known_provider_base_url(&credential.base_url)?;
 
@@ -3358,6 +3507,7 @@ async fn execute_openai_compatible_provider(
             effort_level,
             credential,
             reservation,
+            permission_mode,
         )
         .await;
     }
@@ -3371,6 +3521,7 @@ async fn execute_openai_compatible_provider(
         effort_level,
         credential,
         reservation,
+        permission_mode,
     )
     .await
 }
@@ -3384,13 +3535,18 @@ async fn execute_openai_compatible_via_native_anthropic(
     effort_level: Option<String>,
     credential: StoredOpenAiCompatibleCredential,
     reservation: ClaudeStartReservation,
+    permission_mode: Option<String>,
 ) -> Result<(), String> {
     let anthropic_base_url = native_anthropic_base_url(&credential)
         .ok_or_else(|| "Provider does not expose a native Anthropic endpoint".to_string())?;
     let claude_path = find_claude_binary()?;
 
     let (mut args, stdin_payload) = with_prompt_transport(args_prefix, prompt);
-    args.extend(common_claude_args());
+    args.extend(openai_compatible_turn_args(
+        Vec::new(),
+        permission_mode.as_deref(),
+        credential.model.as_str(),
+    ));
 
     let mut cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
     apply_native_anthropic_provider_env(&mut cmd, &credential, &anthropic_base_url);
@@ -3551,14 +3707,21 @@ pub async fn execute_claude_code(
     provider_model_override: Option<String>,
     agent_id: Option<String>,
     attempt_id: Option<String>,
+    permission_mode: Option<String>,
 ) -> Result<(), String> {
     let Some(reservation) = reserve_claude_start(&window, &tab_id, attempt_id.as_deref()).await
     else {
         return Ok(());
     };
+    let prompt = crate::skills::paperspine::adapt_host_bound_skill_prompt(&prompt);
     let failure_window = window.clone();
     let failure_reservation = reservation.clone();
     let result = async move {
+        let permission_mode = resolve_claude_permission_mode(
+            &project_path,
+            agent_id.as_deref(),
+            permission_mode.as_deref(),
+        );
         if let Some(mut credential) =
             stored_openai_compatible_credential_by_id(provider_credential_id.as_deref())?
         {
@@ -3576,24 +3739,33 @@ pub async fn execute_claude_code(
                 effort_level,
                 credential,
                 reservation,
+                permission_mode,
             )
             .await;
         }
 
         let claude_path = find_claude_binary()?;
 
+        let model = crate::providers::resolve_active_spawn_model(model.as_deref());
+        let selected_model = model.clone();
         let (mut args, stdin_payload) = with_prompt_transport(Vec::new(), prompt);
         if let Some(m) = model {
             args.push("--model".to_string());
             args.push(m);
         }
         push_agent_arg(&mut args, agent_id.as_deref());
-        let permission_mode = resolve_claude_permission_mode(&project_path, agent_id.as_deref());
-        args.extend(common_claude_args_with_permission_mode(
+        args.extend(common_claude_args_for_turn(
             permission_mode.as_deref(),
+            selected_model.as_deref(),
         ));
 
-        let cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
+        let mut cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
+        crate::providers::apply_managed_provider(
+            &mut cmd,
+            selected_model.as_deref(),
+            effort_level.as_deref(),
+        )
+        .await?;
         spawn_claude_process(window, cmd, tab_id, reservation, stdin_payload, None).await
     }
     .await;
@@ -3614,14 +3786,21 @@ pub async fn continue_claude_code(
     provider_credential_id: Option<String>,
     provider_model_override: Option<String>,
     attempt_id: Option<String>,
+    permission_mode: Option<String>,
 ) -> Result<(), String> {
     let Some(reservation) = reserve_claude_start(&window, &tab_id, attempt_id.as_deref()).await
     else {
         return Ok(());
     };
+    let prompt = crate::skills::paperspine::adapt_host_bound_skill_prompt(&prompt);
     let failure_window = window.clone();
     let failure_reservation = reservation.clone();
     let result = async move {
+        let permission_mode = resolve_claude_permission_mode(
+            &project_path,
+            None,
+            permission_mode.as_deref(),
+        );
         if let Some(mut credential) =
             stored_openai_compatible_credential_by_id(provider_credential_id.as_deref())?
         {
@@ -3639,20 +3818,32 @@ pub async fn continue_claude_code(
                 effort_level,
                 credential,
                 reservation,
+                permission_mode,
             )
             .await;
         }
 
         let claude_path = find_claude_binary()?;
 
+        let model = crate::providers::resolve_active_spawn_model(model.as_deref());
+        let selected_model = model.clone();
         let (mut args, stdin_payload) = with_prompt_transport(vec!["-c".to_string()], prompt);
         if let Some(m) = model {
             args.push("--model".to_string());
             args.push(m);
         }
-        args.extend(common_claude_args());
+        args.extend(common_claude_args_for_turn(
+            permission_mode.as_deref(),
+            selected_model.as_deref(),
+        ));
 
-        let cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
+        let mut cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
+        crate::providers::apply_managed_provider(
+            &mut cmd,
+            selected_model.as_deref(),
+            effort_level.as_deref(),
+        )
+        .await?;
         spawn_claude_process(window, cmd, tab_id, reservation, stdin_payload, None).await
     }
     .await;
@@ -3675,14 +3866,21 @@ pub async fn resume_claude_code(
     provider_model_override: Option<String>,
     agent_id: Option<String>,
     attempt_id: Option<String>,
+    permission_mode: Option<String>,
 ) -> Result<(), String> {
     let Some(reservation) = reserve_claude_start(&window, &tab_id, attempt_id.as_deref()).await
     else {
         return Ok(());
     };
+    let prompt = crate::skills::paperspine::adapt_host_bound_skill_prompt(&prompt);
     let failure_window = window.clone();
     let failure_reservation = reservation.clone();
     let result = async move {
+        let permission_mode = resolve_claude_permission_mode(
+            &project_path,
+            agent_id.as_deref(),
+            permission_mode.as_deref(),
+        );
         if let Some(mut credential) =
             stored_openai_compatible_credential_by_id(provider_credential_id.as_deref())?
         {
@@ -3700,12 +3898,15 @@ pub async fn resume_claude_code(
                 effort_level,
                 credential,
                 reservation,
+                permission_mode,
             )
             .await;
         }
 
         let claude_path = find_claude_binary()?;
 
+        let model = crate::providers::resolve_active_spawn_model(model.as_deref());
+        let selected_model = model.clone();
         let (mut args, stdin_payload) =
             with_prompt_transport(vec!["--resume".to_string(), session_id], prompt);
         if let Some(m) = model {
@@ -3713,12 +3914,18 @@ pub async fn resume_claude_code(
             args.push(m);
         }
         push_agent_arg(&mut args, agent_id.as_deref());
-        let permission_mode = resolve_claude_permission_mode(&project_path, agent_id.as_deref());
-        args.extend(common_claude_args_with_permission_mode(
+        args.extend(common_claude_args_for_turn(
             permission_mode.as_deref(),
+            selected_model.as_deref(),
         ));
 
-        let cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
+        let mut cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
+        crate::providers::apply_managed_provider(
+            &mut cmd,
+            selected_model.as_deref(),
+            effort_level.as_deref(),
+        )
+        .await?;
         spawn_claude_process(window, cmd, tab_id, reservation, stdin_payload, None).await
     }
     .await;
@@ -3793,7 +4000,7 @@ struct SessionCandidate {
 /// Claude Code encodes paths by replacing all non-alphanumeric characters with '-'.
 /// e.g. "/Users/dev/my_project" 鈫?"-Users-dev-my-project"
 fn get_sessions_dir(project_path: &str) -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or("Could not determine home directory")?;
+    let config_dir = crate::providers::paths::claude_config_dir()?;
 
     let encoded: String = project_path
         .chars()
@@ -3805,7 +4012,7 @@ fn get_sessions_dir(project_path: &str) -> Result<PathBuf, String> {
         project_path, encoded
     );
 
-    Ok(home.join(".claude").join("projects").join(&encoded))
+    Ok(config_dir.join("projects").join(&encoded))
 }
 
 fn unique_session_migration_target(target: &Path) -> PathBuf {
@@ -5192,6 +5399,15 @@ mod tests {
         let dir_name = path.file_name().unwrap().to_str().unwrap();
         // All non-alphanumeric chars should be replaced with '-'
         assert_eq!(dir_name, "-Users-dev-my-project");
+        let rendered = path.to_string_lossy().replace('\\', "/");
+        assert!(
+            rendered.contains("claude-home/projects/"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("/.claude/projects/"),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -5291,10 +5507,15 @@ mod tests {
         assert!(args.contains(&"--output-format".to_string()));
         assert!(args.contains(&"stream-json".to_string()));
         assert!(args.contains(&"--verbose".to_string()));
+        assert!(args.contains(&"--permission-prompt-tool".to_string()));
+        assert!(args.contains(&"stdio".to_string()));
         assert!(args.contains(&"--permission-mode".to_string()));
-        assert!(args.contains(&"default".to_string()));
+        assert!(args.contains(&"acceptEdits".to_string()));
         assert!(!args.contains(&"--dangerously-skip-permissions".to_string()));
-        assert!(args.contains(&"--append-system-prompt".to_string()));
+        assert!(
+            args.contains(&"--append-system-prompt".to_string())
+                || args.contains(&"--system-prompt".to_string())
+        );
     }
 
     #[test]
@@ -5305,7 +5526,10 @@ mod tests {
             .iter()
             .position(|arg| arg == "--permission-mode")
             .expect("permission mode flag");
-        assert_eq!(args.get(mode_idx + 1).map(String::as_str), Some("default"));
+        assert_eq!(
+            args.get(mode_idx + 1).map(String::as_str),
+            Some("acceptEdits")
+        );
     }
 
     #[test]
@@ -5319,17 +5543,126 @@ mod tests {
             args.get(mode_idx + 1).map(String::as_str),
             Some("acceptEdits")
         );
+        assert!(
+            !args.contains(&"--add-dir".to_string()),
+            "print/sdk mode hangs if --add-dir waits for directory trust"
+        );
+    }
+
+    #[test]
+    fn test_resolve_permission_mode_uses_requested_without_agent() {
+        assert_eq!(
+            resolve_claude_permission_mode("", None, Some("dontAsk")).as_deref(),
+            Some("dontAsk")
+        );
+        assert_eq!(
+            resolve_claude_permission_mode("", None, Some("")).as_deref(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_resolve_permission_mode_prefers_conversation_picker_over_agent() {
+        let temp = tempfile::tempdir().unwrap();
+        let agents = temp.path().join(".localprism").join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(
+            agents.join("reviewer.md"),
+            "---\nname: Reviewer\ndescription: Reviews\npermissionMode: plan\n---\nBe thorough.\n",
+        )
+        .unwrap();
+        let project = temp.path().to_string_lossy().to_string();
+
+        assert_eq!(
+            resolve_claude_permission_mode(&project, Some("reviewer"), Some("bypassPermissions"))
+                .as_deref(),
+            Some("bypassPermissions"),
+            "the conversation approval pill must win over agent frontmatter"
+        );
+        assert_eq!(
+            resolve_claude_permission_mode(&project, Some("reviewer"), None).as_deref(),
+            Some("plan"),
+            "agent permissionMode is only a fallback when the picker sends nothing"
+        );
+    }
+
+    #[test]
+    fn test_openai_compatible_turn_args_honor_permission_mode() {
+        let args = openai_compatible_turn_args(
+            Vec::new(),
+            Some("bypassPermissions"),
+            "deepseek-chat",
+        );
+        let mode_idx = args
+            .iter()
+            .position(|arg| arg == "--permission-mode")
+            .expect("permission mode flag");
+        assert_eq!(
+            args.get(mode_idx + 1).map(String::as_str),
+            Some("bypassPermissions")
+        );
     }
 
     #[test]
     fn test_common_claude_args_system_prompt_mentions_latex() {
         let args = common_claude_args();
-        let prompt_idx = args
-            .iter()
-            .position(|a| a == "--append-system-prompt")
-            .unwrap();
-        let prompt = &args[prompt_idx + 1];
+        let prompt = args
+            .windows(2)
+            .find(|pair| pair[0].ends_with("system-prompt"))
+            .map(|pair| pair[1].as_str())
+            .unwrap_or_else(|| panic!("missing system prompt flag in {args:?}"));
+        assert!(prompt.contains("LaTeX"), "{prompt}");
+    }
+
+    #[test]
+    fn test_prism_system_prompt_keeps_chatgpt_identity() {
+        let prompt = prism_system_prompt(
+            Some("gpt-5.6-terra"),
+            crate::providers::ActiveProviderIdentity::ChatGptOfficial,
+        );
+        assert!(prompt.contains("gpt-5.6-terra"));
+        assert!(prompt.contains("You are not Claude"));
         assert!(prompt.contains("LaTeX"));
+    }
+
+    #[test]
+    fn test_prism_system_prompt_chatgpt_leftover_alias_is_not_claude() {
+        let prompt = prism_system_prompt(
+            Some("opus"),
+            crate::providers::ActiveProviderIdentity::ChatGptOfficial,
+        );
+        assert!(prompt.contains("You are not Claude"));
+        let prompt = prism_system_prompt(
+            None,
+            crate::providers::ActiveProviderIdentity::ThirdParty,
+        );
+        assert!(prompt.contains("You are not Claude"));
+    }
+
+    #[test]
+    fn test_non_claude_providers_replace_default_system_prompt() {
+        assert_eq!(
+            system_prompt_flag(crate::providers::ActiveProviderIdentity::ChatGptOfficial),
+            "--system-prompt"
+        );
+        assert_eq!(
+            system_prompt_flag(crate::providers::ActiveProviderIdentity::ThirdParty),
+            "--system-prompt"
+        );
+        assert_eq!(
+            system_prompt_flag(crate::providers::ActiveProviderIdentity::ClaudeOfficial),
+            "--append-system-prompt"
+        );
+    }
+
+    #[test]
+    fn test_prism_system_prompt_keeps_claude_identity() {
+        let prompt = prism_system_prompt(
+            Some("sonnet"),
+            crate::providers::ActiveProviderIdentity::ClaudeOfficial,
+        );
+        assert!(prompt.contains("sonnet"));
+        assert!(!prompt.contains("You are not Claude"));
     }
 
     #[test]
@@ -5358,16 +5691,12 @@ mod tests {
             "hello 鏂囦欢".into(),
         );
         assert!(args.contains(&"-p".to_string()));
-        #[cfg(target_os = "windows")]
-        {
-            assert_eq!(stdin_payload.as_deref(), Some("hello 鏂囦欢"));
-            assert!(!args.contains(&"hello 鏂囦欢".to_string()));
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            assert_eq!(stdin_payload, None);
-            assert_eq!(args.last().map(String::as_str), Some("hello 鏂囦欢"));
-        }
+        assert!(args.contains(&"--input-format".to_string()));
+        assert!(args.contains(&"stream-json".to_string()));
+        let payload = stdin_payload.expect("stream-json user message");
+        assert!(payload.contains("hello"));
+        assert!(payload.contains("\"type\":\"user\""));
+        assert!(!args.iter().any(|arg| arg.starts_with("hello")));
     }
 
     #[test]
@@ -5821,6 +6150,36 @@ mod tests {
         let cmd = create_command("/usr/bin/claude", vec![], "/tmp", Some("high"));
         let debug_str = format!("{:?}", cmd);
         assert!(debug_str.contains("claude"));
+    }
+
+    #[test]
+    fn test_create_command_isolates_uv_under_localprism_home() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let dir = tempfile::tempdir().unwrap();
+        let previous = std::env::var("LOCALPRISM_HOME").ok();
+        std::env::set_var("LOCALPRISM_HOME", dir.path());
+        let cmd = create_command("/usr/bin/claude", vec![], "/tmp/project", None);
+        let cache = dir.path().join("uv").join("cache");
+        let python = dir.path().join("uv").join("python");
+        let found_cache = cmd.as_std().get_envs().any(|(key, value)| {
+            key == "UV_CACHE_DIR" && value.is_some_and(|value| value == cache.as_os_str())
+        });
+        let found_python = cmd.as_std().get_envs().any(|(key, value)| {
+            key == "UV_PYTHON_INSTALL_DIR" && value.is_some_and(|value| value == python.as_os_str())
+        });
+        match previous {
+            Some(value) => std::env::set_var("LOCALPRISM_HOME", value),
+            None => std::env::remove_var("LOCALPRISM_HOME"),
+        }
+        assert!(
+            found_cache,
+            "create_command should set UV_CACHE_DIR under LocalPrism home"
+        );
+        assert!(
+            found_python,
+            "create_command should set UV_PYTHON_INSTALL_DIR under LocalPrism home"
+        );
+        assert!(cache.is_dir());
     }
 
     // --- clean_user_message_title edge cases ---

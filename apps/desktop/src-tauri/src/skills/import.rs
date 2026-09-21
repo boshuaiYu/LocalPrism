@@ -51,8 +51,7 @@ impl From<&str> for ImportError {
 }
 
 pub fn config_dir() -> Result<PathBuf, ImportError> {
-    dirs::config_dir()
-        .ok_or_else(|| ImportError::from("Unable to resolve the application config directory"))
+    crate::providers::paths::localprism_home().map_err(ImportError::from)
 }
 
 pub fn find_skill_md(skill_dir: &Path) -> Option<PathBuf> {
@@ -186,7 +185,9 @@ pub fn validate_skill(content: &str) -> Result<ParsedSkill, ImportError> {
 
     let folder = sanitize_skill_folder_name(&resolved_name);
     if folder.is_empty() {
-        return Err(ImportError::from("Skill folder name is empty after sanitization"));
+        return Err(ImportError::from(
+            "Skill folder name is empty after sanitization",
+        ));
     }
     validate_skill_slug(&folder).map_err(|error| ImportError::from(error.to_string()))?;
 
@@ -258,16 +259,18 @@ fn collect_relative_files(
             .map_err(|_| ImportError::from("Failed to compute relative skill path"))?
             .to_string_lossy()
             .replace('\\', "/");
-        let bytes = fs::read(&path)
-            .map_err(|error| ImportError::from(format!("Failed to read {}: {error}", path.display())))?;
+        let bytes = fs::read(&path).map_err(|error| {
+            ImportError::from(format!("Failed to read {}: {error}", path.display()))
+        })?;
         files.insert(relative, bytes);
     }
     Ok(())
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), ImportError> {
-    fs::create_dir_all(dst)
-        .map_err(|error| ImportError::from(format!("Failed to create {}: {error}", dst.display())))?;
+    fs::create_dir_all(dst).map_err(|error| {
+        ImportError::from(format!("Failed to create {}: {error}", dst.display()))
+    })?;
     let entries = fs::read_dir(src)
         .map_err(|error| ImportError::from(format!("Failed to read {}: {error}", src.display())))?;
     for entry in entries.flatten() {
@@ -291,9 +294,9 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), ImportError> {
 }
 
 fn atomic_replace_dir(staged: &Path, destination: &Path) -> Result<Option<PathBuf>, ImportError> {
-    let parent = destination.parent().ok_or_else(|| {
-        ImportError::from("Skill destination is missing a parent directory")
-    })?;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| ImportError::from("Skill destination is missing a parent directory"))?;
     fs::create_dir_all(parent).map_err(|error| {
         ImportError::from(format!("Failed to create {}: {error}", parent.display()))
     })?;
@@ -444,6 +447,7 @@ pub fn import_skill_to_targets(
                 description: parsed.description.clone(),
                 folder: item.folder.clone(),
                 source_path: item.destination.to_string_lossy().to_string(),
+                source_url: crate::skills::manifest::source_url_from_skill_source(&source),
                 targets: vec![item.target.clone()],
                 managed: true,
                 compatible_runtimes: parsed.compatible_runtimes.clone(),
@@ -480,23 +484,13 @@ pub fn list_runtime_skills(project_path: Option<&Path>) -> Result<Vec<RuntimeSki
         .map_err(|error| ImportError::from(error.to_string()))?;
 
     let mut disk = Vec::new();
-    let mut targets = vec![
-        SkillTarget {
-            runtime: RuntimeKind::Claude,
-            scope: SkillScope::User,
-        },
-        SkillTarget {
-            runtime: RuntimeKind::Codex,
-            scope: SkillScope::User,
-        },
-    ];
+    let mut targets = vec![SkillTarget {
+        runtime: RuntimeKind::Claude,
+        scope: SkillScope::User,
+    }];
     if project_path.is_some() {
         targets.push(SkillTarget {
             runtime: RuntimeKind::Claude,
-            scope: SkillScope::Project,
-        });
-        targets.push(SkillTarget {
-            runtime: RuntimeKind::Codex,
             scope: SkillScope::Project,
         });
     }
@@ -529,6 +523,7 @@ pub fn list_runtime_skills(project_path: Option<&Path>) -> Result<Vec<RuntimeSki
                 description: parsed.description,
                 folder,
                 source_path: skill_dir.to_string_lossy().to_string(),
+                source_url: None,
                 targets: vec![target.clone()],
                 managed: false,
                 compatible_runtimes: parsed.compatible_runtimes,
@@ -600,16 +595,10 @@ pub fn auto_import_project_skills(project_path: &Path) -> Result<Vec<RuntimeSkil
         .map_err(|error| ImportError::from(error.to_string()))?;
     let mut imported = Vec::new();
 
-    let targets = [
-        SkillTarget {
-            runtime: RuntimeKind::Claude,
-            scope: SkillScope::Project,
-        },
-        SkillTarget {
-            runtime: RuntimeKind::Codex,
-            scope: SkillScope::Project,
-        },
-    ];
+    let targets = [SkillTarget {
+        runtime: RuntimeKind::Claude,
+        scope: SkillScope::Project,
+    }];
 
     for target in targets {
         let Ok(root) = resolve_skill_root(target.runtime, target.scope, Some(project_path)) else {
@@ -668,6 +657,7 @@ pub fn auto_import_project_skills(project_path: &Path) -> Result<Vec<RuntimeSkil
                 description: parsed.description,
                 folder,
                 source_path: canonical.to_string_lossy().to_string(),
+                source_url: None,
                 targets: vec![target.clone()],
                 managed: true,
                 compatible_runtimes: parsed.compatible_runtimes,
@@ -718,6 +708,7 @@ mod tests {
 
     #[test]
     fn import_installs_to_requested_targets_and_registers_manifest() {
+        let _provider_guard = crate::providers::paths::lock_provider_env();
         let _guard = env_lock().lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
@@ -729,11 +720,13 @@ mod tests {
 
         let previous_home = std::env::var_os("HOME");
         let previous_userprofile = std::env::var_os("USERPROFILE");
-        let previous_config = std::env::var_os("LOCALAPPDATA")
-            .or_else(|| std::env::var_os("XDG_CONFIG_HOME"));
+        let previous_localprism = std::env::var_os("LOCALPRISM_HOME");
+        let previous_config =
+            std::env::var_os("LOCALAPPDATA").or_else(|| std::env::var_os("XDG_CONFIG_HOME"));
         // dirs::home_dir / config_dir use platform env; set both common roots.
         std::env::set_var("HOME", &home);
         std::env::set_var("USERPROFILE", &home);
+        std::env::set_var("LOCALPRISM_HOME", &home);
         #[cfg(windows)]
         std::env::set_var("LOCALAPPDATA", &config);
         #[cfg(not(windows))]
@@ -761,6 +754,11 @@ mod tests {
         } else {
             std::env::remove_var("USERPROFILE");
         }
+        if let Some(value) = previous_localprism {
+            std::env::set_var("LOCALPRISM_HOME", value);
+        } else {
+            std::env::remove_var("LOCALPRISM_HOME");
+        }
         #[cfg(windows)]
         {
             if let Some(value) = previous_config {
@@ -781,6 +779,8 @@ mod tests {
         let installed = result.unwrap();
         assert_eq!(installed.len(), 1);
         assert!(installed[0].managed);
-        assert!(PathBuf::from(&installed[0].source_path).join("SKILL.md").exists());
+        assert!(PathBuf::from(&installed[0].source_path)
+            .join("SKILL.md")
+            .exists());
     }
 }

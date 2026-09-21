@@ -3,9 +3,11 @@
 mod agents;
 mod anthropic_proxy;
 mod claude;
+mod claude_permissions;
 mod claude_process;
 mod history;
 mod latex;
+mod providers;
 mod runtime;
 mod skills;
 mod slash_commands;
@@ -669,6 +671,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_process::init())
         .manage(claude::ClaudeProcessState::default())
+        .manage(std::sync::Arc::new(providers::ProviderLoginState::default()))
         .manage(runtime::codex::CodexAppServerState::default())
         .manage(runtime::codex::ApprovalState::default())
         .manage(runtime::AgentRunState::default())
@@ -709,6 +712,13 @@ pub fn run() {
             claude::check_claude_status,
             claude::install_claude_cli,
             claude::login_claude,
+            providers::provider_status,
+            providers::provider_list_models,
+            providers::provider_activate,
+            providers::provider_upsert_third_party,
+            providers::provider_delete,
+            providers::provider_oauth_start,
+            providers::provider_oauth_logout,
             claude::save_anthropic_api_key,
             claude::verify_openai_compatible_api_key,
             claude::list_openai_compatible_models,
@@ -747,6 +757,7 @@ pub fn run() {
             zotero::zotero_start_oauth,
             zotero::zotero_complete_oauth,
             zotero::zotero_cancel_oauth,
+            zotero::zotero_api_request,
             history::history_init,
             history::history_snapshot,
             history::history_list,
@@ -763,6 +774,7 @@ pub fn run() {
             skills::install_scientific_skills_global,
             skills::import_skill_from_folder,
             skills::skill_import,
+            skills::skill_import_url,
             skills::skill_list,
             skills::skill_delete_managed,
             skills::skill_auto_import_project,

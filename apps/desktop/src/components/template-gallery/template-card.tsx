@@ -1,6 +1,7 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { LoaderIcon } from "lucide-react";
 import type { TemplateDefinition } from "@/lib/template-registry";
+import { cn } from "@/lib/utils";
 import { useTemplateStore } from "@/stores/template-store";
 import {
   getThumbnail,
@@ -90,10 +91,17 @@ export function ThumbnailBlank(_props: { color: string }) {
 export const THUMBNAIL_MAP: Record<string, React.FC<{ color: string }>> = {
   "paper-standard": ThumbnailPaper,
   "paper-ieee": ThumbnailPaper,
+  "paper-arxiv": ThumbnailPaper,
+  "paper-elsevier": ThumbnailPaper,
+  "paper-chinese": ThumbnailPaper,
   "paper-acm": ThumbnailPaper,
   "thesis-standard": ThumbnailPaper,
+  "thesis-hitsz": ThumbnailPaper,
   "presentation-beamer": ThumbnailSlides,
   "poster-academic": ThumbnailPoster,
+  "poster-hitsz": ThumbnailPoster,
+  "letter-hit-recommendation": ThumbnailPaper,
+  "letter-hitsz-recommendation": ThumbnailPaper,
   "cv-modern": ThumbnailPaper,
   "letter-formal": ThumbnailPaper,
   "report-technical": ThumbnailPaper,
@@ -116,6 +124,8 @@ interface TemplateCardProps {
 
 export function TemplateCard({ template }: TemplateCardProps) {
   const openPreview = useTemplateStore((s) => s.openPreview);
+  const selectedTemplateId = useTemplateStore((s) => s.selectedTemplateId);
+  const selected = selectedTemplateId === template.id;
   const FallbackThumbnail = getFallbackThumbnail(template);
 
   const thumbnailUrl = useSyncExternalStore(subscribeThumbnails, () =>
@@ -139,7 +149,12 @@ export function TemplateCard({ template }: TemplateCardProps) {
         <button
           onClick={() => openPreview(template.id)}
           style={{ aspectRatio: template.aspectRatio }}
-          className="relative max-h-full w-full overflow-hidden rounded-xl border border-border bg-card transition-all duration-200 hover:border-foreground/20 hover:shadow-md group-hover:scale-[1.02]"
+          className={cn(
+            "relative max-h-full w-full overflow-hidden rounded-xl border bg-card transition-all duration-200 hover:border-foreground/20 hover:shadow-md group-hover:scale-[1.02]",
+            selected
+              ? "border-foreground/40 ring-2 ring-foreground/15"
+              : "border-border",
+          )}
         >
           {thumbnailUrl ? (
             <img

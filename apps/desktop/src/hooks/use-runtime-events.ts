@@ -48,6 +48,9 @@ export function useRuntimeEvents() {
 export function routeRuntimeSideEffects(envelope: RuntimeEventEnvelope): void {
   const { event, sessionId, tabId } = envelope;
   switch (event.type) {
+    case "approvalResolved":
+      useApprovalStore.getState().dismiss(event.requestId);
+      break;
     case "approvalRequested":
     case "userInputRequested": {
       const request = {
@@ -97,6 +100,7 @@ function isKnownApprovalMethod(method: string): boolean {
     method === "item/commandExecution/requestApproval" ||
     method === "item/fileChange/requestApproval" ||
     method === "item/permissions/requestApproval" ||
-    method === "item/tool/requestUserInput"
+    method === "item/tool/requestUserInput" ||
+    method === "claude/can_use_tool"
   );
 }

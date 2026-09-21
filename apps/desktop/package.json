@@ -1,6 +1,6 @@
 {
   "name": "@claude-prism/desktop",
-  "version": "1.3.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,10 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "generate-previews": "tsx scripts/generate-previews.ts",
-    "build:macos": "TECTONIC_DEP_BACKEND=vcpkg VCPKG_ROOT=$HOME/vcpkg CXXFLAGS=-std=c++17 CFLAGS= tauri build --target aarch64-apple-darwin --no-sign",
+    "build:macos": "TECTONIC_DEP_BACKEND=vcpkg VCPKG_ROOT=$HOME/vcpkg CXXFLAGS=-std=c++17 CFLAGS= tauri build --target aarch64-apple-darwin --no-sign --config src-tauri/tauri.local-build.conf.json",
+    "build:macos:intel": "TECTONIC_DEP_BACKEND=vcpkg VCPKG_ROOT=$HOME/vcpkg CXXFLAGS=-std=c++17 CFLAGS= tauri build --target x86_64-apple-darwin --no-sign --config src-tauri/tauri.local-build.conf.json",
+    "build:linux": "TECTONIC_DEP_BACKEND=pkg-config TECTONIC_PKGCONFIG_FORCE_SEMI_STATIC=true CXXFLAGS=-std=c++17 CFLAGS= tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb --config src-tauri/tauri.local-build.conf.json",
+    "build:windows": "tauri build --bundles nsis --config src-tauri/tauri.local-build.conf.json",
     "test": "vitest run",
     "test:watch": "vitest"
   },

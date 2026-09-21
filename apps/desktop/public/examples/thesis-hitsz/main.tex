@@ -1,0 +1,42 @@
+% !TEX program = XeLaTeX
+% HITSZ dissertation starter using the official hitszthesis class
+% https://www.overleaf.com/latex/templates/hitszthesis/hckkkdvywfbc
+% https://github.com/YangLaTeX/hitszthesis
+% Compile: XeLaTeX → BibTeX → XeLaTeX × 2
+%
+% gbt7714 v2 loads natbib before hitszthesis.cls requests
+% [sort&compress], which otherwise raises an option clash at
+% \RequirePackage{subeqnarray}.
+\PassOptionsToPackage{sort&compress,numbers}{natbib}
+\documentclass[type=master]{hitszthesis}
+\usepackage{hitszthesis}
+
+\graphicspath{{figures/}{pictures/}}
+
+\begin{document}
+
+\frontmatter
+\input{front/coverinformation}
+\makecover
+\tableofcontents
+
+\mainmatter
+\input{body/chapter01}
+\input{body/chapter02}
+
+\backmatter
+\input{back/conclusion}
+
+\bibliographystyle{hitszthesis}
+\bibliography{reference}
+
+\begin{appendix}
+\input{back/appendixA}
+\end{appendix}
+
+\input{back/publications}
+\authorization
+\input{back/acknowledgements}
+\input{back/resume}
+
+\end{document}
