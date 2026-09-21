@@ -1,4 +1,4 @@
-# Contributing to ClaudePrism
+# Contributing to LocalPrism
 
 Contributions are welcome! This guide covers the development environment, workflow, and testing.
 
@@ -37,8 +37,8 @@ vcpkg install harfbuzz[graphite2]:x64-windows freetype:x64-windows icu:x64-windo
 ### Setup
 
 ```bash
-git clone https://github.com/delibae/claude-prism.git
-cd claude-prism
+git clone https://github.com/boshuaiYu/LocalPrism.git
+cd LocalPrism
 pnpm install
 ```
 
@@ -57,7 +57,7 @@ pnpm build:desktop
 ## Project Structure
 
 ```
-claude-prism/
+LocalPrism/
 ├── apps/
 │   └── desktop/              # Tauri desktop app
 │       ├── src/              # React frontend (TypeScript)

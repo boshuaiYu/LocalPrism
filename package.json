@@ -4,7 +4,7 @@
   "version": "2.0.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/boshuaiYu/claude-prism"
+    "url": "https://github.com/boshuaiYu/LocalPrism"
   },
   "private": true,
   "workspaces": [

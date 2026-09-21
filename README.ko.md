@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="./apps/desktop/src-tauri/icons/icon.png" width="120" height="120" alt="ClaudePrism" />
+  <img src="./apps/desktop/src-tauri/icons/icon.png" width="120" height="120" alt="LocalPrism" />
 </p>
 
-<h1 align="center">ClaudePrism</h1>
+<h1 align="center">LocalPrism</h1>
 
 <p align="center">
   Claude 기반의 오프라인 우선 과학 논문 작성 워크스페이스.<br/>
@@ -17,41 +17,41 @@
 </p>
 
 <p align="center">
-  <img src="./assets/demo/main.webp" alt="ClaudePrism 데모" width="800" />
+  <img src="./assets/demo/main.webp" alt="LocalPrism 데모" width="800" />
 </p>
 
 <p align="center">
-  <a href="https://claudeprism.delibae.dev?utm_source=github&utm_medium=readme&utm_campaign=launch_v054">
-    <img src="https://img.shields.io/badge/Website-claudeprism.dev-blue?style=flat-square&logo=googlechrome&logoColor=white" alt="Website" />
+  <a href="https://github.com/boshuaiYu/LocalPrism">
+    <img src="https://img.shields.io/badge/GitHub-boshuaiYu%2FLocalPrism-black?style=flat-square&logo=github&logoColor=white" alt="GitHub" />
   </a>&nbsp;
-  <a href="https://github.com/boshuaiYu/claude-prism/releases/latest/download/LocalPrism-macOS.dmg">
+  <a href="https://github.com/boshuaiYu/LocalPrism/releases/latest/download/LocalPrism-macOS.dmg">
     <img src="https://img.shields.io/badge/Download-macOS_(Apple_Silicon)-black?style=for-the-badge&logo=apple&logoColor=white" alt="macOS (Apple Silicon) 다운로드" />
   </a>&nbsp;
-  <a href="https://github.com/boshuaiYu/claude-prism/releases/latest/download/LocalPrism-macOS-Intel.dmg">
+  <a href="https://github.com/boshuaiYu/LocalPrism/releases/latest/download/LocalPrism-macOS-Intel.dmg">
     <img src="https://img.shields.io/badge/Download-macOS_(Intel)-555555?style=for-the-badge&logo=apple&logoColor=white" alt="macOS (Intel) 다운로드" />
   </a>&nbsp;
-  <a href="https://github.com/boshuaiYu/claude-prism/releases/latest/download/LocalPrism-Windows-setup.exe">
+  <a href="https://github.com/boshuaiYu/LocalPrism/releases/latest/download/LocalPrism-Windows-setup.exe">
     <img src="https://img.shields.io/badge/Download-Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 다운로드" />
   </a>&nbsp;
-  <a href="https://github.com/boshuaiYu/claude-prism/releases/latest/download/LocalPrism-Linux.AppImage">
+  <a href="https://github.com/boshuaiYu/LocalPrism/releases/latest/download/LocalPrism-Linux.AppImage">
     <img src="https://img.shields.io/badge/Download-Linux_(AppImage)-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux 다운로드" />
   </a>
 </p>
 <p align="center">
-  <a href="https://github.com/boshuaiYu/claude-prism/releases">
-    <img src="https://img.shields.io/github/v/release/delibae/claude-prism?style=flat-square&label=Latest%20Release&color=green" alt="Latest Release" />
+  <a href="https://github.com/boshuaiYu/LocalPrism/releases">
+    <img src="https://img.shields.io/github/v/release/boshuaiYu/LocalPrism?style=flat-square&label=Latest%20Release&color=green" alt="Latest Release" />
   </a>
 </p>
 
 ---
 
-## 왜 ClaudePrism인가?
+## 왜 LocalPrism인가?
 
 [OpenAI Prism](https://openai.com/prism/)은 클라우드 기반 LaTeX 워크스페이스입니다 — 사용하려면 모든 파일과 데이터를 OpenAI 서버에 업로드해야 합니다.
 
-ClaudePrism은 **로컬 우선** 대안입니다 — 파일은 로컬 디스크에 저장하고 오프라인으로 컴파일합니다. AI 기능은 Anthropic API로 콘텐츠를 전송하여 추론합니다 ([데이터 사용 정책](https://code.claude.com/docs/en/data-usage) 참고).
+LocalPrism은 **로컬 우선** 대안입니다 — 파일은 로컬 디스크에 저장하고 오프라인으로 컴파일합니다. AI 기능은 Anthropic API로 콘텐츠를 전송하여 추론합니다 ([데이터 사용 정책](https://code.claude.com/docs/en/data-usage) 참고).
 
-| | OpenAI Prism | ClaudePrism |
+| | OpenAI Prism | LocalPrism |
 |---|:---:|:---:|
 | AI 모델 | GPT-5.2 | **Claude Opus / Sonnet / Haiku** |
 | 실행 환경 | 브라우저 (클라우드) | **네이티브 데스크톱 (Tauri 2 + Rust)** |
@@ -71,7 +71,7 @@ ClaudePrism은 **로컬 우선** 대안입니다 — 파일은 로컬 디스크�
 ## 기능
 
 ### Python 환경 (uv)
-ClaudePrism은 빠른 Python 패키지 관리자인 [uv](https://docs.astral.sh/uv/)를 앱에 직접 통합합니다. 원클릭으로 uv 설치, 원클릭으로 프로젝트 수준 가상 환경 생성. Claude Code가 Python 코드 실행 시 `.venv`를 자동으로 사용하므로, 에디터를 떠나지 않고 플롯 생성, 분석 스크립트 실행, 데이터 처리가 가능합니다.
+LocalPrism은 빠른 Python 패키지 관리자인 [uv](https://docs.astral.sh/uv/)를 앱에 직접 통합합니다. 원클릭으로 uv 설치, 원클릭으로 프로젝트 수준 가상 환경 생성. Claude Code가 Python 코드 실행 시 `.venv`를 자동으로 사용하므로, 에디터를 떠나지 않고 플롯 생성, 분석 스크립트 실행, 데이터 처리가 가능합니다.
 
 <p align="center">
   <img src="./assets/demo/python.webp" alt="Python 환경" width="600" />
@@ -98,7 +98,7 @@ ClaudePrism은 빠른 Python 패키지 관리자인 [uv](https://docs.astral.sh/
 </p>
 
 ### 템플릿 & 프로젝트 마법사로 빠른 시작
-템플릿(논문, 학위 논문, 프레젠테이션, 포스터, 서신 등)을 선택하고 이름을 지정한 후, 선택적으로 작성 내용을 설명하면 — ClaudePrism이 프로젝트를 설정하고 AI로 초기 콘텐츠를 생성합니다. 참고 파일(PDF, BIB, 이미지)을 드래그 앤 드롭하여 바로 작성을 시작하세요.
+템플릿(논문, 학위 논문, 프레젠테이션, 포스터, 서신 등)을 선택하고 이름을 지정한 후, 선택적으로 작성 내용을 설명하면 — LocalPrism이 프로젝트를 설정하고 AI로 초기 콘텐츠를 생성합니다. 참고 파일(PDF, BIB, 이미지)을 드래그 앤 드롭하여 바로 작성을 시작하세요.
 
 <p align="center">
   <img src="./assets/demo/starter.webp" alt="템플릿 갤러리 & 프로젝트 마법사" width="700" />
@@ -149,7 +149,7 @@ LaTeX/BibTeX 구문 강조, 실시간 오류 린팅, 찾기 & 바꾸기(정규�
 
 ## 설치
 
-[GitHub Releases](https://github.com/boshuaiYu/claude-prism/releases)에서 최신 빌드를 다운로드하세요.
+[GitHub Releases](https://github.com/boshuaiYu/LocalPrism/releases)에서 최신 빌드를 다운로드하세요.
 
 ## 기여
 

@@ -260,7 +260,7 @@ export function ProjectPicker() {
       <header className="relative z-10 flex h-[calc(44px+var(--titlebar-height))] shrink-0 items-center justify-end gap-1 px-4 pt-[var(--titlebar-height)]">
         <Button variant="ghost" size="icon" className="size-8" asChild>
           <a
-            href="https://github.com/delibae/claude-prism"
+            href="https://github.com/boshuaiYu/LocalPrism"
             target="_blank"
             rel="noopener noreferrer"
             title="GitHub"

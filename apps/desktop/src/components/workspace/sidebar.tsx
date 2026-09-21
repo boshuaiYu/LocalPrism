@@ -1502,7 +1502,7 @@ export function Sidebar({
               </Button>
               <Button variant="ghost" size="icon" className="size-6" asChild>
                 <a
-                  href="https://github.com/delibae/claude-prism"
+                  href="https://github.com/boshuaiYu/LocalPrism"
                   target="_blank"
                   rel="noopener noreferrer"
                   title="GitHub"
