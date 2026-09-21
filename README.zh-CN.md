@@ -5,8 +5,8 @@
 <h1 align="center">LocalPrism</h1>
 
 <p align="center">
-  由 Claude 驱动的离线优先科学写作工作区。<br/>
-  LaTeX + Python + 100 多个科学技能 — 在桌面端运行。
+  本地优先的学术写作桌面应用，面向论文、学位论文和推荐信。<br/>
+  隔离的 Claude 目录 · 开箱即用的科研技能包 · 哈工大 / 哈工深模板。
 </p>
 
 <p align="center">
@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <img src="./assets/demo.png" alt="LocalPrism 演示" width="800" />
+  <img src="./assets/demo/main.webp" alt="LocalPrism 工作区" width="800" />
 </p>
 
 <p align="center">
@@ -31,93 +31,124 @@
 
 ---
 
-## 为什么选择 LocalPrism？
+## 为什么是 LocalPrism？
 
-[OpenAI Prism](https://openai.com/prism/) 是一个云端 LaTeX 工作区 — 使用它需要将所有文件和数据上传到 OpenAI 的服务器。
+LocalPrism 是一个**独立**的桌面应用：稿件留在本机文件夹，Tectonic 离线编译，AI 按需使用。它**借鉴了** [ClaudePrism](https://github.com/delibae/claude-prism) 的本地编辑器、PDF 预览和对话壳层，但围绕学术写作重做了运行时和模板，而不是换个名字继续做别人的 fork。
 
-LocalPrism 是**本地优先**的替代方案 — 文件存储在本地磁盘，离线编译。AI 功能通过 Anthropic API 发送内容进行推理（参见[数据使用政策](https://code.claude.com/docs/en/data-usage)）。
-
-| | OpenAI Prism | LocalPrism |
+| | 云端 Prism 类工具 | LocalPrism |
 |---|:---:|:---:|
-| AI 模型 | GPT-5.2 | **Claude Opus / Sonnet / Haiku** |
-| 运行环境 | 浏览器（云端） | **原生桌面应用（Tauri 2 + Rust）** |
-| LaTeX | 云端编译 | **Tectonic（内嵌，离线）** |
-| Python 环境 | — | **内置 uv + venv — 一键科学 Python 环境** |
-| 科学技能 | — | **100+ 领域技能（生物信息学、化学信息学、ML 等）** |
-| 快速开始 | 需要注册账户 | **安装即用 — 模板库 + 项目向导** |
-| 版本控制 | — | **基于 Git 的历史记录，支持标签和差异对比** |
-| 源代码 | 专有 | **开源（MIT）** |
+| 文件 | 上传到厂商 | **只在项目目录里** |
+| Claude 配置 | 共用 `~/.claude` | **独立的 `{LOCALPRISM_HOME}/claude-home`** |
+| 首次技能 | 自己逛目录 | **PaperSpine + 学术 / Nature / 科学实验包** |
+| 智能体 | 手改文件 | **设置里创建，并勾选技能** |
+| 院校模板 | 通用空壳 | **哈工大推荐信、哈工深海报、`hitszthesis`** |
+| 运行时 | 单一厂商 | **Claude，设置里可选 Codex** |
 
-### 数据与隐私
-
-文档在本地存储和编译，不会上传到远程服务器。但使用 AI 功能时，**提示词和 Claude 读取的文件内容会发送到 Anthropic API 进行推理**，这与所有云端 LLM 工具相同。有关保留政策和退出选项，请参阅 [Claude Code 数据使用政策](https://code.claude.com/docs/en/data-usage)。
+使用 AI 时，提示词和模型读到的文件仍会发给对应 API，稿件本身不会被拿去云端存档。使用 Claude 时请参阅 [数据使用说明](https://code.claude.com/docs/en/data-usage)。
 
 ---
 
-## 功能
+## LocalPrism 多做了什么
 
-### Python 环境（uv）
-LocalPrism 集成了 [uv](https://docs.astral.sh/uv/) — 快速的 Python 包管理器。一键安装 uv，一键创建项目级虚拟环境。Claude Code 在运行 Python 代码时自动使用 `.venv`，因此您可以在编辑器中直接生成图表、运行分析脚本和处理数据。
+### 隔离的主目录，不污染你的 Claude Code
 
-### 100+ 科学技能
-浏览并安装来自 [K-Dense Scientific Skills](https://github.com/K-Dense-AI/claude-scientific-skills) 的领域特定技能 — 精心策划的提示词和工具配置，赋予 Claude 专业领域的深度知识：
+技能、自定义 Agent、斜杠命令写在 LocalPrism 自己的数据根下（`claude-home/`）：安装目录可写就跟安装包放在一起，否则落在 `%APPDATA%/LocalPrism` 或系统配置目录。某一篇论文还可以把文件放在项目里的 `.localprism/`。日常使用的 `~/.claude` 不会被改乱。
 
-| 领域 | 技能 |
-|--------|--------|
-| **生物信息学与基因组学** | Scanpy、BioPython、PyDESeq2、PySAM、gget、AnnData 等 |
-| **化学信息学与药物发现** | RDKit、DeepChem、DiffDock、PubChem、ChEMBL 等 |
-| **数据分析与可视化** | Matplotlib、Seaborn、Plotly、Polars、scikit-learn 等 |
-| **机器学习与 AI** | PyTorch Lightning、Transformers、SHAP、UMAP、PyMC 等 |
-| **临床研究** | ClinicalTrials.gov、ClinVar、DrugBank、FDA 等 |
-| **科学传播** | 文献综述、基金撰写、引用管理等 |
-| **多组学与系统生物学** | scvi-tools、COBRApy、Reactome、Bioservices 等 |
-| **更多** | 材料科学、实验室自动化、蛋白质组学、物理学等 |
+[uv](https://docs.astral.sh/uv/) 管的 Python 环境同样装在 LocalPrism 主目录里。
 
-技能可全局安装（`~/.claude/skills/`）或按项目安装，Claude 会在相关时自动加载。
+<p align="center">
+  <img src="./assets/demo/python.webp" alt="Python 环境" width="600" />
+</p>
 
-### 模板与项目向导快速开始
-选择模板（论文、学位论文、演示文稿、海报、信函等），命名，可选描述写作内容 — LocalPrism 设置项目并通过 AI 生成初始内容。拖放参考文件（PDF、BIB、图片）即可立即开始写作。
+### 第一次打开就装好的科研技能包
 
-### Claude AI 助手
-在编辑器中直接与 Claude 对话。在 Sonnet、Opus、Haiku 模型之间选择，可调节推理力度。持久会话、工具使用（文件编辑、bash、搜索）和可扩展的斜杠命令。
+首次启动可以把下面四个包装到**用户范围**（不会塞进当前论文）：
 
-### 建议更改审查
-当 Claude 建议编辑时，更改会以可视化差异的形式显示在专用面板中。按块接受或拒绝，或一次全部应用/撤销（`⌘Y` / `⌘N`）。在您做出决定之前，原始内容始终保留。
+| 技能包 | 用途 |
+|------|------|
+| [PaperSpine](https://github.com/WUBING2023/PaperSpine) | 选题摄入、提纲、改写、引用、LaTeX 骨架 |
+| [academic-research-skills](https://github.com/Imbad0202/academic-research-skills) | 文献综述、同行评审、参考文献核查、研究流水线 |
+| [nature-skills](https://github.com/Yuan1z0825/nature-skills) | Nature 风格润色、图、写作、引用 |
+| [scientific-agent-skills](https://github.com/K-Dense-AI/scientific-agent-skills) | 领域实验：Scanpy、BioPython、RDKit 等 |
 
-### 基于 Git 的历史记录
-每次保存都会在本地 Git 仓库（`.claudeprism/history.git/`）中创建快照。标记重要检查点，浏览任意两个快照之间的差异，恢复以前的版本 — 全部在应用内完成。
+之后仍可再装其他包。技能包自带的官方斜杠命令会按上游名字安装，界面不会把每条技能介绍重复贴进输入框。
 
-### 离线 LaTeX 编译
-Tectonic 直接嵌入应用中。包在首次使用时下载一次并本地缓存。之后编译完全离线，无需安装 TeX Live。
+<p align="center">
+  <img src="./assets/demo/scientific.webp" alt="技能包" width="700" />
+</p>
 
-### 截图询问
-按 `⌘⇧X`（Windows/Linux：`Ctrl+Shift+X`）进入截图模式，拖动选择 PDF 中的任意区域 — 截图会固定到聊天输入框，您可以立即向 Claude 询问。`⌘X` / `Ctrl+X` 仍是剪切。非常适合询问公式、图表、表格或审稿意见。
+### 自定义 Agent，并能指定技能
 
-### 实时 PDF 预览
-原生 MuPDF 渲染，支持 SyncTeX — 点击 PDF 中的位置跳转到相应的源代码行。支持缩放、文本选择和截图。
+「设置 → Agents」里可以新建 Claude（以及 Codex）智能体，从已安装的包里勾选技能。勾选的技能会预加载到该 Agent；用户目录里的其他技能仍可被运行时发现。
 
-### 编辑器
-CodeMirror 6，支持 LaTeX/BibTeX 语法高亮、实时错误检查、查找和替换（正则表达式）以及多文件项目自动保存。
+### 哈工大 / 哈工深模板，以及可写的期刊初稿
 
-### 更多
-- **Zotero 集成** — 基于 OAuth 的文献管理和引用插入。
-- **斜杠命令** — 内置（`/review`、`/init`）+ 来自 `.claude/commands/` 的自定义命令。
-- **外部编辑器** — 在 Cursor、VS Code、Zed 或 Sublime Text 中打开项目。
-- **深色/浅色主题** — 自动切换。
+模板库不只是空论文：
+
+- **哈工大 / 哈工深推荐信**（哈尔滨校徽信头；深圳校区中英双语）
+- **哈工深学术海报**（A0 / beamerposter）
+- **哈工深学位论文**，使用官方 [`hitszthesis`](https://github.com/YangLaTeX/hitszthesis)
+- **带正文的初稿**：arXiv、Elsevier、中文期刊（`ctexart`）
+
+选模板、起名、拖入 PDF / BIB / 图片即可开写。
+
+<p align="center">
+  <img src="./assets/demo/starter.webp" alt="模板库" width="700" />
+</p>
+
+### 可选的第二运行时
+
+设置里可以安装并登录 **Codex**，与 Claude 并列。对话、技能和 Agent 跟随你为该会话选择的运行时。
+
+---
+
+## 从 ClaudePrism 保留的部分
+
+下面这些是 LocalPrism 仍然建立在其上的本地能力，不是云端工作区。
+
+- **离线 LaTeX** — 内嵌 Tectonic，宏包首次下载后本地缓存
+- **实时 PDF** — MuPDF + SyncTeX，点 PDF 跳回源码
+- **截图提问** — `Ctrl+Shift+X` / `⌘⇧X` 把 PDF 选区钉到对话（`Ctrl+X` 仍是剪切）
+- **Git 历史** — 快照在 `.claudeprism/history.git/`，可打标签、对比、恢复
+- **建议改动** — 按块接受或拒绝（`⌘Y` / `⌘N`）
+- **Zotero** — OAuth 文献库和插入引用
+- **外部编辑器** — Cursor、VS Code、Zed、Sublime Text
+- **深色 / 浅色主题**
+
+<p align="center">
+  <img src="./assets/demo/claudecommand.webp" alt="对话与斜杠命令" width="600" />
+</p>
+
+<p align="center">
+  <img src="./assets/demo/history.webp" alt="历史与建议改动" width="700" />
+</p>
+
+<p align="center">
+  <img src="./assets/demo/capture_ask.webp" alt="截图提问" width="700" />
+</p>
+
+<p align="center">
+  <img src="./assets/demo/zotero.webp" alt="Zotero" width="300" />
+</p>
 
 ---
 
 ## 安装
 
-从 [GitHub Releases](https://github.com/boshuaiYu/LocalPrism/releases) 下载最新版本。
+从 [GitHub Releases](https://github.com/boshuaiYu/LocalPrism/releases) 下载最新安装包。
+
+macOS / Linux 包由 GitHub Actions 构建；Windows 也可以在本机执行 `pnpm build:desktop`。
 
 ## 贡献
 
-欢迎贡献！请查看 [CONTRIBUTING.md](./CONTRIBUTING.md) 了解开发环境设置、测试和指南。
+开发环境、测试和打包见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
 ## 致谢
 
-本项目基于 [assistant-ui](https://github.com/assistant-ui) 的 [Open Prism](https://github.com/assistant-ui/open-prism) 开发。
+LocalPrism **不是**别人仓库的 GitHub fork。它是独立仓库：桌面壳层（编辑器、Tectonic、PDF、对话界面）**借鉴自 ClaudePrism**，隔离目录、默认学术技能包、Agent 选择器和哈工大 / 哈工深模板是本项目自己的部分。
+
+- [ClaudePrism](https://github.com/delibae/claude-prism)，作者 [delibae](https://github.com/delibae)
+- [Open Prism](https://github.com/assistant-ui/open-prism)，作者 [assistant-ui](https://github.com/assistant-ui)（ClaudePrism 的上游起点）
 
 ## 许可证
 

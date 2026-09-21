@@ -47,6 +47,10 @@ yarn-error.log*
 .worktrees/
 .tmp/
 .omc/
+.cursor/
+.superpowers/
+.superpower/
+docs/superpowers/
 apps/desktop/src-tauri/target-static/
 *.pem
 

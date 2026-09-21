@@ -5,8 +5,8 @@
 <h1 align="center">LocalPrism</h1>
 
 <p align="center">
-  Claude を活用した、オフラインファーストの論文執筆ワークスペース。<br/>
-  LaTeX + Python + 100 以上の専門スキル ── デスクトップで動作します。
+  論文・学位論文・推薦状向けの、ローカルファーストな執筆デスクトップ。<br/>
+  隔離された Claude ホーム · 初回導入の研究スキルパック · HIT / HITSZ テンプレート。
 </p>
 
 <p align="center">
@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <img src="./assets/demo/main.webp" alt="LocalPrism デモ" width="800" />
+  <img src="./assets/demo/main.webp" alt="LocalPrism ワークスペース" width="800" />
 </p>
 
 <p align="center">
@@ -47,127 +47,122 @@
 
 ## なぜ LocalPrism なのか
 
-[OpenAI Prism](https://openai.com/prism/) はクラウドベースの LaTeX ワークスペースです — 利用するにはすべてのファイルとデータを OpenAI のサーバーにアップロードする必要があります。
+LocalPrism は**独立した**デスクトップアプリです。原稿は手元のフォルダに置き、Tectonic でオフラインコンパイルし、AI は必要なときだけ使います。[ClaudePrism](https://github.com/delibae/claude-prism) のローカルエディタ・PDF プレビュー・チャット殻を**参考にしつつ**、学術執筆向けのランタイムとテンプレートを組み直しています。他人の fork を改名しただけではありません。
 
-LocalPrism は**ローカルファースト**の代替ツールです — ファイルはローカルディスクに保存し、オフラインでコンパイルします。AI 機能は Anthropic API にコンテンツを送信して推論を行います（[データ使用ポリシー](https://code.claude.com/docs/en/data-usage)を参照）。
-
-| | OpenAI Prism | LocalPrism |
+| | クラウド型 Prism | LocalPrism |
 |---|:---:|:---:|
-| AI モデル | GPT-5.2 | **Claude Opus / Sonnet / Haiku** |
-| 実行環境 | ブラウザ（クラウド） | **ネイティブデスクトップ（Tauri 2 + Rust）** |
-| LaTeX | クラウドコンパイル | **Tectonic 内蔵（オフライン対応）** |
-| Python 環境 | — | **uv + venv 内蔵 ── ワンクリックで科学計算向け Python 環境を構築** |
-| 専門スキル | — | **100 以上の専門スキル（バイオインフォマティクス、ケモインフォマティクス、ML など）** |
-| 導入 | アカウント設定が必要 | **インストール後すぐに利用可能 ── テンプレートギャラリー + プロジェクトウィザード** |
-| バージョン管理 | — | **Git ベースの履歴管理（ラベル & diff）** |
-| ソースコード | プロプライエタリ | **オープンソース（MIT）** |
+| ファイル | ベンダーへアップロード | **プロジェクトフォルダに残す** |
+| Claude 設定 | 共有の `~/.claude` | **隔離された `{LOCALPRISM_HOME}/claude-home`** |
+| 初回スキル | カタログを自分で探す | **PaperSpine + 学術 / Nature / 科学パック** |
+| エージェント | 手書きファイル | **設定画面で作成し、スキルを割り当て** |
+| 大学テンプレ | 汎用の空原稿 | **HIT 推薦状、HITSZ ポスター、`hitszthesis`** |
+| ランタイム | 単一ベンダー | **Claude。設定で Codex も選択可** |
 
-### データとプライバシー
-
-ドキュメントはローカルで保存・コンパイルされ、リモートサーバーにアップロードされません。ただし、AI 機能を使用する際、**プロンプトと Claude が読み取ったファイル内容は Anthropic API に送信されます**。これはすべてのクラウドベース LLM ツールと同様です。保持ポリシーとオプトアウトオプションについては [Claude Code データ使用ポリシー](https://code.claude.com/docs/en/data-usage)をご覧ください。
+AI 利用時はプロンプトとモデルが読んだファイルが API に送られます。原稿そのものをクラウド保存するためではありません。Claude 利用時は [データ使用](https://code.claude.com/docs/en/data-usage) を参照してください。
 
 ---
 
-## 機能
+## LocalPrism が足したこと
 
-### Python 環境（uv）
+### 共有 Claude プロファイルを汚さないホーム
 
-LocalPrism には、高速な Python パッケージマネージャである [uv](https://docs.astral.sh/uv/) が直接組み込まれています。ワンクリックで uv をインストールし、ワンクリックでプロジェクトごとの仮想環境を作成できます。Claude Code は Python コードの実行時に `.venv` を自動で使用するため、エディタを離れることなく、グラフの生成、解析スクリプトの実行、データ処理を行えます。
+スキル、カスタムエージェント、スラッシュコマンドは LocalPrism 自身のデータ根（`claude-home/`）に置きます。インストール先が書き込み可能なら実行ファイルの隣、そうでなければ `%APPDATA%/LocalPrism` や OS の設定ディレクトリです。論文ごとに `.localprism/` も使えます。普段の Claude Code プロファイルはそのままです。
+
+[uv](https://docs.astral.sh/uv/) の Python も LocalPrism ホーム配下に入ります。
 
 <p align="center">
   <img src="./assets/demo/python.webp" alt="Python 環境" width="600" />
 </p>
 
-### 100 以上の専門スキル
+### 初回起動で入る研究スキルパック
 
-[K-Dense Scientific Skills](https://github.com/K-Dense-AI/claude-scientific-skills) から、分野ごとのスキルを閲覧・インストールできます。これらは、Claude に各分野の専門知識を追加するための厳選されたプロンプトとツール設定です。
+初回は次の 4 パックを**ユーザー範囲**へ入れられます（今開いている論文には入れません）。
 
-| 分野 | スキル |
-|--------|--------|
-| **バイオインフォマティクス & ゲノミクス** | Scanpy, BioPython, PyDESeq2, PySAM, gget, AnnData, ... |
-| **ケモインフォマティクス & 創薬** | RDKit, DeepChem, DiffDock, PubChem, ChEMBL, ... |
-| **データ分析 & 可視化** | Matplotlib, Seaborn, Plotly, Polars, scikit-learn, ... |
-| **機械学習 & AI** | PyTorch Lightning, Transformers, SHAP, UMAP, PyMC, ... |
-| **臨床研究** | ClinicalTrials.gov, ClinVar, DrugBank, FDA, ... |
-| **研究支援** | 文献レビュー、研究費申請書の作成、引用管理, ... |
-| **マルチオミクス & システム生物学** | scvi-tools, COBRApy, Reactome, Bioservices, ... |
-| **その他** | 材料科学、ラボ自動化、プロテオミクス、物理学, ... |
+| パック | 用途 |
+|------|------|
+| [PaperSpine](https://github.com/WUBING2023/PaperSpine) | 取り込み、アウトライン、改稿、引用、LaTeX 骨格 |
+| [academic-research-skills](https://github.com/Imbad0202/academic-research-skills) | 文献レビュー、査読、参考文献チェック、研究パイプライン |
+| [nature-skills](https://github.com/Yuan1z0825/nature-skills) | Nature 調の推敲、図、執筆、引用 |
+| [scientific-agent-skills](https://github.com/K-Dense-AI/scientific-agent-skills) | Scanpy、BioPython、RDKit などの領域ラボ |
 
-スキルはグローバル（`~/.claude/skills/`）またはプロジェクト単位でインストールでき、必要に応じて Claude が自動的に読み込みます。
+追加パックも後から入れられます。公式スラッシュ名は上流のまま。スキル紹介文を入力欄へ繰り返し貼ることはしません。
 
 <p align="center">
-  <img src="./assets/demo/scientific.webp" alt="専門スキル" width="700" />
+  <img src="./assets/demo/scientific.webp" alt="スキルパック" width="700" />
 </p>
 
-### テンプレート & プロジェクトウィザードですぐに開始
+### スキルを割り当てるカスタムエージェント
 
-テンプレート（論文、学位論文、プレゼンテーション、ポスター、レターなど）を選び、名前を付け、必要に応じて内容を説明すると、LocalPrism がプロジェクトをセットアップし、AI が初期コンテンツを生成します。参考ファイル（PDF、BIB、画像）をドラッグ & ドロップすれば、そのまま執筆を始められます。
+設定 → Agents で Claude（および Codex）エージェントを作り、導入済みパックからスキルを付けられます。割り当てたスキルはそのエージェントにプリロードされます。
+
+### HIT / HITSZ と中身のある投稿用テンプレ
+
+ギャラリーは空の論文だけではありません。
+
+- **HIT / HITSZ 推薦状**（ハルビン校レターヘッド、深圳校の日英併記相当）
+- **HITSZ 学術ポスター**（A0 / beamerposter）
+- 公式 [`hitszthesis`](https://github.com/YangLaTeX/hitszthesis) の**学位論文**
+- **本文入りの初稿**：arXiv、Elsevier、中国語ジャーナル（`ctexart`）
+
+テンプレを選び、名前を付け、PDF / BIB / 図をドロップして書き始めます。
 
 <p align="center">
-  <img src="./assets/demo/starter.webp" alt="テンプレートギャラリー & プロジェクトウィザード" width="700" />
+  <img src="./assets/demo/starter.webp" alt="テンプレートギャラリー" width="700" />
 </p>
 
-### Claude AI アシスタント
+### 任意の第二ランタイム
 
-エディタ上で Claude と直接チャットできます。Sonnet・Opus・Haiku のモデルを切り替えられ、推論レベルも調整できます。セッションは保持され、ツール呼び出し（ファイル編集、bash、検索）や、拡張可能なスラッシュコマンドにも対応しています。
+設定から **Codex** をインストールしてログインできます。会話・スキル・エージェントは、その会話で選んだランタイムに従います。
+
+---
+
+## ClaudePrism から残したもの
+
+ローカルの編集基盤です。クラウドワークスペースではありません。
+
+- **オフライン LaTeX** — 内蔵 Tectonic、初回ダウンロード後はキャッシュ
+- **ライブ PDF** — MuPDF + SyncTeX
+- **キャプチャして質問** — `Ctrl+Shift+X` / `⌘⇧X`（`Ctrl+X` は切り取りのまま）
+- **Git 履歴** — `.claudeprism/history.git/`
+- **提案差分** — チャンク単位で採用 / 却下（`⌘Y` / `⌘N`）
+- **Zotero** — OAuth と引用挿入
+- **外部エディタ** — Cursor、VS Code、Zed、Sublime Text
+- **ダーク / ライト**
 
 <p align="center">
-  <img src="./assets/demo/claudecommand.webp" alt="Claude AI アシスタント & スラッシュコマンド" width="600" />
+  <img src="./assets/demo/claudecommand.webp" alt="チャットとスラッシュコマンド" width="600" />
 </p>
-
-### 履歴 & 変更提案のレビュー
-
-保存するたびに、ローカル Git リポジトリ（`.claudeprism/history.git/`）にスナップショットが作成されます。重要なチェックポイントにラベルを付けたり、任意の 2 つのスナップショット間の diff を確認したり、以前のバージョンに復元したりできます。Claude が編集を提案すると、専用パネルに視覚的な差分とともに表示され、チャンクごとに承認・却下、または一括で適用・取り消し（`⌘Y` / `⌘N`）できます。
 
 <p align="center">
-  <img src="./assets/demo/history.webp" alt="履歴 & 変更提案" width="700" />
+  <img src="./assets/demo/history.webp" alt="履歴と提案変更" width="700" />
 </p>
-
-### オフライン LaTeX コンパイル
-
-Tectonic がアプリに直接組み込まれています。パッケージは初回使用時に一度だけダウンロードされ、ローカルにキャッシュされます。それ以降は TeX Live をインストールしなくても、完全にオフラインでコンパイルできます。
-
-### キャプチャしてそのまま質問
-
-`⌘⇧X`（Windows/Linux：`Ctrl+Shift+X`）でキャプチャモードに入り、PDF 上の任意の領域をドラッグして選択すると、キャプチャした画像がチャット入力欄に固定され、そのまま Claude に質問できます。`⌘X` / `Ctrl+X` は切り取りのままです。数式、図表、査読コメントについて質問するのに便利です。
 
 <p align="center">
-  <img src="./assets/demo/capture_ask.webp" alt="キャプチャ & 質問" width="700" />
+  <img src="./assets/demo/capture_ask.webp" alt="キャプチャして質問" width="700" />
 </p>
-
-### リアルタイム PDF プレビュー
-
-SyncTeX 対応のネイティブ MuPDF レンダリングを採用しています。PDF 上の位置をクリックすると、対応するソース行へジャンプできます。ズーム、テキスト選択、キャプチャにも対応しています。
-
-### エディタ
-
-CodeMirror 6 ベースのエディタで、LaTeX / BibTeX のシンタックスハイライト、リアルタイムのエラー検出、検索 & 置換（正規表現対応）、自動保存付きのマルチファイルプロジェクトをサポートしています。
-
-### その他
-
-- **Zotero 連携** ── OAuth ベースの文献管理と引用挿入
 
 <p align="center">
-  <img src="./assets/demo/zotero.webp" alt="Zotero 連携" width="300" />
+  <img src="./assets/demo/zotero.webp" alt="Zotero" width="300" />
 </p>
-
-- **スラッシュコマンド** ── 組み込み（`/review`, `/init`）+ `.claude/commands/` のカスタムコマンド
-- **外部エディタ** ── Cursor、VS Code、Zed、Sublime Text でプロジェクトを開けます
-- **ダーク / ライトテーマ** ── 自動切り替え
 
 ---
 
 ## インストール
 
-[GitHub Releases](https://github.com/boshuaiYu/LocalPrism/releases) から最新ビルドをダウンロードしてください。
+[GitHub Releases](https://github.com/boshuaiYu/LocalPrism/releases) から最新ビルドを入手してください。
+
+macOS / Linux は GitHub Actions、Windows は `pnpm build:desktop` でも構築できます。
 
 ## コントリビュート
 
-コントリビュートを歓迎します。開発環境のセットアップ、テスト、ガイドラインについては [CONTRIBUTING.md](./CONTRIBUTING.md) を参照してください。
+セットアップとテストは [CONTRIBUTING.md](./CONTRIBUTING.md) を参照してください。
 
 ## 謝辞
 
-本プロジェクトは、[assistant-ui](https://github.com/assistant-ui) による [Open Prism](https://github.com/assistant-ui/open-prism) をもとに開発されました。
+LocalPrism は**他人リポジトリの fork ではありません**。エディタ、Tectonic、PDF、チャット殻は [ClaudePrism](https://github.com/delibae/claude-prism) を参考にし、隔離ホーム、既定の学術パック、エージェント、HIT / HITSZ テンプレートは本プロジェクト側の追加です。
+
+- [ClaudePrism](https://github.com/delibae/claude-prism)（[delibae](https://github.com/delibae)）
+- [Open Prism](https://github.com/assistant-ui/open-prism)（[assistant-ui](https://github.com/assistant-ui)、ClaudePrism の起点）
 
 ## ライセンス
 
