@@ -165,17 +165,14 @@ describe("runtime selector helpers", () => {
     expect(getCodexModelOptions([backendClaudeModel])).toEqual([]);
   });
 
-  it("keeps Claude and API effort controls compatible with low, medium, and high", () => {
-    expect(getReasoningEffortOptions("claude", null)).toEqual([
-      "low",
-      "medium",
-      "high",
-    ]);
-    expect(getReasoningEffortOptions("api", null)).toEqual([
-      "low",
-      "medium",
-      "high",
-    ]);
+  it("does not invent low, medium, and high when the catalog lists no efforts", () => {
+    const empty = { ...backendClaudeModel, reasoningEfforts: [] as string[] };
+    expect(getReasoningEffortOptions("claude", null)).toEqual([]);
+    expect(getReasoningEffortOptions("api", null)).toEqual([]);
+    expect(getReasoningEffortOptions("claude", empty)).toEqual([]);
+    expect(getReasoningEffortOptions("api", empty)).toEqual([]);
+    expect(normalizeReasoningEffort("claude", "low", null)).toBeNull();
+    expect(normalizeReasoningEffort("api", null, empty)).toBeNull();
   });
 
   it("uses the parsed model's efforts for Claude and API peers", () => {
@@ -263,11 +260,19 @@ describe("runtime selector helpers", () => {
     expect(normalizeReasoningEffort("codex", "high", noEfforts)).toBeNull();
   });
 
-  it("normalizes unsupported Claude/API efforts to the documented medium default", () => {
-    expect(normalizeReasoningEffort("claude", "low", null)).toBe("low");
-    expect(normalizeReasoningEffort("claude", "minimal", null)).toBe("low");
-    expect(normalizeReasoningEffort("claude", null, null)).toBe("medium");
-    expect(normalizeReasoningEffort("api", null, null)).toBe("medium");
+  it("resolves Claude and API efforts only from the model's own list", () => {
+    const advertised = {
+      ...backendClaudeModel,
+      reasoningEfforts: ["low", "medium", "high"],
+    };
+    expect(normalizeReasoningEffort("claude", "low", advertised)).toBe("low");
+    expect(normalizeReasoningEffort("claude", "minimal", advertised)).toBe(
+      "low",
+    );
+    expect(normalizeReasoningEffort("claude", null, advertised)).toBe(
+      "medium",
+    );
+    expect(normalizeReasoningEffort("api", null, null)).toBeNull();
   });
 
   it("filters conversations by both runtime and project path", () => {
@@ -770,7 +775,8 @@ describe("ChatComposer provider wiring", () => {
         document.querySelector('[aria-label^="Select custom agent"]'),
       ).toBeTruthy();
 
-      const trigger = document.querySelector('button[title="Switch model"]');
+      const trigger = document.querySelector('button[title="opus"]');
+      expect(trigger?.getAttribute("aria-label")).toBe("Switch model opus");
       if (!(trigger instanceof HTMLButtonElement)) {
         throw new Error("Composer runtime trigger not found");
       }
@@ -1064,7 +1070,8 @@ describe("ChatComposer provider wiring", () => {
         );
         await Promise.resolve();
       });
-      const trigger = document.querySelector('button[title="Switch model"]');
+      const trigger = document.querySelector('button[title="opus"]');
+      expect(trigger?.getAttribute("aria-label")).toBe("Switch model opus");
       if (!(trigger instanceof HTMLButtonElement)) {
         throw new Error("Composer runtime trigger not found");
       }

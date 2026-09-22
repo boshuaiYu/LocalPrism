@@ -95,13 +95,8 @@ export function getReasoningEffortOptions(
   selectedModel: RuntimeModel | null,
 ): readonly string[] {
   if (peer !== "codex") {
-    if (selectedModel && selectedModel.reasoningEfforts.length > 0) {
-      const parsed = normalizeReasoningEffortOptions(
-        selectedModel.reasoningEfforts,
-      );
-      if (parsed.length > 0) return parsed;
-    }
-    return CLAUDE_REASONING_EFFORT_OPTIONS;
+    if (!selectedModel) return [];
+    return normalizeReasoningEffortOptions(selectedModel.reasoningEfforts);
   }
 
   if (selectedModel?.runtime !== "codex") return [];
@@ -179,12 +174,11 @@ export function normalizeReasoningEffort(
   }
 
   const supportedEfforts = getReasoningEffortOptions(peer, selectedModel);
-  return (
-    resolveReasoningEffort(
-      currentEffort,
-      supportedEfforts,
-      CLAUDE_DEFAULT_REASONING_EFFORT,
-    ) ?? CLAUDE_DEFAULT_REASONING_EFFORT
+  if (supportedEfforts.length === 0) return null;
+  return resolveReasoningEffort(
+    currentEffort,
+    supportedEfforts,
+    CLAUDE_DEFAULT_REASONING_EFFORT,
   );
 }
 

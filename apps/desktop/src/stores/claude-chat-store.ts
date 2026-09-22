@@ -768,6 +768,21 @@ function titleForMessages(messages: ClaudeStreamMessage[]): string | undefined {
 }
 
 /**
+ * Drop Thinking… / "No response requested." once a turn stops, including
+ * cancel and error paths that set `isStreaming` false without `_setStreaming`.
+ */
+function settleStoppedTurn(
+  tab: TabState,
+  updates: Partial<TabState>,
+): Partial<TabState> {
+  if (updates.isStreaming !== false) return updates;
+  const source = updates.messages ?? tab.messages;
+  const messages = settleChatMessages(source);
+  if (messages === source) return updates;
+  return { ...updates, messages };
+}
+
+/**
  * Update a specific tab in `tabs[]` and, if that tab is the active tab,
  * also project the changed fields to top-level state for consumer compatibility.
  */
@@ -778,7 +793,10 @@ function applyTabUpdate(
 ): Partial<ClaudeChatState> {
   const currentTab = state.tabs.find((tab) => tab.id === tabId);
   if (!currentTab) return {};
-  const normalizedUpdates = normalizeTabSessionProjection(currentTab, updates);
+  const normalizedUpdates = settleStoppedTurn(
+    currentTab,
+    normalizeTabSessionProjection(currentTab, updates),
+  );
   const newTabs = state.tabs.map((t) =>
     t.id === tabId ? { ...t, ...normalizedUpdates } : t,
   );

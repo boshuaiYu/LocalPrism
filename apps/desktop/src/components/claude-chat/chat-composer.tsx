@@ -229,16 +229,15 @@ function ComposerModelChip({
       ref={buttonRef}
       type="button"
       onClick={onClick}
-      title="Switch model"
+      title={modelId}
+      aria-label={`Switch model ${modelId}`}
       disabled={disabled}
       className={cn(
         "flex h-8 min-w-0 items-center gap-1.5 rounded-full border border-border/80 bg-background/70 px-2.5 text-foreground text-xs transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50",
         fullWidth ? "w-full" : "max-w-full flex-1",
       )}
     >
-      <span className="min-w-0 flex-1 truncate text-left" title={modelId}>
-        {label}
-      </span>
+      <span className="min-w-0 flex-1 truncate text-left">{label}</span>
       <span className="sr-only">{providerName}</span>
       <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
     </button>

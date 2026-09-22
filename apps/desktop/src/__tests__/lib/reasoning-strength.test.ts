@@ -45,6 +45,29 @@ describe("deriveReasoningStrength", () => {
     expect(control.value).toBe("deep");
   });
 
+  it("reads the catalog metadata object forwarded from the provider bridge", () => {
+    const control = deriveReasoningStrength(
+      {
+        id: "budget-model",
+        reasoningEfforts: [],
+        metadata: {
+          id: "budget-model",
+          capabilities: {
+            thinking: { min: 0, max: 64, step: 8, default: 16 },
+          },
+        },
+      },
+      null,
+    );
+    expect(control).toEqual({
+      kind: "continuous",
+      min: 0,
+      max: 64,
+      step: 8,
+      value: 16,
+    });
+  });
+
   it("builds a slider from the model's numeric range", () => {
     const control = deriveReasoningStrength(
       {

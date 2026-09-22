@@ -177,7 +177,7 @@ pub struct ProviderCard {
     pub account_label: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderModel {
     pub id: String,
@@ -186,9 +186,12 @@ pub struct ProviderModel {
     pub is_default: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
+    /// Raw catalog object. The desktop derives continuous reasoning ranges from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderWorkspaceStatus {
     pub engine_installed: bool,
@@ -221,6 +224,7 @@ mod tests {
                 reasoning_efforts: vec!["medium".into()],
                 is_default: true,
                 context_window: None,
+                metadata: None,
             },
             ProviderModel {
                 id: "gpt-5.3-codex".into(),
@@ -228,6 +232,7 @@ mod tests {
                 reasoning_efforts: vec!["medium".into()],
                 is_default: false,
                 context_window: None,
+                metadata: None,
             },
         ]
     }
