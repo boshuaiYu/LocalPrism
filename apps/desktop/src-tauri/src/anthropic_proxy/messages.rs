@@ -62,6 +62,7 @@ pub(super) fn anthropic_to_openai_request(
         }
     }
 
+    coalesce_system_messages_in_body(&mut body);
     Ok(body)
 }
 
@@ -546,6 +547,62 @@ fn append_exit_tool(tools: &mut Vec<Value>) {
     }));
 }
 
+/// Strict chat templates (Qwen, vLLM, SenseNova, NVIDIA) reject a request
+/// unless every system turn is folded into `messages[0]`. Claude Code
+/// 2.1.195+ puts extra `role: "system"` items inside `messages` (skills,
+/// agent types, tool search), and the tool-mode reminder is another system
+/// turn. Either one becomes `400 System message must be at the beginning`.
+fn coalesce_system_messages_in_body(body: &mut Value) {
+    let Some(existing) = body
+        .get("messages")
+        .and_then(|value| value.as_array())
+        .cloned()
+    else {
+        return;
+    };
+    body["messages"] = Value::Array(coalesce_system_messages(existing));
+}
+
+fn coalesce_system_messages(messages: Vec<Value>) -> Vec<Value> {
+    let system_count = messages
+        .iter()
+        .filter(|message| openai_message_role(message) == Some("system"))
+        .count();
+    let already_leading = messages
+        .first()
+        .is_some_and(|message| openai_message_role(message) == Some("system"));
+    if system_count == 0 || (system_count == 1 && already_leading) {
+        return messages;
+    }
+
+    let mut system_parts = Vec::new();
+    let mut rest = Vec::with_capacity(messages.len());
+    for message in messages {
+        if openai_message_role(&message) == Some("system") {
+            if let Some(text) = openai_message_text(&message) {
+                let text = text.trim();
+                if !text.is_empty() {
+                    system_parts.push(text.to_string());
+                }
+            }
+            continue;
+        }
+        rest.push(message);
+    }
+
+    if system_parts.is_empty() {
+        return rest;
+    }
+
+    let mut coalesced = Vec::with_capacity(rest.len() + 1);
+    coalesced.push(json!({
+        "role": "system",
+        "content": system_parts.join("\n\n"),
+    }));
+    coalesced.extend(rest);
+    coalesced
+}
+
 fn append_exit_tool_reminder(body: &mut Value) {
     let Some(messages) = body
         .get_mut("messages")
@@ -869,14 +926,88 @@ mod tests {
         assert_eq!(converted["tool_choice"], "required");
         assert!(tool_names.contains(&"Read"));
         assert!(tool_names.contains(&EXIT_TOOL_NAME));
-        assert!(converted["messages"]
-            .as_array()
+        let messages = converted["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "system");
+        assert!(messages[0]["content"]
+            .as_str()
             .unwrap()
+            .contains("Tool mode is active"));
+        assert!(messages
             .iter()
-            .any(|message| message
-                .get("content")
-                .and_then(|value| value.as_str())
-                .is_some_and(|content| content.contains("Tool mode is active"))));
+            .skip(1)
+            .all(|message| message.get("role").and_then(|value| value.as_str()) != Some("system")));
+    }
+
+    #[test]
+    fn merges_mid_transcript_system_messages_into_the_leading_prompt() {
+        let request = json!({
+            "system": "You are a LaTeX assistant.",
+            "messages": [
+                { "role": "user", "content": "Write a section." },
+                { "role": "system", "content": "Available agent types: writer, reviewer." },
+                { "role": "assistant", "content": "Drafting." },
+                { "role": "system", "content": [{ "type": "text", "text": "ToolSearch context." }] }
+            ]
+        });
+
+        let converted =
+            anthropic_to_openai_request(&request, &credential(), &transformers(&[])).unwrap();
+        let messages = converted["messages"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "system");
+        let system = messages[0]["content"].as_str().unwrap();
+        assert!(system.contains("You are a LaTeX assistant."));
+        assert!(system.contains("Available agent types: writer, reviewer."));
+        assert!(system.contains("ToolSearch context."));
+        assert!(system.find("LaTeX").unwrap() < system.find("Available agent").unwrap());
+        assert!(system.find("Available agent").unwrap() < system.find("ToolSearch").unwrap());
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[2]["role"], "assistant");
+        assert!(messages
+            .iter()
+            .skip(1)
+            .all(|message| message.get("role").and_then(|value| value.as_str()) != Some("system")));
+    }
+
+    #[test]
+    fn moves_interleaved_system_message_away_from_tool_results() {
+        let request = json!({
+            "system": "Be precise.",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "Read",
+                        "input": { "file_path": "main.tex" }
+                    }]
+                },
+                { "role": "system", "content": "Skill reminder." },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_1",
+                        "content": "file text"
+                    }]
+                }
+            ]
+        });
+
+        let converted =
+            anthropic_to_openai_request(&request, &credential(), &transformers(&[])).unwrap();
+        let messages = converted["messages"].as_array().unwrap();
+
+        assert_eq!(messages[0]["role"], "system");
+        let system = messages[0]["content"].as_str().unwrap();
+        assert!(system.contains("Be precise."));
+        assert!(system.contains("Skill reminder."));
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[2]["tool_call_id"], "toolu_1");
+        assert_eq!(messages[2]["content"], "file text");
     }
 
     #[test]
