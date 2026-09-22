@@ -7,7 +7,10 @@ pub(crate) mod tools;
 mod transformers;
 mod usage;
 
-use self::messages::{anthropic_to_openai_request, openai_to_anthropic_message};
+use self::messages::{
+    anthropic_to_openai_request, hoist_anthropic_system_messages, normalize_openai_system_messages,
+    openai_to_anthropic_message,
+};
 use self::providers::apply_provider_request_transforms;
 use self::responses::{
     anthropic_to_codex_responses, parse_sse_block, responses_headers, CodexProxyCredential,
@@ -57,6 +60,200 @@ pub(crate) async fn start_openai_anthropic_proxy(
     });
 
     Ok(format!("http://{}", addr))
+}
+
+/// Forward Anthropic `/v1/messages` after folding mid-transcript system
+/// turns into the top-level `system` field. Used for Qwen / DeepSeek /
+/// Moonshot native Anthropic endpoints and other Anthropic-format
+/// third-party providers that still compile a Qwen-style chat template.
+pub(crate) async fn start_anthropic_passthrough_proxy(
+    credential: OpenAiProxyCredential,
+) -> Result<String, String> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(|err| format!("Failed to start local Anthropic proxy: {}", err))?;
+    let addr = listener
+        .local_addr()
+        .map_err(|err| format!("Failed to read local Anthropic proxy address: {}", err))?;
+    let credential = Arc::new(credential);
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let credential = Arc::clone(&credential);
+            tokio::spawn(async move {
+                if let Err(err) = handle_anthropic_passthrough_connection(stream, credential).await {
+                    eprintln!("[anthropic-passthrough] request failed: {}", err);
+                }
+            });
+        }
+    });
+
+    Ok(format!("http://{}", addr))
+}
+
+async fn handle_anthropic_passthrough_connection(
+    mut stream: TcpStream,
+    credential: Arc<OpenAiProxyCredential>,
+) -> Result<(), String> {
+    let request = read_http_request(&mut stream).await?;
+    let path = request_path_without_query(&request.path);
+    if request.method == "POST" && (is_messages_path(path) || is_count_tokens_path(path)) {
+        match handle_anthropic_passthrough(&request, path, &credential, &mut stream).await {
+            Ok(()) => {
+                let _ = stream.shutdown().await;
+                return Ok(());
+            }
+            Err(err) => {
+                let response = json_response(
+                    502,
+                    &json!({
+                        "type": "error",
+                        "error": { "type": "api_error", "message": err },
+                    }),
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .map_err(|err| format!("Failed to write Anthropic proxy error: {err}"))?;
+                let _ = stream.shutdown().await;
+                return Ok(());
+            }
+        }
+    }
+
+    let response = json_response(
+        200,
+        &json!({ "ok": true, "service": "localprism-anthropic-passthrough-proxy" }),
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .map_err(|err| format!("Failed to write Anthropic proxy ping: {err}"))?;
+    let _ = stream.shutdown().await;
+    Ok(())
+}
+
+async fn handle_anthropic_passthrough(
+    request: &HttpRequest,
+    path: &str,
+    credential: &OpenAiProxyCredential,
+    stream: &mut TcpStream,
+) -> Result<(), String> {
+    let mut body = serde_json::from_slice::<Value>(&request.body)
+        .map_err(|err| format!("Claude Code sent invalid Anthropic JSON: {err}"))?;
+    hoist_anthropic_system_messages(&mut body);
+    if !credential.model.trim().is_empty() {
+        body["model"] = Value::String(credential.model.clone());
+    }
+    let wants_stream = body
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|err| format!("Failed to create Anthropic provider client: {err}"))?;
+    let url = if is_count_tokens_path(path) {
+        anthropic_count_tokens_url(&credential.base_url)
+    } else {
+        anthropic_messages_url(&credential.base_url)
+    };
+    let mut builder = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .body(body.to_string());
+    builder = with_optional_anthropic_key(builder, &credential.api_key);
+    if let Some(version) = request_header(request, "anthropic-version") {
+        builder = builder.header("anthropic-version", version);
+    } else {
+        builder = builder.header("anthropic-version", "2023-06-01");
+    }
+    if let Some(beta) = request_header(request, "anthropic-beta") {
+        builder = builder.header("anthropic-beta", beta);
+    }
+
+    let response = builder
+        .send()
+        .await
+        .map_err(|err| format!("Provider request failed: {err}"))?;
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+
+    if wants_stream && status.is_success() && content_type.to_ascii_lowercase().contains("stream") {
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n",
+            )
+            .await
+            .map_err(|err| format!("Failed to write Anthropic SSE headers: {err}"))?;
+        let mut response = response;
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    stream
+                        .write_all(&chunk)
+                        .await
+                        .map_err(|err| format!("Failed to write Anthropic SSE chunk: {err}"))?;
+                }
+                Ok(None) => break,
+                Err(err) => return Err(format!("Provider stream error: {err}")),
+            }
+        }
+        return Ok(());
+    }
+
+    let response_text = response
+        .text()
+        .await
+        .map_err(|err| format!("Failed to read provider response: {err}"))?;
+    stream
+        .write_all(http_response(status.as_u16(), &content_type, &response_text).as_bytes())
+        .await
+        .map_err(|err| format!("Failed to write Anthropic proxy response: {err}"))?;
+    Ok(())
+}
+
+fn request_header<'a>(request: &'a HttpRequest, name: &str) -> Option<&'a str> {
+    request
+        .headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+fn anthropic_messages_url(base_url: &str) -> String {
+    let clean = base_url.trim_end_matches('/');
+    if clean.ends_with("/v1/messages") || clean.ends_with("/messages") {
+        clean.to_string()
+    } else if clean.ends_with("/v1") {
+        format!("{}/messages", clean)
+    } else {
+        format!("{}/v1/messages", clean)
+    }
+}
+
+fn anthropic_count_tokens_url(base_url: &str) -> String {
+    format!("{}/count_tokens", anthropic_messages_url(base_url))
+}
+
+fn with_optional_anthropic_key(
+    request: reqwest::RequestBuilder,
+    api_key: &str,
+) -> reqwest::RequestBuilder {
+    if api_key.trim().is_empty() {
+        request
+    } else {
+        request.header("x-api-key", api_key).bearer_auth(api_key)
+    }
 }
 
 pub(crate) async fn start_codex_responses_proxy(
@@ -319,6 +516,7 @@ async fn handle_connection(
 struct HttpRequest {
     method: String,
     path: String,
+    headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
@@ -357,10 +555,14 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String
         .ok_or_else(|| "Proxy request is missing path".to_string())?
         .to_string();
 
-    let content_length = lines
+    let headers = lines
         .filter_map(|line| line.split_once(':'))
+        .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
+        .collect::<Vec<_>>();
+    let content_length = headers
+        .iter()
         .find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        .and_then(|(_, value)| value.parse::<usize>().ok())
         .unwrap_or(0);
 
     let body_start = header_end + 4;
@@ -377,7 +579,12 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String
     }
     body.truncate(content_length);
 
-    Ok(HttpRequest { method, path, body })
+    Ok(HttpRequest {
+        method,
+        path,
+        headers,
+        body,
+    })
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
@@ -455,6 +662,7 @@ async fn handle_messages_to_stream(
         wants_stream,
         &transformers,
     );
+    normalize_openai_system_messages(&mut openai_request);
     if request_contains_openai_image_parts(&openai_request)
         && provider_rejects_openai_image_parts(credential)
     {

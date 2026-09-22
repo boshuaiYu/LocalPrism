@@ -61,6 +61,7 @@ pub struct ManagedRuntimeEnv {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProxyKind {
     OpenaiChat(SavedProvider),
+    AnthropicNative(SavedProvider),
     CodexResponses {
         model: String,
         effort: Option<String>,
@@ -144,31 +145,37 @@ pub fn build_managed_env(
     .unwrap_or_else(|| provider.models.main.clone());
     let model = model.as_str();
     match provider.api_format {
-        ApiFormat::Anthropic => Ok(ManagedRuntimeEnv {
-            values: vec![
-                ("ANTHROPIC_AUTH_TOKEN".into(), provider.api_key.clone()),
-                ("ANTHROPIC_BASE_URL".into(), provider.base_url.clone()),
-                ("ANTHROPIC_MODEL".into(), model.to_string()),
-                (
-                    "ANTHROPIC_DEFAULT_HAIKU_MODEL".into(),
-                    model.to_string(),
-                ),
-                (
-                    "ANTHROPIC_DEFAULT_SONNET_MODEL".into(),
-                    model.to_string(),
-                ),
-                (
-                    "ANTHROPIC_DEFAULT_OPUS_MODEL".into(),
-                    model.to_string(),
-                ),
-            ],
-            remove: vec![
-                "ANTHROPIC_API_KEY".into(),
-                "CLAUDE_MODEL".into(),
-                "CLAUDE_CODE_OAUTH_TOKEN".into(),
-            ],
-            proxy_kind: None,
-        }),
+        ApiFormat::Anthropic => {
+            let mut routed = provider;
+            routed.models.main = model.to_string();
+            Ok(ManagedRuntimeEnv {
+                values: vec![
+                    (
+                        "ANTHROPIC_AUTH_TOKEN".into(),
+                        "localprism-anthropic-proxy".into(),
+                    ),
+                    ("ANTHROPIC_MODEL".into(), model.to_string()),
+                    (
+                        "ANTHROPIC_DEFAULT_HAIKU_MODEL".into(),
+                        model.to_string(),
+                    ),
+                    (
+                        "ANTHROPIC_DEFAULT_SONNET_MODEL".into(),
+                        model.to_string(),
+                    ),
+                    (
+                        "ANTHROPIC_DEFAULT_OPUS_MODEL".into(),
+                        model.to_string(),
+                    ),
+                ],
+                remove: vec![
+                    "ANTHROPIC_API_KEY".into(),
+                    "CLAUDE_MODEL".into(),
+                    "CLAUDE_CODE_OAUTH_TOKEN".into(),
+                ],
+                proxy_kind: Some(ProxyKind::AnthropicNative(routed)),
+            })
+        }
         ApiFormat::OpenaiChat | ApiFormat::OpenaiResponses => {
             let mut routed = provider;
             routed.models.main = model.to_string();
@@ -190,7 +197,8 @@ mod tests {
     use crate::providers::models::save_cached_models;
     use crate::providers::store::{save_index, save_oauth};
     use crate::providers::types::{
-        OAuthTokens, ProviderIndex, ProviderModel, CHATGPT_MODEL_SOL, CHATGPT_MODEL_TERRA,
+        OAuthTokens, ProviderIndex, ProviderModel, ProviderModels, SavedProvider,
+        CHATGPT_MODEL_SOL, CHATGPT_MODEL_TERRA,
     };
     use tempfile::TempDir;
 
@@ -231,6 +239,42 @@ mod tests {
             .any(|(key, value)| key == "ANTHROPIC_AUTH_TOKEN" && value == "oauth-token"));
         assert!(env.remove.iter().any(|key| key == "ANTHROPIC_BASE_URL"));
         assert!(env.proxy_kind.is_none());
+    }
+
+    #[test]
+    fn third_party_anthropic_uses_passthrough_proxy() {
+        let (_dir, _guard) = isolate();
+        let mut index = ProviderIndex::default();
+        index.active_id = Some("qwen".into());
+        index.providers.push(SavedProvider {
+            id: "qwen".into(),
+            name: "Qwen".into(),
+            api_key: "sk-test".into(),
+            base_url: "https://dashscope.aliyuncs.com/apps/anthropic".into(),
+            api_format: ApiFormat::Anthropic,
+            models: ProviderModels {
+                main: "qwen3-max".into(),
+                haiku: None,
+                sonnet: None,
+                opus: None,
+            },
+        });
+        save_index(&index).unwrap();
+
+        let env = build_managed_env(None, None).unwrap();
+        match env.proxy_kind {
+            Some(ProxyKind::AnthropicNative(provider)) => {
+                assert_eq!(provider.base_url, "https://dashscope.aliyuncs.com/apps/anthropic");
+                assert_eq!(provider.models.main, "qwen3-max");
+                assert_eq!(provider.api_key, "sk-test");
+            }
+            other => panic!("expected AnthropicNative, got {other:?}"),
+        }
+        assert!(env.values.iter().all(|(key, _)| key != "ANTHROPIC_BASE_URL"));
+        assert!(env
+            .values
+            .iter()
+            .any(|(key, value)| key == "ANTHROPIC_AUTH_TOKEN" && value == "localprism-anthropic-proxy"));
     }
 
     #[test]

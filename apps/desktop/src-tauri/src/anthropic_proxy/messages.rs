@@ -10,6 +10,9 @@ pub(super) fn anthropic_to_openai_request(
     credential: &OpenAiProxyCredential,
     transformers: &ProxyTransformerChain,
 ) -> Result<Value, String> {
+    let mut request = request.clone();
+    hoist_anthropic_system_messages(&mut request);
+    let request = &request;
     let mut messages = Vec::new();
     if let Some(system) = request.get("system").and_then(flatten_anthropic_content) {
         if !system.trim().is_empty() {
@@ -62,8 +65,60 @@ pub(super) fn anthropic_to_openai_request(
         }
     }
 
-    coalesce_system_messages_in_body(&mut body);
+    normalize_openai_system_messages(&mut body);
     Ok(body)
+}
+
+/// Claude Code 2.1.195+ puts `role: "system"` inside Anthropic `messages[]`
+/// (skills, agent types, ToolSearch). Official Anthropic only allows
+/// user/assistant there. Qwen / DeepSeek / Moonshot native Anthropic
+/// adapters convert that array to a chat template and return
+/// `400 System message must be at the beginning`. Fold every system-like
+/// turn into the top-level `system` field before the request is forwarded
+/// or converted to OpenAI.
+pub(super) fn hoist_anthropic_system_messages(request: &mut Value) {
+    let Some(existing) = request
+        .get("messages")
+        .and_then(|value| value.as_array())
+        .cloned()
+    else {
+        return;
+    };
+    if !existing.iter().any(is_system_like_message) {
+        return;
+    }
+
+    let mut system_parts = Vec::new();
+    if let Some(system) = request.get("system").and_then(flatten_anthropic_content) {
+        let system = system.trim();
+        if !system.is_empty() {
+            system_parts.push(system.to_string());
+        }
+    }
+
+    let mut kept = Vec::with_capacity(existing.len());
+    for message in existing {
+        if is_system_like_message(&message) {
+            if let Some(text) = flatten_anthropic_content(message.get("content").unwrap_or(&Value::Null))
+            {
+                let text = text.trim();
+                if !text.is_empty() {
+                    system_parts.push(text.to_string());
+                }
+            }
+            continue;
+        }
+        kept.push(message);
+    }
+
+    request["messages"] = Value::Array(kept);
+    if system_parts.is_empty() {
+        if let Some(object) = request.as_object_mut() {
+            object.remove("system");
+        }
+        return;
+    }
+    request["system"] = Value::String(system_parts.join("\n\n"));
 }
 
 pub(super) fn openai_to_anthropic_message(
@@ -388,6 +443,13 @@ fn openai_message_role(message: &Value) -> Option<&str> {
     message.get("role").and_then(|value| value.as_str())
 }
 
+fn is_system_like_message(message: &Value) -> bool {
+    matches!(
+        openai_message_role(message).map(|role| role.to_ascii_lowercase()).as_deref(),
+        Some("system") | Some("developer")
+    )
+}
+
 fn openai_tool_message_id(message: &Value) -> Option<&str> {
     if openai_message_role(message) != Some("tool") {
         return None;
@@ -552,7 +614,7 @@ fn append_exit_tool(tools: &mut Vec<Value>) {
 /// 2.1.195+ puts extra `role: "system"` items inside `messages` (skills,
 /// agent types, tool search), and the tool-mode reminder is another system
 /// turn. Either one becomes `400 System message must be at the beginning`.
-fn coalesce_system_messages_in_body(body: &mut Value) {
+pub(super) fn normalize_openai_system_messages(body: &mut Value) {
     let Some(existing) = body
         .get("messages")
         .and_then(|value| value.as_array())
@@ -564,13 +626,8 @@ fn coalesce_system_messages_in_body(body: &mut Value) {
 }
 
 fn coalesce_system_messages(messages: Vec<Value>) -> Vec<Value> {
-    let system_count = messages
-        .iter()
-        .filter(|message| openai_message_role(message) == Some("system"))
-        .count();
-    let already_leading = messages
-        .first()
-        .is_some_and(|message| openai_message_role(message) == Some("system"));
+    let system_count = messages.iter().filter(|message| is_system_like_message(message)).count();
+    let already_leading = messages.first().is_some_and(is_system_like_message);
     if system_count == 0 || (system_count == 1 && already_leading) {
         return messages;
     }
@@ -578,7 +635,7 @@ fn coalesce_system_messages(messages: Vec<Value>) -> Vec<Value> {
     let mut system_parts = Vec::new();
     let mut rest = Vec::with_capacity(messages.len());
     for message in messages {
-        if openai_message_role(&message) == Some("system") {
+        if is_system_like_message(&message) {
             if let Some(text) = openai_message_text(&message) {
                 let text = text.trim();
                 if !text.is_empty() {
@@ -1008,6 +1065,41 @@ mod tests {
         assert_eq!(messages[2]["role"], "tool");
         assert_eq!(messages[2]["tool_call_id"], "toolu_1");
         assert_eq!(messages[2]["content"], "file text");
+    }
+
+    #[test]
+    fn hoists_inline_anthropic_system_messages_before_forwarding() {
+        let mut request = json!({
+            "system": "You are a LaTeX assistant.",
+            "messages": [
+                { "role": "user", "content": "Write a section." },
+                { "role": "system", "content": "Available agent types: writer." },
+                { "role": "assistant", "content": "Drafting." },
+                { "role": "developer", "content": [{ "type": "text", "text": "ToolSearch context." }] }
+            ]
+        });
+
+        hoist_anthropic_system_messages(&mut request);
+
+        assert_eq!(
+            request["system"],
+            "You are a LaTeX assistant.\n\nAvailable agent types: writer.\n\nToolSearch context."
+        );
+        let messages = request["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["role"], "assistant");
+    }
+
+    #[test]
+    fn leaves_anthropic_payloads_without_inline_system_alone() {
+        let mut request = json!({
+            "system": [{ "type": "text", "text": "Keep this array." }],
+            "messages": [{ "role": "user", "content": "Hi" }]
+        });
+        let before = request.clone();
+        hoist_anthropic_system_messages(&mut request);
+        assert_eq!(request, before);
     }
 
     #[test]
