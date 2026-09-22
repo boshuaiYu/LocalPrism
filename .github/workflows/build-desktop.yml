@@ -526,6 +526,11 @@ jobs:
           fi
           pnpm --filter @claude-prism/desktop tauri build --target x86_64-unknown-linux-gnu $EXTRA
 
+      - name: Reject interposed GLib/expat symbols
+        run: |
+          bash scripts/check-linux-desktop-symbols.sh \
+            apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/claude-prism-desktop
+
       - name: Collect updater artifacts
         id: collect
         run: |

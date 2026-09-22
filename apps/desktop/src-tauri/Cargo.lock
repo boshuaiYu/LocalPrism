@@ -502,7 +502,7 @@ dependencies = [
 
 [[package]]
 name = "claude-prism-desktop"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -5560,8 +5560,6 @@ dependencies = [
 [[package]]
 name = "tectonic_dep_support"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b093fd9b702c1b4a9827aa01c82aa14c774e4a138ad0f61c56988acfaf629eb"
 dependencies = [
  "pkg-config",
  "vcpkg",

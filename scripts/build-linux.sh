@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
-# Build LocalPrism Linux installers (AppImage / .deb). Must run on Linux.
-# Usage: bash scripts/build-linux.sh
+# Build LocalPrism Linux installers (AppImage / .deb / .rpm). Must run on Linux.
+#
+#   bash scripts/build-linux.sh
+#
+# Native packages (Debian/Ubuntu):
+#   sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+#     patchelf libssl-dev libicu-dev libgraphite2-dev libharfbuzz-dev \
+#     libfreetype-dev libfontconfig1-dev libpng-dev zlib1g-dev
+#
+# After the binary is linked, scripts/check-linux-desktop-symbols.sh rejects a
+# build that exports static GLib/expat/zlib/ICU symbols. Those exports crash
+# GTK on newer distros (Debian 13 SIGSEGV in g_application_register; Ubuntu
+# 24.04 aborts in g_string_free / XML_ParserFree).
+#
+# Smoke-test the unpacked binary (does not need the AppImage):
+#   xvfb-run -a dbus-run-session -- \
+#     apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/claude-prism-desktop
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -15,6 +30,9 @@ corepack pnpm --filter=@claude-prism/desktop tauri build \
   --target x86_64-unknown-linux-gnu \
   --bundles appimage,deb \
   --config src-tauri/tauri.local-build.conf.json
+
+bash "$ROOT/scripts/check-linux-desktop-symbols.sh" \
+  "$ROOT/apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/claude-prism-desktop"
 
 echo "==> Linux artifacts"
 find "$ROOT/apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle" \

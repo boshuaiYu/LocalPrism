@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/nicegui-unofficial/nicegui-tauri-template/main/src-tauri/tauri.conf-v2-schema.json",
   "identifier": "com.claude-prism.desktop",
   "productName": "LocalPrism",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "build": {
     "beforeDevCommand": "corepack pnpm dev",
     "beforeBuildCommand": "corepack pnpm build",

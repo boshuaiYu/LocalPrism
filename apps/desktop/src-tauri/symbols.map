@@ -1,50 +1,23 @@
-/* Version script to hide statically linked library symbols.
+/* Hide every symbol defined by this executable.
  *
- * Prevents symbol collisions between our statically linked
- * ICU/HarfBuzz/FreeType/Fontconfig (from vcpkg, used by Tectonic)
- * and the dynamically linked versions used by WebKit2GTK at runtime.
+ * Tectonic's semi-static link copies ICU, HarfBuzz, FreeType, Fontconfig,
+ * expat, zlib, brotli, and (before the tectonic_dep_support patch) GLib into
+ * the binary. Rust passes --export-dynamic, so those C symbols become
+ * interposers: GTK, Mesa, and WebKit call our copies instead of the system
+ * libraries. That is a SIGSEGV in g_bus_get_sync on GLib 2.84 (Debian 13) and
+ * "free(): invalid pointer" from XML_ParserFree / g_string_free on Ubuntu 24.04.
  *
- * Without this, the ELF dynamic linker resolves WebKit2GTK's ICU
- * calls to our static symbols (different version), causing a segfault
- * at startup.  Fixes #100; preserves #91 fix (static ICU = no
- * libicuuc.so.70 not-found error on newer distros).
+ * Copy-relocated libc data symbols must stay global or libc itself breaks.
  */
 {
+  global:
+    stderr;
+    stdin;
+    stdout;
+    timezone;
+    __timezone;
+    tzname;
+    __tzname;
   local:
-    /* ICU4C */
-    u_*;
-    ucnv_*;
-    ucol_*;
-    ures_*;
-    udata_*;
-    ucal_*;
-    udat_*;
-    unum_*;
-    uset_*;
-    ustr_*;
-    ubidi_*;
-    ubrk_*;
-    uidna_*;
-    uloc_*;
-    unorm_*;
-    unorm2_*;
-    utrans_*;
-    icu_*;
-    UCNV_*;
-
-    /* HarfBuzz */
-    hb_*;
-
-    /* FreeType */
-    FT_*;
-    ft_*;
-
-    /* Fontconfig */
-    Fc*;
-
-    /* Graphite2 */
-    gr_*;
-
-    /* libpng (often pulled in by FreeType) */
-    png_*;
+    *;
 };
