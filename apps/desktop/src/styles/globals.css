@@ -49,7 +49,20 @@
 }
 
 :root {
-  --radius: 0.625rem;
+  --radius: 0.5rem;
+  --space-unit: 8px;
+  --control-height: calc(var(--space-unit) * 5);
+  --lp-meta: oklch(0.4 0 0);
+  --prism-cta: linear-gradient(
+    135deg,
+    oklch(0.46 0.16 265),
+    oklch(0.52 0.13 210)
+  );
+  --prism-mark: linear-gradient(
+    135deg,
+    oklch(0.62 0.14 265),
+    oklch(0.7 0.11 200)
+  );
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
@@ -115,6 +128,7 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
+  --lp-meta: oklch(0.82 0 0);
 }
 
 @layer base {
@@ -509,4 +523,49 @@
 .md-document :target {
   border-radius: 3px;
   background: color-mix(in oklch, var(--accent) 70%, transparent);
+}
+
+.lp-title {
+  font-size: 1.5rem;
+  line-height: 2rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--foreground);
+}
+
+.lp-heading {
+  font-size: 1rem;
+  line-height: 1.5rem;
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.lp-body {
+  font-size: 0.875rem;
+  line-height: 1.5rem;
+  color: var(--foreground);
+}
+
+.lp-meta {
+  font-size: 0.75rem;
+  line-height: 1rem;
+  color: var(--lp-meta);
+}
+
+.lp-primary-cta {
+  background-image: var(--prism-cta);
+  color: white;
+}
+
+.lp-primary-cta:hover {
+  filter: brightness(1.06);
+}
+
+.lp-mark {
+  background-image: var(--prism-mark);
+}
+
+.lp-focus:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }

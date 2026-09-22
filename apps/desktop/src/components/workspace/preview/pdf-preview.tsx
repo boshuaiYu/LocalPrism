@@ -70,6 +70,7 @@ import {
 import { resolveTexRoot, type ProjectFile } from "@/stores/document-store";
 import { MarkdownPreviewPane } from "@/components/workspace/preview/markdown-preview-pane";
 import { createLogger } from "@/lib/debug/logger";
+import { pdfChromeCompactStatus, pdfZoomLabel } from "@/lib/pdf-chrome-status";
 
 const log = createLogger("pdf-preview");
 
@@ -929,12 +930,24 @@ export function PdfPreview() {
     );
   };
 
+  const pdfStatus = pdfChromeCompactStatus({
+    isSaving,
+    isCompiling,
+    hasError: Boolean(compileError),
+    currentPage,
+    numPages,
+    zoomLabel: pdfZoomLabel({ fitMode, scale }),
+  });
+
   return (
     <div
       ref={previewContainerRef}
       className="@container/pv relative flex h-full flex-col bg-muted/50"
     >
       <div className="flex min-h-[calc(var(--workspace-topbar-height)+var(--titlebar-height))] shrink-0 flex-wrap items-center gap-x-1 gap-y-1 border-border border-b bg-background px-2 py-1">
+        <span className="lp-meta max-w-40 truncate px-1 font-medium tabular-nums">
+          {pdfStatus}
+        </span>
         <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
           {isMarkdownActive ? (
             <span className="px-1 font-medium text-muted-foreground text-xs">
@@ -1072,6 +1085,7 @@ export function PdfPreview() {
                       setPageInputValue(String(currentPage));
                     }}
                     title="Click to jump to page"
+                    aria-label={`Page ${currentPage} of ${numPages}`}
                   >
                     {currentPage}
                   </button>

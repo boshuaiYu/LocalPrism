@@ -1,3 +1,4 @@
+import { ProviderPathGuidance } from "@/components/providers/provider-path-guidance";
 import { ProviderSettings } from "@/components/providers/provider-settings";
 
 export interface RuntimeSettingsProps {
@@ -13,10 +14,15 @@ export function RuntimeSettings({
   officialOpenDefault = false,
 }: RuntimeSettingsProps) {
   return (
-    <ProviderSettings
-      refreshOnMount={refreshOnMount}
-      showEngine={showEngine}
-      officialOpenDefault={officialOpenDefault}
-    />
+    <div className="space-y-2">
+      <div className="px-4 pt-4">
+        <ProviderPathGuidance />
+      </div>
+      <ProviderSettings
+        refreshOnMount={refreshOnMount}
+        showEngine={showEngine}
+        officialOpenDefault={officialOpenDefault}
+      />
+    </div>
   );
 }

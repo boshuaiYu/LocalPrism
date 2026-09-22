@@ -4,12 +4,20 @@ import { ApprovalDialog } from "@/components/approvals/approval-dialog";
 import { SubagentPanel } from "@/components/subagents/subagent-panel";
 import { useChatLayoutStore } from "@/stores/chat-layout-store";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
+import { lastUserPrompt } from "@/lib/chat-error-card";
 import { ChatMessages } from "./chat-messages";
 import { ChatComposer } from "./chat-composer";
+import { ChatErrorCard } from "./chat-error-card";
 import { ChatTabBar } from "./chat-tab-bar";
 
 export function ClaudeChatDrawer() {
   const error = useClaudeChatStore((s) => s.error);
+  const messages = useClaudeChatStore((s) => s.messages);
+  const isStreaming = useClaudeChatStore((s) => s.isStreaming);
+  const activeTabId = useClaudeChatStore((s) => s.activeTabId);
+  const sendPrompt = useClaudeChatStore((s) => s.sendPrompt);
+  const clearMessages = useClaudeChatStore((s) => s.clearMessages);
+  const setError = useClaudeChatStore((s) => s._setError);
   const visible = useChatLayoutStore((s) => s.visible);
   const hideChat = useChatLayoutStore((s) => s.setVisible);
 
@@ -35,9 +43,14 @@ export function ClaudeChatDrawer() {
       />
 
       {error && (
-        <div className="mx-3 mt-2 mb-1 rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-1.5 text-destructive text-xs">
-          {error}
-        </div>
+        <ChatErrorCard
+          error={error}
+          retryPrompt={lastUserPrompt(messages)}
+          busy={isStreaming}
+          onRetry={(prompt) => void sendPrompt(prompt)}
+          onClearConversation={clearMessages}
+          onDismiss={() => setError(activeTabId, null)}
+        />
       )}
 
       <SubagentPanel />

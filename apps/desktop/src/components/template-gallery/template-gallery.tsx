@@ -9,8 +9,9 @@ import {
 import { TemplateCard } from "./template-card";
 import { CategorySidebar } from "./category-sidebar";
 import { TemplatePreview } from "./template-preview";
+import { isOnboardingTextField, onboardingEscape } from "@/lib/onboarding-flow";
 
-export function TemplateGallery() {
+export function TemplateGallery({ onExit }: { onExit?: () => void }) {
   const searchQuery = useTemplateStore((s) => s.searchQuery);
   const setSearchQuery = useTemplateStore((s) => s.setSearchQuery);
   const selectedCategory = useTemplateStore((s) => s.selectedCategory);
@@ -23,22 +24,38 @@ export function TemplateGallery() {
     reset();
   }, [reset]);
 
-  // Focus search on Cmd/Ctrl+K
+  // Focus search on Cmd/Ctrl+K. Escape pops one level: clear search, then leave.
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault();
         searchRef.current?.focus();
+        return;
       }
-      // Escape clears search
-      if (e.key === "Escape" && document.activeElement === searchRef.current) {
+      if (e.key !== "Escape") return;
+      if (useTemplateStore.getState().previewTemplateId) return;
+      const action = onboardingEscape({
+        surface: "gallery",
+        searchQuery: useTemplateStore.getState().searchQuery,
+        fieldFocused: isOnboardingTextField(e.target),
+        referencesOpen: false,
+        locationOpen: false,
+        hasDraft: false,
+      });
+      if (action.type === "clear-search") {
+        e.preventDefault();
         setSearchQuery("");
         searchRef.current?.blur();
+        return;
+      }
+      if (action.type === "exit") {
+        e.preventDefault();
+        onExit?.();
       }
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [setSearchQuery]);
+  }, [onExit, setSearchQuery]);
 
   // Group templates by category when showing all
   const showGrouped = !selectedCategory && !searchQuery;
