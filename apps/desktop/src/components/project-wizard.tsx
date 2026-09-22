@@ -32,7 +32,13 @@ import {
   buildReferenceFilesSection,
   importReferenceFiles,
 } from "@/lib/project-attachments";
-import { getProjectNameError, normalizeProjectName } from "@/lib/project-name";
+import {
+  PROJECT_FORM_CHROME_ATTR,
+  deferProjectNameBlur,
+  getProjectNameError,
+  normalizeProjectName,
+  projectNameErrorFromBlur,
+} from "@/lib/project-name";
 
 // ─── Helpers ───
 
@@ -89,6 +95,7 @@ function ScratchForm({ onBack }: { onBack: () => void }) {
 
   const projectNameRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const deferNameBlurRef = useRef(false);
 
   const addRecentProject = useProjectStore((s) => s.addRecentProject);
   const lastProjectFolder = useProjectStore((s) => s.lastProjectFolder);
@@ -294,9 +301,15 @@ function ScratchForm({ onBack }: { onBack: () => void }) {
                 setProjectName(e.target.value);
                 setProjectNameError("");
               }}
-              onBlur={() =>
-                setProjectNameError(getProjectNameError(projectName) ?? "")
-              }
+              onBlur={(event) => {
+                const next = projectNameErrorFromBlur(
+                  projectName,
+                  event.relatedTarget,
+                  deferNameBlurRef.current,
+                );
+                if (next === undefined) return;
+                setProjectNameError(next ?? "");
+              }}
               className="rounded-xl border-border/60 bg-card/30 text-sm focus-visible:bg-card/50"
             />
             {projectNameError && (
@@ -348,6 +361,12 @@ function ScratchForm({ onBack }: { onBack: () => void }) {
             {/* Reference files */}
             <div>
               <button
+                type="button"
+                {...{ [PROJECT_FORM_CHROME_ATTR]: "" }}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  deferProjectNameBlur(deferNameBlurRef);
+                }}
                 onClick={() => setRefFilesOpen(!refFilesOpen)}
                 className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/30"
               >
@@ -430,6 +449,12 @@ function ScratchForm({ onBack }: { onBack: () => void }) {
             {/* Project location */}
             <div>
               <button
+                type="button"
+                {...{ [PROJECT_FORM_CHROME_ATTR]: "" }}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  deferProjectNameBlur(deferNameBlurRef);
+                }}
                 onClick={() => setLocationOpen(!locationOpen)}
                 className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/30"
               >

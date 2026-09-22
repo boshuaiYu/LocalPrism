@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getThirdPartyProviderCards } from "@/components/claude-setup";
 import { RuntimeSettings } from "@/components/runtime/runtime-settings";
+import { providerReadinessBadge } from "@/lib/provider-readiness";
 import {
   resetProviderStoreForTests,
   useProviderStore,
@@ -126,6 +127,52 @@ describe("RuntimeSettings", () => {
 
     expect(container.textContent).not.toContain("Install Claude Code CLI");
     expect(container.textContent).toContain("Use an API key");
+  });
+
+  it("uses the same readiness text for an active API provider and the summary", async () => {
+    useProviderStore.setState({
+      engineInstalled: true,
+      cards: [
+        {
+          id: "claude-official",
+          kind: "official-claude",
+          name: "Claude Official",
+          authenticated: false,
+          isActive: false,
+          accountLabel: null,
+        },
+        {
+          id: "siliconflow",
+          kind: "third-party",
+          name: "SiliconFlow",
+          authenticated: true,
+          isActive: true,
+          accountLabel: "Qwen/Qwen2.5-7B-Instruct",
+        },
+      ],
+      models: [
+        {
+          id: "Qwen/Qwen2.5-7B-Instruct",
+          displayName: "Qwen",
+          reasoningEfforts: ["medium"],
+          isDefault: true,
+        },
+      ],
+    });
+
+    await act(async () => {
+      root.render(<RuntimeSettings />);
+      await Promise.resolve();
+    });
+
+    const badge = providerReadinessBadge(useProviderStore.getState());
+    expect(container.textContent).toContain("SiliconFlow");
+    expect(container.textContent).toContain(
+      "Qwen/Qwen2.5-7B-Instruct · Active",
+    );
+    expect(container.textContent).toContain(badge);
+    expect(badge).toContain("1 connected");
+    expect(container.textContent).not.toContain("0/2 ready");
   });
 
   it("can reuse a completed parent refresh without launching another one", async () => {

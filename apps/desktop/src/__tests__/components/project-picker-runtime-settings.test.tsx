@@ -6,6 +6,10 @@ import { ProjectPicker } from "@/components/project-picker";
 import type { RuntimeAccount, RuntimeKind } from "@/runtime/types";
 import { useClaudeSetupStore } from "@/stores/claude-setup-store";
 import {
+  resetProviderStoreForTests,
+  useProviderStore,
+} from "@/stores/provider-store";
+import {
   resetRuntimeStoreForTests,
   useRuntimeStore,
 } from "@/stores/runtime-store";
@@ -67,11 +71,33 @@ describe("ProjectPicker runtime settings", () => {
 
   beforeEach(() => {
     resetRuntimeStoreForTests();
+    resetProviderStoreForTests();
     useRuntimeStore.setState({
       accounts: {
-        claude: account("claude", true),
+        claude: account("claude", false),
         codex: account("codex", false),
       },
+    });
+    useProviderStore.setState({
+      engineInstalled: true,
+      cards: [
+        {
+          id: "siliconflow",
+          kind: "third-party",
+          name: "SiliconFlow",
+          authenticated: true,
+          isActive: true,
+          accountLabel: "Qwen/Qwen2.5-7B-Instruct",
+        },
+      ],
+      models: [
+        {
+          id: "Qwen/Qwen2.5-7B-Instruct",
+          displayName: "Qwen",
+          reasoningEfforts: ["medium"],
+          isDefault: true,
+        },
+      ],
     });
     checkClaudeStatus = vi
       .fn<ReturnType<typeof useClaudeSetupStore.getState>["checkStatus"]>()
@@ -108,9 +134,10 @@ describe("ProjectPicker runtime settings", () => {
     await act(async () => root.unmount());
     container.remove();
     resetRuntimeStoreForTests();
+    resetProviderStoreForTests();
   });
 
-  it("shows dual-runtime readiness and preserves the Environment settings entry", async () => {
+  it("shows provider readiness separately from legacy runtime accounts", async () => {
     await act(async () => {
       root.render(<ProjectPicker />);
       await Promise.resolve();
@@ -126,7 +153,11 @@ describe("ProjectPicker runtime settings", () => {
     await act(async () => findButton(container, "Settings").click());
 
     expect(container.textContent).toContain("Providers");
-    expect(container.textContent).toContain("1/2 ready");
+    expect(container.textContent).toContain(
+      "Engine on · 1 connected · Model set",
+    );
+    expect(container.textContent).not.toContain("0/2 ready");
+    expect(container.textContent).not.toContain("1/2 ready");
     expect(
       container.querySelector('[data-testid="runtime-settings"]'),
     ).not.toBeNull();
