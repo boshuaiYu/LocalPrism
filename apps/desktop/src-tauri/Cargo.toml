@@ -72,3 +72,8 @@ libc = "0.2"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"
+
+# Keep Tectonic's semi-static ICU/HarfBuzz/FreeType link, but never statically
+# link GLib. See vendor/tectonic_dep_support/src/lib.rs.
+[patch.crates-io]
+tectonic_dep_support = { path = "vendor/tectonic_dep_support" }
