@@ -165,17 +165,14 @@ describe("runtime selector helpers", () => {
     expect(getCodexModelOptions([backendClaudeModel])).toEqual([]);
   });
 
-  it("keeps Claude and API effort controls compatible with low, medium, and high", () => {
-    expect(getReasoningEffortOptions("claude", null)).toEqual([
-      "low",
-      "medium",
-      "high",
-    ]);
-    expect(getReasoningEffortOptions("api", null)).toEqual([
-      "low",
-      "medium",
-      "high",
-    ]);
+  it("does not invent low, medium, and high when the catalog lists no efforts", () => {
+    const empty = { ...backendClaudeModel, reasoningEfforts: [] as string[] };
+    expect(getReasoningEffortOptions("claude", null)).toEqual([]);
+    expect(getReasoningEffortOptions("api", null)).toEqual([]);
+    expect(getReasoningEffortOptions("claude", empty)).toEqual([]);
+    expect(getReasoningEffortOptions("api", empty)).toEqual([]);
+    expect(normalizeReasoningEffort("claude", "low", null)).toBeNull();
+    expect(normalizeReasoningEffort("api", null, empty)).toBeNull();
   });
 
   it("uses the parsed model's efforts for Claude and API peers", () => {
@@ -263,11 +260,17 @@ describe("runtime selector helpers", () => {
     expect(normalizeReasoningEffort("codex", "high", noEfforts)).toBeNull();
   });
 
-  it("normalizes unsupported Claude/API efforts to the documented medium default", () => {
-    expect(normalizeReasoningEffort("claude", "low", null)).toBe("low");
-    expect(normalizeReasoningEffort("claude", "minimal", null)).toBe("low");
-    expect(normalizeReasoningEffort("claude", null, null)).toBe("medium");
-    expect(normalizeReasoningEffort("api", null, null)).toBe("medium");
+  it("resolves Claude and API efforts only from the model's own list", () => {
+    const advertised = {
+      ...backendClaudeModel,
+      reasoningEfforts: ["low", "medium", "high"],
+    };
+    expect(normalizeReasoningEffort("claude", "low", advertised)).toBe("low");
+    expect(normalizeReasoningEffort("claude", "minimal", advertised)).toBe(
+      "low",
+    );
+    expect(normalizeReasoningEffort("claude", null, advertised)).toBe("medium");
+    expect(normalizeReasoningEffort("api", null, null)).toBeNull();
   });
 
   it("filters conversations by both runtime and project path", () => {
@@ -524,7 +527,9 @@ describe("RuntimeSelector", () => {
     try {
       expect(view.container.textContent).toContain("Model");
       expect(
-        view.container.querySelector('[data-testid="reasoning-effort-slider"]'),
+        view.container.querySelector(
+          '[data-testid="reasoning-strength-control"]',
+        ),
       ).not.toBeNull();
       expect(view.container.textContent).not.toContain("Approvals");
       expect(view.container.textContent).not.toContain("Ask each time");
@@ -534,7 +539,7 @@ describe("RuntimeSelector", () => {
     }
   });
 
-  it("uses a slider of the selected model's parsed efforts", async () => {
+  it("uses the selected model's parsed efforts as a segmented control", async () => {
     const onSelectionChange = vi.fn().mockReturnValue("changed");
     const view = await mountSelector({
       selectedModelId: "gpt-5.6-sol",
@@ -542,23 +547,19 @@ describe("RuntimeSelector", () => {
       onSelectionChange,
     });
     try {
-      expect(
-        view.container.querySelector(
-          'button[aria-label="Reasoning effort low"]',
-        ),
-      ).toBeNull();
-      const slider = view.container.querySelector(
-        '[data-testid="reasoning-effort-slider"]',
+      const selected = view.container.querySelector(
+        '[aria-label="Reasoning strength Medium"]',
       );
-      if (!(slider instanceof HTMLInputElement)) {
-        throw new Error("Reasoning slider missing");
+      if (!(selected instanceof HTMLButtonElement)) {
+        throw new Error("Reasoning strength control missing");
       }
-      expect(slider.max).toBe("3");
-      expect(slider.getAttribute("aria-valuetext")).toBe("Medium");
+      expect(selected.getAttribute("aria-checked")).toBe("true");
+      expect(
+        view.container.querySelector('[data-testid="reasoning-effort-slider"]'),
+      ).toBeNull();
 
       await act(async () => {
-        slider.value = "3";
-        slider.dispatchEvent(new Event("input", { bubbles: true }));
+        buttonByLabel(view.container, "Reasoning strength Extra high").click();
       });
       expect(onSelectionChange).toHaveBeenCalledWith({
         runtimeModel: "gpt-5.6-sol",
@@ -570,13 +571,14 @@ describe("RuntimeSelector", () => {
         selectedModelId: "gpt-5.6-terra",
         reasoningEffort: "medium",
       });
-      const next = view.container.querySelector(
-        '[data-testid="reasoning-effort-slider"]',
-      );
-      if (!(next instanceof HTMLInputElement)) {
-        throw new Error("Reasoning slider missing after model change");
-      }
-      expect(next.max).toBe("2");
+      expect(
+        view.container.querySelector(
+          '[aria-label="Reasoning strength Extra high"]',
+        ),
+      ).toBeNull();
+      expect(
+        view.container.querySelector('[aria-label="Reasoning strength High"]'),
+      ).not.toBeNull();
       expect(
         view.container.querySelector(
           '[data-testid="reasoning-effort-fast-toggle"]',
@@ -771,7 +773,8 @@ describe("ChatComposer provider wiring", () => {
         document.querySelector('[aria-label^="Select custom agent"]'),
       ).toBeTruthy();
 
-      const trigger = document.querySelector('button[title="Switch model"]');
+      const trigger = document.querySelector('button[title="opus"]');
+      expect(trigger?.getAttribute("aria-label")).toBe("Switch model opus");
       if (!(trigger instanceof HTMLButtonElement)) {
         throw new Error("Composer runtime trigger not found");
       }
@@ -1065,7 +1068,8 @@ describe("ChatComposer provider wiring", () => {
         );
         await Promise.resolve();
       });
-      const trigger = document.querySelector('button[title="Switch model"]');
+      const trigger = document.querySelector('button[title="opus"]');
+      expect(trigger?.getAttribute("aria-label")).toBe("Switch model opus");
       if (!(trigger instanceof HTMLButtonElement)) {
         throw new Error("Composer runtime trigger not found");
       }

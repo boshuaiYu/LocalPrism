@@ -22,31 +22,45 @@ import {
 } from "@/stores/claude-chat-store";
 import { toolResultDisplayText, toolResultText } from "@/lib/tool-result-text";
 import { isSkillToolName, skillToolDisplayName } from "@/lib/skill-tool-result";
+import { toolActivityPhase } from "@/lib/chat-turn-settlement";
 
 interface ToolWidgetProps {
   toolUse: ContentBlock;
   toolResult?: ContentBlock;
+  /** True only while this tool's turn is still streaming. */
+  live?: boolean;
 }
 
-export const ToolWidget: FC<ToolWidgetProps> = ({ toolUse, toolResult }) => {
+export const ToolWidget: FC<ToolWidgetProps> = ({
+  toolUse,
+  toolResult,
+  live = false,
+}) => {
   const name = toolUse.name?.toLowerCase() || "";
 
   if (name === "write")
-    return <WriteWidget input={toolUse.input} result={toolResult} />;
+    return (
+      <WriteWidget input={toolUse.input} result={toolResult} live={live} />
+    );
   if (name === "edit" || name === "multiedit")
-    return <EditWidget input={toolUse.input} result={toolResult} />;
+    return <EditWidget input={toolUse.input} result={toolResult} live={live} />;
   if (name === "read")
-    return <ReadWidget input={toolUse.input} result={toolResult} />;
+    return <ReadWidget input={toolUse.input} result={toolResult} live={live} />;
   if (name === "bash")
-    return <BashWidget input={toolUse.input} result={toolResult} />;
+    return <BashWidget input={toolUse.input} result={toolResult} live={live} />;
   if (name === "powershell" || name === "pwsh")
     return (
-      <BashWidget input={toolUse.input} result={toolResult} prefix="PS>" />
+      <BashWidget
+        input={toolUse.input}
+        result={toolResult}
+        live={live}
+        prefix="PS>"
+      />
     );
   if (name === "glob")
-    return <GlobWidget input={toolUse.input} result={toolResult} />;
+    return <GlobWidget input={toolUse.input} result={toolResult} live={live} />;
   if (name === "grep")
-    return <GrepWidget input={toolUse.input} result={toolResult} />;
+    return <GrepWidget input={toolUse.input} result={toolResult} live={live} />;
   if (name === "askuserquestion")
     return <AskUserQuestionWidget input={toolUse.input} result={toolResult} />;
   if (name === "exitplanmode")
@@ -54,7 +68,9 @@ export const ToolWidget: FC<ToolWidgetProps> = ({ toolUse, toolResult }) => {
   if (name === "todowrite")
     return <TodoWriteWidget input={toolUse.input} result={toolResult} />;
   if (isSkillToolName(toolUse.name)) {
-    return <SkillWidget input={toolUse.input} result={toolResult} />;
+    return (
+      <SkillWidget input={toolUse.input} result={toolResult} live={live} />
+    );
   }
 
   return (
@@ -62,41 +78,71 @@ export const ToolWidget: FC<ToolWidgetProps> = ({ toolUse, toolResult }) => {
       name={toolUse.name || "unknown"}
       input={toolUse.input}
       result={toolResult}
+      live={live}
     />
   );
 };
 
+function activityLabel(
+  phase: ReturnType<typeof toolActivityPhase>,
+  labels: {
+    streaming: string;
+    completed: string;
+    error: string;
+    cancelled: string;
+  },
+): string {
+  return labels[phase];
+}
+
 // ─── Status Icon ───
 
-const StatusIcon: FC<{ result?: ContentBlock }> = ({ result }) => {
-  const isStreaming = useClaudeChatStore((s) => s.isStreaming);
-  if (!result) {
-    if (!isStreaming) {
-      // Tool was cancelled (stop pressed) — show stopped state
-      return <CircleIcon className="size-3.5 text-muted-foreground" />;
-    }
+const StatusIcon: FC<{ result?: ContentBlock; live?: boolean }> = ({
+  result,
+  live = false,
+}) => {
+  const phase = toolActivityPhase(!!result, result?.is_error, live);
+  if (phase === "streaming") {
     return (
-      <LoaderIcon className="size-3.5 animate-spin text-muted-foreground" />
+      <LoaderIcon
+        data-testid="tool-status-running"
+        className="size-3.5 animate-spin text-muted-foreground"
+      />
     );
   }
-  if (result.is_error) {
+  if (phase === "error") {
     return <span className="text-destructive text-sm">!</span>;
+  }
+  if (phase === "cancelled") {
+    return (
+      <CircleIcon
+        data-testid="tool-status-cancelled"
+        className="size-3.5 text-muted-foreground"
+      />
+    );
   }
   return <CheckIcon className="size-3.5 text-green-600" />;
 };
 
 // ─── Write Widget ───
 
-const WriteWidget: FC<{ input: any; result?: ContentBlock }> = ({
-  input,
-  result,
-}) => {
+const WriteWidget: FC<{
+  input: any;
+  result?: ContentBlock;
+  live?: boolean;
+}> = ({ input, result, live = false }) => {
+  const phase = toolActivityPhase(!!result, result?.is_error, live);
   return (
     <div className="my-1.5 flex items-center gap-2 rounded-lg border border-border bg-muted/50 px-3 py-2 text-sm">
-      <StatusIcon result={result} />
+      <StatusIcon result={result} live={live} />
       <FileOutputIcon className="size-3.5 shrink-0 text-muted-foreground" />
       <span className="min-w-0 truncate text-muted-foreground">
-        {result ? "Wrote" : "Writing"}{" "}
+        {activityLabel(phase, {
+          streaming: "Writing",
+          completed: "Wrote",
+          error: "Write failed",
+          cancelled: "Write cancelled",
+        })}{" "}
         <code className="rounded bg-muted px-1 text-xs">
           {input?.file_path}
         </code>
@@ -107,11 +153,13 @@ const WriteWidget: FC<{ input: any; result?: ContentBlock }> = ({
 
 // ─── Edit Widget ───
 
-const EditWidget: FC<{ input: any; result?: ContentBlock }> = ({
-  input,
-  result,
-}) => {
+const EditWidget: FC<{
+  input: any;
+  result?: ContentBlock;
+  live?: boolean;
+}> = ({ input, result, live = false }) => {
   const [expanded, setExpanded] = useState(false);
+  const phase = toolActivityPhase(!!result, result?.is_error, live);
 
   return (
     <div className="my-1.5 rounded-lg border border-border bg-muted/50 text-sm">
@@ -120,10 +168,15 @@ const EditWidget: FC<{ input: any; result?: ContentBlock }> = ({
         className="flex w-full items-center gap-2 px-3 py-2"
         onClick={() => setExpanded(!expanded)}
       >
-        <StatusIcon result={result} />
+        <StatusIcon result={result} live={live} />
         <FileEditIcon className="size-3.5 shrink-0 text-muted-foreground" />
         <span className="min-w-0 truncate text-muted-foreground">
-          {result ? "Edited" : "Editing"}{" "}
+          {activityLabel(phase, {
+            streaming: "Editing",
+            completed: "Edited",
+            error: "Edit failed",
+            cancelled: "Edit cancelled",
+          })}{" "}
           <code className="rounded bg-muted px-1 text-xs">
             {input?.file_path}
           </code>
@@ -151,13 +204,15 @@ const EditWidget: FC<{ input: any; result?: ContentBlock }> = ({
 
 // ─── Read Widget ───
 
-const ReadWidget: FC<{ input: any; result?: ContentBlock }> = ({
-  input,
-  result,
-}) => {
+const ReadWidget: FC<{
+  input: any;
+  result?: ContentBlock;
+  live?: boolean;
+}> = ({ input, result, live = false }) => {
   const [expanded, setExpanded] = useState(false);
   const displayText = toolResultDisplayText(result);
   const canExpand = Boolean(displayText);
+  const phase = toolActivityPhase(!!result, result?.is_error, live);
 
   return (
     <div className="my-1.5 rounded-lg border border-border bg-muted/50 text-sm">
@@ -167,10 +222,15 @@ const ReadWidget: FC<{ input: any; result?: ContentBlock }> = ({
         onClick={() => canExpand && setExpanded(!expanded)}
         disabled={!canExpand}
       >
-        <StatusIcon result={result} />
+        <StatusIcon result={result} live={live} />
         <FileIcon className="size-3.5 shrink-0 text-muted-foreground" />
         <span className="min-w-0 truncate text-muted-foreground">
-          {result ? "Read" : "Reading"}{" "}
+          {activityLabel(phase, {
+            streaming: "Reading",
+            completed: "Read",
+            error: "Read failed",
+            cancelled: "Read cancelled",
+          })}{" "}
           <code className="rounded bg-muted px-1 text-xs">
             {input?.file_path}
           </code>
@@ -203,8 +263,9 @@ const ReadWidget: FC<{ input: any; result?: ContentBlock }> = ({
 const BashWidget: FC<{
   input: any;
   result?: ContentBlock;
+  live?: boolean;
   prefix?: string;
-}> = ({ input, result, prefix = "$" }) => {
+}> = ({ input, result, live = false, prefix = "$" }) => {
   const [expanded, setExpanded] = useState(false);
   const command = input?.command || input?.description || "";
   const resultContent = toolResultText(result);
@@ -216,7 +277,7 @@ const BashWidget: FC<{
         className="flex w-full items-center gap-2 px-3 py-2"
         onClick={() => setExpanded(!expanded)}
       >
-        <StatusIcon result={result} />
+        <StatusIcon result={result} live={live} />
         <TerminalIcon className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
         <code className="min-w-0 truncate text-emerald-700 text-xs dark:text-emerald-300">
           {prefix} {truncate(command, 80)}
@@ -241,16 +302,23 @@ const BashWidget: FC<{
 
 // ─── Glob Widget ───
 
-const GlobWidget: FC<{ input: any; result?: ContentBlock }> = ({
-  input,
-  result,
-}) => {
+const GlobWidget: FC<{
+  input: any;
+  result?: ContentBlock;
+  live?: boolean;
+}> = ({ input, result, live = false }) => {
+  const phase = toolActivityPhase(!!result, result?.is_error, live);
   return (
     <div className="my-1.5 flex items-center gap-2 rounded-lg border border-border bg-muted/50 px-3 py-2 text-sm">
-      <StatusIcon result={result} />
+      <StatusIcon result={result} live={live} />
       <FileIcon className="size-3.5 shrink-0 text-muted-foreground" />
       <span className="min-w-0 truncate text-muted-foreground">
-        {result ? "Searched" : "Searching"}{" "}
+        {activityLabel(phase, {
+          streaming: "Searching",
+          completed: "Searched",
+          error: "Search failed",
+          cancelled: "Search cancelled",
+        })}{" "}
         <code className="rounded bg-muted px-1 text-xs">{input?.pattern}</code>
       </span>
     </div>
@@ -259,16 +327,23 @@ const GlobWidget: FC<{ input: any; result?: ContentBlock }> = ({
 
 // ─── Grep Widget ───
 
-const GrepWidget: FC<{ input: any; result?: ContentBlock }> = ({
-  input,
-  result,
-}) => {
+const GrepWidget: FC<{
+  input: any;
+  result?: ContentBlock;
+  live?: boolean;
+}> = ({ input, result, live = false }) => {
+  const phase = toolActivityPhase(!!result, result?.is_error, live);
   return (
     <div className="my-1.5 flex items-center gap-2 rounded-lg border border-border bg-muted/50 px-3 py-2 text-sm">
-      <StatusIcon result={result} />
+      <StatusIcon result={result} live={live} />
       <FileIcon className="size-3.5 shrink-0 text-muted-foreground" />
       <span className="min-w-0 truncate text-muted-foreground">
-        {result ? "Grepped" : "Grepping"}{" "}
+        {activityLabel(phase, {
+          streaming: "Grepping",
+          completed: "Grepped",
+          error: "Grep failed",
+          cancelled: "Grep cancelled",
+        })}{" "}
         <code className="rounded bg-muted px-1 text-xs">{input?.pattern}</code>
       </span>
     </div>
@@ -544,22 +619,30 @@ const TodoWriteWidget: FC<{ input: any; result?: ContentBlock }> = ({
 
 // ─── Skill Widget ───
 
-const SkillWidget: FC<{ input: any; result?: ContentBlock }> = ({
-  input,
-  result,
-}) => {
+const SkillWidget: FC<{
+  input: any;
+  result?: ContentBlock;
+  live?: boolean;
+}> = ({ input, result, live = false }) => {
   const skillName = skillToolDisplayName(input);
   const errorText = result?.is_error ? toolResultText(result).trim() : "";
+  const phase = toolActivityPhase(!!result, result?.is_error, live);
   return (
     <div
       className="my-1.5 rounded-lg border border-border bg-muted/50 text-sm"
       data-testid="chat-skill-widget"
     >
       <div className="flex items-center gap-2 px-3 py-2">
-        <StatusIcon result={result} />
+        <StatusIcon result={result} live={live} />
         <WrenchIcon className="size-3.5 text-muted-foreground" />
         <span className="min-w-0 truncate text-muted-foreground">
-          {result ? "Ran" : "Running"} skill{" "}
+          {activityLabel(phase, {
+            streaming: "Running",
+            completed: "Ran",
+            error: "Failed",
+            cancelled: "Cancelled",
+          })}{" "}
+          skill{" "}
           <code className="rounded bg-muted px-1 text-xs">{skillName}</code>
         </span>
       </div>
@@ -580,8 +663,10 @@ const GenericWidget: FC<{
   name: string;
   input: any;
   result?: ContentBlock;
-}> = ({ name, input, result }) => {
+  live?: boolean;
+}> = ({ name, input, result, live = false }) => {
   const [expanded, setExpanded] = useState(false);
+  const phase = toolActivityPhase(!!result, result?.is_error, live);
 
   return (
     <div className="my-1.5 rounded-lg border border-border bg-muted/50 text-sm">
@@ -590,10 +675,16 @@ const GenericWidget: FC<{
         className="flex w-full items-center gap-2 px-3 py-2"
         onClick={() => setExpanded(!expanded)}
       >
-        <StatusIcon result={result} />
+        <StatusIcon result={result} live={live} />
         <WrenchIcon className="size-3.5 text-muted-foreground" />
         <span className="text-muted-foreground">
-          {result ? "Ran" : "Running"} <code className="text-xs">{name}</code>
+          {activityLabel(phase, {
+            streaming: "Running",
+            completed: "Ran",
+            error: "Failed",
+            cancelled: "Cancelled",
+          })}{" "}
+          <code className="text-xs">{name}</code>
         </span>
         {expanded ? (
           <ChevronDownIcon className="ml-auto size-3.5 text-muted-foreground" />
@@ -614,14 +705,20 @@ const GenericWidget: FC<{
 
 // ─── Thinking Widget ───
 
-export const ThinkingWidget: FC<{ thinking: string; signature?: string }> = ({
-  thinking,
-}) => {
+export const ThinkingWidget: FC<{
+  thinking: string;
+  signature?: string;
+  live?: boolean;
+}> = ({ thinking, live = false }) => {
   const [expanded, setExpanded] = useState(false);
   const trimmed = thinking.trim();
 
   return (
-    <div className="my-1.5 overflow-hidden rounded-lg border border-muted-foreground/20 bg-muted-foreground/5">
+    <div
+      className="my-1.5 overflow-hidden rounded-lg border border-muted-foreground/20 bg-muted-foreground/5"
+      data-testid="thinking-widget"
+      data-turn-state={live ? "streaming" : "completed"}
+    >
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
@@ -632,7 +729,7 @@ export const ThinkingWidget: FC<{ thinking: string; signature?: string }> = ({
             <BrainIcon className="size-3.5 text-muted-foreground" />
           </div>
           <span className="font-medium text-muted-foreground text-sm italic">
-            Thinking...
+            {live ? "Thinking..." : "Thought"}
           </span>
         </div>
         <ChevronRightIcon

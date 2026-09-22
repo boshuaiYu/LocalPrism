@@ -292,6 +292,7 @@ mod tests {
                     reasoning_efforts: vec!["medium".into()],
                     is_default: true,
                     context_window: None,
+                    metadata: None,
                 },
                 ProviderModel {
                     id: "gpt-5.3-codex".into(),
@@ -299,6 +300,7 @@ mod tests {
                     reasoning_efforts: vec!["medium".into()],
                     is_default: false,
                     context_window: None,
+                    metadata: None,
                 },
             ],
         )
@@ -361,6 +363,7 @@ mod tests {
                     reasoning_efforts: vec!["medium".into()],
                     is_default: true,
                     context_window: None,
+                    metadata: None,
                 },
                 ProviderModel {
                     id: "gpt-5.3-codex".into(),
@@ -368,6 +371,7 @@ mod tests {
                     reasoning_efforts: vec!["medium".into()],
                     is_default: false,
                     context_window: None,
+                    metadata: None,
                 },
             ],
         )
@@ -397,6 +401,7 @@ mod tests {
                     reasoning_efforts: vec!["medium".into()],
                     is_default: true,
                     context_window: None,
+                    metadata: None,
                 },
                 ProviderModel {
                     id: CHATGPT_MODEL_TERRA.into(),
@@ -404,6 +409,7 @@ mod tests {
                     reasoning_efforts: vec!["medium".into()],
                     is_default: false,
                     context_window: None,
+                    metadata: None,
                 },
             ],
         )
