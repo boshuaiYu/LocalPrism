@@ -46,6 +46,7 @@ yarn-error.log*
 .DS_Store
 .worktrees/
 .tmp/
+.husky/
 .omc/
 .cursor/
 .superpowers/
