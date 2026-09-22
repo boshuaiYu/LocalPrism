@@ -41,14 +41,17 @@ export function WelcomeWizard({ onComplete }: { onComplete?: () => void }) {
       data-testid="welcome-wizard"
       className="relative flex h-full flex-col overflow-hidden bg-background text-foreground"
     >
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top,oklch(0.96_0.02_85)_0%,transparent_55%)] dark:bg-[radial-gradient(ellipse_at_top,oklch(0.22_0.03_270)_0%,transparent_55%)]"
-      />
-
-      <header className="relative z-10 flex h-[calc(52px+var(--titlebar-height))] shrink-0 items-center justify-between px-6 pt-[var(--titlebar-height)]">
-        <div className="flex items-center gap-3">
-          <img src="/icon-192.png" alt="" className="size-8 object-contain" />
+      <header className="relative z-10 flex h-[calc(48px+var(--titlebar-height))] shrink-0 items-center justify-between px-6 pt-[var(--titlebar-height)]">
+        <div className="flex items-center gap-2">
+          <div className="lp-mark flex size-8 items-center justify-center rounded-lg p-0.5">
+            <div className="flex size-full items-center justify-center rounded-md bg-background">
+              <img
+                src="/icon-192.png"
+                alt=""
+                className="size-6 object-contain"
+              />
+            </div>
+          </div>
           <div>
             <div className="font-semibold text-sm tracking-tight">
               LocalPrism
@@ -68,7 +71,9 @@ export function WelcomeWizard({ onComplete }: { onComplete?: () => void }) {
       </main>
 
       <footer className="relative z-10 flex shrink-0 items-center justify-end gap-3 border-border/60 border-t bg-background/80 px-6 py-4">
-        <Button onClick={finish}>Get started</Button>
+        <Button className="lp-primary-cta h-10 rounded-lg" onClick={finish}>
+          Get started
+        </Button>
       </footer>
     </div>
   );

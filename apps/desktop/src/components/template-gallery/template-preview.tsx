@@ -27,6 +27,14 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { OnboardingStepper } from "@/components/onboarding/onboarding-stepper";
+import {
+  isOnboardingTextField,
+  onboardingEscape,
+  onboardingHasDraft,
+  resolveOnboardingStep,
+  type OnboardingDismiss,
+} from "@/lib/onboarding-flow";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { useTemplateStore } from "@/stores/template-store";
@@ -528,6 +536,40 @@ export function TemplatePreview() {
   const canCreate = Boolean(
     template && projectFolder && !getProjectNameError(projectName),
   );
+  const hasDraft = onboardingHasDraft({
+    projectName,
+    purpose,
+    attachmentCount: attachments.length,
+  });
+  const activeStep = resolveOnboardingStep({
+    mode: "template",
+    phase: modalStep === "details" ? "details" : "preview",
+    referencesOpen: refFilesOpen,
+    creating: isCreating,
+  });
+  const returnToPreview = () => {
+    setPreviewPainted(false);
+    setRenderFailed(false);
+    setModalStep("preview");
+  };
+  const applyDismiss = (action: OnboardingDismiss) => {
+    if (action.type === "blur-field") {
+      if (document.activeElement instanceof HTMLElement) {
+        document.activeElement.blur();
+      }
+      return;
+    }
+    if (action.type === "close-section") {
+      if (action.section === "references") setRefFilesOpen(false);
+      else setLocationOpen(false);
+      return;
+    }
+    if (action.type === "back-to-preview") {
+      returnToPreview();
+      return;
+    }
+    if (action.type === "close-preview") handleOpenChange(false);
+  };
   const previewOverlay = templatePreviewOverlay({
     step: modalStep,
     loading,
@@ -557,7 +599,26 @@ export function TemplatePreview() {
       <DialogContent
         showCloseButton={false}
         className={`flex max-w-none flex-col gap-0 overflow-hidden p-0 transition-[width] duration-300 sm:max-w-none ${modalWidth} ${modalStep === "preview" ? "h-[70vh]" : "max-h-[80vh]"}`}
+        onEscapeKeyDown={(event) => {
+          event.preventDefault();
+          applyDismiss(
+            onboardingEscape({
+              surface: modalStep === "details" ? "details" : "preview",
+              searchQuery: "",
+              fieldFocused: isOnboardingTextField(document.activeElement),
+              referencesOpen: refFilesOpen,
+              locationOpen,
+              hasDraft,
+            }),
+          );
+        }}
+        onPointerDownOutside={(event) => {
+          if (modalStep === "details" && hasDraft) event.preventDefault();
+        }}
       >
+        <div className="overflow-x-auto border-border/60 border-b px-4 py-2">
+          <OnboardingStepper active={activeStep} />
+        </div>
         {modalStep === "preview" ? (
           /* ═══════════════════ PREVIEW STEP ═══════════════════ */
           <>
@@ -573,9 +634,18 @@ export function TemplatePreview() {
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 rounded-lg"
+                    onClick={() => handleOpenChange(false)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
                     size="sm"
                     onClick={() => setModalStep("details")}
-                    className="gap-1.5"
+                    className="lp-primary-cta h-8 gap-2 rounded-lg"
                   >
                     <SparklesIcon className="size-3.5" />
                     Use Template
@@ -674,11 +744,7 @@ export function TemplatePreview() {
                   variant="ghost"
                   size="icon"
                   className="size-7 shrink-0 rounded-lg"
-                  onClick={() => {
-                    setPreviewPainted(false);
-                    setRenderFailed(false);
-                    setModalStep("preview");
-                  }}
+                  onClick={returnToPreview}
                 >
                   <ArrowLeftIcon className="size-4" />
                 </Button>
@@ -909,9 +975,18 @@ export function TemplatePreview() {
             </div>
 
             {/* Create button — sticky footer */}
-            <div className="shrink-0 border-border/60 border-t px-5 py-4">
+            <div className="flex shrink-0 gap-2 border-border/60 border-t px-4 py-4">
               <Button
-                className="w-full gap-2 rounded-xl font-semibold shadow-sm transition-all hover:shadow-md active:scale-[0.99]"
+                type="button"
+                variant="outline"
+                className="h-10 rounded-lg"
+                disabled={isCreating}
+                onClick={returnToPreview}
+              >
+                Back
+              </Button>
+              <Button
+                className="lp-primary-cta h-10 flex-1 gap-2 rounded-lg font-semibold"
                 size="lg"
                 disabled={!canCreate || isCreating}
                 onClick={handleCreate}

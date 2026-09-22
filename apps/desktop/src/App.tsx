@@ -21,7 +21,11 @@ import { ErrorFallback } from "@/components/error-fallback";
 import { createLogger } from "@/lib/debug/logger";
 import { EnvironmentOnboarding } from "@/components/environment-onboarding";
 import { WelcomeWizard } from "@/components/welcome-wizard";
-import { isWelcomeCompleted, markWelcomeCompleted } from "@/lib/welcome";
+import {
+  isWelcomeCompleted,
+  markWelcomeCompleted,
+  REOPEN_WELCOME_EVENT,
+} from "@/lib/welcome";
 import { runtimeListConversations } from "@/runtime/commands";
 
 const log = createLogger("app");
@@ -314,6 +318,13 @@ export function App({ onReady }: { onReady?: () => void }) {
     const handler = () => setShowDebug((prev) => !prev);
     window.addEventListener("toggle-debug-panel", handler);
     return () => window.removeEventListener("toggle-debug-panel", handler);
+  }, []);
+
+  useEffect(() => {
+    const reopenWelcome = () => setWelcomeCompleted(false);
+    window.addEventListener(REOPEN_WELCOME_EVENT, reopenWelcome);
+    return () =>
+      window.removeEventListener(REOPEN_WELCOME_EVENT, reopenWelcome);
   }, []);
 
   return (

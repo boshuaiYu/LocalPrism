@@ -26,6 +26,13 @@ import { exists, join } from "@/lib/tauri/fs";
 import { getTemplateById } from "@/lib/template-registry";
 import { materializeTemplateProject } from "@/lib/materialize-template";
 import { TemplateGallery } from "@/components/template-gallery";
+import { OnboardingStepper } from "@/components/onboarding/onboarding-stepper";
+import {
+  isOnboardingTextField,
+  onboardingEscape,
+  onboardingHasDraft,
+  resolveOnboardingStep,
+} from "@/lib/onboarding-flow";
 import { DEFAULT_PROJECT_INSTRUCTIONS } from "@/lib/default-claude-md";
 import { ensureProjectAgentsMd } from "@/lib/project-agents-md";
 import {
@@ -57,19 +64,22 @@ export function ProjectWizard({ mode, onBack }: ProjectWizardProps) {
   if (mode === "template") {
     return (
       <div className="flex h-full flex-col bg-background">
-        <div className="flex h-[calc(48px+var(--titlebar-height))] shrink-0 items-center gap-3 border-border/60 border-b px-4 pt-[var(--titlebar-height)]">
+        <div className="flex h-[calc(40px+var(--titlebar-height))] shrink-0 items-center gap-2 border-border/60 border-b px-4 pt-[var(--titlebar-height)]">
           <Button
             variant="ghost"
             size="icon"
-            className="size-7 rounded-lg"
+            className="size-8 rounded-lg"
             onClick={onBack}
           >
             <ArrowLeftIcon className="size-4" />
           </Button>
-          <span className="font-semibold text-sm">Choose a Template</span>
+          <span className="lp-heading">Choose a Template</span>
         </div>
-        <div className="flex-1 overflow-hidden">
-          <TemplateGallery />
+        <div className="border-border/60 border-b px-4 py-2">
+          <OnboardingStepper active="template" />
+        </div>
+        <div className="min-h-0 flex-1 overflow-hidden">
+          <TemplateGallery onExit={onBack} />
         </div>
       </div>
     );
@@ -266,20 +276,71 @@ function ScratchForm({ onBack }: { onBack: () => void }) {
   const canCreate = Boolean(
     template && projectFolder && !getProjectNameError(projectName),
   );
+  const hasDraft = onboardingHasDraft({
+    projectName,
+    purpose,
+    attachmentCount: attachments.length,
+  });
+  const activeStep = resolveOnboardingStep({
+    mode: "scratch",
+    phase: "details",
+    referencesOpen: refFilesOpen,
+    creating: isCreating,
+  });
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || isCreating) return;
+      const action = onboardingEscape({
+        surface: "scratch",
+        searchQuery: "",
+        fieldFocused: isOnboardingTextField(event.target),
+        referencesOpen: refFilesOpen,
+        locationOpen,
+        hasDraft,
+      });
+      if (action.type === "blur-field") {
+        event.preventDefault();
+        if (document.activeElement instanceof HTMLElement) {
+          document.activeElement.blur();
+        }
+        return;
+      }
+      if (action.type === "close-section") {
+        event.preventDefault();
+        if (action.section === "references") setRefFilesOpen(false);
+        else setLocationOpen(false);
+        return;
+      }
+      if (action.type === "block-exit") {
+        event.preventDefault();
+        return;
+      }
+      if (action.type === "exit") {
+        event.preventDefault();
+        onBack();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [hasDraft, isCreating, locationOpen, onBack, refFilesOpen]);
 
   return (
     <div className="flex h-full flex-col bg-background">
       {/* Header */}
-      <div className="flex h-[calc(48px+var(--titlebar-height))] shrink-0 items-center gap-3 border-border/60 border-b px-4 pt-[var(--titlebar-height)]">
+      <div className="flex h-[calc(40px+var(--titlebar-height))] shrink-0 items-center gap-2 border-border/60 border-b px-4 pt-[var(--titlebar-height)]">
         <Button
           variant="ghost"
           size="icon"
-          className="size-7 rounded-lg"
+          className="size-8 rounded-lg"
           onClick={onBack}
         >
           <ArrowLeftIcon className="size-4" />
         </Button>
-        <span className="font-semibold text-sm">New Document</span>
+        <span className="lp-heading">New Document</span>
+      </div>
+      <div className="border-border/60 border-b px-4 py-2">
+        <OnboardingStepper active={activeStep} />
       </div>
 
       {/* Form */}
@@ -498,9 +559,18 @@ function ScratchForm({ onBack }: { onBack: () => void }) {
           </div>
 
           {/* Create button */}
-          <div className="pt-1">
+          <div className="flex gap-2 pt-2">
             <Button
-              className="w-full gap-2 rounded-xl font-semibold shadow-sm transition-all hover:shadow-md active:scale-[0.99]"
+              type="button"
+              variant="outline"
+              className="h-10 rounded-lg"
+              disabled={isCreating}
+              onClick={onBack}
+            >
+              Cancel
+            </Button>
+            <Button
+              className="lp-primary-cta h-10 flex-1 gap-2 rounded-lg font-semibold"
               size="lg"
               disabled={!canCreate || isCreating}
               onClick={handleCreate}

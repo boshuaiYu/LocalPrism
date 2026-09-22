@@ -20,11 +20,15 @@ import { useRuntimeEvents } from "@/hooks/use-runtime-events";
 import { useApprovalStore } from "@/stores/approval-store";
 import { useDocumentStore } from "@/stores/document-store";
 import { usePreviewStore } from "@/stores/preview-store";
-import {
-  contentPaneSize,
-  useChatLayoutStore,
-} from "@/stores/chat-layout-store";
+import { useChatLayoutStore } from "@/stores/chat-layout-store";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
+import {
+  clearPaneLayouts,
+  paneIds,
+  paneSizeMap,
+  writePaneLayout,
+  type PaneVisibility,
+} from "@/lib/workspace-pane-layout";
 
 const SIDEBAR_DEFAULT_SIZE = 15;
 const SIDEBAR_MIN_SIZE = 10;
@@ -34,6 +38,17 @@ const SIDEBAR_ANIMATION_MS = 280;
 
 function easeInOutSmooth(progress: number) {
   return progress * progress * (3 - 2 * progress);
+}
+
+function WorkspaceResizeHandle({ testId }: { testId?: string }) {
+  return (
+    <PanelResizeHandle
+      data-testid={testId}
+      className="group relative w-2 shrink-0 bg-transparent outline-none focus-visible:bg-ring/20 data-resize-handle-active:bg-ring/15"
+    >
+      <span className="pointer-events-none absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border transition-colors group-hover:bg-ring group-focus-visible:bg-ring group-data-resize-handle-active:bg-ring" />
+    </PanelResizeHandle>
+  );
 }
 
 export function WorkspaceLayout() {
@@ -62,6 +77,32 @@ export function WorkspaceLayout() {
     SIDEBAR_COLLAPSED_SIZE_FALLBACK,
   );
   const [codeVisible, setCodeVisible] = useState(true);
+  const [layoutEpoch, setLayoutEpoch] = useState(0);
+  const paneVisibility: PaneVisibility = {
+    code: codeVisible,
+    chat: chatVisible,
+    pdf: previewVisible,
+  };
+  const paneSizes = paneSizeMap(paneVisibility, localStorage);
+  const resetLayout = useCallback(() => {
+    clearPaneLayouts(localStorage);
+    expandedSidebarSizeRef.current = SIDEBAR_DEFAULT_SIZE;
+    setSidebarCollapsed(false);
+    setLayoutEpoch((epoch) => epoch + 1);
+  }, []);
+  const persistLayout = useCallback(
+    (sizes: number[]) => {
+      const visibility = {
+        code: codeVisible,
+        chat: chatVisible,
+        pdf: previewVisible,
+      };
+      if (sidebarAnimatingRef.current || sidebarCollapsed) return;
+      if (sizes.length !== paneIds(visibility).length) return;
+      writePaneLayout(visibility, sizes, localStorage);
+    },
+    [chatVisible, codeVisible, previewVisible, sidebarCollapsed],
+  );
 
   const getCollapsedSidebarSize = useCallback(() => {
     const workspaceWidth =
@@ -256,12 +297,17 @@ export function WorkspaceLayout() {
 
   return (
     <div ref={workspaceRef} className="relative h-full">
-      <PanelGroup direction="horizontal" className="h-full">
+      <PanelGroup
+        key={layoutEpoch}
+        direction="horizontal"
+        className="h-full"
+        onLayout={persistLayout}
+      >
         <Panel
           id="sidebar"
           order={1}
           ref={sidebarPanelRef}
-          defaultSize={SIDEBAR_DEFAULT_SIZE}
+          defaultSize={paneSizes.sidebar}
           minSize={SIDEBAR_MIN_SIZE}
           maxSize={25}
           collapsible
@@ -287,22 +333,19 @@ export function WorkspaceLayout() {
               setChatVisible: setChatPaneVisible,
               setPdfVisible: setPdfPaneVisible,
               setSidebarVisible: (visible) => setSidebarPaneCollapsed(!visible),
+              onResetLayout: resetLayout,
+              layoutResetKey: layoutEpoch,
             }}
           />
         </Panel>
 
-        <PanelResizeHandle className="w-px bg-border transition-colors hover:bg-ring" />
+        <WorkspaceResizeHandle />
 
         {codeVisible && (
           <Panel
             id="code"
             order={2}
-            defaultSize={contentPaneSize({
-              code: true,
-              chat: chatVisible,
-              pdf: previewVisible,
-              pane: "code",
-            })}
+            defaultSize={paneSizes.code}
             minSize={22}
             className="min-w-0"
           >
@@ -318,29 +361,18 @@ export function WorkspaceLayout() {
         )}
 
         {codeVisible && chatVisible && (
-          <PanelResizeHandle
-            data-testid="resize-code-chat"
-            className="w-px bg-border transition-colors hover:bg-ring"
-          />
+          <WorkspaceResizeHandle testId="resize-code-chat" />
         )}
 
         {codeVisible && !chatVisible && previewVisible && (
-          <PanelResizeHandle
-            data-testid="resize-code-pdf"
-            className="w-px bg-border transition-colors hover:bg-ring"
-          />
+          <WorkspaceResizeHandle testId="resize-code-pdf" />
         )}
 
         {chatVisible && (
           <Panel
             id="chat"
             order={3}
-            defaultSize={contentPaneSize({
-              code: codeVisible,
-              chat: true,
-              pdf: previewVisible,
-              pane: "chat",
-            })}
+            defaultSize={paneSizes.chat}
             minSize={18}
             collapsible
             collapsedSize={0}
@@ -352,22 +384,14 @@ export function WorkspaceLayout() {
         )}
 
         {chatVisible && previewVisible && (
-          <PanelResizeHandle
-            data-testid="resize-chat-pdf"
-            className="w-px bg-border transition-colors hover:bg-ring"
-          />
+          <WorkspaceResizeHandle testId="resize-chat-pdf" />
         )}
 
         {previewVisible && (
           <Panel
             id="pdf"
             order={4}
-            defaultSize={contentPaneSize({
-              code: codeVisible,
-              chat: chatVisible,
-              pdf: true,
-              pane: "pdf",
-            })}
+            defaultSize={paneSizes.pdf}
             minSize={22}
             className="min-w-0"
           >

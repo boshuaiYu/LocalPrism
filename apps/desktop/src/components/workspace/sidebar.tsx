@@ -26,6 +26,7 @@ import {
   FlaskConicalIcon,
   TerminalIcon,
   SettingsIcon,
+  CircleHelpIcon,
   MessageCircleIcon,
   Bot as BotIcon,
   type LucideIcon,
@@ -85,6 +86,8 @@ import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import { ProjectCloseButton } from "@/components/workspace/project-close-button";
 import { UvSetupDialog } from "@/components/uv-setup";
 import { SettingsDialog } from "@/components/settings/settings-dialog";
+import { GettingStartedDialog } from "@/components/getting-started-dialog";
+import { SIDEBAR_SPLIT_AUTOSAVE_ID } from "@/lib/workspace-pane-layout";
 import { createLogger } from "@/lib/debug/logger";
 import { resolveNewProjectFile } from "@/lib/new-project-file";
 
@@ -349,6 +352,13 @@ function LayoutPaneSwitcher({
             checked={controls.sidebarVisible}
             onCheckedChange={controls.setSidebarVisible}
           />
+          <button
+            type="button"
+            className="lp-focus flex h-10 w-full items-center rounded-lg px-2 text-left font-medium text-sm hover:bg-accent/70"
+            onClick={controls.onResetLayout}
+          >
+            Reset layout
+          </button>
         </div>
       </HoverCardContent>
     </HoverCard>
@@ -413,6 +423,8 @@ interface LayoutControls {
   setChatVisible: (visible: boolean) => void;
   setPdfVisible: (visible: boolean) => void;
   setSidebarVisible: (visible: boolean) => void;
+  onResetLayout: () => void;
+  layoutResetKey: number;
 }
 
 export function Sidebar({
@@ -966,6 +978,7 @@ export function Sidebar({
   const [newFileKind, setNewFileKind] = useState<"tex" | "markdown">("tex");
   const [newFolderName, setNewFolderName] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<
     "runtimes" | "skills" | "agents"
   >("runtimes");
@@ -1225,7 +1238,17 @@ export function Sidebar({
           </Button>
         )}
       </div>
-      <div className="flex h-9 w-full items-center justify-center border-sidebar-border border-t">
+      <div className="flex h-9 w-full items-center justify-center gap-1 border-sidebar-border border-t">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7"
+          onClick={() => setGuideOpen(true)}
+          title="Getting Started"
+          aria-label="Getting Started"
+        >
+          <CircleHelpIcon className="size-3.5" />
+        </Button>
         <ProjectCloseButton
           className="size-7 transition-transform duration-300 ease-in-out hover:scale-105"
           onClose={closeProject}
@@ -1295,7 +1318,12 @@ export function Sidebar({
           </div>
 
           {/* Resizable sections */}
-          <PanelGroup direction="vertical" className="min-h-0 flex-1">
+          <PanelGroup
+            key={layoutControls?.layoutResetKey ?? 0}
+            autoSaveId={SIDEBAR_SPLIT_AUTOSAVE_ID}
+            direction="vertical"
+            className="min-h-0 flex-1"
+          >
             {/* Files */}
             <Panel defaultSize={50} minSize={15}>
               <div
@@ -1429,7 +1457,9 @@ export function Sidebar({
               </div>
             </Panel>
 
-            <PanelResizeHandle className="h-px bg-sidebar-border transition-colors hover:bg-ring data-resize-handle-active:bg-ring" />
+            <PanelResizeHandle className="group relative h-2 shrink-0 bg-transparent data-resize-handle-active:bg-ring/15">
+              <span className="pointer-events-none absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-sidebar-border transition-colors group-hover:bg-ring group-data-resize-handle-active:bg-ring" />
+            </PanelResizeHandle>
 
             {/* Outline */}
             <Panel defaultSize={20} minSize={10}>
@@ -1462,7 +1492,9 @@ export function Sidebar({
               </div>
             </Panel>
 
-            <PanelResizeHandle className="h-px bg-sidebar-border transition-colors hover:bg-ring data-resize-handle-active:bg-ring" />
+            <PanelResizeHandle className="group relative h-2 shrink-0 bg-transparent data-resize-handle-active:bg-ring/15">
+              <span className="pointer-events-none absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-sidebar-border transition-colors group-hover:bg-ring group-data-resize-handle-active:bg-ring" />
+            </PanelResizeHandle>
 
             {/* Zotero */}
             <Panel defaultSize={15} minSize={10}>
@@ -1490,6 +1522,16 @@ export function Sidebar({
           <div className="flex h-9 items-center justify-between border-sidebar-border border-t px-3 text-muted-foreground text-xs">
             <span className="truncate">LocalPrism v{appVersion}</span>
             <div className="flex shrink-0 items-center gap-1">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-6"
+                onClick={() => setGuideOpen(true)}
+                title="Getting Started"
+                aria-label="Getting Started"
+              >
+                <CircleHelpIcon className="size-3.5" />
+              </Button>
               <Button
                 variant="ghost"
                 size="icon"
@@ -1545,6 +1587,12 @@ export function Sidebar({
               setSettingsOpen(open);
               if (!open) setSettingsTab("runtimes");
             }}
+          />
+          <GettingStartedDialog
+            open={guideOpen}
+            onOpenChange={setGuideOpen}
+            beforeOpenGuide={closeProject}
+            leavesProject
           />
 
           {/* New File Dialog */}

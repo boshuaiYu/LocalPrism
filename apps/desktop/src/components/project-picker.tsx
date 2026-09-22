@@ -32,6 +32,7 @@ import {
   MonitorIcon,
   MoonIcon,
   SunIcon,
+  CircleHelpIcon,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useTheme } from "next-themes";
@@ -42,7 +43,14 @@ import { useProviderStore } from "@/stores/provider-store";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
 import { getMupdfClient } from "@/lib/mupdf/mupdf-client";
 import { exists, join } from "@/lib/tauri/fs";
+import { GettingStartedDialog } from "@/components/getting-started-dialog";
+import { HomeEmptyState } from "@/components/home/home-empty-state";
 import { Button } from "@/components/ui/button";
+import {
+  homeProjectListState,
+  OPEN_FOLDER_HINT,
+} from "@/lib/home-project-list";
+import { projectCardMetaLine } from "@/lib/project-card-meta";
 import {
   Dialog,
   DialogContent,
@@ -102,6 +110,7 @@ export function ProjectPicker() {
   const [searchQuery, setSearchQuery] = useState("");
   const [removeProjectTarget, setRemoveProjectTarget] =
     useState<RecentProject | null>(null);
+  const [guideOpen, setGuideOpen] = useState(false);
   const defaultProjectsDiscoveredRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const pendingSearchFocus = useRef(false);
@@ -239,6 +248,11 @@ export function ProjectPicker() {
         project.path.toLowerCase().includes(normalizedSearch),
     );
   }, [normalizedSearch, recentProjects]);
+  const listState = homeProjectListState({
+    recentCount: recentProjects.length,
+    query: normalizedSearch,
+    matchCount: visibleProjects.length,
+  });
 
   if (wizardMode) {
     return (
@@ -254,12 +268,7 @@ export function ProjectPicker() {
 
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-background text-foreground">
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top,oklch(0.96_0.02_85)_0%,transparent_55%)] dark:bg-[radial-gradient(ellipse_at_top,oklch(0.22_0.03_270)_0%,transparent_55%)]"
-      />
-
-      <header className="relative z-10 flex h-[calc(44px+var(--titlebar-height))] shrink-0 items-center justify-end gap-1 px-4 pt-[var(--titlebar-height)]">
+      <header className="relative z-10 flex h-[calc(40px+var(--titlebar-height))] shrink-0 items-center justify-end gap-2 px-4 pt-[var(--titlebar-height)]">
         <Button variant="ghost" size="icon" className="size-8" asChild>
           <a
             href="https://github.com/boshuaiYu/LocalPrism"
@@ -292,8 +301,16 @@ export function ProjectPicker() {
           )}
         </Button>
         <Button
+          variant="ghost"
+          className="h-8 gap-2 rounded-lg px-2 text-muted-foreground hover:text-foreground"
+          onClick={() => setGuideOpen(true)}
+        >
+          <CircleHelpIcon className="size-4" />
+          Getting Started
+        </Button>
+        <Button
           variant={activeSection === "settings" ? "secondary" : "ghost"}
-          className="h-8 gap-1.5 px-2.5 text-muted-foreground hover:text-foreground"
+          className="h-8 gap-2 rounded-lg px-2 text-muted-foreground hover:text-foreground"
           onClick={() =>
             setActiveSection((section) =>
               section === "settings" ? "projects" : "settings",
@@ -316,9 +333,7 @@ export function ProjectPicker() {
               <ArrowLeftIcon className="size-3.5" />
               Back to home
             </button>
-            <h1 className="mb-6 font-semibold text-xl tracking-tight">
-              Settings
-            </h1>
+            <h1 className="lp-title mb-6">Settings</h1>
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-[13rem_minmax(0,1fr)]">
               <aside className="space-y-1 lg:border-border/60 lg:border-r lg:pr-4">
                 <SettingsDetailButton
@@ -360,23 +375,23 @@ export function ProjectPicker() {
         ) : (
           <div className="mx-auto flex min-h-full w-full max-w-xl flex-col justify-center px-6 py-10">
             <div className="mb-8 text-center">
-              <div className="mx-auto mb-4 flex size-16 items-center justify-center rounded-2xl border border-border/70 bg-background/80 shadow-sm">
-                <img src="/icon-192.png" alt="" className="size-10" />
+              <div className="lp-mark mx-auto mb-4 flex size-16 items-center justify-center rounded-lg p-0.5">
+                <div className="flex size-full items-center justify-center rounded-md bg-background">
+                  <img src="/icon-192.png" alt="" className="size-10" />
+                </div>
               </div>
-              <h1 className="font-semibold text-3xl tracking-tight">
-                LocalPrism
-              </h1>
-              <p className="mt-2 text-muted-foreground text-sm">
+              <h1 className="lp-title text-[1.75rem]">LocalPrism</h1>
+              <p className="lp-meta mt-2">
                 AI-powered academic writing workspace
               </p>
             </div>
 
-            <div className="flex gap-3">
+            <div className="flex gap-2">
               <Button
                 onClick={() => setShowModeDialog(true)}
                 size="lg"
                 variant="outline"
-                className="h-11 flex-1 gap-2 rounded-xl"
+                className="h-10 flex-1 gap-2 rounded-lg"
               >
                 <FolderPlusIcon className="size-4" />
                 New Project
@@ -384,19 +399,28 @@ export function ProjectPicker() {
               <Button
                 onClick={handleOpenFolder}
                 size="lg"
-                className="h-11 flex-1 gap-2 rounded-xl"
+                className="lp-primary-cta h-10 flex-1 gap-2 rounded-lg"
               >
                 <FolderOpenIcon className="size-4" />
                 Open Folder
               </Button>
             </div>
+            <p className="lp-meta mt-2 text-center">{OPEN_FOLDER_HINT}</p>
 
             <HomepageEnvironmentStatus />
 
-            {(recentProjects.length > 0 || normalizedSearch) && (
+            {listState === "empty" && (
+              <HomeEmptyState
+                variant="empty"
+                onNewProject={() => setShowModeDialog(true)}
+                onOpenFolder={() => void handleOpenFolder()}
+              />
+            )}
+
+            {(listState === "list" || listState === "no-results") && (
               <section className="mt-8">
-                <div className="mb-3 flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2 text-muted-foreground text-xs uppercase tracking-wide">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <div className="lp-meta flex items-center gap-2 uppercase tracking-wide">
                     <ClockIcon className="size-3.5" />
                     Recent Projects
                   </div>
@@ -407,7 +431,7 @@ export function ProjectPicker() {
                       value={searchQuery}
                       onChange={(event) => setSearchQuery(event.target.value)}
                       placeholder="Search"
-                      className="h-8 w-full rounded-lg border border-input bg-background pr-12 pl-8 text-xs outline-none transition-colors placeholder:text-muted-foreground focus:border-ring"
+                      className="lp-focus h-8 w-full rounded-lg border border-input bg-background pr-12 pl-8 text-xs outline-none transition-colors placeholder:text-muted-foreground"
                     />
                     <kbd className="pointer-events-none absolute top-1/2 right-1.5 -translate-y-1/2 rounded border border-border/70 px-1 font-medium text-[10px] text-muted-foreground">
                       {searchShortcutLabel}
@@ -415,12 +439,16 @@ export function ProjectPicker() {
                   </div>
                 </div>
 
-                {visibleProjects.length === 0 ? (
-                  <div className="rounded-xl border border-border border-dashed px-4 py-8 text-center text-muted-foreground text-sm">
-                    No matching projects
-                  </div>
+                {listState === "no-results" ? (
+                  <HomeEmptyState
+                    variant="no-results"
+                    query={searchQuery}
+                    onNewProject={() => setShowModeDialog(true)}
+                    onOpenFolder={() => void handleOpenFolder()}
+                    onClearSearch={() => setSearchQuery("")}
+                  />
                 ) : (
-                  <div className="overflow-hidden rounded-xl border border-border/70 bg-background/70 shadow-sm">
+                  <div className="overflow-hidden rounded-lg border border-border/70 bg-background/70">
                     {visibleProjects.map((project) => (
                       <RecentProjectRow
                         key={project.path}
@@ -448,7 +476,7 @@ export function ProjectPicker() {
             <DialogTitle>Create New Project</DialogTitle>
             <DialogDescription>How would you like to start?</DialogDescription>
           </DialogHeader>
-          <div className="flex gap-3 pt-2">
+          <div className="flex gap-2 pt-2">
             <button
               onClick={() => handleSelectMode("template")}
               className="group flex flex-1 flex-col items-center gap-3 rounded-lg border border-border/70 p-4 text-center transition-colors hover:border-border hover:bg-muted/50"
@@ -482,8 +510,20 @@ export function ProjectPicker() {
               </div>
             </button>
           </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              className="h-10 rounded-lg"
+              onClick={() => setShowModeDialog(false)}
+            >
+              Cancel
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <GettingStartedDialog open={guideOpen} onOpenChange={setGuideOpen} />
 
       <Dialog
         open={!!removeProjectTarget}
@@ -678,8 +718,14 @@ function RecentProjectRow({
         </div>
         <div className="min-w-0 flex-1">
           <div className="truncate font-medium text-sm">{project.name}</div>
-          <div className="truncate text-muted-foreground text-xs">
-            {project.path}
+          <div className="lp-meta truncate" title={project.path}>
+            {projectCardMetaLine({
+              path: project.path,
+              updatedAt: project.lastOpened,
+              now: Date.now(),
+              preview:
+                preview.status === "ready" ? preview.data.kind : preview.status,
+            })}
           </div>
         </div>
       </button>
