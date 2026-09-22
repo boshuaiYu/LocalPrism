@@ -1,4 +1,6 @@
-use crate::anthropic_proxy::{start_openai_anthropic_proxy, OpenAiProxyCredential};
+use crate::anthropic_proxy::{
+    start_anthropic_passthrough_proxy, start_openai_anthropic_proxy, OpenAiProxyCredential,
+};
 use crate::claude_process::{
     fail_claude_start, reserve_claude_start, spawn_claude_process, stop_claude_process,
     stop_claude_process_silently_if_missing, ClaudeStartReservation, ClaudeStopMode,
@@ -3539,6 +3541,18 @@ async fn execute_openai_compatible_via_native_anthropic(
 ) -> Result<(), String> {
     let anthropic_base_url = native_anthropic_base_url(&credential)
         .ok_or_else(|| "Provider does not expose a native Anthropic endpoint".to_string())?;
+    let proxy_url = start_anthropic_passthrough_proxy(OpenAiProxyCredential {
+        api_key: credential.api_key.clone(),
+        base_url: anthropic_base_url.clone(),
+        model: credential.model.clone(),
+        transformers: credential.transformers.clone(),
+        model_transformers: credential
+            .model_transformers
+            .get(&credential.model)
+            .cloned()
+            .unwrap_or_default(),
+    })
+    .await?;
     let claude_path = find_claude_binary()?;
 
     let (mut args, stdin_payload) = with_prompt_transport(args_prefix, prompt);
@@ -3550,6 +3564,7 @@ async fn execute_openai_compatible_via_native_anthropic(
 
     let mut cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
     apply_native_anthropic_provider_env(&mut cmd, &credential, &anthropic_base_url);
+    cmd.env("ANTHROPIC_BASE_URL", proxy_url);
 
     spawn_claude_process(
         window,

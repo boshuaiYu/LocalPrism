@@ -15,7 +15,8 @@ use tokio::sync::Mutex;
 
 use crate::anthropic_proxy::responses::CodexProxyCredential;
 use crate::anthropic_proxy::{
-    start_codex_responses_proxy, start_openai_anthropic_proxy, OpenAiProxyCredential,
+    start_anthropic_passthrough_proxy, start_codex_responses_proxy, start_openai_anthropic_proxy,
+    OpenAiProxyCredential,
 };
 
 pub use env::{
@@ -345,6 +346,17 @@ pub async fn apply_managed_provider(
         }
         Some(ProxyKind::OpenaiChat(provider)) => {
             let proxy = start_openai_anthropic_proxy(OpenAiProxyCredential {
+                api_key: provider.api_key,
+                base_url: provider.base_url,
+                model: provider.models.main,
+                transformers: Vec::new(),
+                model_transformers: Vec::new(),
+            })
+            .await?;
+            values.push(("ANTHROPIC_BASE_URL".into(), proxy));
+        }
+        Some(ProxyKind::AnthropicNative(provider)) => {
+            let proxy = start_anthropic_passthrough_proxy(OpenAiProxyCredential {
                 api_key: provider.api_key,
                 base_url: provider.base_url,
                 model: provider.models.main,
