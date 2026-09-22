@@ -269,9 +269,7 @@ describe("runtime selector helpers", () => {
     expect(normalizeReasoningEffort("claude", "minimal", advertised)).toBe(
       "low",
     );
-    expect(normalizeReasoningEffort("claude", null, advertised)).toBe(
-      "medium",
-    );
+    expect(normalizeReasoningEffort("claude", null, advertised)).toBe("medium");
     expect(normalizeReasoningEffort("api", null, null)).toBeNull();
   });
 
