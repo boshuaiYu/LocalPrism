@@ -7,12 +7,16 @@ import type {
   RuntimeKind,
   RuntimeModel,
 } from "@/runtime/types";
-import { ReasoningEffortSlider } from "@/components/claude-chat/reasoning-effort-slider";
+import { ReasoningStrengthControl } from "@/components/claude-chat/reasoning-strength-control";
 import { resolveFastModelPair } from "@/lib/fast-model";
 import {
   normalizeReasoningEffortOptions,
   resolveReasoningEffort,
 } from "@/lib/reasoning-effort";
+import {
+  deriveReasoningStrength,
+  reasoningStrengthWireValue,
+} from "@/lib/reasoning-strength";
 import { cn } from "@/lib/utils";
 import { useProviderStore } from "@/stores/provider-store";
 
@@ -309,17 +313,11 @@ export function RuntimeSelector({
       null,
     [providerModels, selectedModelId],
   );
-  const effortOptions = normalizeReasoningEffortOptions(
-    selectedModel?.reasoningEfforts?.length
-      ? selectedModel.reasoningEfforts
-      : CLAUDE_REASONING_EFFORT_OPTIONS,
+  const strengthControl = deriveReasoningStrength(
+    selectedModel,
+    reasoningEffort ?? selectedClaudeEffort,
   );
-  const selectedEffort =
-    resolveReasoningEffort(
-      reasoningEffort,
-      effortOptions,
-      selectedClaudeEffort,
-    ) ?? selectedClaudeEffort;
+  const selectedEffort = reasoningStrengthWireValue(strengthControl);
   const fastPair = useMemo(
     () => resolveFastModelPair(selectedModel?.id, providerModels),
     [providerModels, selectedModel?.id],
@@ -393,39 +391,50 @@ export function RuntimeSelector({
           ))
         )}
 
-        <div className="mt-1 border-border border-t px-2 pt-2 pb-2">
-          <ReasoningEffortSlider
-            options={effortOptions}
-            value={selectedEffort}
-            modelName={selectedModel?.displayName}
+        <div className="mt-1 flex flex-col gap-2 border-border border-t px-2 pt-2 pb-2">
+          {fastPair ? (
+            <button
+              type="button"
+              data-testid="reasoning-effort-fast-toggle"
+              aria-label={
+                selectedModel?.id === fastPair.fastId
+                  ? "Disable fast model"
+                  : "Enable fast model"
+              }
+              aria-pressed={selectedModel?.id === fastPair.fastId}
+              disabled={busy || !providerReady}
+              className={cn(
+                "flex h-7 items-center gap-1.5 self-start rounded-full px-2 text-xs",
+                selectedModel?.id === fastPair.fastId
+                  ? "bg-[#C17A5C]/15 text-[#C17A5C]"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                "disabled:cursor-not-allowed disabled:opacity-40",
+              )}
+              onClick={() => {
+                const enabled = selectedModel?.id === fastPair.fastId;
+                const nextId = enabled ? fastPair.baseId : fastPair.fastId;
+                const nextModel = providerModels.find(
+                  (model) => model.id === nextId,
+                );
+                applySelection(
+                  nextId,
+                  resolveReasoningEffort(
+                    selectedEffort,
+                    normalizeReasoningEffortOptions(
+                      nextModel?.reasoningEfforts,
+                    ),
+                  ),
+                  agentId,
+                );
+              }}
+            >
+              Fast
+            </button>
+          ) : null}
+          <ReasoningStrengthControl
+            control={strengthControl}
+            layout="narrow"
             disabled={busy || !providerReady || !selectedModel}
-            fastToggle={
-              fastPair
-                ? {
-                    enabled: selectedModel?.id === fastPair.fastId,
-                    onChange: (enabled) => {
-                      const nextId = enabled
-                        ? fastPair.fastId
-                        : fastPair.baseId;
-                      const nextModel = providerModels.find(
-                        (model) => model.id === nextId,
-                      );
-                      applySelection(
-                        nextId,
-                        resolveReasoningEffort(
-                          selectedEffort,
-                          normalizeReasoningEffortOptions(
-                            nextModel?.reasoningEfforts?.length
-                              ? nextModel.reasoningEfforts
-                              : CLAUDE_REASONING_EFFORT_OPTIONS,
-                          ),
-                        ),
-                        agentId,
-                      );
-                    },
-                  }
-                : null
-            }
             onChange={(effort) =>
               applySelection(
                 selectedModel?.id ?? selectedClaudeModel,

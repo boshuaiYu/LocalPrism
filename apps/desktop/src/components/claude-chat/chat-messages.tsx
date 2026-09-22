@@ -21,6 +21,12 @@ import {
   isSkillToolName,
   isSkillToolResultEcho,
 } from "@/lib/skill-tool-result";
+import {
+  chatTerminalState,
+  isIntermediateChatBlock,
+  lastUserTextMessageIndex,
+  settleChatMessages,
+} from "@/lib/chat-turn-settlement";
 
 const EMPTY_PENDING_GUIDANCE: QueuedGuidance[] = [];
 const THREAD_MAX_WIDTH = "max-w-[44rem]";
@@ -151,6 +157,12 @@ export const ChatMessages: FC = () => {
     });
   }, [messages]);
 
+  const settledMessages = useMemo(
+    () => (isStreaming ? displayMessages : settleChatMessages(displayMessages)),
+    [displayMessages, isStreaming],
+  );
+  const openTurnStart = lastUserTextMessageIndex(settledMessages);
+
   // Auto-scroll to bottom (only if user hasn't scrolled up).
   // Instant + rAF while streaming — CSS/JS smooth scroll on every token janks.
   useEffect(() => {
@@ -165,7 +177,7 @@ export const ChatMessages: FC = () => {
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [displayMessages, pendingGuidance, isStreaming]);
+  }, [settledMessages, pendingGuidance, isStreaming]);
 
   // Reset auto-scroll when streaming stops
   useEffect(() => {
@@ -195,7 +207,7 @@ export const ChatMessages: FC = () => {
       onScroll={handleScroll}
       className="absolute inset-0 overflow-y-auto scroll-smooth px-5 pt-5 pb-2"
     >
-      {displayMessages.length === 0 &&
+      {settledMessages.length === 0 &&
         pendingGuidance.length === 0 &&
         !isStreaming && (
           <div className="flex h-full items-center justify-center px-6 text-center text-muted-foreground text-sm leading-relaxed">
@@ -203,9 +215,13 @@ export const ChatMessages: FC = () => {
           </div>
         )}
 
-      {displayMessages.map((msg, idx) => (
+      {settledMessages.map((msg, idx) => (
         <div key={idx} className={cn("mx-auto w-full", THREAD_MAX_WIDTH)}>
-          <MessageBubble message={msg} toolResultMap={toolResultMap} />
+          <MessageBubble
+            message={msg}
+            toolResultMap={toolResultMap}
+            live={isStreaming && idx > openTurnStart}
+          />
         </div>
       ))}
 
@@ -244,14 +260,19 @@ function toolUseIds(message: ClaudeStreamMessage): string[] {
 const MessageBubble: FC<{
   message: ClaudeStreamMessage;
   toolResultMap: Map<string, ContentBlock>;
+  live?: boolean;
 }> = memo(
-  ({ message, toolResultMap }) => {
+  ({ message, toolResultMap, live = false }) => {
     if (message.type === "user") {
       return <UserMessage message={message} />;
     }
     if (message.type === "assistant") {
       return (
-        <AssistantMessage message={message} toolResultMap={toolResultMap} />
+        <AssistantMessage
+          message={message}
+          toolResultMap={toolResultMap}
+          live={live}
+        />
       );
     }
     if (message.type === "result") {
@@ -260,6 +281,7 @@ const MessageBubble: FC<{
     return null;
   },
   (prev, next) => {
+    if (prev.live !== next.live) return false;
     if (prev.message !== next.message) return false;
     if (prev.message.type !== "assistant") return true;
     return toolUseIds(prev.message).every(
@@ -446,9 +468,14 @@ const PendingGuidanceMessage: FC<{ guidance: QueuedGuidance }> = ({
 const AssistantMessage: FC<{
   message: ClaudeStreamMessage;
   toolResultMap: Map<string, ContentBlock>;
-}> = ({ message, toolResultMap }) => {
+  live?: boolean;
+}> = ({ message, toolResultMap, live = false }) => {
   const content = message.message?.content;
   if (!Array.isArray(content) || content.length === 0) return null;
+  const visibleContent = live
+    ? content
+    : content.filter((block) => !isIntermediateChatBlock(block));
+  if (visibleContent.length === 0) return null;
 
   const skillResults = content.flatMap((block) => {
     if (
@@ -464,7 +491,7 @@ const AssistantMessage: FC<{
   const isHiddenSkillText = (text: string) =>
     isSkillToolResultEcho(text, skillResults);
 
-  const hasRenderableContent = content.some(
+  const hasRenderableContent = visibleContent.some(
     (block) =>
       (block.type === "text" && block.text && !isHiddenSkillText(block.text)) ||
       (block.type === "thinking" && block.thinking) ||
@@ -473,7 +500,13 @@ const AssistantMessage: FC<{
 
   if (!hasRenderableContent) return null;
 
-  const copyText = content
+  const unfinished = visibleContent.some(
+    (block) =>
+      block.type === "tool_use" && !!block.id && !toolResultMap.has(block.id),
+  );
+  const turnState = chatTerminalState({ live, unfinished });
+
+  const copyText = visibleContent
     .filter(
       (block) =>
         block.type === "text" && block.text && !isHiddenSkillText(block.text),
@@ -482,9 +515,12 @@ const AssistantMessage: FC<{
     .join("\n\n");
 
   return (
-    <div className="fade-in slide-in-from-bottom-1 relative mx-auto w-full animate-in py-4 duration-150">
+    <div
+      data-turn-state={turnState}
+      className="fade-in slide-in-from-bottom-1 relative mx-auto w-full animate-in py-4 duration-150"
+    >
       <div className="wrap-break-word px-2 text-foreground text-sm leading-7">
-        {content.map((block, idx) => {
+        {visibleContent.map((block, idx) => {
           if (block.type === "text" && block.text) {
             if (isHiddenSkillText(block.text)) {
               return null;
@@ -499,7 +535,14 @@ const AssistantMessage: FC<{
           }
           if (block.type === "tool_use" && block.id) {
             const result = toolResultMap.get(block.id);
-            return <ToolWidget key={idx} toolUse={block} toolResult={result} />;
+            return (
+              <ToolWidget
+                key={idx}
+                toolUse={block}
+                toolResult={result}
+                live={live}
+              />
+            );
           }
           if (block.type === "thinking" && block.thinking) {
             return (
@@ -507,6 +550,7 @@ const AssistantMessage: FC<{
                 key={idx}
                 thinking={block.thinking}
                 signature={block.signature}
+                live={live}
               />
             );
           }
@@ -526,10 +570,19 @@ const ResultMessage: FC<{ message: ClaudeStreamMessage }> = ({ message }) => {
   const isError = message.is_error || message.subtype === "error";
   const resultText = message.result;
 
-  if (!resultText || isSkillInstructionDump(resultText)) return null;
+  if (
+    !resultText ||
+    isSkillInstructionDump(resultText) ||
+    isIntermediateChatBlock({ type: "text", text: resultText })
+  ) {
+    return null;
+  }
 
   return (
-    <div className="fade-in slide-in-from-bottom-1 relative mx-auto w-full animate-in py-4 duration-150">
+    <div
+      data-turn-state={chatTerminalState({ live: false, error: !!isError })}
+      className="fade-in slide-in-from-bottom-1 relative mx-auto w-full animate-in py-4 duration-150"
+    >
       <div className="wrap-break-word px-2 text-foreground text-sm leading-7">
         {isError ? (
           <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-destructive text-sm">

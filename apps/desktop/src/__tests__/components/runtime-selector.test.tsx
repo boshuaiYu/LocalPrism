@@ -524,7 +524,9 @@ describe("RuntimeSelector", () => {
     try {
       expect(view.container.textContent).toContain("Model");
       expect(
-        view.container.querySelector('[data-testid="reasoning-effort-slider"]'),
+        view.container.querySelector(
+          '[data-testid="reasoning-strength-control"]',
+        ),
       ).not.toBeNull();
       expect(view.container.textContent).not.toContain("Approvals");
       expect(view.container.textContent).not.toContain("Ask each time");
@@ -534,7 +536,7 @@ describe("RuntimeSelector", () => {
     }
   });
 
-  it("uses a slider of the selected model's parsed efforts", async () => {
+  it("uses the selected model's parsed efforts as a segmented control", async () => {
     const onSelectionChange = vi.fn().mockReturnValue("changed");
     const view = await mountSelector({
       selectedModelId: "gpt-5.6-sol",
@@ -542,23 +544,19 @@ describe("RuntimeSelector", () => {
       onSelectionChange,
     });
     try {
-      expect(
-        view.container.querySelector(
-          'button[aria-label="Reasoning effort low"]',
-        ),
-      ).toBeNull();
-      const slider = view.container.querySelector(
-        '[data-testid="reasoning-effort-slider"]',
+      const selected = view.container.querySelector(
+        '[aria-label="Reasoning strength Medium"]',
       );
-      if (!(slider instanceof HTMLInputElement)) {
-        throw new Error("Reasoning slider missing");
+      if (!(selected instanceof HTMLButtonElement)) {
+        throw new Error("Reasoning strength control missing");
       }
-      expect(slider.max).toBe("3");
-      expect(slider.getAttribute("aria-valuetext")).toBe("Medium");
+      expect(selected.getAttribute("aria-checked")).toBe("true");
+      expect(
+        view.container.querySelector('[data-testid="reasoning-effort-slider"]'),
+      ).toBeNull();
 
       await act(async () => {
-        slider.value = "3";
-        slider.dispatchEvent(new Event("input", { bubbles: true }));
+        buttonByLabel(view.container, "Reasoning strength Extra high").click();
       });
       expect(onSelectionChange).toHaveBeenCalledWith({
         runtimeModel: "gpt-5.6-sol",
@@ -570,13 +568,14 @@ describe("RuntimeSelector", () => {
         selectedModelId: "gpt-5.6-terra",
         reasoningEffort: "medium",
       });
-      const next = view.container.querySelector(
-        '[data-testid="reasoning-effort-slider"]',
-      );
-      if (!(next instanceof HTMLInputElement)) {
-        throw new Error("Reasoning slider missing after model change");
-      }
-      expect(next.max).toBe("2");
+      expect(
+        view.container.querySelector(
+          '[aria-label="Reasoning strength Extra high"]',
+        ),
+      ).toBeNull();
+      expect(
+        view.container.querySelector('[aria-label="Reasoning strength High"]'),
+      ).not.toBeNull();
       expect(
         view.container.querySelector(
           '[data-testid="reasoning-effort-fast-toggle"]',

@@ -16,9 +16,13 @@ import {
 } from "@/lib/chat-token-usage";
 import {
   FALLBACK_REASONING_EFFORTS,
-  normalizeReasoningEffortOptions,
   resolveReasoningEffort,
 } from "@/lib/reasoning-effort";
+import {
+  deriveReasoningStrength,
+  reasoningStrengthWireValue,
+} from "@/lib/reasoning-strength";
+import { settleChatMessages } from "@/lib/chat-turn-settlement";
 import { useSettingsStore } from "./settings-store";
 import { useChatLayoutStore } from "./chat-layout-store";
 import { createLogger } from "@/lib/debug/logger";
@@ -1267,15 +1271,17 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       useProviderStore.getState().models,
       requestModel,
     );
-    const catalogEffortOptions = normalizeReasoningEffortOptions(
-      catalogModel?.reasoningEfforts,
-    );
-    const resolvedEffort = resolveReasoningEffort(
-      tabReasoningEffort ?? state.effortLevel,
-      catalogEffortOptions.length > 0
-        ? catalogEffortOptions
-        : [...FALLBACK_REASONING_EFFORTS],
-    );
+    const requestedEffort = tabReasoningEffort ?? state.effortLevel;
+    // No catalog yet: keep the stored effort on the historical ladder so a
+    // send before models load still carries the user's choice. A loaded model
+    // with no adjustable strength must not be given a fake preset.
+    const resolvedEffort = catalogModel
+      ? reasoningStrengthWireValue(
+          deriveReasoningStrength(catalogModel, requestedEffort),
+        )
+      : resolveReasoningEffort(requestedEffort, [
+          ...FALLBACK_REASONING_EFFORTS,
+        ]);
     const attemptEpoch = (activeTab.attemptEpoch ?? 0) + 1;
     const attemptId = nextRuntimeAttemptId(activeTabId);
     const isCurrentPreflight = () => {
@@ -2909,12 +2915,15 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
   _setStreaming: (tabId: string, streaming: boolean) => {
     set((state) => {
       const tab = state.tabs.find((t) => t.id === tabId);
+      const messages =
+        !streaming && tab ? settleChatMessages(tab.messages) : tab?.messages;
       return applyTabUpdate(state, tabId, {
         isStreaming: streaming,
         streamingStartedAt: streaming
           ? (tab?.streamingStartedAt ?? Date.now())
           : null,
         streamingStatus: streaming ? (tab?.streamingStatus ?? null) : null,
+        ...(messages && messages !== tab?.messages ? { messages } : {}),
       });
     });
   },
