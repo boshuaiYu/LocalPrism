@@ -37,7 +37,8 @@ import type { LucideIcon } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useProjectStore } from "@/stores/project-store";
 import { useDocumentStore } from "@/stores/document-store";
-import { useRuntimeStore } from "@/stores/runtime-store";
+import { providerReadinessBadge } from "@/lib/provider-readiness";
+import { useProviderStore } from "@/stores/provider-store";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
 import { getMupdfClient } from "@/lib/mupdf/mupdf-client";
 import { exists, join } from "@/lib/tauri/fs";
@@ -115,11 +116,12 @@ export function ProjectPicker() {
   const removeRecentProject = useProjectStore((s) => s.removeRecentProject);
   const openProject = useDocumentStore((s) => s.openProject);
 
-  const readyRuntimeCount = useRuntimeStore(
-    (state) =>
-      Object.values(state.accounts).filter(
-        (account) => account.installed && account.authenticated,
-      ).length,
+  const providerBadge = useProviderStore((state) =>
+    providerReadinessBadge({
+      engineInstalled: state.engineInstalled,
+      cards: state.cards,
+      models: state.models,
+    }),
   );
 
   useEffect(() => {
@@ -323,7 +325,7 @@ export function ProjectPicker() {
                   active={settingsDetailSection === "runtimes"}
                   icon={KeyRoundIcon}
                   label="Providers"
-                  meta={`${readyRuntimeCount}/2 ready`}
+                  meta={providerBadge}
                   onClick={() => setSettingsDetailSection("runtimes")}
                 />
                 <SettingsDetailButton
@@ -762,6 +764,7 @@ function SettingsDetailButton({
     <button
       type="button"
       onClick={onClick}
+      title={meta}
       className={cn(
         "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors",
         active

@@ -70,10 +70,16 @@ import {
 import { resolveTexRoot, type ProjectFile } from "@/stores/document-store";
 import { MarkdownPreviewPane } from "@/components/workspace/preview/markdown-preview-pane";
 import { createLogger } from "@/lib/debug/logger";
+import {
+  PDF_PREVIEW_DEFAULT_FIT_MODE,
+  fitPreviewScale,
+  nextPdfZoomState,
+  type PdfFitMode,
+} from "@/lib/pdf-preview-zoom";
 
 const log = createLogger("pdf-preview");
 
-type FitMode = "fit-width" | "fit-height" | null;
+type FitMode = PdfFitMode;
 
 /** Per-root zoom state cache: rootFileId -> { scale, fitMode } */
 const zoomCache = new Map<string, { scale: number; fitMode: FitMode }>();
@@ -149,7 +155,7 @@ export function PdfPreview() {
   const scrollToPageRef = useRef<((page: number) => void) | null>(null);
   const [scale, setScale] = useState<number>(1.0);
   const [captureMode, setCaptureMode] = useState(false);
-  const [fitMode, setFitMode] = useState<FitMode>(null);
+  const [fitMode, setFitMode] = useState<FitMode>(PDF_PREVIEW_DEFAULT_FIT_MODE);
   const [containerSize, setContainerSize] = useState<{
     width: number;
     height: number;
@@ -186,19 +192,21 @@ export function PdfPreview() {
     };
   }, []);
 
-  // Save/restore zoom state per root file on switch
+  // Save/restore zoom state per root file on switch.
+  // Documents without a saved zoom open fit-to-width.
   useEffect(() => {
     const prev = prevRootRef.current;
-    if (prev && prev !== currentRootFileId) {
-      // Save previous root's zoom
+    const switchedRoot = Boolean(prev && prev !== currentRootFileId);
+    if (switchedRoot && prev) {
       zoomCache.set(prev, { scale, fitMode });
     }
-    // Restore new root's zoom
-    const cached = zoomCache.get(currentRootFileId);
-    if (cached) {
-      setScale(cached.scale);
-      setFitMode(cached.fitMode);
-    }
+    const next = nextPdfZoomState(
+      { scale, fitMode },
+      zoomCache.get(currentRootFileId),
+      switchedRoot,
+    );
+    if (next.scale !== scale) setScale(next.scale);
+    if (next.fitMode !== fitMode) setFitMode(next.fitMode);
     prevRootRef.current = currentRootFileId;
   }, [currentRootFileId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -490,14 +498,7 @@ export function PdfPreview() {
   // Recompute scale when fit mode is active and container/page size changes
   useEffect(() => {
     if (!fitMode || !containerSize || !firstPageSize) return;
-    const PADDING = 32; // p-4 on each side
-    if (fitMode === "fit-width") {
-      const newScale = (containerSize.width - PADDING) / firstPageSize.width;
-      setScale(Math.max(0.25, Math.min(4, newScale)));
-    } else if (fitMode === "fit-height") {
-      const newScale = (containerSize.height - PADDING) / firstPageSize.height;
-      setScale(Math.max(0.25, Math.min(4, newScale)));
-    }
+    setScale(fitPreviewScale(fitMode, containerSize, firstPageSize));
   }, [fitMode, containerSize, firstPageSize]);
 
   const zoomIn = () => {
