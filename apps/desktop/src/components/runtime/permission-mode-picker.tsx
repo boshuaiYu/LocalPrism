@@ -60,7 +60,7 @@ export function PermissionModePicker({ busy = false }: { busy?: boolean }) {
         aria-expanded={open}
         disabled={busy}
         onClick={() => setOpen((value) => !value)}
-        className="flex h-7 items-center gap-1 rounded-full px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+        className="flex h-7 shrink-0 items-center gap-1 rounded-full px-2 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
       >
         <ShieldCheckIcon className="size-3.5" />
         <span className="max-w-28 truncate">

@@ -27,6 +27,8 @@ export interface ProviderModel {
   reasoningEfforts: string[];
   isDefault: boolean;
   contextWindow?: number | null;
+  /** Provider catalog payload used to derive reasoning strength. */
+  metadata?: unknown;
 }
 
 export interface ProviderWorkspaceStatus {

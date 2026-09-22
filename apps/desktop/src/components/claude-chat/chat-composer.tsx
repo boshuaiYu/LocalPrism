@@ -1,6 +1,7 @@
 import {
   type CSSProperties,
   type FC,
+  type RefObject,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -51,17 +52,17 @@ import {
 import { getProviderDisplayName } from "@/lib/provider-icons";
 import { getModelCapabilities } from "@/lib/model-capabilities";
 import {
-  CLAUDE_REASONING_EFFORT_OPTIONS,
   getSelectedCodexModel,
   isRuntimeSendDisabled,
   RuntimeSelector,
   runtimeSelectionSupportsImages,
 } from "@/components/runtime/runtime-selector";
+import { composerControlsLayout } from "@/lib/composer-controls-layout";
 import {
-  formatReasoningEffortLabel,
-  normalizeReasoningEffortOptions,
-  resolveReasoningEffort,
-} from "@/lib/reasoning-effort";
+  deriveReasoningStrength,
+  reasoningStrengthWireValue,
+} from "@/lib/reasoning-strength";
+import { ReasoningStrengthControl } from "@/components/claude-chat/reasoning-strength-control";
 import { PermissionModePicker } from "@/components/runtime/permission-mode-picker";
 import { AgentSelector } from "@/components/agents/agent-selector";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
@@ -206,6 +207,43 @@ function claudeModelDisplayName(model: string) {
   }
 }
 
+function ComposerModelChip({
+  buttonRef,
+  label,
+  modelId,
+  providerName,
+  disabled,
+  fullWidth,
+  onClick,
+}: {
+  buttonRef: RefObject<HTMLButtonElement | null>;
+  label: string;
+  modelId: string;
+  providerName: string;
+  disabled: boolean;
+  fullWidth: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      ref={buttonRef}
+      type="button"
+      onClick={onClick}
+      title={modelId}
+      aria-label={`Switch model ${modelId}`}
+      disabled={disabled}
+      className={cn(
+        "flex h-8 min-w-0 items-center gap-1.5 rounded-full border border-border/80 bg-background/70 px-2.5 text-foreground text-xs transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50",
+        fullWidth ? "w-full" : "max-w-full flex-1",
+      )}
+    >
+      <span className="min-w-0 flex-1 truncate text-left">{label}</span>
+      <span className="sr-only">{providerName}</span>
+      <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
+    </button>
+  );
+}
+
 export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
   const sendPrompt = useClaudeChatStore((s) => s.sendPrompt);
   const setChatError = useClaudeChatStore((s) => s._setError);
@@ -317,15 +355,11 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
     providerModels,
     selectedRuntimeModelId ?? selectedModel,
   );
-  const catalogEffortOptions = normalizeReasoningEffortOptions(
-    catalogModel?.reasoningEfforts?.length
-      ? catalogModel.reasoningEfforts
-      : CLAUDE_REASONING_EFFORT_OPTIONS,
-  );
-  const selectedRuntimeEffort = resolveReasoningEffort(
+  const strengthControl = deriveReasoningStrength(
+    catalogModel,
     activeTabMeta.reasoningEffort ?? effortLevel,
-    catalogEffortOptions,
   );
+  const selectedRuntimeEffort = reasoningStrengthWireValue(strengthControl);
   const selectedClaudeModel =
     chatPeer !== "codex"
       ? (selectedRuntimeModelId ?? selectedModel)
@@ -370,6 +404,19 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
     left: 0,
     bottom: 0,
   });
+  const [controlsWidth, setControlsWidth] = useState(0);
+  const controlsRef = useRef<HTMLDivElement>(null);
+  const controlsLayout = composerControlsLayout(controlsWidth);
+
+  useLayoutEffect(() => {
+    const node = controlsRef.current;
+    if (!node || typeof ResizeObserver === "undefined") return;
+    const update = () => setControlsWidth(node.clientWidth);
+    update();
+    const observer = new ResizeObserver(() => update());
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [archivedCodex]);
 
   // Recalculate popup position when it opens
   useLayoutEffect(() => {
@@ -1189,6 +1236,55 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [modelPickerOpen]);
 
+  const composerCatalogModel =
+    providerModels.find((model) => model.id === selectedRuntimeModelId) ??
+    providerModels.find((model) => model.isDefault) ??
+    providerModels[0];
+  const composerModelId =
+    composerCatalogModel?.id ?? selectedRuntimeModelId ?? selectedModel;
+  const composerModelLabel =
+    composerCatalogModel?.displayName ??
+    claudeModelDisplayName(composerModelId);
+  const applyStrength = (value: string) => {
+    setEffortLevel(value);
+    updateTabRuntimeSelection(activeTabId, {
+      runtimeModel: selectedRuntimeModelId ?? selectedModel,
+      reasoningEffort: value,
+      agentId: activeTabMeta.agentId ?? null,
+    });
+  };
+  const sendButton = (
+    <TooltipIconButton
+      tooltip={
+        isStreaming && !hasInput
+          ? "Stop"
+          : isStreaming
+            ? "Queue guidance"
+            : "Send"
+      }
+      side="top"
+      variant="default"
+      size="icon"
+      className="size-8 rounded-full"
+      onClick={
+        isStreaming && !hasInput
+          ? () => void cancelExecution(activeTabId)
+          : handleSend
+      }
+      disabled={isRuntimeSendDisabled(
+        isStreaming,
+        hasInput,
+        runtimeSelectionReady,
+      )}
+    >
+      {isStreaming && !hasInput ? (
+        <SquareIcon className="size-3.5 fill-current" />
+      ) : (
+        <ArrowUpIcon className="size-4" />
+      )}
+    </TooltipIconButton>
+  );
+
   return (
     <div
       ref={composerRef}
@@ -1441,16 +1537,32 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
             />
           )}
 
-          <div className="relative flex items-center justify-between px-0.5">
-            {/* Attachments, model & settings selector */}
-            <div className="flex items-center gap-1.5">
+          <div
+            ref={controlsRef}
+            data-testid="composer-controls"
+            data-layout={controlsLayout}
+            className={cn(
+              "flex min-w-0 gap-1.5 px-0.5",
+              controlsLayout === "narrow"
+                ? "flex-col"
+                : "flex-row items-center",
+            )}
+          >
+            <div
+              className={cn(
+                "flex min-w-0 items-center gap-1.5",
+                controlsLayout === "narrow"
+                  ? "w-full flex-wrap"
+                  : "min-w-0 flex-1",
+              )}
+            >
               <TooltipIconButton
                 tooltip="Attach files"
                 side="top"
                 type="button"
                 variant="ghost"
                 size="icon"
-                className="size-8 rounded-full"
+                className="size-8 shrink-0 rounded-full"
                 onClick={handleAttachFiles}
                 disabled={!projectRoot}
               >
@@ -1481,75 +1593,51 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
                   });
                 }}
               />
-              <button
-                ref={modelButtonRef}
-                type="button"
-                onClick={() => setModelPickerOpen((v) => !v)}
-                title="Switch model"
-                disabled={runtimeBusy}
-                className="flex h-8 items-center gap-1.5 rounded-full px-2.5 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {(() => {
-                  const providerModel =
-                    providerModels.find(
-                      (model) => model.id === selectedRuntimeModelId,
-                    ) ??
-                    providerModels.find((model) => model.isDefault) ??
-                    providerModels[0];
-                  const modelLabel =
-                    providerModel?.displayName ??
-                    claudeModelDisplayName(
-                      selectedRuntimeModelId ?? selectedModel,
-                    );
-                  const effortLabel = formatReasoningEffortLabel(
-                    selectedRuntimeEffort ?? effortLevel ?? "medium",
-                  );
-                  return (
-                    <>
-                      <span className="max-w-40 truncate">{modelLabel}</span>
-                      <span className="text-muted-foreground/60">
-                        · {effortLabel}
-                      </span>
-                      <span className="sr-only">{activeProviderName}</span>
-                      <ChevronDownIcon className="size-3" />
-                    </>
-                  );
-                })()}
-              </button>
+              {controlsLayout === "wide" ? (
+                <>
+                  <ComposerModelChip
+                    buttonRef={modelButtonRef}
+                    label={composerModelLabel}
+                    modelId={composerModelId}
+                    providerName={activeProviderName}
+                    disabled={runtimeBusy}
+                    fullWidth={false}
+                    onClick={() => setModelPickerOpen((open) => !open)}
+                  />
+                  <ReasoningStrengthControl
+                    control={strengthControl}
+                    layout="wide"
+                    disabled={runtimeBusy || !catalogModel}
+                    onChange={applyStrength}
+                  />
+                </>
+              ) : null}
               <ChatTokenMeter />
+              {controlsLayout === "narrow" ? (
+                <div className="ml-auto shrink-0">{sendButton}</div>
+              ) : null}
             </div>
-
-            <div className="flex items-center gap-1.5">
-              <TooltipIconButton
-                tooltip={
-                  isStreaming && !hasInput
-                    ? "Stop"
-                    : isStreaming
-                      ? "Queue guidance"
-                      : "Send"
-                }
-                side="top"
-                variant="default"
-                size="icon"
-                className="size-8 rounded-full"
-                onClick={
-                  isStreaming && !hasInput
-                    ? () => void cancelExecution(activeTabId)
-                    : handleSend
-                }
-                disabled={isRuntimeSendDisabled(
-                  isStreaming,
-                  hasInput,
-                  runtimeSelectionReady,
-                )}
-              >
-                {isStreaming && !hasInput ? (
-                  <SquareIcon className="size-3.5 fill-current" />
-                ) : (
-                  <ArrowUpIcon className="size-4" />
-                )}
-              </TooltipIconButton>
-            </div>
+            {controlsLayout === "wide" ? (
+              <div className="shrink-0">{sendButton}</div>
+            ) : (
+              <div className="flex w-full min-w-0 flex-col gap-1.5">
+                <ComposerModelChip
+                  buttonRef={modelButtonRef}
+                  label={composerModelLabel}
+                  modelId={composerModelId}
+                  providerName={activeProviderName}
+                  disabled={runtimeBusy}
+                  fullWidth
+                  onClick={() => setModelPickerOpen((open) => !open)}
+                />
+                <ReasoningStrengthControl
+                  control={strengthControl}
+                  layout="narrow"
+                  disabled={runtimeBusy || !catalogModel}
+                  onChange={applyStrength}
+                />
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -52,10 +52,36 @@ import {
   buildReferenceFilesSection,
   importReferenceFiles,
 } from "@/lib/project-attachments";
-import { getProjectNameError, normalizeProjectName } from "@/lib/project-name";
+import {
+  nextTemplatePreviewPaint,
+  templatePreviewOverlay,
+} from "@/lib/template-preview-frame";
+import {
+  PROJECT_FORM_CHROME_ATTR,
+  deferProjectNameBlur,
+  getProjectNameError,
+  normalizeProjectName,
+  projectNameErrorFromBlur,
+} from "@/lib/project-name";
 import { ensureProjectAgentsMd } from "@/lib/project-agents-md";
 
 const log = createLogger("template-preview");
+
+function paintPreviewCanvas(
+  canvas: HTMLCanvasElement,
+  imageData: ImageData,
+  displayW: number,
+  displayH: number,
+): boolean {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return false;
+  canvas.width = imageData.width;
+  canvas.height = imageData.height;
+  canvas.style.width = `${displayW}px`;
+  canvas.style.height = `${displayH}px`;
+  ctx.putImageData(imageData, 0, 0);
+  return true;
+}
 
 // ─── Helpers ───
 
@@ -78,11 +104,25 @@ export function TemplatePreview() {
   const [isLandscape, setIsLandscape] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
+  const [previewPainted, setPreviewPainted] = useState(false);
+  const [renderFailed, setRenderFailed] = useState(false);
+  const [paintNonce, setPaintNonce] = useState(0);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const docIdRef = useRef(0);
   const pageSizesRef = useRef<PageSize[]>([]);
   const loadGenRef = useRef(0);
+  const frameCacheRef = useRef(
+    new Map<
+      string,
+      {
+        imageData: ImageData;
+        displayW: number;
+        displayH: number;
+      }
+    >(),
+  );
+  const deferNameBlurRef = useRef(false);
 
   // ── Creation form state ──
   const [purpose, setPurpose] = useState("");
@@ -114,6 +154,9 @@ export function TemplatePreview() {
         setNumPages(0);
         setIsLandscape(false);
         setError(false);
+        setPreviewPainted(false);
+        setRenderFailed(false);
+        frameCacheRef.current.clear();
         if (docIdRef.current > 0) {
           getMupdfClient()
             .closeDocument(docIdRef.current)
@@ -133,6 +176,9 @@ export function TemplatePreview() {
       setAttachments([]);
       setProjectName("");
       setProjectNameError("");
+      setPreviewPainted(false);
+      setRenderFailed(false);
+      frameCacheRef.current.clear();
       setRefFilesOpen(false);
       setLocationOpen(false);
     }
@@ -218,53 +264,111 @@ export function TemplatePreview() {
   }, [previewTemplateId]);
 
   // ── Render current page ──
+  // The details step unmounts the canvas. Coming back must redraw from the
+  // cached document (or show a skeleton with retry) instead of a blank frame.
   useEffect(() => {
-    if (
-      docIdRef.current <= 0 ||
-      numPages === 0 ||
-      !canvasRef.current ||
-      !containerRef.current
-    )
+    if (modalStep !== "preview") {
+      setPreviewPainted(false);
       return;
-
-    const pageIndex = currentPage - 1;
-    const size = pageSizesRef.current[pageIndex];
-    if (!size) return;
-
-    setIsLandscape(size.width > size.height);
-
-    const container = containerRef.current;
-    const maxW = container.clientWidth - 48;
-    const maxH = container.clientHeight - 48;
-    const pageAspect = size.width / size.height;
-
-    let displayW = maxW;
-    let displayH = displayW / pageAspect;
-    if (displayH > maxH) {
-      displayH = maxH;
-      displayW = displayH * pageAspect;
     }
 
-    const dpr = window.devicePixelRatio || 1;
-    const dpi = (displayW / size.width) * 72 * dpr;
+    const docId = docIdRef.current;
+    const pageIndex = currentPage - 1;
+    const size = pageSizesRef.current[pageIndex];
+    let cancelled = false;
+    let observer: ResizeObserver | null = null;
 
-    const client = getMupdfClient();
-    client
-      .drawPage(docIdRef.current, pageIndex, dpi)
-      .then((imageData) => {
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        canvas.width = imageData.width;
-        canvas.height = imageData.height;
-        canvas.style.width = `${displayW}px`;
-        canvas.style.height = `${displayH}px`;
-        const ctx = canvas.getContext("2d")!;
-        ctx.putImageData(imageData, 0, 0);
-      })
-      .catch((err) => {
-        log.warn("render error", { error: String(err) });
+    const paint = () => {
+      if (cancelled) return;
+      const container = containerRef.current;
+      const canvas = canvasRef.current;
+      if (!container || !canvas || !size) return;
+
+      const decision = nextTemplatePreviewPaint({
+        step: "preview",
+        docId,
+        pageCount: numPages,
+        pageIndex,
+        pageWidth: size.width,
+        pageHeight: size.height,
+        containerWidth: container.clientWidth,
+        containerHeight: container.clientHeight,
+        devicePixelRatio: window.devicePixelRatio || 1,
       });
-  }, [currentPage, numPages, isLandscape]);
+      if (decision.action === "wait-for-layout") {
+        if (!observer) {
+          observer = new ResizeObserver(() => paint());
+          observer.observe(container);
+        }
+        return;
+      }
+      if (decision.action !== "paint") return;
+
+      setIsLandscape(decision.landscape);
+      const cacheKey = `${previewTemplateId ?? ""}:${pageIndex}`;
+      const cached = frameCacheRef.current.get(cacheKey);
+      if (cached) {
+        try {
+          if (
+            paintPreviewCanvas(
+              canvas,
+              cached.imageData,
+              cached.displayW,
+              cached.displayH,
+            )
+          ) {
+            setPreviewPainted(true);
+            setRenderFailed(false);
+          }
+        } catch (err) {
+          log.warn("cached preview paint failed", { error: String(err) });
+          frameCacheRef.current.delete(cacheKey);
+        }
+      }
+
+      getMupdfClient()
+        .drawPage(docId, decision.pageIndex, decision.dpi)
+        .then((imageData) => {
+          if (cancelled) return;
+          const target = canvasRef.current;
+          if (!target) return;
+          if (
+            !paintPreviewCanvas(
+              target,
+              imageData,
+              decision.displayW,
+              decision.displayH,
+            )
+          ) {
+            setRenderFailed(true);
+            setPreviewPainted(false);
+            return;
+          }
+          frameCacheRef.current.set(cacheKey, {
+            imageData,
+            displayW: decision.displayW,
+            displayH: decision.displayH,
+          });
+          setPreviewPainted(true);
+          setRenderFailed(false);
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          log.warn("render error", { error: String(err) });
+          if (!frameCacheRef.current.has(cacheKey)) {
+            setRenderFailed(true);
+            setPreviewPainted(false);
+          }
+        });
+    };
+
+    const frame = requestAnimationFrame(paint);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(frame);
+      observer?.disconnect();
+    };
+  }, [modalStep, currentPage, numPages, paintNonce, previewTemplateId]);
 
   // ── Page navigation ──
   const goToPrevPage = useCallback(
@@ -443,6 +547,11 @@ export function TemplatePreview() {
     referencesOpen: refFilesOpen,
     creating: isCreating,
   });
+  const returnToPreview = () => {
+    setPreviewPainted(false);
+    setRenderFailed(false);
+    setModalStep("preview");
+  };
   const applyDismiss = (action: OnboardingDismiss) => {
     if (action.type === "blur-field") {
       if (document.activeElement instanceof HTMLElement) {
@@ -456,10 +565,23 @@ export function TemplatePreview() {
       return;
     }
     if (action.type === "back-to-preview") {
-      setModalStep("preview");
+      returnToPreview();
       return;
     }
     if (action.type === "close-preview") handleOpenChange(false);
+  };
+  const previewOverlay = templatePreviewOverlay({
+    step: modalStep,
+    loading,
+    error,
+    pageCount: numPages,
+    painted: previewPainted,
+    renderFailed,
+  });
+  const retryPreviewPaint = () => {
+    setRenderFailed(false);
+    setPreviewPainted(false);
+    setPaintNonce((nonce) => nonce + 1);
   };
 
   if (!template) return null;
@@ -536,15 +658,15 @@ export function TemplatePreview() {
               <div className="relative flex flex-1 flex-col">
                 <div
                   ref={containerRef}
-                  className="flex flex-1 items-center justify-center overflow-hidden bg-muted/30 p-6"
+                  className="relative flex flex-1 items-center justify-center overflow-hidden bg-muted/30 p-6"
                 >
-                  {loading && (
+                  {previewOverlay === "loading" && (
                     <div className="flex flex-col items-center gap-2 text-muted-foreground">
                       <LoaderIcon className="size-5 animate-spin" />
                       <span className="text-sm">Loading preview...</span>
                     </div>
                   )}
-                  {error && (
+                  {previewOverlay === "load-error" && (
                     <div className="flex flex-col items-center gap-2 text-muted-foreground">
                       <span className="text-sm">Preview not available</span>
                       <span className="text-xs opacity-60">
@@ -552,8 +674,35 @@ export function TemplatePreview() {
                       </span>
                     </div>
                   )}
+                  {(previewOverlay === "skeleton" ||
+                    previewOverlay === "retry") && (
+                    <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-muted/30 text-muted-foreground">
+                      {previewOverlay === "skeleton" ? (
+                        <LoaderIcon className="size-5 animate-spin" />
+                      ) : null}
+                      <span className="text-sm">
+                        {previewOverlay === "retry"
+                          ? "Preview didn't render"
+                          : "Loading preview..."}
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={retryPreviewPaint}
+                      >
+                        Retry
+                      </Button>
+                    </div>
+                  )}
                   {!loading && !error && numPages > 0 && (
-                    <canvas ref={canvasRef} className="shadow-xl" />
+                    <canvas
+                      ref={canvasRef}
+                      className={
+                        previewPainted
+                          ? "shadow-xl"
+                          : "pointer-events-none absolute opacity-0"
+                      }
+                    />
                   )}
                 </div>
 
@@ -595,7 +744,7 @@ export function TemplatePreview() {
                   variant="ghost"
                   size="icon"
                   className="size-7 shrink-0 rounded-lg"
-                  onClick={() => setModalStep("preview")}
+                  onClick={returnToPreview}
                 >
                   <ArrowLeftIcon className="size-4" />
                 </Button>
@@ -626,11 +775,15 @@ export function TemplatePreview() {
                       setProjectName(e.target.value);
                       setProjectNameError("");
                     }}
-                    onBlur={() =>
-                      setProjectNameError(
-                        getProjectNameError(projectName) ?? "",
-                      )
-                    }
+                    onBlur={(event) => {
+                      const next = projectNameErrorFromBlur(
+                        projectName,
+                        event.relatedTarget,
+                        deferNameBlurRef.current,
+                      );
+                      if (next === undefined) return;
+                      setProjectNameError(next ?? "");
+                    }}
                     className="rounded-xl border-border/60 bg-card/30 text-sm focus-visible:bg-card/50"
                   />
                   {projectNameError && (
@@ -682,6 +835,12 @@ export function TemplatePreview() {
                   {/* Reference files */}
                   <div>
                     <button
+                      type="button"
+                      {...{ [PROJECT_FORM_CHROME_ATTR]: "" }}
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        deferProjectNameBlur(deferNameBlurRef);
+                      }}
                       onClick={() => setRefFilesOpen(!refFilesOpen)}
                       className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-muted/30"
                     >
@@ -763,6 +922,12 @@ export function TemplatePreview() {
                   {/* Project location */}
                   <div>
                     <button
+                      type="button"
+                      {...{ [PROJECT_FORM_CHROME_ATTR]: "" }}
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        deferProjectNameBlur(deferNameBlurRef);
+                      }}
                       onClick={() => setLocationOpen(!locationOpen)}
                       className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-muted/30"
                     >
@@ -816,7 +981,7 @@ export function TemplatePreview() {
                 variant="outline"
                 className="h-10 rounded-lg"
                 disabled={isCreating}
-                onClick={() => setModalStep("preview")}
+                onClick={returnToPreview}
               >
                 Back
               </Button>

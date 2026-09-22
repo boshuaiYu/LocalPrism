@@ -9,6 +9,11 @@ import {
   type ThirdPartyPreset,
 } from "@/lib/third-party-presets";
 import { getProviderIconSrc } from "@/lib/provider-icons";
+import {
+  providerCardStatusLabel,
+  providerReadinessBadge,
+  providerStatusDetail,
+} from "@/lib/provider-readiness";
 import { cn } from "@/lib/utils";
 
 export interface ProviderSettingsProps {
@@ -26,7 +31,6 @@ export function ProviderSettings({
   const cards = useProviderStore((state) => state.cards);
   const engineInstalled = useProviderStore((state) => state.engineInstalled);
   const missingGit = useProviderStore((state) => state.missingGit);
-  const ready = useProviderStore((state) => state.ready);
   const error = useProviderStore((state) => state.error);
   const oauthBusy = useProviderStore((state) => state.oauthBusy);
   const oauthUrl = useProviderStore((state) => state.oauthUrl);
@@ -36,6 +40,11 @@ export function ProviderSettings({
   const upsertThirdParty = useProviderStore((state) => state.upsertThirdParty);
   const remove = useProviderStore((state) => state.remove);
   const models = useProviderStore((state) => state.models);
+  const readinessBadge = providerReadinessBadge({
+    engineInstalled,
+    cards,
+    models,
+  });
   const activeName =
     cards.find((card) => card.isActive)?.name ?? "the active provider";
   const installEngine = useClaudeSetupStore((state) => state.install);
@@ -89,6 +98,7 @@ export function ProviderSettings({
 
       <ThirdPartySection
         cards={thirdParty}
+        models={models}
         onActivate={(id) => void activate(id)}
         onDelete={(id) => void remove(id)}
         onSave={(provider) => void upsertThirdParty(provider, true)}
@@ -138,6 +148,7 @@ export function ProviderSettings({
                     card.kind === "official-chatgpt" ? "chatgpt" : "claude",
                   )
                 }
+                models={models}
                 onActivate={() => void activate(card.id)}
               />
             ))}
@@ -147,9 +158,7 @@ export function ProviderSettings({
 
       {error && <p className="text-destructive text-sm">{error}</p>}
       <p className="text-muted-foreground text-xs">
-        Ready when the engine is installed and one provider is active. An API
-        key is enough
-        {ready ? " · ready" : ""}.
+        {readinessBadge}. An API key is enough.
         {models.length > 0
           ? ` ${models.length} models from ${activeName}.`
           : ""}
@@ -160,6 +169,7 @@ export function ProviderSettings({
 
 function OfficialCard({
   card,
+  models,
   busy,
   oauthUrl,
   onLogin,
@@ -167,6 +177,7 @@ function OfficialCard({
   onActivate,
 }: {
   card: ProviderCard;
+  models: { isDefault?: boolean }[];
   busy: boolean;
   oauthUrl: string | null;
   onLogin: () => void;
@@ -185,11 +196,7 @@ function OfficialCard({
           </p>
         </div>
         <span className="text-muted-foreground text-xs">
-          {card.isActive
-            ? "Active"
-            : card.authenticated
-              ? "Ready"
-              : "Signed out"}
+          {providerCardStatusLabel(card, models)}
         </span>
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
@@ -221,11 +228,13 @@ function OfficialCard({
 
 function ThirdPartySection({
   cards,
+  models,
   onActivate,
   onDelete,
   onSave,
 }: {
   cards: ProviderCard[];
+  models: { isDefault?: boolean }[];
   onActivate: (id: string) => void;
   onDelete: (id: string) => void;
   onSave: (provider: {
@@ -356,8 +365,7 @@ function ThirdPartySection({
             <div>
               <p className="text-sm">{card.name}</p>
               <p className="text-muted-foreground text-xs">
-                {card.accountLabel}
-                {card.isActive ? " · Active" : ""}
+                {providerStatusDetail(card, models)}
               </p>
             </div>
             <div className="flex gap-2">

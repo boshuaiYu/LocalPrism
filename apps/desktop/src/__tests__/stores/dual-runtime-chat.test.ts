@@ -370,6 +370,44 @@ describe("dual-runtime chat dispatch", () => {
     );
   });
 
+  it("clears thinking residue when cancel or a failed send stops streaming", async () => {
+    const residue = [
+      {
+        type: "assistant" as const,
+        message: {
+          content: [{ type: "thinking" as const, thinking: "Thinking…" }],
+        },
+      },
+      {
+        type: "assistant" as const,
+        message: {
+          content: [{ type: "thinking" as const, thinking: "Kept trace" }],
+        },
+      },
+      { type: "result" as const, result: "No response requested." },
+    ];
+    resetStore(makeTab({ isStreaming: true, messages: residue }));
+    vi.mocked(invoke).mockResolvedValueOnce(true);
+
+    await useClaudeChatStore.getState().cancelExecution("tab-runtime");
+
+    expect(activeTab()?.isStreaming).toBe(false);
+    expect(activeTab()?.messages).toEqual([residue[1]]);
+
+    resetStore(makeTab({ messages: residue }));
+    vi.mocked(invoke).mockRejectedValueOnce(new Error("runtime down"));
+
+    await useClaudeChatStore.getState().sendPrompt("Hello");
+
+    expect(activeTab()?.isStreaming).toBe(false);
+    expect(activeTab()?.error).toMatch(/runtime down/);
+    const texts = JSON.stringify(activeTab()?.messages ?? []);
+    expect(texts).not.toContain("Thinking…");
+    expect(texts).not.toContain("No response requested.");
+    expect(texts).toContain("Kept trace");
+    expect(texts).toContain("Hello");
+  });
+
   it("interrupts cancellation with the tab's explicit runtime", async () => {
     resetStore(makeTab({ runtime: "codex", isStreaming: true }));
     vi.mocked(invoke).mockResolvedValueOnce(true);

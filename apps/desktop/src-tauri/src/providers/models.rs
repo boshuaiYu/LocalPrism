@@ -14,7 +14,7 @@ use super::types::{
 };
 
 const CACHE_TTL_MS: i64 = 10 * 60 * 1000;
-const CATALOG_CACHE_SCHEMA: u32 = 3;
+const CATALOG_CACHE_SCHEMA: u32 = 4;
 const ANTHROPIC_MODELS_URL: &str = "https://api.anthropic.com/v1/models";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
@@ -50,6 +50,7 @@ pub fn bundled_claude_models() -> Vec<ProviderModel> {
             reasoning_efforts: claude_efforts(),
             is_default: true,
             context_window: Some(200_000),
+            metadata: None,
         },
         ProviderModel {
             id: "opus".into(),
@@ -57,6 +58,7 @@ pub fn bundled_claude_models() -> Vec<ProviderModel> {
             reasoning_efforts: claude_efforts(),
             is_default: false,
             context_window: Some(200_000),
+            metadata: None,
         },
         ProviderModel {
             id: "haiku".into(),
@@ -64,6 +66,7 @@ pub fn bundled_claude_models() -> Vec<ProviderModel> {
             reasoning_efforts: claude_efforts(),
             is_default: false,
             context_window: Some(200_000),
+            metadata: None,
         },
         ProviderModel {
             id: "opusplan".into(),
@@ -71,6 +74,7 @@ pub fn bundled_claude_models() -> Vec<ProviderModel> {
             reasoning_efforts: claude_efforts(),
             is_default: false,
             context_window: Some(200_000),
+            metadata: None,
         },
     ]
 }
@@ -82,6 +86,7 @@ fn model(id: &str, name: &str, is_default: bool) -> ProviderModel {
         reasoning_efforts: default_efforts(),
         is_default,
         context_window: Some(272_000),
+        metadata: None,
     }
 }
 
@@ -212,9 +217,10 @@ fn push_unique_model(models: &mut Vec<ProviderModel>, id: &str, is_default: bool
     models.push(ProviderModel {
         id: id.to_string(),
         display_name: id.to_string(),
-        reasoning_efforts: claude_efforts(),
+        reasoning_efforts: Vec::new(),
         is_default,
         context_window: None,
+        metadata: None,
     });
 }
 
@@ -280,7 +286,7 @@ async fn live_claude_models() -> Result<Vec<ProviderModel>, String> {
         ("anthropic-beta".to_string(), ANTHROPIC_OAUTH_BETA.to_string()),
     ];
     let value = fetch_json(ANTHROPIC_MODELS_URL, &headers).await?;
-    let parsed = parse_live_models_with_fallback(&value, &claude_efforts());
+    let parsed = parse_live_models(&value);
     if parsed.is_empty() {
         Err("Claude models response did not include any visible models".into())
     } else {
@@ -294,10 +300,7 @@ async fn live_third_party_models(provider: &SavedProvider) -> Result<Vec<Provide
     for url in candidate_model_urls(&provider.base_url) {
         match fetch_json(&url, &headers).await {
             Ok(value) => {
-                let mut parsed = parse_live_models_with_fallback(
-                    &value,
-                    &empty_efforts_for_format(provider.api_format),
-                );
+                let mut parsed = parse_live_models(&value);
                 if parsed.is_empty() {
                     last_error = format!("{url} did not include any visible models");
                     continue;
@@ -438,13 +441,6 @@ async fn fetch_json(
 }
 
 pub fn parse_live_models(value: &serde_json::Value) -> Vec<ProviderModel> {
-    parse_live_models_with_fallback(value, &default_efforts())
-}
-
-fn parse_live_models_with_fallback(
-    value: &serde_json::Value,
-    empty_fallback: &[String],
-) -> Vec<ProviderModel> {
     let items = value
         .get("models")
         .or_else(|| value.get("data"))
@@ -479,15 +475,17 @@ fn parse_live_models_with_fallback(
             .or_else(|| item.get("default"))
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
+        let priority = item.get("priority").and_then(|value| value.as_i64());
         parsed.push((
             ProviderModel {
                 id: id.to_string(),
                 display_name: display.to_string(),
-                reasoning_efforts: parse_efforts(&item, empty_fallback),
+                reasoning_efforts: parse_efforts(&item),
                 is_default: flagged_default,
                 context_window: parse_context_window(&item),
+                metadata: item.as_object().is_some().then(|| item.clone()),
             },
-            item.get("priority").and_then(|value| value.as_i64()),
+            priority,
         ));
     }
     apply_account_default(&mut parsed);
@@ -521,16 +519,8 @@ fn apply_account_default(parsed: &mut [(ProviderModel, Option<i64>)]) {
     }
 }
 
-fn empty_efforts_for_format(api_format: ApiFormat) -> Vec<String> {
-    match api_format {
-        ApiFormat::Anthropic => claude_efforts(),
-        ApiFormat::OpenaiChat | ApiFormat::OpenaiResponses => default_efforts(),
-    }
-}
-
-fn parse_efforts(item: &serde_json::Value, empty_fallback: &[String]) -> Vec<String> {
-    let efforts = item
-        .get("supported_reasoning_levels")
+fn parse_efforts(item: &serde_json::Value) -> Vec<String> {
+    item.get("supported_reasoning_levels")
         .or_else(|| item.get("supported_reasoning_efforts"))
         .or_else(|| item.get("reasoning_efforts"))
         .and_then(|value| value.as_array())
@@ -540,12 +530,7 @@ fn parse_efforts(item: &serde_json::Value, empty_fallback: &[String]) -> Vec<Str
                 .filter_map(parse_effort_token)
                 .collect::<Vec<_>>()
         })
-        .unwrap_or_default();
-    if efforts.is_empty() {
-        empty_fallback.to_vec()
-    } else {
-        efforts
-    }
+        .unwrap_or_default()
 }
 
 fn parse_context_window(item: &serde_json::Value) -> Option<u64> {
@@ -746,24 +731,23 @@ mod tests {
     }
 
     #[test]
-    fn third_party_empty_efforts_follow_api_format() {
-        assert_eq!(
-            empty_efforts_for_format(ApiFormat::Anthropic),
-            vec!["low", "medium", "high"]
-        );
-        assert_eq!(
-            empty_efforts_for_format(ApiFormat::OpenaiChat),
-            vec!["low", "medium", "high", "xhigh"]
-        );
-    }
-
-    #[test]
-    fn claude_catalog_without_efforts_uses_claude_fallback() {
+    fn live_catalog_without_efforts_stays_empty_and_keeps_metadata() {
         let value = serde_json::json!({
-            "data": [{ "id": "claude-opus-4-6", "display_name": "Opus" }]
+            "data": [{
+                "id": "claude-opus-4-6",
+                "display_name": "Opus",
+                "capabilities": {
+                    "thinking": { "min": 0, "max": 64, "step": 8, "default": 16 }
+                }
+            }]
         });
-        let models = parse_live_models_with_fallback(&value, &claude_efforts());
-        assert_eq!(models[0].reasoning_efforts, vec!["low", "medium", "high"]);
+        let models = parse_live_models(&value);
+        assert!(models[0].reasoning_efforts.is_empty());
+        let metadata = models[0].metadata.as_ref().expect("catalog metadata");
+        assert_eq!(metadata["capabilities"]["thinking"]["min"], 0);
+        assert_eq!(metadata["capabilities"]["thinking"]["max"], 64);
+        assert_eq!(metadata["capabilities"]["thinking"]["step"], 8);
+        assert_eq!(metadata["id"], "claude-opus-4-6");
     }
 
     #[test]
