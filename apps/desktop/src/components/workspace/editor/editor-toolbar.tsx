@@ -15,7 +15,7 @@ import {
   MinusIcon,
   PlusIcon,
   BookMarkedIcon,
-  ExternalLinkIcon,
+  ChevronDownIcon,
 } from "lucide-react";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Button } from "@/components/ui/button";
@@ -57,24 +57,82 @@ const ZOOM_OPTIONS = [
   { value: "4", label: "400%" },
 ];
 
-const EDITOR_ICONS: Record<string, string> = {
+const DEFAULT_EDITOR_ID = "codex";
+const PREFERRED_EDITOR_STORAGE_KEY = "localprism.preferredEditor";
+
+const MONO_EDITOR_ICONS: Record<string, string> = {
   cursor: cursorIcon,
-  vscode: vscodeIcon,
   codex: codexIcon,
 };
 
-function EditorMenuLabel({ editor }: { editor: EditorInfo }) {
-  const icon = EDITOR_ICONS[editor.id];
-  if (!icon) return editor.name;
+function readPreferredEditorId(): string {
+  try {
+    const stored = localStorage.getItem(PREFERRED_EDITOR_STORAGE_KEY)?.trim();
+    return stored || DEFAULT_EDITOR_ID;
+  } catch {
+    return DEFAULT_EDITOR_ID;
+  }
+}
+
+function rememberPreferredEditorId(editorId: string) {
+  try {
+    localStorage.setItem(PREFERRED_EDITOR_STORAGE_KEY, editorId);
+  } catch {
+    // Private mode can reject storage. The in-memory choice still applies.
+  }
+}
+
+function preferredEditor(
+  editors: EditorInfo[],
+  preferredId: string,
+): EditorInfo | undefined {
   return (
-    <span className="flex items-center gap-2">
+    editors.find((editor) => editor.id === preferredId) ??
+    editors.find((editor) => editor.id === DEFAULT_EDITOR_ID) ??
+    editors[0]
+  );
+}
+
+function EditorBrandIcon({ editor }: { editor: EditorInfo }) {
+  const mono = MONO_EDITOR_ICONS[editor.id];
+  if (mono) {
+    return (
+      <span
+        aria-hidden="true"
+        data-editor-icon={editor.id}
+        className="inline-block size-4 shrink-0 bg-foreground"
+        style={{
+          WebkitMaskImage: `url("${mono}")`,
+          maskImage: `url("${mono}")`,
+          WebkitMaskRepeat: "no-repeat",
+          maskRepeat: "no-repeat",
+          WebkitMaskPosition: "center",
+          maskPosition: "center",
+          WebkitMaskSize: "contain",
+          maskSize: "contain",
+        }}
+      />
+    );
+  }
+  if (editor.id === "vscode") {
+    return (
       <img
-        src={icon}
+        src={vscodeIcon}
         alt=""
         aria-hidden="true"
+        data-editor-icon="vscode"
         draggable={false}
         className="size-4"
       />
+    );
+  }
+  return null;
+}
+
+function EditorMenuLabel({ editor }: { editor: EditorInfo }) {
+  return (
+    <span className="flex items-center gap-2">
+      <EditorBrandIcon editor={editor} />
       {editor.name}
     </span>
   );
@@ -90,34 +148,71 @@ function OpenInEditorMenu({
   onRefresh: () => void;
 }) {
   const { t } = useI18n();
+  const [preferredId, setPreferredId] = useState(readPreferredEditorId);
+  const selected = preferredEditor(editors, preferredId);
+
+  const chooseEditor = (editorId: string) => {
+    setPreferredId(editorId);
+    rememberPreferredEditorId(editorId);
+    onOpen(editorId);
+  };
+
   return (
-    <DropdownMenu
-      onOpenChange={(open) => {
-        if (open) onRefresh();
-      }}
-    >
-      <DropdownMenuTrigger asChild>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-6 p-1"
-          title={t("editor.openIn")}
-        >
-          <ExternalLinkIcon className="size-4" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
-        {editors.length === 0 ? (
-          <DropdownMenuItem disabled>{t("editor.noneFound")}</DropdownMenuItem>
+    <div className="flex items-center">
+      <Button
+        variant="ghost"
+        size="icon"
+        className="size-6 rounded-r-none p-1"
+        title={
+          selected
+            ? t("editor.openWith", { name: selected.name })
+            : t("editor.noneFound")
+        }
+        disabled={!selected}
+        onClick={() => {
+          if (selected) onOpen(selected.id);
+        }}
+      >
+        {selected ? (
+          <EditorBrandIcon editor={selected} />
         ) : (
-          editors.map((editor) => (
-            <DropdownMenuItem key={editor.id} onClick={() => onOpen(editor.id)}>
-              <EditorMenuLabel editor={editor} />
-            </DropdownMenuItem>
-          ))
+          <EditorBrandIcon editor={{ id: DEFAULT_EDITOR_ID, name: "Codex" }} />
         )}
-      </DropdownMenuContent>
-    </DropdownMenu>
+      </Button>
+      <DropdownMenu
+        onOpenChange={(open) => {
+          if (open) onRefresh();
+        }}
+      >
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-4 rounded-l-none px-0"
+            title={t("editor.choose")}
+            aria-label={t("editor.choose")}
+          >
+            <ChevronDownIcon className="size-3" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          {editors.length === 0 ? (
+            <DropdownMenuItem disabled>
+              {t("editor.noneFound")}
+            </DropdownMenuItem>
+          ) : (
+            editors.map((editor) => (
+              <DropdownMenuItem
+                key={editor.id}
+                onClick={() => chooseEditor(editor.id)}
+              >
+                <EditorMenuLabel editor={editor} />
+              </DropdownMenuItem>
+            ))
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
   );
 }
 

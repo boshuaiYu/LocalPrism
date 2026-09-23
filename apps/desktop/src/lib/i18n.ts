@@ -336,6 +336,8 @@ const en = {
     "Skills help paper workflows. Default packs such as {{packs}} include PaperSpine-style helpers the agent can use while drafting and revising a paper.",
 
   "editor.openIn": "Open in Editor",
+  "editor.openWith": "Open in {{name}}",
+  "editor.choose": "Choose editor",
   "editor.noneFound": "No editors found",
 
   "chat.keepAll": "Keep All",
@@ -767,6 +769,8 @@ const zh: Record<MessageKey, string> = {
     "技能会协助文稿写作。默认技能包（例如 {{packs}}）包含 PaperSpine 风格的助手，智能体起草和修改文稿时可以使用。",
 
   "editor.openIn": "在编辑器中打开",
+  "editor.openWith": "在 {{name}} 中打开",
+  "editor.choose": "选择编辑器",
   "editor.noneFound": "未找到编辑器",
 
   "chat.keepAll": "全部保留",

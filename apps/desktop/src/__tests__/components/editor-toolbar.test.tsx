@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { EditorToolbar } from "@/components/workspace/editor/editor-toolbar";
 import { useDocumentStore } from "@/stores/document-store";
+import { useSettingsStore } from "@/stores/settings-store";
 
 const editors = [
   { id: "cursor", name: "Cursor" },
@@ -34,6 +35,8 @@ describe("EditorToolbar external editors", () => {
   let root: Root;
 
   beforeEach(() => {
+    localStorage.removeItem("localprism.preferredEditor");
+    useSettingsStore.setState({ uiLanguage: "en" });
     vi.mocked(invoke).mockReset();
     vi.mocked(invoke).mockImplementation((command: string) => {
       if (command === "detect_editors") return Promise.resolve(editors);
@@ -64,6 +67,8 @@ describe("EditorToolbar external editors", () => {
   afterEach(() => {
     root.unmount();
     container.remove();
+    localStorage.removeItem("localprism.preferredEditor");
+    useSettingsStore.setState({ uiLanguage: "en" });
     useDocumentStore.setState({
       projectRoot: null,
       activeFileId: "",
@@ -71,42 +76,22 @@ describe("EditorToolbar external editors", () => {
     });
   });
 
-  it("lists installed editors and opens the current file in the chosen one", async () => {
+  it("opens Codex from the primary button and keeps distinct editor marks", async () => {
     root.render(<ToolbarHarness />);
 
     const button = await vi.waitFor(() => {
-      const node = container.querySelector('button[title="Open in Editor"]');
+      const node = container.querySelector('button[title="Open in Codex"]');
       if (!(node instanceof HTMLButtonElement)) {
         throw new Error("open button missing");
       }
       return node;
     });
+    expect(button.querySelector('[data-editor-icon="codex"]')).toBeTruthy();
     await vi.waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("detect_editors");
     });
 
-    openMenu(button);
-
-    await vi.waitFor(() => {
-      expect(document.body.textContent).toContain("Cursor");
-      expect(document.body.textContent).toContain("VS Code");
-      expect(document.body.textContent).toContain("Codex");
-    });
-
-    for (const name of ["Cursor", "VS Code", "Codex"]) {
-      const item = [
-        ...document.body.querySelectorAll('[role="menuitem"]'),
-      ].find((node) => node.textContent?.includes(name));
-      expect(item?.querySelector("img"), name).toBeTruthy();
-    }
-
-    const codex = [...document.body.querySelectorAll('[role="menuitem"]')].find(
-      (item) => item.textContent?.includes("Codex"),
-    );
-    if (!(codex instanceof HTMLElement)) {
-      throw new Error("Codex menu item missing");
-    }
-    codex.click();
+    button.click();
 
     await vi.waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("open_in_editor", {
@@ -115,6 +100,122 @@ describe("EditorToolbar external editors", () => {
         filePath: "main.tex",
         line: undefined,
       });
+    });
+
+    const menu = container.querySelector('button[title="Choose editor"]');
+    if (!(menu instanceof HTMLButtonElement)) {
+      throw new Error("editor menu missing");
+    }
+    openMenu(menu);
+
+    await vi.waitFor(() => {
+      expect(document.body.textContent).toContain("Cursor");
+      expect(document.body.textContent).toContain("VS Code");
+      expect(document.body.textContent).toContain("Codex");
+    });
+
+    const item = (name: string) => {
+      const node = [
+        ...document.body.querySelectorAll('[role="menuitem"]'),
+      ].find((entry) => entry.textContent?.includes(name));
+      if (!(node instanceof HTMLElement)) {
+        throw new Error(`${name} menu item missing`);
+      }
+      return node;
+    };
+
+    expect(
+      item("Cursor").querySelector('[data-editor-icon="cursor"]'),
+    ).toBeTruthy();
+    expect(item("Cursor").querySelector("img")).toBeNull();
+    expect(
+      item("VS Code").querySelector('img[data-editor-icon="vscode"]'),
+    ).toBeTruthy();
+    expect(
+      item("Codex").querySelector('[data-editor-icon="codex"]'),
+    ).toBeTruthy();
+    expect(item("Codex").querySelector("img")).toBeNull();
+  });
+
+  it("remembers the editor chosen from the menu", async () => {
+    root.render(<ToolbarHarness />);
+
+    const menu = await vi.waitFor(() => {
+      const node = container.querySelector('button[title="Choose editor"]');
+      if (!(node instanceof HTMLButtonElement)) {
+        throw new Error("editor menu missing");
+      }
+      return node;
+    });
+    openMenu(menu);
+
+    const cursor = await vi.waitFor(() => {
+      const node = [
+        ...document.body.querySelectorAll('[role="menuitem"]'),
+      ].find((entry) => entry.textContent?.includes("Cursor"));
+      if (!(node instanceof HTMLElement)) {
+        throw new Error("Cursor menu item missing");
+      }
+      return node;
+    });
+    cursor.click();
+
+    await vi.waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("open_in_editor", {
+        editorId: "cursor",
+        projectPath: "/work/paper",
+        filePath: "main.tex",
+        line: undefined,
+      });
+      expect(
+        container.querySelector('button[title="Open in Cursor"]'),
+      ).toBeTruthy();
+    });
+    expect(localStorage.getItem("localprism.preferredEditor")).toBe("cursor");
+  });
+
+  it("uses the first installed editor when Codex is not installed", async () => {
+    vi.mocked(invoke).mockImplementation((command: string) => {
+      if (command === "detect_editors") {
+        return Promise.resolve([
+          { id: "cursor", name: "Cursor" },
+          { id: "vscode", name: "VS Code" },
+        ]);
+      }
+      return Promise.resolve(null);
+    });
+    root.render(<ToolbarHarness />);
+
+    const button = await vi.waitFor(() => {
+      const node = container.querySelector('button[title="Open in Cursor"]');
+      if (!(node instanceof HTMLButtonElement)) {
+        throw new Error("fallback button missing");
+      }
+      return node;
+    });
+    button.click();
+    await vi.waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("open_in_editor", {
+        editorId: "cursor",
+        projectPath: "/work/paper",
+        filePath: "main.tex",
+        line: undefined,
+      });
+    });
+    expect(localStorage.getItem("localprism.preferredEditor")).toBeNull();
+  });
+
+  it("uses Chinese labels for the split button", async () => {
+    useSettingsStore.setState({ uiLanguage: "zh" });
+    root.render(<ToolbarHarness />);
+
+    await vi.waitFor(() => {
+      expect(
+        container.querySelector('button[title="在 Codex 中打开"]'),
+      ).toBeTruthy();
+      expect(
+        container.querySelector('button[title="选择编辑器"]'),
+      ).toBeTruthy();
     });
   });
 
@@ -126,12 +227,13 @@ describe("EditorToolbar external editors", () => {
     root.render(<ToolbarHarness />);
 
     const button = await vi.waitFor(() => {
-      const node = container.querySelector('button[title="Open in Editor"]');
+      const node = container.querySelector('button[title="Choose editor"]');
       if (!(node instanceof HTMLButtonElement)) {
-        throw new Error("open button missing");
+        throw new Error("editor menu missing");
       }
       return node;
     });
+    expect(container.querySelector("button[disabled]")).toBeTruthy();
     openMenu(button);
 
     await vi.waitFor(() => {

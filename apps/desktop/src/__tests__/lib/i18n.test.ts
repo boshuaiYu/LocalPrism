@@ -15,6 +15,14 @@ describe("translate", () => {
     expect(translate("zh", "chrome.environment")).toBe("环境");
     expect(translate("zh", "settings.environment")).toBe("环境");
     expect(translate("zh", "editor.openIn")).toBe("在编辑器中打开");
+    expect(translate("en", "editor.openWith", { name: "Codex" })).toBe(
+      "Open in Codex",
+    );
+    expect(translate("zh", "editor.openWith", { name: "Codex" })).toBe(
+      "在 Codex 中打开",
+    );
+    expect(translate("en", "editor.choose")).toBe("Choose editor");
+    expect(translate("zh", "editor.choose")).toBe("选择编辑器");
     expect(translate("zh", "env.pythonEnvironment")).toBe("Python 环境 (uv)");
   });
 
