@@ -165,9 +165,9 @@ const MARKDOWN_COMPONENTS = {
     node?: unknown;
   }) {
     return (
-      <div className="my-3 w-full overflow-x-auto rounded-lg border border-border">
+      <div className="chat-markdown-table my-3 w-full max-w-full overflow-x-auto rounded-lg border border-border">
         <table
-          className="m-0 w-full border-collapse text-left text-sm"
+          className="m-0 w-max min-w-full border-collapse text-left text-sm"
           {...props}
         >
           {children}
@@ -199,7 +199,7 @@ const MARKDOWN_COMPONENTS = {
   }) {
     return (
       <th
-        className="border-border border-r border-b px-3 py-2 font-medium text-foreground last:border-r-0"
+        className="whitespace-nowrap border-border border-r border-b px-3 py-2 font-medium text-foreground last:border-r-0"
         {...props}
       >
         {children}
@@ -216,7 +216,7 @@ const MARKDOWN_COMPONENTS = {
   }) {
     return (
       <td
-        className="border-border border-t border-r px-3 py-2 align-top text-foreground last:border-r-0"
+        className="whitespace-nowrap border-border border-t border-r px-3 py-2 align-top text-foreground last:border-r-0"
         {...props}
       >
         {children}
@@ -243,7 +243,7 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = memo(
         rehypePlugins={REHYPE_PLUGINS}
         urlTransform={transformChatUrl}
         className={cn(
-          "min-w-0 max-w-full break-words [overflow-wrap:anywhere] [&_*]:max-w-full",
+          "chat-markdown min-w-0 max-w-full break-words [overflow-wrap:anywhere]",
           className ?? "prose prose-sm dark:prose-invert max-w-none",
         )}
         components={
@@ -335,7 +335,7 @@ const CodeBlock: FC<{ language: string; code: string; preview?: boolean }> = ({
 
   return (
     <div className="not-prose group relative my-2">
-      <pre className="overflow-x-auto rounded bg-muted p-3 text-sm">
+      <pre className="chat-markdown-code max-w-full overflow-x-auto whitespace-pre rounded bg-muted p-3 text-sm [overflow-wrap:normal]">
         <code>{code}</code>
       </pre>
 

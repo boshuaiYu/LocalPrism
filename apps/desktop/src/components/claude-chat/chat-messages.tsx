@@ -205,7 +205,7 @@ export const ChatMessages: FC = () => {
     <div
       ref={viewportRef}
       onScroll={handleScroll}
-      className="absolute inset-0 overflow-y-auto scroll-smooth px-5 pt-5 pb-2"
+      className="absolute inset-0 min-w-0 overflow-y-auto overflow-x-hidden scroll-smooth px-5 pt-5 pb-2"
     >
       {settledMessages.length === 0 &&
         pendingGuidance.length === 0 &&
@@ -216,7 +216,10 @@ export const ChatMessages: FC = () => {
         )}
 
       {settledMessages.map((msg, idx) => (
-        <div key={idx} className={cn("mx-auto w-full", THREAD_MAX_WIDTH)}>
+        <div
+          key={idx}
+          className={cn("mx-auto w-full min-w-0", THREAD_MAX_WIDTH)}
+        >
           <MessageBubble
             message={msg}
             toolResultMap={toolResultMap}
@@ -226,7 +229,7 @@ export const ChatMessages: FC = () => {
       ))}
 
       {isStreaming && (
-        <div className={cn("mx-auto w-full px-2", THREAD_MAX_WIDTH)}>
+        <div className={cn("mx-auto w-full min-w-0 px-2", THREAD_MAX_WIDTH)}>
           <StreamingIndicator
             startedAt={streamingStartedAt}
             status={streamingStatus}
@@ -238,7 +241,7 @@ export const ChatMessages: FC = () => {
       {pendingGuidance.map((guidance) => (
         <div
           key={guidance.id}
-          className={cn("mx-auto w-full", THREAD_MAX_WIDTH)}
+          className={cn("mx-auto w-full min-w-0", THREAD_MAX_WIDTH)}
         >
           <PendingGuidanceMessage guidance={guidance} />
         </div>
@@ -335,9 +338,9 @@ const UserMessage: FC<{ message: ClaudeStreamMessage }> = ({ message }) => {
     errors: { message: string; location?: string }[],
     prompt: string,
   ) => (
-    <div className="fade-in slide-in-from-bottom-1 grid w-full animate-in auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 py-4 duration-150 [&:where(>*)]:col-start-2">
+    <div className="fade-in slide-in-from-bottom-1 grid w-full min-w-0 animate-in auto-rows-auto grid-cols-[minmax(0,1fr)_minmax(0,max-content)] content-start gap-y-2 px-2 py-4 duration-150 [&:where(>*)]:col-start-2">
       <div className="relative col-start-2 min-w-0">
-        <div className="wrap-break-word rounded-2xl bg-muted px-4 py-2.5 text-foreground text-sm leading-relaxed empty:hidden">
+        <div className="wrap-break-word min-w-0 max-w-full rounded-2xl bg-muted px-4 py-2.5 text-foreground text-sm leading-relaxed empty:hidden">
           <div className="mb-2 rounded-lg border border-red-500/20 bg-red-500/10 px-2.5 py-2">
             <div className="mb-1.5 font-medium text-red-400 text-xs">
               {title}
@@ -406,9 +409,9 @@ const UserMessage: FC<{ message: ClaudeStreamMessage }> = ({ message }) => {
   }
 
   return (
-    <div className="fade-in slide-in-from-bottom-1 grid w-full animate-in auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 py-4 duration-150 [&:where(>*)]:col-start-2">
+    <div className="fade-in slide-in-from-bottom-1 grid w-full min-w-0 animate-in auto-rows-auto grid-cols-[minmax(0,1fr)_minmax(0,max-content)] content-start gap-y-2 px-2 py-4 duration-150 [&:where(>*)]:col-start-2">
       <div className="relative col-start-2 min-w-0">
-        <div className="wrap-break-word rounded-2xl bg-muted px-4 py-2.5 text-foreground text-sm leading-relaxed empty:hidden">
+        <div className="wrap-break-word min-w-0 max-w-full rounded-2xl bg-muted px-4 py-2.5 text-foreground text-sm leading-relaxed empty:hidden">
           {contextLabel && (
             <span className="mb-1 inline-flex items-center rounded-md bg-background/60 px-1.5 py-0.5 font-mono text-muted-foreground text-xs">
               {contextLabel}
@@ -440,9 +443,9 @@ const PendingGuidanceMessage: FC<{ guidance: QueuedGuidance }> = ({
     : visiblePrompt;
 
   return (
-    <div className="fade-in slide-in-from-bottom-1 grid w-full animate-in auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 py-4 duration-150 [&:where(>*)]:col-start-2">
+    <div className="fade-in slide-in-from-bottom-1 grid w-full min-w-0 animate-in auto-rows-auto grid-cols-[minmax(0,1fr)_minmax(0,max-content)] content-start gap-y-2 px-2 py-4 duration-150 [&:where(>*)]:col-start-2">
       <div className="relative col-start-2 min-w-0">
-        <div className="wrap-break-word rounded-2xl bg-muted px-4 py-2.5 text-foreground text-sm leading-relaxed empty:hidden">
+        <div className="wrap-break-word min-w-0 max-w-full rounded-2xl bg-muted px-4 py-2.5 text-foreground text-sm leading-relaxed empty:hidden">
           {contextLabel && (
             <span className="mb-1 inline-flex items-center rounded-md bg-background/60 px-1.5 py-0.5 font-mono text-muted-foreground text-xs">
               {contextLabel}
@@ -517,9 +520,9 @@ const AssistantMessage: FC<{
   return (
     <div
       data-turn-state={turnState}
-      className="fade-in slide-in-from-bottom-1 relative mx-auto w-full animate-in py-4 duration-150"
+      className="fade-in slide-in-from-bottom-1 relative mx-auto w-full min-w-0 animate-in py-4 duration-150"
     >
-      <div className="wrap-break-word px-2 text-foreground text-sm leading-7">
+      <div className="wrap-break-word min-w-0 max-w-full px-2 text-foreground text-sm leading-7">
         {visibleContent.map((block, idx) => {
           if (block.type === "text" && block.text) {
             if (isHiddenSkillText(block.text)) {
@@ -581,9 +584,9 @@ const ResultMessage: FC<{ message: ClaudeStreamMessage }> = ({ message }) => {
   return (
     <div
       data-turn-state={chatTerminalState({ live: false, error: !!isError })}
-      className="fade-in slide-in-from-bottom-1 relative mx-auto w-full animate-in py-4 duration-150"
+      className="fade-in slide-in-from-bottom-1 relative mx-auto w-full min-w-0 animate-in py-4 duration-150"
     >
-      <div className="wrap-break-word px-2 text-foreground text-sm leading-7">
+      <div className="wrap-break-word min-w-0 max-w-full px-2 text-foreground text-sm leading-7">
         {isError ? (
           <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-destructive text-sm">
             {resultText}

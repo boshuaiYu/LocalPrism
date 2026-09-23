@@ -10,7 +10,6 @@ describe("pdf chrome status", () => {
         hasError: false,
         currentPage: 2,
         numPages: 10,
-        zoomLabel: "Fit width",
       }),
     ).toBe("Compiling");
     expect(
@@ -20,24 +19,26 @@ describe("pdf chrome status", () => {
         hasError: true,
         currentPage: 2,
         numPages: 10,
-        zoomLabel: "Fit width",
       }),
     ).toBe("Compile failed");
   });
 
-  it("shows page and zoom when the preview is idle", () => {
+  it("shows only a light page indicator when the preview is idle", () => {
     expect(pdfZoomLabel({ fitMode: "fit-width", scale: 1.2 })).toBe(
       "Fit width",
     );
-    expect(
-      pdfChromeCompactStatus({
-        isSaving: false,
-        isCompiling: false,
-        hasError: false,
-        currentPage: 2,
-        numPages: 10,
-        zoomLabel: "120%",
-      }),
-    ).toBe("Page 2/10 · 120%");
+    expect(pdfZoomLabel({ fitMode: "fit-height", scale: 0.8 })).toBe(
+      "Fit height",
+    );
+    expect(pdfZoomLabel({ fitMode: null, scale: 1.2 })).toBe("120%");
+    const status = pdfChromeCompactStatus({
+      isSaving: false,
+      isCompiling: false,
+      hasError: false,
+      currentPage: 1,
+      numPages: 3,
+    });
+    expect(status).toBe("1/3");
+    expect(status).not.toMatch(/fit|page|%/i);
   });
 });
