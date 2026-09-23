@@ -88,9 +88,13 @@ describe("skill tool result helpers", () => {
     const unchanged = collapseRepeatedSkillToolMessages(collapsed);
     expect(unchanged).toBe(collapsed);
 
+    const stringUser = {
+      type: "user",
+      message: { content: "run init again" },
+    } as unknown as ClaudeStreamMessage;
     const nextTurn = collapseRepeatedSkillToolMessages([
       ...collapsed,
-      user("run init again"),
+      stringUser,
       skill("toolu_9", "init"),
     ]);
     expect(
