@@ -43,6 +43,7 @@ import { useUvSetupStore } from "@/stores/uv-setup-store";
 import { getMupdfClient } from "@/lib/mupdf/mupdf-client";
 import { exists, join } from "@/lib/tauri/fs";
 import { AppStatusCluster } from "@/components/app-status-cluster";
+import { UpdatePrompt } from "@/components/update-prompt";
 import { HomeEmptyState } from "@/components/home/home-empty-state";
 import { Button } from "@/components/ui/button";
 import {
@@ -268,51 +269,58 @@ export function ProjectPicker() {
 
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-background text-foreground">
-      <header className="relative z-10 flex h-[calc(40px+var(--titlebar-height))] shrink-0 items-center justify-end gap-2 px-4 pt-[var(--titlebar-height)]">
-        <Button variant="ghost" size="icon" className="size-8" asChild>
-          <a
-            href="https://github.com/boshuaiYu/LocalPrism"
-            target="_blank"
-            rel="noopener noreferrer"
-            title="GitHub"
+      <header
+        data-testid="app-chrome-header"
+        className="relative z-10 flex min-h-[calc(40px+var(--titlebar-height))] shrink-0 flex-wrap items-center justify-between gap-2 px-4 pt-[var(--titlebar-height)] pb-1"
+      >
+        <AppStatusCluster version={appVersion} />
+        <div className="flex shrink-0 items-center gap-2">
+          <Button variant="ghost" size="icon" className="size-8" asChild>
+            <a
+              href="https://github.com/boshuaiYu/LocalPrism"
+              target="_blank"
+              rel="noopener noreferrer"
+              title="GitHub"
+            >
+              <GithubIcon className="size-4" />
+            </a>
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-8"
+            onClick={cycleTheme}
+            title={
+              theme === "system"
+                ? "System theme"
+                : theme === "light"
+                  ? "Light mode"
+                  : "Dark mode"
+            }
           >
-            <GithubIcon className="size-4" />
-          </a>
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-8"
-          onClick={cycleTheme}
-          title={
-            theme === "system"
-              ? "System theme"
-              : theme === "light"
-                ? "Light mode"
-                : "Dark mode"
-          }
-        >
-          {theme === "system" ? (
-            <MonitorIcon className="size-4" />
-          ) : theme === "light" ? (
-            <SunIcon className="size-4" />
-          ) : (
-            <MoonIcon className="size-4" />
-          )}
-        </Button>
-        <Button
-          variant={activeSection === "settings" ? "secondary" : "ghost"}
-          className="h-8 gap-2 rounded-lg px-2 text-muted-foreground hover:text-foreground"
-          onClick={() =>
-            setActiveSection((section) =>
-              section === "settings" ? "projects" : "settings",
-            )
-          }
-        >
-          <SettingsIcon className="size-4" />
-          {t("chrome.settings")}
-        </Button>
+            {theme === "system" ? (
+              <MonitorIcon className="size-4" />
+            ) : theme === "light" ? (
+              <SunIcon className="size-4" />
+            ) : (
+              <MoonIcon className="size-4" />
+            )}
+          </Button>
+          <Button
+            variant={activeSection === "settings" ? "secondary" : "ghost"}
+            className="h-8 gap-2 rounded-lg px-2 text-muted-foreground hover:text-foreground"
+            onClick={() =>
+              setActiveSection((section) =>
+                section === "settings" ? "projects" : "settings",
+              )
+            }
+          >
+            <SettingsIcon className="size-4" />
+            {t("chrome.settings")}
+          </Button>
+        </div>
       </header>
+      <UpdatePrompt />
 
       <main className="relative z-10 min-h-0 flex-1 overflow-auto">
         {activeSection === "settings" ? (
@@ -456,13 +464,6 @@ export function ProjectPicker() {
           </div>
         )}
       </main>
-      <footer
-        data-testid="home-footer"
-        className="flex h-11 shrink-0 items-center justify-between gap-3 border-border/70 border-t px-4 text-muted-foreground text-xs"
-      >
-        <AppStatusCluster version={appVersion} />
-      </footer>
-
       {/* New Project mode selection dialog */}
       <Dialog open={showModeDialog} onOpenChange={setShowModeDialog}>
         <DialogContent showCloseButton={false} className="sm:max-w-md">

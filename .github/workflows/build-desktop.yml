@@ -514,6 +514,9 @@ jobs:
   # Publish: generate latest.json & upload to release
   # Signatures are read from .sig artifacts. Job outputs cannot carry
   # multiline minisign files, which previously published platforms: {}.
+  # Stable updates read releases/latest/download/latest.json. Publish a
+  # beta as a GitHub prerelease so this tag does not replace that URL.
+  # The app then reads releases/download/<tag>/latest.json and asks first.
   # ──────────────────────────────────────────────
   publish:
     needs: [build-windows, build-macos, build-macos-intel, build-linux]

@@ -1,35 +1,56 @@
 import { useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { useI18n } from "@/lib/use-i18n";
 import { classifyUpdateError, updateBannerVisible } from "@/lib/update-policy";
+import { useI18n } from "@/lib/use-i18n";
 import {
   ensureUpdateCheck,
   useUpdateStore,
   type UpdateStatus,
 } from "@/stores/update-store";
 
-function statusCopy(status: UpdateStatus, missingPlatform: string): string {
+function statusCopy(
+  status: UpdateStatus,
+  t: (
+    key:
+      | "updates.missingPlatform"
+      | "updates.betaAvailable"
+      | "updates.checking"
+      | "updates.upToDate"
+      | "updates.idle"
+      | "updates.downloading"
+      | "updates.downloadingPercent"
+      | "updates.ready"
+      | "updates.manual"
+      | "updates.installing",
+    vars?: Record<string, string | number>,
+  ) => string,
+): string {
   switch (status.state) {
     case "checking":
-      return "Checking for updates…";
+      return t("updates.checking");
     case "up-to-date":
-      return "You're on the latest version.";
+      return t("updates.upToDate");
+    case "confirm":
+      return t("updates.betaAvailable", { version: status.version });
     case "downloading":
       return status.percent == null
-        ? `Downloading ${status.version} in the background. LocalPrism asks before restarting.`
-        : `Downloading ${status.version} (${status.percent}%). LocalPrism asks before restarting.`;
+        ? t("updates.downloading", { version: status.version })
+        : t("updates.downloadingPercent", {
+            version: status.version,
+            percent: status.percent,
+          });
     case "ready":
-      return `${status.version} is downloaded. Restart to install it.`;
+      return t("updates.ready", { version: status.version });
     case "manual":
-      return `${status.version} is available. This Linux install is a .deb or .rpm, so LocalPrism will not replace it with the AppImage. Download the new package from Releases.`;
+      return t("updates.manual", { version: status.version });
     case "installing":
-      return `Installing ${status.version} and restarting…`;
+      return t("updates.installing", { version: status.version });
     case "error":
       return classifyUpdateError(status.message) === "missing-platform"
-        ? missingPlatform
+        ? t("updates.missingPlatform")
         : status.message;
     default:
-      return "Updates download in the background. Restart only after you confirm.";
+      return t("updates.idle");
   }
 }
 
@@ -38,6 +59,7 @@ export function UpdatePrompt() {
   const status = useUpdateStore((state) => state.status);
   const dismissed = useUpdateStore((state) => state.bannerDismissed);
   const dismissBanner = useUpdateStore((state) => state.dismissBanner);
+  const confirmDownload = useUpdateStore((state) => state.confirmDownload);
   const applyUpdate = useUpdateStore((state) => state.applyUpdate);
   const openReleases = useUpdateStore((state) => state.openReleases);
 
@@ -50,35 +72,47 @@ export function UpdatePrompt() {
   return (
     <div
       data-testid="update-prompt"
-      className="lp-chrome fixed inset-x-0 bottom-4 z-40 mx-auto flex w-[min(40rem,calc(100vw-2rem))] flex-col gap-3 rounded-xl border px-4 py-3 shadow-lg"
+      role="region"
+      aria-label={t("updates.bannerLabel")}
+      className="lp-chrome flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b px-4 py-2"
     >
-      <p className="text-sm leading-relaxed">
-        {statusCopy(status, t("updates.missingPlatform"))}
+      <p className="min-w-0 flex-1 text-sm leading-relaxed">
+        {statusCopy(status, t)}
       </p>
-      <div className="flex flex-wrap justify-end gap-2">
+      <div className="flex shrink-0 flex-wrap justify-end gap-2">
+        {status.state === "confirm" && (
+          <Button
+            type="button"
+            className="h-8 rounded-lg"
+            data-testid="update-download"
+            onClick={() => void confirmDownload()}
+          >
+            {t("updates.download")}
+          </Button>
+        )}
         {status.state === "ready" && (
           <Button
             type="button"
-            className="h-9 rounded-lg"
+            className="h-8 rounded-lg"
             onClick={() => void applyUpdate()}
           >
-            Restart to update
+            {t("updates.restart")}
           </Button>
         )}
         {status.state === "manual" && (
           <Button
             type="button"
-            className="h-9 rounded-lg"
+            className="h-8 rounded-lg"
             onClick={() => void openReleases()}
           >
-            View releases
+            {t("updates.viewReleases")}
           </Button>
         )}
         {status.state === "error" &&
           classifyUpdateError(status.message) === "missing-platform" && (
             <Button
               type="button"
-              className="h-9 rounded-lg"
+              className="h-8 rounded-lg"
               onClick={() => void openReleases()}
             >
               {t("updates.viewReleases")}
@@ -88,10 +122,11 @@ export function UpdatePrompt() {
           <Button
             type="button"
             variant="outline"
-            className="h-9 rounded-lg"
+            className="h-8 rounded-lg"
+            data-testid="update-later"
             onClick={dismissBanner}
           >
-            Later
+            {t("updates.later")}
           </Button>
         )}
       </div>
@@ -103,9 +138,13 @@ export function UpdateSettings() {
   const { t } = useI18n();
   const status = useUpdateStore((state) => state.status);
   const checkForUpdate = useUpdateStore((state) => state.checkForUpdate);
+  const confirmDownload = useUpdateStore((state) => state.confirmDownload);
   const applyUpdate = useUpdateStore((state) => state.applyUpdate);
   const openReleases = useUpdateStore((state) => state.openReleases);
-  const busy = status.state === "checking" || status.state === "downloading";
+  const busy =
+    status.state === "checking" ||
+    status.state === "downloading" ||
+    status.state === "installing";
 
   return (
     <section
@@ -114,28 +153,34 @@ export function UpdateSettings() {
     >
       <h3 className="font-medium text-sm">{t("settings.updates")}</h3>
       <p className="mt-1 text-lp-meta text-sm leading-relaxed">
-        {statusCopy(status, t("updates.missingPlatform"))} In-app install
-        applies to the AppImage, macOS, and Windows. Debian and RPM installs
-        stay on the package from Releases. Downloads are checked with the
-        existing updater signature.
+        {statusCopy(status, t)} {t("updates.settingsBody")}
       </p>
       <div className="mt-3 flex flex-wrap gap-2">
         <Button
           type="button"
           variant="outline"
           className="h-9 rounded-lg"
-          disabled={busy || status.state === "installing"}
+          disabled={busy}
           onClick={() => void checkForUpdate({ explicit: true })}
         >
           {t("updates.check")}
         </Button>
+        {status.state === "confirm" && (
+          <Button
+            type="button"
+            className="h-9 rounded-lg"
+            onClick={() => void confirmDownload()}
+          >
+            {t("updates.download")}
+          </Button>
+        )}
         {status.state === "ready" && (
           <Button
             type="button"
             className="h-9 rounded-lg"
             onClick={() => void applyUpdate()}
           >
-            Restart to update
+            {t("updates.restart")}
           </Button>
         )}
         {status.state === "manual" && (
@@ -145,7 +190,7 @@ export function UpdateSettings() {
             className="h-9 rounded-lg"
             onClick={() => void openReleases()}
           >
-            View releases
+            {t("updates.viewReleases")}
           </Button>
         )}
       </div>

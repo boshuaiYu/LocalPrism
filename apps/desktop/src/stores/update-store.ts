@@ -1,4 +1,6 @@
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { open } from "@tauri-apps/plugin-shell";
 import {
@@ -8,15 +10,26 @@ import {
 } from "@tauri-apps/plugin-updater";
 import { create } from "zustand";
 import {
+  betaCandidatesFromGithub,
+  chooseUpdateOffer,
+  GITHUB_RELEASES_API,
   RELEASES_URL,
   updateApplyMode,
+  type ReleaseCandidate,
   type UpdateApplyMode,
+  type UpdateOffer,
 } from "@/lib/update-policy";
 
 export type UpdateStatus =
   | { state: "idle" }
   | { state: "checking"; explicit: boolean }
   | { state: "up-to-date" }
+  | {
+      state: "confirm";
+      version: string;
+      notes?: string;
+      channel: "beta";
+    }
   | {
       state: "downloading";
       version: string;
@@ -32,18 +45,38 @@ interface UpdateStore {
   status: UpdateStatus;
   bannerDismissed: boolean;
   checkForUpdate: (options?: { explicit?: boolean }) => Promise<void>;
+  confirmDownload: () => Promise<void>;
   applyUpdate: () => Promise<void>;
   dismissBanner: () => void;
   openReleases: () => Promise<void>;
 }
 
 let pending: Update | null = null;
+let pendingManifest: string | null = null;
+let preparedManifest = false;
 let autoCheckStarted = false;
 let checkLock: Promise<void> | null = null;
+let stopProgress: (() => void) | null = null;
 
 function notesFrom(update: Update): string | undefined {
   const body = update.body?.trim();
   return body ? body : undefined;
+}
+
+async function closePending() {
+  stopProgress?.();
+  stopProgress = null;
+  const update = pending;
+  pending = null;
+  pendingManifest = null;
+  if (!update) return;
+  await update.close().catch(() => undefined);
+}
+
+function clearPreparedManifest() {
+  if (!preparedManifest) return;
+  preparedManifest = false;
+  void invoke("clear_prepared_update").catch(() => undefined);
 }
 
 async function downloadPending(
@@ -93,6 +126,64 @@ async function downloadPending(
   });
 }
 
+async function currentAppVersion(stable: Update | null): Promise<string> {
+  try {
+    const version = await getVersion();
+    if (typeof version === "string" && version.trim()) return version.trim();
+  } catch {
+    // Tests and non-Tauri previews fall through to the updater payload.
+  }
+  return stable?.currentVersion ?? "";
+}
+
+async function loadBetaCandidates(): Promise<ReleaseCandidate[]> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(GITHUB_RELEASES_API, {
+      signal: controller.signal,
+      headers: {
+        Accept: "application/vnd.github+json",
+        "User-Agent": "LocalPrism",
+      },
+    });
+    if (!response.ok) return [];
+    return betaCandidatesFromGithub(await response.json());
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function trackManifestProgress(
+  version: string,
+  notes: string | undefined,
+  set: (
+    partial:
+      | Partial<UpdateStore>
+      | ((state: UpdateStore) => Partial<UpdateStore>),
+  ) => void,
+) {
+  stopProgress?.();
+  const unlisten = await listen<{
+    downloaded: number;
+    total: number | null;
+  }>("updater-download-progress", (event) => {
+    const total = event.payload.total ?? 0;
+    const percent =
+      total > 0
+        ? Math.min(100, Math.round((event.payload.downloaded / total) * 100))
+        : null;
+    set({
+      status: { state: "downloading", version, percent, notes },
+    });
+  });
+  stopProgress = () => {
+    unlisten();
+  };
+}
+
 export const useUpdateStore = create<UpdateStore>((set, get) => ({
   status: { state: "idle" },
   bannerDismissed: false,
@@ -108,7 +199,8 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
       (current === "downloading" ||
         current === "ready" ||
         current === "manual" ||
-        current === "installing")
+        current === "installing" ||
+        current === "confirm")
     ) {
       return;
     }
@@ -116,6 +208,8 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
 
     const run = (async () => {
       set({ status: { state: "checking", explicit } });
+      await closePending();
+      clearPreparedManifest();
       try {
         let channel: string | null = "native";
         try {
@@ -124,26 +218,76 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
           channel = "native";
         }
         const mode: UpdateApplyMode = updateApplyMode(channel);
-        const update = await check();
-        if (!update) {
-          pending = null;
+        const [stableResult, betas] = await Promise.all([
+          check()
+            .then((value) => ({ ok: true as const, value }))
+            .catch((error: unknown) => ({ ok: false as const, error })),
+          loadBetaCandidates(),
+        ]);
+
+        if (!stableResult.ok && betas.length === 0) {
+          throw stableResult.error;
+        }
+
+        const stableUpdate = stableResult.ok ? stableResult.value : null;
+        const currentVersion = await currentAppVersion(stableUpdate);
+        const offer: UpdateOffer = chooseUpdateOffer({
+          currentVersion,
+          stable: stableUpdate
+            ? {
+                version: stableUpdate.version,
+                notes: notesFrom(stableUpdate),
+              }
+            : null,
+          betas,
+        });
+
+        if (offer.action === "none") {
+          if (stableUpdate) await stableUpdate.close().catch(() => undefined);
+          if (!stableResult.ok) throw stableResult.error;
           set({
             status: { state: explicit ? "up-to-date" : "idle" },
           });
           return;
         }
-        const notes = notesFrom(update);
+
+        const notes = offer.notes;
         if (mode === "manual-package") {
-          pending = null;
-          await update.close();
+          if (stableUpdate) await stableUpdate.close().catch(() => undefined);
           set({
-            status: { state: "manual", version: update.version, notes },
+            status: { state: "manual", version: offer.version, notes },
             bannerDismissed: false,
           });
           return;
         }
-        pending = update;
-        await downloadPending(update, set);
+
+        if (offer.action === "confirm") {
+          if (offer.manifestUrl) {
+            if (stableUpdate) await stableUpdate.close().catch(() => undefined);
+            pendingManifest = offer.manifestUrl;
+          } else {
+            pending = stableUpdate;
+          }
+          set({
+            status: {
+              state: "confirm",
+              version: offer.version,
+              notes,
+              channel: "beta",
+            },
+            bannerDismissed: false,
+          });
+          return;
+        }
+
+        if (!stableUpdate) {
+          set({
+            status: { state: explicit ? "up-to-date" : "idle" },
+          });
+          return;
+        }
+        pending = stableUpdate;
+        await downloadPending(stableUpdate, set);
       } catch (err) {
         const failedDuringDownload = get().status.state === "downloading";
         set({
@@ -161,13 +305,77 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
     });
     return checkLock;
   },
+  confirmDownload: async () => {
+    const status = get().status;
+    if (status.state !== "confirm") return;
+    const update = pending;
+    const manifestUrl = pendingManifest;
+    const notes = status.notes;
+    const version = status.version;
+    if (update) {
+      try {
+        await downloadPending(update, set);
+      } catch (err) {
+        set({
+          status: { state: "error", message: String(err), explicit: true },
+        });
+      }
+      return;
+    }
+    if (!manifestUrl) {
+      set({
+        status: {
+          state: "error",
+          message: "Beta manifest URL is missing.",
+          explicit: true,
+        },
+      });
+      return;
+    }
+    set({
+      status: { state: "downloading", version, percent: null, notes },
+      bannerDismissed: false,
+    });
+    try {
+      await trackManifestProgress(version, notes, set);
+      const installedVersion = await invoke<string>(
+        "download_manifest_update",
+        {
+          manifestUrl,
+        },
+      );
+      stopProgress?.();
+      stopProgress = null;
+      preparedManifest = true;
+      pendingManifest = null;
+      set({
+        status: {
+          state: "ready",
+          version: installedVersion || version,
+          notes,
+        },
+        bannerDismissed: false,
+      });
+    } catch (err) {
+      stopProgress?.();
+      stopProgress = null;
+      set({
+        status: { state: "error", message: String(err), explicit: true },
+      });
+    }
+  },
   applyUpdate: async () => {
     const update = pending;
     const status = get().status;
-    if (!update || status.state !== "ready") return;
+    if (status.state !== "ready") return;
+    if (!update && !preparedManifest) return;
     set({ status: { state: "installing", version: status.version } });
     try {
-      await update.install();
+      if (update) {
+        await update.install();
+      } else {
+        await invoke("install_prepared_update");
+      }
       await relaunch();
     } catch (err) {
       set({
@@ -186,6 +394,9 @@ export function ensureUpdateCheck() {
 export function resetUpdateStoreForTests() {
   autoCheckStarted = false;
   pending = null;
+  pendingManifest = null;
+  preparedManifest = false;
+  stopProgress = null;
   checkLock = null;
   useUpdateStore.setState({
     status: { state: "idle" },

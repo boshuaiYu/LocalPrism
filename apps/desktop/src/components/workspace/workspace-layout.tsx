@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { SettingsIcon } from "lucide-react";
 import {
   Panel,
   PanelGroup,
@@ -17,6 +18,13 @@ import { PdfPreview } from "./preview/pdf-preview";
 import { ChatRestoreButton } from "@/components/claude-chat/chat-restore-button";
 import { ClaudeChatDrawer } from "@/components/claude-chat/claude-chat-drawer";
 import { ProductTour } from "@/components/product-tour";
+import {
+  AppStatusCluster,
+  useAppVersion,
+} from "@/components/app-status-cluster";
+import { UpdatePrompt } from "@/components/update-prompt";
+import { Button } from "@/components/ui/button";
+import { useI18n } from "@/lib/use-i18n";
 import { useRuntimeEvents } from "@/hooks/use-runtime-events";
 import { useApprovalStore } from "@/stores/approval-store";
 import { useDocumentStore } from "@/stores/document-store";
@@ -52,6 +60,8 @@ function WorkspaceResizeHandle({ testId }: { testId?: string }) {
 }
 
 export function WorkspaceLayout() {
+  const { t } = useI18n();
+  const appVersion = useAppVersion();
   useRuntimeEvents();
   const initialized = useDocumentStore((s) => s.initialized);
   const previewVisible = usePreviewStore((s) => s.visible);
@@ -280,126 +290,157 @@ export function WorkspaceLayout() {
     />
   ) : null;
 
-  if (!initialized) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <div className="text-muted-foreground">Loading project...</div>
-      </div>
-    );
-  }
-
   return (
-    <div ref={workspaceRef} className="relative h-full">
-      <PanelGroup
-        direction="horizontal"
-        className="h-full"
-        onLayout={persistLayout}
+    <div className="flex h-full min-h-0 flex-col bg-background text-foreground">
+      <header
+        data-testid="app-chrome-header"
+        className="flex shrink-0 items-center justify-between gap-2 border-b px-3 pt-[var(--titlebar-height)] pb-1"
       >
-        <Panel
-          id="sidebar"
-          order={1}
-          ref={sidebarPanelRef}
-          defaultSize={paneSizes.sidebar}
-          minSize={SIDEBAR_MIN_SIZE}
-          maxSize={25}
-          collapsible
-          collapsedSize={sidebarCollapsedSize}
-          onCollapse={() => setSidebarCollapsed(true)}
-          onExpand={() => setSidebarCollapsed(false)}
-          onResize={(size) => {
-            if (!sidebarAnimatingRef.current && size >= SIDEBAR_MIN_SIZE) {
-              expandedSidebarSizeRef.current = size;
-            }
-          }}
-          className="min-w-0 overflow-hidden"
+        <AppStatusCluster version={appVersion} />
+        <Button
+          type="button"
+          variant="ghost"
+          className="h-8 gap-2 rounded-lg px-2 text-muted-foreground hover:text-foreground"
+          onClick={() =>
+            window.dispatchEvent(new CustomEvent("localprism-open-settings"))
+          }
         >
-          <Sidebar
-            collapsed={sidebarCollapsed}
-            onToggleCollapsed={toggleSidebarCollapsed}
-            layoutControls={{
-              codeVisible,
-              chatVisible,
-              pdfVisible: previewVisible,
-              sidebarVisible: !sidebarCollapsed,
-              setCodeVisible: setCodePaneVisible,
-              setChatVisible: setChatPaneVisible,
-              setPdfVisible: setPdfPaneVisible,
-              setSidebarVisible: (visible) => setSidebarPaneCollapsed(!visible),
-            }}
-          />
-        </Panel>
+          <SettingsIcon className="size-4" />
+          {t("chrome.settings")}
+        </Button>
+      </header>
+      <UpdatePrompt />
+      <div
+        ref={workspaceRef}
+        className="relative min-h-0 flex-1"
+        style={{ ["--titlebar-height" as string]: "0px" }}
+      >
+        {!initialized ? (
+          <div className="flex h-full items-center justify-center">
+            <div className="text-muted-foreground">Loading project...</div>
+          </div>
+        ) : (
+          <>
+            <PanelGroup
+              direction="horizontal"
+              className="h-full"
+              onLayout={persistLayout}
+            >
+              <Panel
+                id="sidebar"
+                order={1}
+                ref={sidebarPanelRef}
+                defaultSize={paneSizes.sidebar}
+                minSize={SIDEBAR_MIN_SIZE}
+                maxSize={25}
+                collapsible
+                collapsedSize={sidebarCollapsedSize}
+                onCollapse={() => setSidebarCollapsed(true)}
+                onExpand={() => setSidebarCollapsed(false)}
+                onResize={(size) => {
+                  if (
+                    !sidebarAnimatingRef.current &&
+                    size >= SIDEBAR_MIN_SIZE
+                  ) {
+                    expandedSidebarSizeRef.current = size;
+                  }
+                }}
+                className="min-w-0 overflow-hidden"
+              >
+                <Sidebar
+                  collapsed={sidebarCollapsed}
+                  onToggleCollapsed={toggleSidebarCollapsed}
+                  layoutControls={{
+                    codeVisible,
+                    chatVisible,
+                    pdfVisible: previewVisible,
+                    sidebarVisible: !sidebarCollapsed,
+                    setCodeVisible: setCodePaneVisible,
+                    setChatVisible: setChatPaneVisible,
+                    setPdfVisible: setPdfPaneVisible,
+                    setSidebarVisible: (visible) =>
+                      setSidebarPaneCollapsed(!visible),
+                  }}
+                />
+              </Panel>
 
-        <WorkspaceResizeHandle />
+              <WorkspaceResizeHandle />
 
-        {codeVisible && (
-          <Panel
-            id="code"
-            order={2}
-            defaultSize={paneSizes.code}
-            minSize={22}
-            className="min-w-0"
-          >
-            {chatVisible ? (
-              <LatexEditor />
-            ) : (
-              <div className="relative h-full min-w-0">
-                <LatexEditor />
-                {chatRestoreButton}
-              </div>
-            )}
-          </Panel>
+              {codeVisible && (
+                <Panel
+                  id="code"
+                  order={2}
+                  defaultSize={paneSizes.code}
+                  minSize={22}
+                  className="min-w-0"
+                >
+                  {chatVisible ? (
+                    <LatexEditor />
+                  ) : (
+                    <div className="relative h-full min-w-0">
+                      <LatexEditor />
+                      {chatRestoreButton}
+                    </div>
+                  )}
+                </Panel>
+              )}
+
+              {codeVisible && chatVisible && (
+                <WorkspaceResizeHandle testId="resize-code-chat" />
+              )}
+
+              {codeVisible && !chatVisible && previewVisible && (
+                <WorkspaceResizeHandle testId="resize-code-pdf" />
+              )}
+
+              {chatVisible && (
+                <Panel
+                  id="chat"
+                  order={3}
+                  defaultSize={paneSizes.chat}
+                  minSize={18}
+                  collapsible
+                  collapsedSize={0}
+                  onCollapse={() => setChatPaneVisible(false)}
+                  className="min-w-0 overflow-hidden"
+                >
+                  <ClaudeChatDrawer />
+                </Panel>
+              )}
+
+              {chatVisible && previewVisible && (
+                <WorkspaceResizeHandle testId="resize-chat-pdf" />
+              )}
+
+              {previewVisible && (
+                <Panel
+                  id="pdf"
+                  order={4}
+                  defaultSize={paneSizes.pdf}
+                  minSize={22}
+                  className="min-w-0"
+                >
+                  {!chatVisible && !codeVisible ? (
+                    <div
+                      className="relative h-full min-w-0"
+                      data-tour="tour-pdf"
+                    >
+                      <PdfPreview />
+                      {chatRestoreButton}
+                    </div>
+                  ) : (
+                    <div className="h-full min-w-0" data-tour="tour-pdf">
+                      <PdfPreview />
+                    </div>
+                  )}
+                </Panel>
+              )}
+            </PanelGroup>
+            {!codeVisible && !previewVisible && chatRestoreButton}
+            <ProductTour />
+          </>
         )}
-
-        {codeVisible && chatVisible && (
-          <WorkspaceResizeHandle testId="resize-code-chat" />
-        )}
-
-        {codeVisible && !chatVisible && previewVisible && (
-          <WorkspaceResizeHandle testId="resize-code-pdf" />
-        )}
-
-        {chatVisible && (
-          <Panel
-            id="chat"
-            order={3}
-            defaultSize={paneSizes.chat}
-            minSize={18}
-            collapsible
-            collapsedSize={0}
-            onCollapse={() => setChatPaneVisible(false)}
-            className="min-w-0 overflow-hidden"
-          >
-            <ClaudeChatDrawer />
-          </Panel>
-        )}
-
-        {chatVisible && previewVisible && (
-          <WorkspaceResizeHandle testId="resize-chat-pdf" />
-        )}
-
-        {previewVisible && (
-          <Panel
-            id="pdf"
-            order={4}
-            defaultSize={paneSizes.pdf}
-            minSize={22}
-            className="min-w-0"
-          >
-            {!chatVisible && !codeVisible ? (
-              <div className="relative h-full min-w-0" data-tour="tour-pdf">
-                <PdfPreview />
-                {chatRestoreButton}
-              </div>
-            ) : (
-              <div className="h-full min-w-0" data-tour="tour-pdf">
-                <PdfPreview />
-              </div>
-            )}
-          </Panel>
-        )}
-      </PanelGroup>
-      {!codeVisible && !previewVisible && chatRestoreButton}
-      <ProductTour />
+      </div>
     </div>
   );
 }
