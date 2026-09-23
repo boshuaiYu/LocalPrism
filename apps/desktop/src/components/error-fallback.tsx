@@ -1,14 +1,16 @@
 import type { FallbackProps } from "react-error-boundary";
+import { useI18n } from "@/lib/use-i18n";
 
 export function ErrorFallback({ error, resetErrorBoundary }: FallbackProps) {
+  const { t } = useI18n();
   return (
     <div className="flex h-screen w-screen items-center justify-center bg-background p-8">
       <div className="w-full max-w-2xl space-y-4">
         <h1 className="font-bold text-2xl text-destructive">
-          Something went wrong
+          {t("errors.somethingWrong")}
         </h1>
         <p className="text-muted-foreground text-sm">
-          An unexpected error occurred. You can try again or reload the app.
+          {t("errors.unexpected")}
         </p>
 
         <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-md border bg-muted p-4 text-xs">
@@ -23,14 +25,14 @@ export function ErrorFallback({ error, resetErrorBoundary }: FallbackProps) {
             onClick={resetErrorBoundary}
             className="rounded-md bg-primary px-4 py-2 font-medium text-primary-foreground text-sm hover:bg-primary/90"
           >
-            Try again
+            {t("errors.tryAgain")}
           </button>
           <button
             type="button"
             onClick={() => window.location.reload()}
             className="rounded-md border px-4 py-2 font-medium text-sm hover:bg-accent"
           >
-            Reload
+            {t("errors.reload")}
           </button>
         </div>
       </div>

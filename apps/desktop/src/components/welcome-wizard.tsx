@@ -19,6 +19,8 @@ import { useClaudeSetupStore } from "@/stores/claude-setup-store";
 import { useProviderStore } from "@/stores/provider-store";
 import { useSkillStore } from "@/stores/skill-store";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
+import { LanguageSwitch } from "@/components/language-switch";
+import { useI18n } from "@/lib/use-i18n";
 
 interface SkillsStatus {
   installed: boolean;
@@ -27,6 +29,7 @@ interface SkillsStatus {
 }
 
 export function WelcomeWizard({ onComplete }: { onComplete?: () => void }) {
+  const { t } = useI18n();
   const [dismissed, setDismissed] = useState(false);
 
   const finish = useCallback(() => {
@@ -58,13 +61,16 @@ export function WelcomeWizard({ onComplete }: { onComplete?: () => void }) {
               LocalPrism
             </div>
             <div className="text-muted-foreground text-xs">
-              Welcome — guided setup
+              {t("onboarding.welcomeSubtitle")}
             </div>
           </div>
         </div>
-        <Button variant="ghost" className="h-8 px-3 text-xs" onClick={finish}>
-          Skip
-        </Button>
+        <div className="flex items-center gap-2">
+          <LanguageSwitch />
+          <Button variant="ghost" className="h-8 px-3 text-xs" onClick={finish}>
+            {t("onboarding.skip")}
+          </Button>
+        </div>
       </header>
 
       <main className="relative z-10 min-h-0 flex-1 overflow-y-auto px-6 pb-4">
@@ -73,7 +79,7 @@ export function WelcomeWizard({ onComplete }: { onComplete?: () => void }) {
 
       <footer className="relative z-10 flex shrink-0 items-center justify-end gap-3 border-border/60 border-t bg-background/80 px-6 py-4">
         <Button className="lp-primary-cta h-10 rounded-lg" onClick={finish}>
-          Get started
+          {t("onboarding.getStarted")}
         </Button>
       </footer>
     </div>

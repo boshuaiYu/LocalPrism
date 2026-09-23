@@ -21,6 +21,8 @@ import { isDebugLoggingEnabled } from "@/lib/debug/log-store";
 import { interruptRuntimeTurn } from "@/runtime/commands";
 import type { RuntimeEventEnvelope } from "@/runtime/types";
 import { useApprovalStore } from "@/stores/approval-store";
+import { useSettingsStore } from "@/stores/settings-store";
+import { translate } from "@/lib/i18n";
 import {
   classifyClaudeProcessStderr,
   formatUnexpectedClaudeExit,
@@ -297,6 +299,17 @@ export function useClaudeEvents() {
       const trimmed = payload.trim();
       if (!trimmed) return null;
       const lower = trimmed.toLowerCase();
+      const detail =
+        trimmed.length > 800 ? `${trimmed.slice(0, 800)}...` : trimmed;
+      if (/\b400\b/.test(lower) || lower.includes("bad request")) {
+        return translate(
+          useSettingsStore.getState().uiLanguage,
+          "errors.http400",
+          {
+            detail,
+          },
+        );
+      }
       const looksProviderRelated =
         lower.includes("provider") ||
         lower.includes("openai") ||
@@ -315,7 +328,7 @@ export function useClaudeEvents() {
         lower.includes("does not support") ||
         lower.includes("base url");
       if (!looksProviderRelated) return null;
-      return trimmed.length > 800 ? `${trimmed.slice(0, 800)}...` : trimmed;
+      return detail;
     }
 
     async function registerProposedChange(
@@ -644,6 +657,7 @@ export function useClaudeEvents() {
             isWindows,
             exitCode: payload.exit_code,
             stderrTail: payload.stderr_tail,
+            language: useSettingsStore.getState().uiLanguage,
           }),
         );
       }
@@ -1095,7 +1109,10 @@ export function useClaudeEvents() {
               log.error(`[${tabId}] CRITICAL: ${payload}`);
             }
             const isDirectProvider = directProviderTabRef.current.get(tabId);
-            const classified = classifyClaudeProcessStderr(payload);
+            const classified = classifyClaudeProcessStderr(
+              payload,
+              useSettingsStore.getState().uiLanguage,
+            );
             const providerMessage =
               isDirectProvider || providerErrorMessage(payload)
                 ? providerErrorMessage(payload) || payload.trim()

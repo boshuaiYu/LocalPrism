@@ -11,6 +11,8 @@ import { RuntimeSettings } from "@/components/runtime/runtime-settings";
 import { SkillLibrary } from "@/components/skills/skill-library";
 import { AgentLibrary } from "@/components/agents/agent-library";
 import { useDocumentStore } from "@/stores/document-store";
+import { LanguageSwitch } from "@/components/language-switch";
+import { useI18n } from "@/lib/use-i18n";
 
 export interface SettingsDialogProps {
   open: boolean;
@@ -23,6 +25,7 @@ export function SettingsDialog({
   onOpenChange,
   defaultTab = "runtimes",
 }: SettingsDialogProps) {
+  const { t } = useI18n();
   const projectPath = useDocumentStore((state) => state.projectRoot);
 
   return (
@@ -31,11 +34,10 @@ export function SettingsDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <SettingsIcon className="size-4" />
-            Settings
+            {t("settings.title")}
           </DialogTitle>
-          <DialogDescription>
-            Configure providers, skills, and custom agents.
-          </DialogDescription>
+          <DialogDescription>{t("settings.description")}</DialogDescription>
+          <LanguageSwitch />
         </DialogHeader>
 
         <Tabs
@@ -44,9 +46,11 @@ export function SettingsDialog({
           className="flex min-h-0 flex-1 flex-col gap-3"
         >
           <TabsList className="grid w-full grid-cols-3">
-            <TabsTrigger value="runtimes">Providers</TabsTrigger>
-            <TabsTrigger value="skills">Skills</TabsTrigger>
-            <TabsTrigger value="agents">Agents</TabsTrigger>
+            <TabsTrigger value="runtimes">
+              {t("settings.providers")}
+            </TabsTrigger>
+            <TabsTrigger value="skills">{t("settings.skills")}</TabsTrigger>
+            <TabsTrigger value="agents">{t("settings.agents")}</TabsTrigger>
           </TabsList>
 
           <TabsContent

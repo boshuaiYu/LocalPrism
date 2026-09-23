@@ -7,6 +7,7 @@ import { useSkillStore } from "@/stores/skill-store";
 import { groupItemsBySkillCategory } from "@/lib/skill-categories";
 import { skillPaperWorkflowGuidance } from "@/lib/skill-workflow-copy";
 import type { RuntimeSkill } from "@/runtime/types";
+import { useI18n } from "@/lib/use-i18n";
 
 export interface SkillLibraryProps {
   projectPath?: string | null;
@@ -24,6 +25,7 @@ export function SkillLibrary({ projectPath = null }: SkillLibraryProps) {
   const removeManaged = useSkillStore((state) => state.removeManaged);
   const [importing, setImporting] = useState(false);
   const [sourceUrl, setSourceUrl] = useState("");
+  const { t } = useI18n();
 
   useEffect(() => {
     void refresh(projectPath ?? undefined);
@@ -44,7 +46,7 @@ export function SkillLibrary({ projectPath = null }: SkillLibraryProps) {
     const selected = await open({
       directory: true,
       multiple: false,
-      title: "Select skill folder",
+      title: t("skills.importTitle"),
     });
     if (!selected || Array.isArray(selected)) return;
     setImporting(true);
@@ -76,14 +78,9 @@ export function SkillLibrary({ projectPath = null }: SkillLibraryProps) {
         {skillPaperWorkflowGuidance()}
       </p>
       <div>
-        <p className="mb-2 font-medium text-sm">Import destination</p>
+        <p className="mb-2 font-medium text-sm">{t("skills.destination")}</p>
         <p className="mb-2 text-muted-foreground text-xs">
-          Skills and subagents live next to the LocalPrism install, not
-          ~/.claude or %APPDATA%. User skills go to claude-home/skills and
-          subagents to claude-home/agents in the install folder (for example
-          D:\LocalPrism\claude-home\skills). Project skills go to .localprism in
-          the current paper. If the install folder is read-only, LocalPrism
-          falls back to its app data folder.
+          {t("skills.destinationHelp")}
         </p>
         <SkillTargetPicker
           value={selectedTargets}
@@ -98,22 +95,21 @@ export function SkillLibrary({ projectPath = null }: SkillLibraryProps) {
           disabled={importing || selectedTargets.length === 0}
           onClick={() => void onImport()}
         >
-          {importing ? "Importing…" : "Import folder"}
+          {importing ? t("skills.importing") : t("skills.importFolder")}
         </Button>
         <Button
           type="button"
           variant="outline"
           onClick={() => void refresh(projectPath ?? undefined)}
         >
-          Refresh
+          {t("skills.refresh")}
         </Button>
       </div>
 
       <div className="space-y-2">
-        <p className="font-medium text-sm">Add from URL</p>
+        <p className="font-medium text-sm">{t("skills.addUrl")}</p>
         <p className="text-muted-foreground text-xs">
-          GitHub repo, skill folder tree URL, .tar.gz archive, or a raw SKILL.md
-          link.
+          {t("skills.addUrlHelp")}
         </p>
         <div className="flex gap-2">
           <Input
@@ -132,14 +128,14 @@ export function SkillLibrary({ projectPath = null }: SkillLibraryProps) {
             }
             onClick={() => void onImportUrl()}
           >
-            Add URL
+            {t("skills.addUrlAction")}
           </Button>
         </div>
       </div>
 
       {error && <p className="text-destructive text-sm">{error}</p>}
       {loading && (
-        <p className="text-muted-foreground text-sm">Loading skills…</p>
+        <p className="text-muted-foreground text-sm">{t("skills.loading")}</p>
       )}
 
       <div className="space-y-3">
@@ -167,7 +163,7 @@ export function SkillLibrary({ projectPath = null }: SkillLibraryProps) {
           </div>
         ))}
         {!loading && skills.length === 0 && (
-          <p className="text-muted-foreground text-sm">No skills found.</p>
+          <p className="text-muted-foreground text-sm">{t("skills.empty")}</p>
         )}
       </div>
     </div>
@@ -181,6 +177,7 @@ function SkillRow({
   skill: RuntimeSkill;
   onRemove?: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <li className="rounded-lg border border-border px-3 py-2">
       <div className="flex items-start justify-between gap-2">
@@ -190,12 +187,16 @@ function SkillRow({
             {skill.targets
               .map((target) =>
                 target.scope === "user"
-                  ? "LocalPrism / user"
-                  : "LocalPrism / project",
+                  ? t("skills.userTarget")
+                  : t("skills.projectTarget"),
               )
               .join(", ")}
-            {skill.managed ? " · managed" : " · unmanaged"}
-            {skill.enabled ? " · enabled" : " · disabled"}
+            {skill.managed
+              ? ` · ${t("skills.managed")}`
+              : ` · ${t("skills.unmanaged")}`}
+            {skill.enabled
+              ? ` · ${t("skills.enabled")}`
+              : ` · ${t("skills.disabled")}`}
           </p>
           <p className="mt-1 break-all text-muted-foreground text-xs">
             {skill.sourcePath}
@@ -208,7 +209,7 @@ function SkillRow({
         </div>
         {onRemove && (
           <Button type="button" size="sm" variant="ghost" onClick={onRemove}>
-            Remove
+            {t("skills.remove")}
           </Button>
         )}
       </div>

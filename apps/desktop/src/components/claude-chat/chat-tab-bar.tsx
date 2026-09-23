@@ -7,6 +7,8 @@ import {
   useApprovalStore,
 } from "@/stores/approval-store";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
+import { tabsForProject } from "@/stores/chat-persistence";
+import { useI18n } from "@/lib/use-i18n";
 import { SessionSelector } from "./session-selector";
 import { WorkspaceAccountButton } from "./workspace-account-button";
 
@@ -31,10 +33,11 @@ function sameTabBarItems(left: TabBarItem[], right: TabBarItem[]): boolean {
 }
 
 export function ChatTabBar({ leading }: { leading?: ReactNode }) {
+  const { t } = useI18n();
   const tabs = useStoreWithEqualityFn(
     useClaudeChatStore,
     (s) =>
-      s.tabs.map((tab) => ({
+      tabsForProject(s.tabs, s.activeProjectPath).map((tab) => ({
         id: tab.id,
         title: tab.title,
         isStreaming: tab.isStreaming,
@@ -72,7 +75,8 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
     const handleKeyDown = (e: KeyboardEvent) => {
       const isMac = navigator.platform.startsWith("Mac");
       const state = useClaudeChatStore.getState();
-      const { tabs: currentTabs, activeTabId: currentActive } = state;
+      const currentTabs = tabsForProject(state.tabs, state.activeProjectPath);
+      const currentActive = state.activeTabId;
       if (currentTabs.length === 0) return;
 
       // Ctrl+Tab / Ctrl+Shift+Tab — tab switching (all platforms)
@@ -131,7 +135,7 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
           <TabButton
             key={tab.id}
             tabId={tab.id}
-            title={tab.title}
+            title={tab.title === "New Chat" ? t("chat.newChat") : tab.title}
             isActive={tab.id === activeTabId}
             isStreaming={tab.isStreaming}
             isStopping={tab.isStopping}
@@ -146,7 +150,7 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
           type="button"
           onClick={handleCreate}
           className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          aria-label="New tab"
+          aria-label={t("chat.newTab")}
         >
           <PlusIcon className="size-3.5" />
         </button>

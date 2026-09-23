@@ -29,10 +29,20 @@ function canonicalProjectPath(projectPath: string): string {
     : normalized;
 }
 
-function sameProjectPath(left: string | null, right: string): boolean {
+export function sameProjectPath(left: string | null, right: string): boolean {
   return (
     left != null && canonicalProjectPath(left) === canonicalProjectPath(right)
   );
+}
+
+export function tabsForProject<T extends { projectPath: string | null }>(
+  tabs: readonly T[],
+  projectPath: string | null,
+): T[] {
+  if (!projectPath) {
+    return tabs.filter((tab) => tab.projectPath == null);
+  }
+  return tabs.filter((tab) => sameProjectPath(tab.projectPath, projectPath));
 }
 
 export function projectChatStorageKey(projectPath: string): string {

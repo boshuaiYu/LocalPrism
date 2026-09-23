@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { chatErrorSummary } from "@/lib/chat-error-card";
+import { useI18n } from "@/lib/use-i18n";
 
 export function ChatErrorCard({
   error,
@@ -16,6 +17,7 @@ export function ChatErrorCard({
   onClearConversation: () => void;
   onDismiss: () => void;
 }) {
+  const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const summary = chatErrorSummary(error, expanded);
 
@@ -34,7 +36,7 @@ export function ChatErrorCard({
             disabled={busy}
             onClick={() => onRetry(retryPrompt)}
           >
-            Retry
+            {t("errors.retry")}
           </button>
         )}
         {summary.canExpand && (
@@ -43,7 +45,7 @@ export function ChatErrorCard({
             className="lp-focus h-8 rounded-lg border border-destructive/40 px-3 font-medium text-xs"
             onClick={() => setExpanded((open) => !open)}
           >
-            {expanded ? "Hide details" : "Details"}
+            {expanded ? t("errors.hideDetails") : t("errors.details")}
           </button>
         )}
         <button
@@ -51,14 +53,14 @@ export function ChatErrorCard({
           className="lp-focus h-8 rounded-lg border border-destructive/40 px-3 font-medium text-xs"
           onClick={onClearConversation}
         >
-          Clear conversation
+          {t("errors.clearConversation")}
         </button>
         <button
           type="button"
           className="lp-focus h-8 rounded-lg px-3 font-medium text-xs"
           onClick={onDismiss}
         >
-          Dismiss
+          {t("errors.dismiss")}
         </button>
       </div>
     </div>

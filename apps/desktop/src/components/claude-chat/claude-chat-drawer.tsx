@@ -9,8 +9,10 @@ import { ChatMessages } from "./chat-messages";
 import { ChatComposer } from "./chat-composer";
 import { ChatErrorCard } from "./chat-error-card";
 import { ChatTabBar } from "./chat-tab-bar";
+import { useI18n } from "@/lib/use-i18n";
 
 export function ClaudeChatDrawer() {
+  const { t } = useI18n();
   const error = useClaudeChatStore((s) => s.error);
   const messages = useClaudeChatStore((s) => s.messages);
   const isStreaming = useClaudeChatStore((s) => s.isStreaming);
@@ -25,7 +27,7 @@ export function ClaudeChatDrawer() {
     <section
       data-testid="chat-pane"
       className="flex h-full min-h-0 min-w-0 flex-col bg-background"
-      aria-label="Chat"
+      aria-label={t("chrome.chat")}
     >
       <ChatTabBar
         leading={
@@ -33,11 +35,11 @@ export function ClaudeChatDrawer() {
             type="button"
             onClick={() => hideChat(false)}
             className="ml-1.5 flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2 text-muted-foreground text-xs transition-colors hover:bg-muted/80 hover:text-foreground"
-            aria-label="Hide chat"
-            title="Hide AI chat to a small icon"
+            aria-label={t("chrome.hideChat")}
+            title={t("chrome.hideChat")}
           >
             <PanelRightCloseIcon className="size-3.5" />
-            <span>Hide</span>
+            <span>{t("chrome.hide")}</span>
           </button>
         }
       />

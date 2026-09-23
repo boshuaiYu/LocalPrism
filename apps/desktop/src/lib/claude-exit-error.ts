@@ -1,3 +1,5 @@
+import { translate, type UiLanguage } from "@/lib/i18n";
+
 const MAX_STDERR_CHARS = 500;
 
 export function truncateErrorDetail(
@@ -9,7 +11,10 @@ export function truncateErrorDetail(
   return `${trimmed.slice(0, limit)}...`;
 }
 
-export function classifyClaudeProcessStderr(stderr: string): string | null {
+export function classifyClaudeProcessStderr(
+  stderr: string,
+  language: UiLanguage = "en",
+): string | null {
   const trimmed = stderr.trim();
   if (!trimmed) return null;
   const lower = trimmed.toLowerCase();
@@ -20,7 +25,7 @@ export function classifyClaudeProcessStderr(stderr: string): string | null {
     lower.includes("too many requests") ||
     lower.includes("rate limit")
   ) {
-    return `Rate limited by the API. ${detail}`;
+    return translate(language, "errors.rateLimited", { detail });
   }
   if (
     lower.includes("prompt is too long") ||
@@ -29,7 +34,7 @@ export function classifyClaudeProcessStderr(stderr: string): string | null {
     lower.includes("maximum context") ||
     (lower.includes("token") && lower.includes("limit"))
   ) {
-    return `The request exceeded the model context limit (often from a huge skill such as PaperSpine). Narrow the request and retry. ${detail}`;
+    return translate(language, "errors.contextLimit", { detail });
   }
   if (
     lower.includes("unauthorized") ||
@@ -37,14 +42,17 @@ export function classifyClaudeProcessStderr(stderr: string): string | null {
     lower.includes("authentication") ||
     /\b401\b/.test(lower)
   ) {
-    return `Authentication failed. Check the provider API key or official account sign-in. ${detail}`;
+    return translate(language, "errors.auth", { detail });
+  }
+  if (/\b400\b/.test(lower) || lower.includes("bad request")) {
+    return translate(language, "errors.http400", { detail });
   }
   if (
     lower.includes("git-bash") ||
     lower.includes("git bash") ||
     lower.includes("bash.exe")
   ) {
-    return "Claude Code requires git-bash on Windows. Please install Git for Windows or set the CLAUDE_CODE_GIT_BASH_PATH environment variable.";
+    return translate(language, "errors.gitBash");
   }
   return null;
 }
@@ -55,18 +63,20 @@ export function formatUnexpectedClaudeExit(input: {
   isWindows: boolean;
   exitCode?: number | null;
   stderrTail?: string | null;
+  language?: UiLanguage;
 }): string {
+  const language = input.language ?? "en";
   const stderr = input.stderrTail?.trim() ?? "";
-  const classified = classifyClaudeProcessStderr(stderr);
+  const classified = classifyClaudeProcessStderr(stderr, language);
   if (classified) return classified;
 
   if (!input.started) {
     if (input.isDirectProvider) {
-      return "AI provider request failed to start. Check the provider API key, Base URL, model name, and model access.";
+      return translate(language, "errors.providerStart");
     }
     return input.isWindows
-      ? "Claude process failed to start. Check that Claude Code CLI is installed and git-bash is available."
-      : "Claude process failed to start. Check that Claude Code CLI is installed.";
+      ? translate(language, "errors.claudeStartWindows")
+      : translate(language, "errors.claudeStart");
   }
 
   const exit =
@@ -76,7 +86,10 @@ export function formatUnexpectedClaudeExit(input: {
   const detail = stderr ? ` ${truncateErrorDetail(stderr)}` : "";
 
   if (input.isDirectProvider) {
-    return `AI provider request stopped unexpectedly.${exit}${detail} Check the API key, model access, Base URL, tool-call support, or rate limits.`.trim();
+    return translate(language, "errors.providerStopped", {
+      exit,
+      detail,
+    }).trim();
   }
-  return `Claude process exited unexpectedly.${exit}${detail} Check the process output above; this is often an API, skill, or spawn error rather than a rate limit.`.trim();
+  return translate(language, "errors.claudeExited", { exit, detail }).trim();
 }

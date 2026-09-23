@@ -23,6 +23,16 @@ import {
   reasoningStrengthWireValue,
 } from "@/lib/reasoning-strength";
 import { settleChatMessages } from "@/lib/chat-turn-settlement";
+import {
+  applyCompression,
+  buildCompressionCarryover,
+  compressionFailureMessage,
+  planCompression,
+  prependCompressionCarryover,
+  summarizeTranscriptLocally,
+} from "@/lib/chat-compression";
+import { uiText } from "@/lib/use-i18n";
+import { sameProjectPath } from "./chat-persistence";
 import { useSettingsStore } from "./settings-store";
 import { useChatLayoutStore } from "./chat-layout-store";
 import { createLogger } from "@/lib/debug/logger";
@@ -144,6 +154,12 @@ export interface ClaudeStreamMessage {
   result?: string;
   is_error?: boolean;
   num_turns?: number;
+  /** Folded earlier turns. Originals stay attached so the summary is not a silent delete. */
+  contextSummary?: {
+    text: string;
+    originals: ClaudeStreamMessage[];
+    coveredCount: number;
+  };
 }
 
 // ─── Tab Types ───
@@ -203,6 +219,7 @@ function nextResumeRequestId(tabId: string): string {
 }
 
 const pendingRuntimeStarts = new Map<string, Promise<void>>();
+const compressionInFlight = new Set<string>();
 
 export interface TabState {
   id: string;
@@ -248,6 +265,11 @@ export interface TabState {
   resumeRequestId?: string | null;
   /** Stop intents awaiting their corresponding legacy completion event. */
   cancelledAttempts?: AttemptCancellation[];
+  /**
+   * One-shot prompt prefix sent with the next turn after compression.
+   * Keeps the shortened thread usable without resuming the full session.
+   */
+  compressionCarryover?: string | null;
 }
 
 export type TabRuntimeSelection = Pick<
@@ -352,6 +374,7 @@ function makeDefaultTab(
     preflightAttemptEpoch: null,
     resumeRequestId: null,
     cancelledAttempts: [],
+    compressionCarryover: null,
   };
 }
 
@@ -1025,6 +1048,10 @@ interface ClaudeChatState {
   cancelExecution: (tabId?: string) => Promise<RuntimeStopOutcome>;
   clearMessages: () => void;
   newSession: () => void;
+  compressEarlierMessages: (options?: {
+    force?: boolean;
+    summarize?: (transcript: string) => Promise<string> | string;
+  }) => Promise<"compressed" | "skipped" | "failed">;
   resetForProject: (projectPath: string | null) => ProjectChatResetResult;
   resumeConversation: (
     reference: ConversationRef,
@@ -1207,7 +1234,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     if ((activeTab.cancelledAttempts?.length ?? 0) > 0) {
       set((s) =>
         applyTabUpdate(s, activeTabId, {
-          error: "Waiting for the previous runtime turn to stop.",
+          error: uiText("errors.waitingStop"),
         }),
       );
       discardRejectedPrompt(activeTabId);
@@ -1219,14 +1246,16 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     const projectGeneration = docState.projectGeneration;
     const projectContentGeneration = docState.contentGeneration;
     if (!projectPath) {
-      set((s) => applyTabUpdate(s, activeTabId, { error: "No project open" }));
+      set((s) =>
+        applyTabUpdate(s, activeTabId, { error: uiText("errors.noProject") }),
+      );
       discardRejectedPrompt(activeTabId);
       return;
     }
     if (docState.isProjectMutating) {
       set((s) =>
         applyTabUpdate(s, activeTabId, {
-          error: "The project is being changed. Wait for it to finish.",
+          error: uiText("errors.projectChanging"),
         }),
       );
       discardRejectedPrompt(activeTabId);
@@ -1258,8 +1287,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     if (activeTab.runtime === "codex") {
       set((s) =>
         applyTabUpdate(s, activeTabId, {
-          error:
-            "This conversation is read-only. Start a new chat with the active provider.",
+          error: uiText("errors.readOnly"),
         }),
       );
       discardRejectedPrompt(activeTabId);
@@ -1269,8 +1297,8 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       set((s) =>
         applyTabUpdate(s, activeTabId, {
           error: useClaudeSetupStore.getState().isInstalling
-            ? "Installing the writing engine. You can send once it finishes."
-            : "Install the writing engine and activate a provider in Settings → Providers before sending.",
+            ? uiText("errors.installingEngine")
+            : uiText("errors.needProvider"),
         }),
       );
       discardRejectedPrompt(activeTabId);
@@ -1482,6 +1510,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
 
       // Build prompt with full context for the selected runtime.
       let prompt = userPrompt;
+      const compressionCarryover = activeTab.compressionCarryover ?? null;
       if (activeFile) {
         const selRange = docState.selectionRange;
         const selectedText =
@@ -1501,6 +1530,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         }
         prompt = `${ctx}\n\n${userPrompt}`;
       }
+      prompt = prependCompressionCarryover(prompt, compressionCarryover);
       log.info("invoking CLI", {
         promptLength: prompt.length,
         mode: resumeSessionId ? "resume" : "new",
@@ -1532,6 +1562,13 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       pendingRuntimeStarts.set(attemptId, startPromise);
       try {
         await startPromise;
+        if (compressionCarryover) {
+          set((current) =>
+            applyTabUpdate(current, activeTabId, {
+              compressionCarryover: null,
+            }),
+          );
+        }
       } finally {
         if (pendingRuntimeStarts.get(attemptId) === startPromise) {
           pendingRuntimeStarts.delete(attemptId);
@@ -1545,6 +1582,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       set((current) =>
         applyTabUpdate(current, activeTabId, {
           preflightAttemptEpoch: null,
+          ...(compressionCarryover ? { compressionCarryover: null } : {}),
         }),
       );
       log.info(
@@ -2063,6 +2101,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
         forcedQueuedGuidanceId: null,
+        compressionCarryover: null,
         resumeRequestId: null,
         ...(!isBusy ? { pendingTemporaryFilePaths: [] } : {}),
       }),
@@ -2165,6 +2204,14 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       get().activeProjectPath ??
       useDocumentStore.getState().projectRoot ??
       null;
+    const foreignProject =
+      !!activeTab?.projectPath &&
+      !!projectPath &&
+      !sameProjectPath(activeTab.projectPath, projectPath);
+    if (foreignProject) {
+      get().createTab();
+      return;
+    }
     if (
       activeTab &&
       (activeTab.isStreaming || (activeTab.cancelledAttempts?.length ?? 0) > 0)
@@ -2220,6 +2267,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         forceQueuedGuidanceOnComplete: false,
         forcedQueuedGuidanceId: null,
         pendingTemporaryFilePaths: [],
+        compressionCarryover: null,
         attemptEpoch: (activeTab?.attemptEpoch ?? 0) + 1,
         activeAttemptId: null,
         preflightAttemptEpoch: null,
@@ -2228,6 +2276,75 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       activeProjectPath: projectPath,
     }));
     cleanupDiscardedTemporaryFiles(discardedTemporaryFilePaths);
+  },
+
+  compressEarlierMessages: async (options) => {
+    const state = get();
+    const tabId = state.activeTabId;
+    const tab = state.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab || tab.isStreaming || (tab.cancelledAttempts?.length ?? 0) > 0) {
+      return "skipped";
+    }
+    const projectPath =
+      state.activeProjectPath ?? useDocumentStore.getState().projectRoot;
+    if (
+      projectPath &&
+      tab.projectPath &&
+      !sameProjectPath(tab.projectPath, projectPath)
+    ) {
+      return "skipped";
+    }
+    if (compressionInFlight.has(tabId)) return "skipped";
+    if (!options?.force) return "skipped";
+    const plan = planCompression(tab.messages, { force: true });
+    if (!plan) return "skipped";
+
+    compressionInFlight.add(tabId);
+    const snapshotLength = tab.messages.length;
+    try {
+      const summarize = options?.summarize ?? summarizeTranscriptLocally;
+      let summary = "";
+      try {
+        summary = (await summarize(plan.transcript)).trim();
+        if (!summary) throw new Error("Empty summary");
+      } catch (error) {
+        const message = compressionFailureMessage(
+          error,
+          useSettingsStore.getState().uiLanguage,
+        );
+        set((current) => {
+          const currentTab = current.tabs.find(
+            (candidate) => candidate.id === tabId,
+          );
+          if (!currentTab || currentTab.messages.length !== snapshotLength) {
+            return {};
+          }
+          return applyTabUpdate(current, tabId, { error: message });
+        });
+        return "failed";
+      }
+
+      const currentTab = get().tabs.find((candidate) => candidate.id === tabId);
+      if (
+        !currentTab ||
+        currentTab.isStreaming ||
+        currentTab.messages.length !== snapshotLength
+      ) {
+        return "skipped";
+      }
+      const messages = applyCompression(plan, summary);
+      set((current) =>
+        applyTabUpdate(current, tabId, {
+          messages,
+          sessionId: null,
+          compressionCarryover: buildCompressionCarryover(summary, plan.recent),
+          error: null,
+        }),
+      );
+      return "compressed";
+    } finally {
+      compressionInFlight.delete(tabId);
+    }
   },
 
   changeTabRuntime: (tabId, nextPeer, options) => {
@@ -2286,6 +2403,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         forceQueuedGuidanceOnComplete: false,
         forcedQueuedGuidanceId: null,
         pendingTemporaryFilePaths: [],
+        compressionCarryover: null,
         attemptEpoch: (tab.attemptEpoch ?? 0) + 1,
         activeAttemptId: null,
         preflightAttemptEpoch: null,

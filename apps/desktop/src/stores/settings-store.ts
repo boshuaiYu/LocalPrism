@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { isUiLanguage, type UiLanguage } from "@/lib/i18n";
 import {
   DEFAULT_PERMISSION_MODE,
   normalizePermissionMode,
@@ -17,6 +18,8 @@ interface SettingsState {
   setAutoCompile: (enabled: boolean) => void;
   permissionMode: PermissionMode;
   setPermissionMode: (mode: PermissionMode) => void;
+  uiLanguage: UiLanguage;
+  setUiLanguage: (language: UiLanguage) => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -31,16 +34,20 @@ export const useSettingsStore = create<SettingsState>()(
       permissionMode: DEFAULT_PERMISSION_MODE,
       setPermissionMode: (mode) =>
         set({ permissionMode: normalizePermissionMode(mode) }),
+      uiLanguage: "en",
+      setUiLanguage: (language) =>
+        set({ uiLanguage: isUiLanguage(language) ? language : "en" }),
     }),
     {
       name: "claude-prism-settings",
-      version: 3,
+      version: 4,
       migrate: (persisted) => {
         const state = persisted as Partial<SettingsState>;
         return {
           ...state,
           autoCompile: state.autoCompile ?? true,
           permissionMode: normalizePermissionMode(state.permissionMode),
+          uiLanguage: isUiLanguage(state.uiLanguage) ? state.uiLanguage : "en",
         };
       },
       merge: (persisted, current) => {
@@ -51,6 +58,9 @@ export const useSettingsStore = create<SettingsState>()(
           permissionMode: normalizePermissionMode(
             state.permissionMode ?? current.permissionMode,
           ),
+          uiLanguage: isUiLanguage(state.uiLanguage)
+            ? state.uiLanguage
+            : current.uiLanguage,
         };
       },
     },
