@@ -631,6 +631,9 @@ async fn fetch_gated_beta_manifest(
     }
     let body = response.text().await.map_err(|err| err.to_string())?;
     let rewritten = beta_manifest::rewrite_compact_manifest(&body, current_version)?;
+    if !beta_manifest::compact_release_is_newer(&rewritten.display_version, current_version)? {
+        return Err("That beta is not newer than this install.".to_string());
+    }
     let server = beta_manifest::serve_local_manifest(rewritten.json).await?;
     Ok(GatedBetaManifest {
         url: server.url.clone(),

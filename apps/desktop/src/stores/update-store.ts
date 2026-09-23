@@ -13,7 +13,7 @@ import {
   betaCandidatesFromGithub,
   chooseUpdateOffer,
   GITHUB_RELEASES_API,
-  RELEASES_URL,
+  releasePageUrl,
   updateApplyMode,
   type ReleaseCandidate,
   type UpdateApplyMode,
@@ -190,7 +190,9 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
   bannerDismissed: false,
   dismissBanner: () => set({ bannerDismissed: true }),
   openReleases: async () => {
-    await open(RELEASES_URL);
+    const status = get().status;
+    const version = "version" in status ? status.version : undefined;
+    await open(releasePageUrl(version));
   },
   checkForUpdate: async (options) => {
     const explicit = options?.explicit ?? false;

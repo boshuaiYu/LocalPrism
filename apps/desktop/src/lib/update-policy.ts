@@ -124,6 +124,16 @@ export function isPrereleaseVersion(version: string): boolean {
   );
 }
 
+/** `1.0.8beta2` and `1.0.8-2`. Not `1.0.8-beta.2`. */
+function msiBuildNumber(version: SemVer): number | null {
+  if (version.compactBeta !== null) return version.compactBeta;
+  const [only] = version.prerelease;
+  if (version.prerelease.length === 1 && only && /^\d+$/.test(only)) {
+    return Number(only);
+  }
+  return null;
+}
+
 function compareIdentifier(left: string, right: string): number {
   const leftNumeric = /^\d+$/.test(left);
   const rightNumeric = /^\d+$/.test(right);
@@ -148,8 +158,15 @@ export function compareSemver(left: SemVer, right: SemVer): number {
     if (left.compactBeta !== null && right.compactBeta !== null) {
       return left.compactBeta - right.compactBeta;
     }
-    // `v1.0.8beta2` is published after stable `v1.0.8`, so it sorts newer
-    // than that release and newer than hyphen prereleases of the same core.
+    const leftBuild = msiBuildNumber(left);
+    const rightBuild = msiBuildNumber(right);
+    // The WiX-safe package version of `v1.0.8beta2` is `1.0.8-2`.
+    // Those two strings are the same build. `1.0.8beta3` is newer than
+    // `1.0.8-2`, and `1.0.8beta1` is older.
+    if (leftBuild !== null && rightBuild !== null) {
+      return leftBuild - rightBuild;
+    }
+    // A compact tag is published after the plain release of the same core.
     return left.compactBeta !== null ? 1 : -1;
   }
   if (left.prerelease.length === 0 && right.prerelease.length === 0) return 0;
@@ -199,6 +216,12 @@ export function isAllowedBetaManifestUrl(url: string): boolean {
   }
   if (tag === "latest" || tag.includes("..") || tag.includes("/")) return false;
   return SAFE_TAG_RE.test(tag);
+}
+
+export function releasePageUrl(version?: string): string {
+  const trimmed = version?.trim().replace(/^v(?=\d)/, "") ?? "";
+  if (!SAFE_TAG_RE.test(trimmed) || trimmed === "latest") return RELEASES_URL;
+  return `https://github.com/boshuaiYu/LocalPrism/releases/tag/v${trimmed}`;
 }
 
 export function betaManifestUrlForTag(tag: string): string | null {
@@ -284,7 +307,8 @@ function prereleaseManifestForVersion(version: string): string | null {
 /**
  * Stable builds from `releases/latest` may download immediately.
  * Prereleases, including `v1.0.8beta3`, stay hidden unless `allowPrerelease`.
- * A compact beta of the same core is newer than that stable tag.
+ * A compact beta of the same core is newer than that plain stable tag.
+ * `1.0.8beta2` is the same build as `1.0.8-2`. `1.0.8beta3` is newer.
  * `1.0.8` is still newer than hyphenated `1.0.8-1`.
  * Beta manifests are `releases/download/<tag>/latest.json`, never `releases/latest`.
  */

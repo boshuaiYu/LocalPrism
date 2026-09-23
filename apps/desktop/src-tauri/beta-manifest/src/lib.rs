@@ -61,6 +61,23 @@ pub fn updater_gate_version(current: &str) -> Result<String, String> {
     Ok(format!("{major}.{minor}.{next_patch}-beta.0"))
 }
 
+/// True when `candidate` should replace `current`.
+/// `1.0.8beta2` is not newer than the WiX version `1.0.8-2`.
+/// `1.0.8beta3` is. A compact tag is newer than the plain release
+/// of the same core (`1.0.8beta2` > `1.0.8`).
+pub fn compact_release_is_newer(candidate: &str, current: &str) -> Result<bool, String> {
+    let next =
+        parse_release(candidate).ok_or_else(|| format!("Cannot read beta version {candidate}."))?;
+    if next.compact.is_none() {
+        return Err(format!(
+            "Beta manifest version is not a compact prerelease such as 1.0.8beta3."
+        ));
+    }
+    let previous =
+        parse_release(current).ok_or_else(|| format!("Cannot read the app version {current}."))?;
+    Ok(compare_release(&next, &previous) > 0)
+}
+
 pub fn rewrite_compact_manifest(
     raw: &str,
     current_version: &str,
@@ -153,6 +170,110 @@ fn split_beta_suffix(version: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((core, digits))
+}
+
+struct ReleaseVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    compact: Option<u64>,
+    numeric_pre: Option<u64>,
+    other_pre: bool,
+}
+
+fn parse_release(input: &str) -> Option<ReleaseVersion> {
+    let trimmed = input.trim();
+    if let Some((core, digits)) = compact_parts(trimmed) {
+        let (major, minor, patch) = split_core(core)?;
+        let compact = digits.parse::<u64>().ok()?;
+        return Some(ReleaseVersion {
+            major,
+            minor,
+            patch,
+            compact: Some(compact),
+            numeric_pre: None,
+            other_pre: false,
+        });
+    }
+    let trimmed = trimmed.trim_start_matches(['v', 'V']);
+    let (core, pre) = trimmed.split_once('-').unwrap_or((trimmed, ""));
+    let (major, minor, patch) = split_core(core.split('+').next().unwrap_or(core))?;
+    if pre.is_empty() || pre.starts_with('+') {
+        return Some(ReleaseVersion {
+            major,
+            minor,
+            patch,
+            compact: None,
+            numeric_pre: None,
+            other_pre: false,
+        });
+    }
+    let pre = pre.split('+').next().unwrap_or(pre);
+    let mut ids = pre.split('.');
+    let first = ids.next().unwrap_or("");
+    let single_numeric =
+        ids.next().is_none() && !first.is_empty() && first.bytes().all(|b| b.is_ascii_digit());
+    Some(ReleaseVersion {
+        major,
+        minor,
+        patch,
+        compact: None,
+        numeric_pre: if single_numeric {
+            first.parse::<u64>().ok()
+        } else {
+            None
+        },
+        other_pre: !single_numeric,
+    })
+}
+
+fn compact_parts(version: &str) -> Option<(&str, &str)> {
+    if !compact_beta_shape(version) {
+        return None;
+    }
+    let rest = version.trim().trim_start_matches(['v', 'V']);
+    split_beta_suffix(rest)
+}
+
+fn split_core(core: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+fn compare_release(left: &ReleaseVersion, right: &ReleaseVersion) -> i32 {
+    if left.major != right.major {
+        return (left.major > right.major) as i32 - (left.major < right.major) as i32;
+    }
+    if left.minor != right.minor {
+        return (left.minor > right.minor) as i32 - (left.minor < right.minor) as i32;
+    }
+    if left.patch != right.patch {
+        return (left.patch > right.patch) as i32 - (left.patch < right.patch) as i32;
+    }
+    if left.compact.is_some() || right.compact.is_some() {
+        if let (Some(left_n), Some(right_n)) = (left.compact, right.compact) {
+            return (left_n > right_n) as i32 - (left_n < right_n) as i32;
+        }
+        let left_build = left
+            .compact
+            .or(left.numeric_pre.filter(|_| !left.other_pre));
+        let right_build = right
+            .compact
+            .or(right.numeric_pre.filter(|_| !right.other_pre));
+        if left.compact.is_some() != right.compact.is_some() {
+            if let (Some(left_n), Some(right_n)) = (left_build, right_build) {
+                return (left_n > right_n) as i32 - (left_n < right_n) as i32;
+            }
+        }
+        return if left.compact.is_some() { 1 } else { -1 };
+    }
+    0
 }
 
 fn semver_core(current: &str) -> Result<(u64, u64, u64), String> {
@@ -279,8 +400,8 @@ async fn write_json(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_compact_beta_version, manifest_needs_version_gate, rewrite_compact_manifest,
-        serve_local_manifest, updater_gate_version,
+        compact_release_is_newer, is_compact_beta_version, manifest_needs_version_gate,
+        rewrite_compact_manifest, serve_local_manifest, updater_gate_version,
     };
 
     #[test]
@@ -309,6 +430,30 @@ mod tests {
             Ok("1.0.9-beta.0")
         );
         assert!(updater_gate_version("not-a-version").is_err());
+    }
+
+    #[test]
+    fn the_wix_build_number_is_the_same_release_as_that_compact_tag() {
+        assert_eq!(
+            compact_release_is_newer("1.0.8beta2", "1.0.8-2").ok(),
+            Some(false)
+        );
+        assert_eq!(
+            compact_release_is_newer("1.0.8beta1", "1.0.8-2").ok(),
+            Some(false)
+        );
+        assert_eq!(
+            compact_release_is_newer("1.0.8beta3", "1.0.8-2").ok(),
+            Some(true)
+        );
+        assert_eq!(
+            compact_release_is_newer("1.0.8beta2", "1.0.8").ok(),
+            Some(true)
+        );
+        assert_eq!(
+            compact_release_is_newer("1.0.8beta3", "1.0.9").ok(),
+            Some(false)
+        );
     }
 
     #[test]

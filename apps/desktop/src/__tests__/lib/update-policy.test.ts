@@ -94,7 +94,12 @@ describe("beta update detection", () => {
     }
     expect(compareSemver(compactNewer, compactOlder)).toBeGreaterThan(0);
     expect(compareSemver(compactOlder, stable)).toBeGreaterThan(0);
-    expect(compareSemver(compactOlder, newerBeta)).toBeGreaterThan(0);
+    expect(compareSemver(compactOlder, newerBeta)).toBe(0);
+    expect(compareSemver(parseSemver("1.0.8beta1")!, newerBeta)).toBeLessThan(
+      0,
+    );
+    expect(compareSemver(compactNewer, newerBeta)).toBeGreaterThan(0);
+    expect(compareSemver(stable, newerBeta)).toBeGreaterThan(0);
     expect(compareSemver(parseSemver("1.0.9")!, compactNewer)).toBeGreaterThan(
       0,
     );
@@ -225,6 +230,27 @@ describe("beta update detection", () => {
         allowPrerelease: false,
       }),
     ).toMatchObject({ action: "download", version: "1.0.8" });
+
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.8-2",
+        stable: { version: "1.0.8" },
+        betas,
+        allowPrerelease: true,
+      }),
+    ).toMatchObject({
+      action: "confirm",
+      version: "1.0.8beta3",
+    });
+
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.8-2",
+        stable: null,
+        betas: betas.filter((beta) => beta.version === "1.0.8beta2"),
+        allowPrerelease: true,
+      }).action,
+    ).toBe("none");
 
     expect(
       chooseUpdateOffer({

@@ -133,7 +133,7 @@ describe("AppStatusBar updates", () => {
       if (flash instanceof HTMLButtonElement) flash.click();
     });
     expect(open).toHaveBeenCalledWith(
-      "https://github.com/boshuaiYu/LocalPrism/releases/latest",
+      "https://github.com/boshuaiYu/LocalPrism/releases/tag/v9.9.9",
     );
   });
 
