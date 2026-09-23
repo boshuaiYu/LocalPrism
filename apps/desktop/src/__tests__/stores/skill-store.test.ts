@@ -306,8 +306,10 @@ describe("skill-store", () => {
       "academic-research-skills",
       "nature-skills",
       "scientific-agent-skills",
+      "paper-humanizer-skill",
     ]);
     expect(results.map((item) => item.status)).toEqual([
+      "imported",
       "imported",
       "imported",
       "imported",
@@ -341,6 +343,7 @@ describe("skill-store", () => {
           skill({ folder: "deep-research" }),
           skill({ folder: "nature-polishing" }),
           skill({ folder: "scanpy" }),
+          skill({ folder: "paper-humanizer" }),
         ];
       }
       if (command === "list_agents") {
@@ -373,6 +376,7 @@ describe("skill-store", () => {
       "already",
       "already",
       "already",
+      "already",
     ]);
     expect(
       invoke.mock.calls.some(([command]) => command === "skill_import_url"),
@@ -387,6 +391,7 @@ describe("skill-store", () => {
           skill({ folder: "deep-research" }),
           skill({ folder: "nature-polishing" }),
           skill({ folder: "scanpy" }),
+          skill({ folder: "paper-humanizer" }),
         ];
       }
       if (command === "list_agents") return [];
@@ -408,6 +413,7 @@ describe("skill-store", () => {
     expect(results.map((item) => item.status)).toEqual([
       "imported",
       "imported",
+      "already",
       "already",
       "already",
     ]);
@@ -433,6 +439,7 @@ describe("skill-store", () => {
           skill({ folder: "deep-research" }),
           skill({ folder: "nature-polishing" }),
           skill({ folder: "scanpy" }),
+          skill({ folder: "paper-humanizer" }),
         ];
       }
       if (command === "list_agents") {
@@ -455,10 +462,11 @@ describe("skill-store", () => {
       "imported",
       "imported",
       "imported",
+      "imported",
     ]);
     expect(
       invoke.mock.calls.filter(([command]) => command === "skill_import_url"),
-    ).toHaveLength(4);
+    ).toHaveLength(5);
     expect(invoke).toHaveBeenCalledWith("skill_import_url", {
       sourceUrl: PAPERSPINE_SKILLS_URL,
       targets: [{ runtime: "claude", scope: "user" }],

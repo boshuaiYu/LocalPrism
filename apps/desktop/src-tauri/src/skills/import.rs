@@ -91,8 +91,62 @@ pub fn collect_skill_dirs(root: &Path, output: &mut Vec<PathBuf>) {
         if file_type.is_symlink() || !file_type.is_dir() {
             continue;
         }
+        if let Some(name) = entry.file_name().to_str() {
+            if should_skip_skill_tree_entry(name) {
+                continue;
+            }
+        }
         collect_skill_dirs(&entry.path(), output);
     }
+}
+
+pub fn should_skip_skill_tree_entry(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        ".git" | ".github" | ".svn" | ".hg" | "node_modules" | "__pycache__" | ".ds_store"
+    )
+}
+
+fn directory_name_overrides_declared_folder(folder_name: &str) -> bool {
+    !matches!(
+        folder_name,
+        "repo" | "raw" | "skill" | "skills" | "root" | "tmp" | "temp" | "src" | "dist"
+    )
+}
+
+fn yaml_mapping_string(
+    mapping: &serde_yaml::Mapping,
+    key: &str,
+) -> Option<String> {
+    mapping
+        .get(serde_yaml::Value::String(key.into()))
+        .and_then(|value| match value {
+            serde_yaml::Value::String(text) => Some(text.clone()),
+            serde_yaml::Value::Number(number) => Some(number.to_string()),
+            serde_yaml::Value::Bool(flag) => Some(flag.to_string()),
+            _ => None,
+        })
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn lenient_frontmatter_field(raw: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}:");
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix(&prefix) else {
+            continue;
+        };
+        let value = rest
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
 }
 
 pub fn sanitize_skill_folder_name(name: &str) -> String {
@@ -137,21 +191,17 @@ pub fn validate_skill(content: &str) -> Result<ParsedSkill, ImportError> {
     let mut name = None;
     let mut description = None;
     if let Some(raw) = frontmatter {
-        let value: serde_yaml::Value = serde_yaml::from_str(&raw)
-            .map_err(|error| ImportError::from(format!("Invalid SKILL.md frontmatter: {error}")))?;
-        if let Some(mapping) = value.as_mapping() {
-            name = mapping
-                .get(serde_yaml::Value::String("name".into()))
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string);
-            description = mapping
-                .get(serde_yaml::Value::String("description".into()))
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string);
+        if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&raw) {
+            if let Some(mapping) = value.as_mapping() {
+                name = yaml_mapping_string(mapping, "name");
+                description = yaml_mapping_string(mapping, "description");
+            }
+        }
+        if name.is_none() {
+            name = lenient_frontmatter_field(&raw, "name");
+        }
+        if description.is_none() {
+            description = lenient_frontmatter_field(&raw, "description");
         }
     }
 
@@ -211,7 +261,10 @@ pub fn validate_skill_dir(skill_dir: &Path) -> Result<(ParsedSkill, PathBuf), Im
         .and_then(|name| name.to_str())
         .map(sanitize_skill_folder_name)
     {
-        if !folder_name.is_empty() && validate_skill_slug(&folder_name).is_ok() {
+        if directory_name_overrides_declared_folder(&folder_name)
+            && !folder_name.is_empty()
+            && validate_skill_slug(&folder_name).is_ok()
+        {
             parsed.folder = folder_name;
         }
     }
@@ -247,6 +300,11 @@ fn collect_relative_files(
         if file_type.is_symlink() {
             continue;
         }
+        if let Some(name) = path.file_name().and_then(|value| value.to_str()) {
+            if should_skip_skill_tree_entry(name) {
+                continue;
+            }
+        }
         if file_type.is_dir() {
             collect_relative_files(root, &path, files)?;
             continue;
@@ -281,6 +339,11 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), ImportError> {
         };
         if file_type.is_symlink() {
             continue;
+        }
+        if let Some(name) = entry.file_name().to_str() {
+            if should_skip_skill_tree_entry(name) {
+                continue;
+            }
         }
         if file_type.is_dir() {
             copy_dir_recursive(&entry_path, &target)?;
@@ -350,6 +413,51 @@ struct StagedInstall {
     declared_name: String,
     content_sha256: String,
     backup: Option<PathBuf>,
+}
+
+pub fn snapshot_installed_targets(
+    skill_dir: &Path,
+    targets: &[SkillTarget],
+    project_path: Option<&Path>,
+) -> Vec<RuntimeSkill> {
+    let Ok((parsed, _)) = validate_skill_dir(skill_dir) else {
+        return Vec::new();
+    };
+    let mut snapshots = Vec::new();
+    for target in targets {
+        let Ok(root) = resolve_skill_root(target.runtime, target.scope, project_path) else {
+            continue;
+        };
+        let Ok(destination) = skill_destination(&root, &parsed.folder) else {
+            continue;
+        };
+        if find_skill_md(&destination).is_none() {
+            continue;
+        }
+        let folder = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(sanitize_skill_folder_name)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| parsed.folder.clone());
+        let Ok(id) = stable_entry_id(target, &folder) else {
+            continue;
+        };
+        snapshots.push(RuntimeSkill {
+            id,
+            name: parsed.name.clone(),
+            description: parsed.description.clone(),
+            folder,
+            source_path: destination.to_string_lossy().to_string(),
+            source_url: None,
+            targets: vec![target.clone()],
+            managed: true,
+            compatible_runtimes: parsed.compatible_runtimes.clone(),
+            enabled: target.runtime == RuntimeKind::Claude,
+            discovery_error: None,
+        });
+    }
+    snapshots
 }
 
 pub fn import_skill_to_targets(
@@ -743,6 +851,17 @@ mod tests {
                 path: source.to_string_lossy().to_string(),
             },
         );
+        let again = import_skill_to_targets(
+            &source,
+            &[SkillTarget {
+                runtime: RuntimeKind::Claude,
+                scope: SkillScope::User,
+            }],
+            None,
+            SkillSource::Folder {
+                path: source.to_string_lossy().to_string(),
+            },
+        );
 
         if let Some(value) = previous_home {
             std::env::set_var("HOME", value);
@@ -782,5 +901,60 @@ mod tests {
         assert!(PathBuf::from(&installed[0].source_path)
             .join("SKILL.md")
             .exists());
+        let replaced = again.unwrap();
+        assert_eq!(replaced.len(), 1);
+        assert_eq!(replaced[0].folder, "writer");
+        assert!(PathBuf::from(&replaced[0].source_path)
+            .join("SKILL.md")
+            .exists());
+    }
+
+    #[test]
+    fn archive_root_named_repo_keeps_declared_skill_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = temp.path().join("repo");
+        write_skill(
+            &skill_dir,
+            "paper-humanizer",
+            "Use when the user says: polish academic text",
+        );
+        fs::create_dir_all(skill_dir.join(".git")).unwrap();
+        fs::write(skill_dir.join(".git/config"), "junk").unwrap();
+        let (parsed, _) = validate_skill_dir(&skill_dir).unwrap();
+        assert_eq!(parsed.folder, "paper-humanizer");
+        assert!(parsed.description.contains("polish"));
+
+        let named = temp.path().join("paper-humanizer-skill");
+        write_skill(&named, "paper-humanizer", "Academic humanizer");
+        let (named_parsed, _) = validate_skill_dir(&named).unwrap();
+        assert_eq!(named_parsed.folder, "paper-humanizer-skill");
+    }
+
+    #[test]
+    fn colon_description_survives_invalid_yaml() {
+        let parsed = validate_skill(
+            "---\nname: paper-humanizer\ndescription: Use when the user says: polish\n---\n# Paper\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.name, "paper-humanizer");
+        assert!(parsed.description.contains("polish"));
+        assert!(parsed.description.contains("says"));
+    }
+
+    #[test]
+    fn fingerprint_ignores_vcs_and_junk_dirs() {
+        let temp = tempfile::tempdir().unwrap();
+        let left = temp.path().join("left");
+        let right = temp.path().join("right");
+        write_skill(&left, "writer", "Writes prose");
+        write_skill(&right, "writer", "Writes prose");
+        fs::create_dir_all(left.join(".git")).unwrap();
+        fs::write(left.join(".git/config"), "left").unwrap();
+        fs::create_dir_all(right.join("node_modules")).unwrap();
+        fs::write(right.join("node_modules/pkg.js"), "right").unwrap();
+        assert_eq!(
+            fingerprint_skill_dir(&left).unwrap(),
+            fingerprint_skill_dir(&right).unwrap()
+        );
     }
 }

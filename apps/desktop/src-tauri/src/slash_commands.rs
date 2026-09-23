@@ -396,6 +396,7 @@ Hard rules:
 - Preferred public source for academic writing: https://github.com/WUBING2023/PaperSpine (Claude skills live under dist/claude/skills).
 - Other public GitHub/skill URLs and local folders with SKILL.md are also valid.
 - Do not overwrite an existing skill folder unless the notes or a later reply say to replace it.
+- Do not call the Skill tool, including Skill init, more than once for the same install.
 
 Workflow:
 - If User notes are non-empty, treat them as the request and start the install. Do not restate the notes as a question and do not wait for confirmation unless a required source URL/folder is missing.

@@ -15,6 +15,19 @@ import { isPaperSpineSkill } from "@/lib/paperspine";
 import { useAgentStore } from "@/stores/agent-store";
 import { useSkillCategoryStore } from "@/stores/skill-category-store";
 
+function invokeErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  if (typeof error === "string" && error.trim()) return error;
+  if (error && typeof error === "object") {
+    const record = error as Record<string, unknown>;
+    for (const key of ["message", "error"]) {
+      const value = record[key];
+      if (typeof value === "string" && value.trim()) return value;
+    }
+  }
+  return "Skill import failed";
+}
+
 export type DefaultSkillPackResult = {
   id: string;
   status: "already" | "imported" | "error";
@@ -114,7 +127,7 @@ export const useSkillStore = create<SkillStoreState>((set, get) => ({
     } catch (error) {
       set({
         loading: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: invokeErrorMessage(error),
       });
       throw error;
     }
@@ -145,7 +158,7 @@ export const useSkillStore = create<SkillStoreState>((set, get) => ({
     } catch (error) {
       set({
         loading: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: invokeErrorMessage(error),
       });
       throw error;
     }
@@ -255,8 +268,7 @@ export const useSkillStore = create<SkillStoreState>((set, get) => ({
           slash = await listOfficialSlash();
           results.push({ id: pack.id, status: "imported" });
         } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
+          const message = invokeErrorMessage(error);
           set({ loading: false, error: message, installingPackId: null });
           results.push({
             id: pack.id,

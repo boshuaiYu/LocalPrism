@@ -1339,6 +1339,9 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
         let target = dst.join(entry.file_name());
 
         if entry_path.is_dir() {
+            if import::should_skip_skill_tree_entry(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
             copy_dir_recursive(&entry_path, &target)?;
         } else {
             std::fs::copy(&entry_path, &target)
@@ -1445,26 +1448,16 @@ pub async fn skill_import(
     let mut skill_dirs = Vec::new();
     import::collect_skill_dirs(&source, &mut skill_dirs);
     skill_dirs.sort();
-    if skill_dirs.is_empty() {
-        return Err(
-            "Selected folder does not contain any skills. A skill must contain SKILL.md.".into(),
-        );
-    }
-
     let project = project_path.as_deref().map(Path::new);
-    let mut imported = Vec::new();
-    for skill_dir in skill_dirs {
-        let mut batch = import::import_skill_to_targets(
-            &skill_dir,
-            &targets,
-            project,
-            manifest::SkillSource::Folder {
-                path: skill_dir.to_string_lossy().to_string(),
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        imported.append(&mut batch);
-    }
+    let imported = import_collected_skill_dirs(
+        skill_dirs,
+        &targets,
+        project,
+        manifest::SkillSource::Folder {
+            path: source.to_string_lossy().to_string(),
+        },
+        false,
+    )?;
     let _ = crate::slash_commands::import_user_slash_commands_from_source(&source, true);
     Ok(imported)
 }
@@ -1608,23 +1601,54 @@ async fn download_url_bytes(
     Ok(bytes)
 }
 
+#[cfg(test)]
 fn skill_already_installed(
     skill_dir: &Path,
     targets: &[domain::SkillTarget],
     project: Option<&Path>,
 ) -> bool {
-    let Ok((parsed, _)) = import::validate_skill_dir(skill_dir) else {
-        return false;
-    };
-    targets.iter().all(|target| {
-        let Ok(root) = paths::resolve_skill_root(target.runtime, target.scope, project) else {
-            return false;
-        };
-        let Ok(destination) = paths::skill_destination(&root, &parsed.folder) else {
-            return false;
-        };
-        import::find_skill_md(&destination).is_some()
-    })
+    let existing = import::snapshot_installed_targets(skill_dir, targets, project);
+    !targets.is_empty() && existing.len() == targets.len()
+}
+
+fn normalize_skill_import_url(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Some(index) = trimmed.find("https://").or_else(|| trimmed.find("http://")) {
+        let rest = &trimmed[index..];
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        return rest[..end]
+            .trim_end_matches(|ch: char| {
+                matches!(ch, ')' | ']' | '>' | ',' | '"' | '\'' | '。' | '，')
+            })
+            .to_string();
+    }
+    if let Some(https) = github_ssh_to_https(trimmed) {
+        return https;
+    }
+    trimmed.to_string()
+}
+
+fn github_ssh_to_https(raw: &str) -> Option<String> {
+    let rest = raw
+        .strip_prefix("git@github.com:")
+        .or_else(|| raw.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| {
+            raw.find("git@github.com:")
+                .map(|index| &raw[index + "git@github.com:".len()..])
+        })
+        .or_else(|| {
+            raw.find("ssh://git@github.com/")
+                .map(|index| &raw[index + "ssh://git@github.com/".len()..])
+        })?;
+    let rest = rest.split_whitespace().next()?.trim_end_matches('/');
+    let rest = rest.trim_end_matches(".git");
+    if rest.is_empty() || rest.contains(' ') {
+        return None;
+    }
+    Some(format!("https://github.com/{rest}"))
 }
 
 fn import_collected_skill_dirs(
@@ -1640,14 +1664,33 @@ fn import_collected_skill_dirs(
         );
     }
     let mut imported = Vec::new();
+    let mut errors = Vec::new();
     for skill_dir in skill_dirs {
-        if skip_existing && skill_already_installed(&skill_dir, targets, project) {
+        let existing = import::snapshot_installed_targets(&skill_dir, targets, project);
+        let already_installed = !targets.is_empty() && existing.len() == targets.len();
+        if skip_existing && already_installed {
+            imported.extend(existing);
             continue;
         }
-        let mut batch =
-            import::import_skill_to_targets(&skill_dir, targets, project, source.clone())
-                .map_err(|error| error.to_string())?;
-        imported.append(&mut batch);
+        match import::import_skill_to_targets(&skill_dir, targets, project, source.clone()) {
+            Ok(mut batch) => imported.append(&mut batch),
+            Err(error) => {
+                if already_installed {
+                    imported.extend(existing);
+                } else {
+                    errors.push(error.to_string());
+                }
+            }
+        }
+    }
+    if imported.is_empty() {
+        if errors.is_empty() {
+            return Err(
+                "Downloaded source does not contain any skills. A skill must contain SKILL.md."
+                    .into(),
+            );
+        }
+        return Err(errors.join("\n"));
     }
     Ok(imported)
 }
@@ -1660,12 +1703,15 @@ pub async fn skill_import_url(
     project_path: Option<String>,
     skip_existing: Option<bool>,
 ) -> Result<Vec<domain::RuntimeSkill>, String> {
-    let source_url = source_url.trim().to_string();
+    let source_url = normalize_skill_import_url(&source_url);
     if source_url.is_empty() {
         return Err("Skill URL cannot be empty".into());
     }
     if !(source_url.starts_with("https://") || source_url.starts_with("http://")) {
-        return Err("Skill URL must start with http:// or https://".into());
+        return Err(
+            "Skill URL must be an http(s) link. GitHub links such as https://github.com/owner/repo are supported."
+                .into(),
+        );
     }
 
     let project = project_path.as_deref().map(Path::new);
@@ -1724,7 +1770,9 @@ pub async fn skill_import_url(
             }
         }
         if let Some(error) = last_error {
-            return Err(error);
+            return Err(format!(
+                "Could not download skills from {source_url}. {error}"
+            ));
         }
 
         let repo_dir = tmp_dir.join("repo");
@@ -2160,6 +2208,27 @@ mod tests {
         assert!(!is_skill_markdown_url(
             "https://github.com/acme/writer-skill"
         ));
+        assert_eq!(
+            normalize_skill_import_url(
+                "git@github.com:crabin/paper-humanizer-skill.git"
+            ),
+            "https://github.com/crabin/paper-humanizer-skill"
+        );
+        assert_eq!(
+            normalize_skill_import_url(
+                "/install-skills 安装一下 https://github.com/crabin/paper-humanizer-skill.git /tmp/paper-humanizer-skill skill"
+            ),
+            "https://github.com/crabin/paper-humanizer-skill.git"
+        );
+        assert_eq!(
+            parse_github_import_url("https://github.com/crabin/paper-humanizer-skill.git"),
+            Some(GithubImportSpec {
+                owner: "crabin".into(),
+                repo: "paper-humanizer-skill".into(),
+                git_ref: "main".into(),
+                subpath: None,
+            })
+        );
         assert_eq!(
             parse_github_import_url(
                 "https://github.com/WUBING2023/PaperSpine/tree/main/dist/claude/skills"

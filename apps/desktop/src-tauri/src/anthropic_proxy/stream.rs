@@ -1,7 +1,10 @@
-use super::tools::{normalized_tool_call_id, repair_tool_arguments};
+use super::tools::{
+    duplicate_skill_tool_call, normalized_tool_call_id, repair_tool_arguments,
+    repaired_tool_arguments_value,
+};
 use super::{http_response, OpenAiProxyCredential};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
@@ -443,7 +446,16 @@ fn finish_anthropic_stream(state: &mut OpenAiStreamState) -> String {
         .map(|(openai_index, block)| (*openai_index, block))
         .collect::<Vec<_>>();
     tool_blocks.sort_by_key(|(openai_index, _)| *openai_index);
+    let mut seen_skill_calls = HashSet::new();
     for (_, block) in tool_blocks {
+        let name = block
+            .name
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        let input = repaired_tool_arguments_value(&block.buffered_arguments);
+        if duplicate_skill_tool_call(&mut seen_skill_calls, &name, &input) {
+            continue;
+        }
         let index = state.next_block_index;
         state.next_block_index += 1;
         push_sse(
@@ -977,5 +989,60 @@ mod tests {
         assert!(done.contains("\"input_tokens\":3388"));
         assert!(done.contains("\"output_tokens\":80"));
         assert!(done.contains("\"cache_read_input_tokens\":200"));
+    }
+
+    #[test]
+    fn collapses_duplicate_streamed_skill_calls() {
+        let request = json!({ "model": "gpt-6-luna" });
+        let mut state = OpenAiStreamState::default();
+        for index in 0..5 {
+            let _ = openai_stream_chunk_to_anthropic(
+                &mut state,
+                &json!({
+                    "id": "chatcmpl_1",
+                    "choices": [{
+                        "delta": {
+                            "tool_calls": [{
+                                "index": index,
+                                "id": format!("call_skill_{index}"),
+                                "type": "function",
+                                "function": {
+                                    "name": "Skill",
+                                    "arguments": "{\"skill\":\"init\"}"
+                                }
+                            }]
+                        },
+                        "finish_reason": null
+                    }]
+                }),
+                &request,
+                &credential(),
+            );
+        }
+        let _ = openai_stream_chunk_to_anthropic(
+            &mut state,
+            &json!({
+                "id": "chatcmpl_1",
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 5,
+                            "id": "call_read",
+                            "type": "function",
+                            "function": {
+                                "name": "Read",
+                                "arguments": "{\"file_path\":\"main.tex\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            &request,
+            &credential(),
+        );
+        let done = finish_anthropic_stream(&mut state);
+        assert_eq!(done.matches("\"name\":\"Skill\"").count(), 1);
+        assert_eq!(done.matches("\"name\":\"Read\"").count(), 1);
     }
 }
