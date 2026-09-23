@@ -196,7 +196,7 @@ struct LocalIdentity {
 
 const LOOPBACK_CERT_DER: &[u8] = include_bytes!("../certs/localhost.der");
 const LOOPBACK_KEY_DER: &[u8] = include_bytes!("../certs/localhost.pkcs8.der");
-const LOOPBACK_CA_PEM: &str = include_str!("../certs/ca.pem");
+const LOOPBACK_CA_PEM: &str = include_str!("../certs/ca.crt");
 
 /// The leaf key only serves `127.0.0.1`. Callers that can add `ca.pem`
 /// as a root keep normal hostname checks. The updater plugin cannot share
