@@ -215,7 +215,6 @@ function ComposerModelChip({
   modelId,
   providerName,
   disabled,
-  fullWidth,
   onClick,
 }: {
   buttonRef: RefObject<HTMLButtonElement | null>;
@@ -224,13 +223,13 @@ function ComposerModelChip({
   modelId: string;
   providerName: string;
   disabled: boolean;
-  fullWidth: boolean;
   onClick: () => void;
 }) {
   return (
     <button
       ref={buttonRef}
       type="button"
+      data-testid="composer-model-trigger"
       onClick={onClick}
       title={modelId}
       aria-label={
@@ -239,12 +238,9 @@ function ComposerModelChip({
           : `Switch model ${modelId}`
       }
       disabled={disabled}
-      className={cn(
-        "flex h-8 min-w-0 items-center gap-1.5 rounded-full border border-border/80 bg-background/70 px-2.5 text-foreground text-xs transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50",
-        fullWidth ? "w-full" : "max-w-full flex-1",
-      )}
+      className="flex h-8 w-fit min-w-0 max-w-full shrink-0 items-center gap-1.5 self-start rounded-full border border-border/80 bg-background/70 px-2.5 text-foreground text-xs transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
     >
-      <span className="min-w-0 flex-1 truncate text-left">{label}</span>
+      <span className="min-w-0 truncate text-left">{label}</span>
       {effortLabel ? (
         <span className="shrink-0 text-muted-foreground/60">
           · {effortLabel}
@@ -1606,7 +1602,6 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
                   modelId={composerModelId}
                   providerName={activeProviderName}
                   disabled={runtimeBusy}
-                  fullWidth={false}
                   onClick={() => setModelPickerOpen((open) => !open)}
                 />
               ) : null}
@@ -1625,7 +1620,6 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
                 modelId={composerModelId}
                 providerName={activeProviderName}
                 disabled={runtimeBusy}
-                fullWidth
                 onClick={() => setModelPickerOpen((open) => !open)}
               />
             )}

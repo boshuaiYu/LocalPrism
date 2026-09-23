@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { Button } from "@/components/ui/button";
+import { useI18n } from "@/lib/use-i18n";
 import { updateBannerVisible } from "@/lib/update-policy";
 import {
   ensureUpdateCheck,
@@ -84,6 +85,7 @@ export function UpdatePrompt() {
 }
 
 export function UpdateSettings() {
+  const { t } = useI18n();
   const status = useUpdateStore((state) => state.status);
   const checkForUpdate = useUpdateStore((state) => state.checkForUpdate);
   const applyUpdate = useUpdateStore((state) => state.applyUpdate);
@@ -91,8 +93,11 @@ export function UpdateSettings() {
   const busy = status.state === "checking" || status.state === "downloading";
 
   return (
-    <section className="lp-panel shrink-0 rounded-xl border p-4">
-      <h3 className="font-medium text-sm">Updates</h3>
+    <section
+      data-testid="update-settings"
+      className="lp-panel shrink-0 rounded-xl border p-4"
+    >
+      <h3 className="font-medium text-sm">{t("settings.updates")}</h3>
       <p className="mt-1 text-lp-meta text-sm leading-relaxed">
         {statusCopy(status)} In-app install applies to the AppImage, macOS, and
         Windows. Debian and RPM installs stay on the package from Releases.

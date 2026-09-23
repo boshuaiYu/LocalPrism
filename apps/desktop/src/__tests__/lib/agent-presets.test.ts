@@ -5,7 +5,10 @@ import {
   DE_AI_INSTRUCTIONS,
   PEER_REVIEW_INSTRUCTIONS,
   buildPresetAgentProfile,
+  builtinPresetContentUpdate,
+  builtinPresetProfilesToSeed,
 } from "@/lib/agent-presets";
+import { emptyAgentProfile } from "@/stores/agent-store";
 import type { RuntimeSkill, SkillScope } from "@/runtime/types";
 
 function skill(
@@ -38,12 +41,11 @@ describe("builtin agent presets", () => {
 
     const polish = buildPresetAgentProfile("academic-polish", []);
     expect(polish.id).toBe("academic-polish");
-    expect(polish.name).toBe("润色");
-    expect(polish.description).toContain("提升清晰度");
-    expect(polish.description).toContain("academic tone");
+    expect(polish.name).toBe("论文抛光机");
+    expect(polish.description).toContain("贴回 LaTeX");
     expect(polish.instructions).toBe(ACADEMIC_POLISH_INSTRUCTIONS);
     expect(polish.instructions).toContain(
-      "You are an expert academic editor for LaTeX research papers",
+      "You are an academic editor for LaTeX research papers",
     );
     expect(polish.instructions).toContain("Preserve LaTeX exactly");
     expect(polish.instructions).toContain("\\cite/\\citet/\\citep");
@@ -56,27 +58,31 @@ describe("builtin agent presets", () => {
 
     const deAi = buildPresetAgentProfile("de-ai", []);
     expect(deAi.id).toBe("de-ai");
-    expect(deAi.name).toBe("去AI");
-    expect(deAi.description).toContain("模板化");
-    expect(deAi.description).toContain("template-like");
+    expect(deAi.name).toBe("AI消除器");
+    expect(deAi.description).toContain("模板腔");
     expect(deAi.instructions).toBe(DE_AI_INSTRUCTIONS);
     expect(deAi.instructions).toContain("You humanize academic prose");
     expect(deAi.instructions).toContain("Do NOT: invent facts");
+    expect(deAi.instructions).toContain("值得注意的是");
+    expect(deAi.instructions).toContain("detector scores");
     expect(deAi.skillIds).toEqual([]);
 
     const review = buildPresetAgentProfile("peer-review", []);
     expect(review.id).toBe("peer-review");
-    expect(review.name).toBe("Peer Review");
-    expect(review.description).toContain("审稿");
-    expect(review.description).toContain("actionable");
+    expect(review.name).toBe("毒舌审稿官");
+    expect(review.description).toContain("苛刻审稿人");
+    expect(BUILTIN_AGENT_PRESETS[2]?.titleSecondary).toBe("Review Duo");
     expect(review.instructions).toBe(PEER_REVIEW_INSTRUCTIONS);
     expect(review.instructions).toContain(
-      "You are a senior peer reviewer for a top venue",
+      "You are two harsh, independent reviewers plus the editor",
     );
     expect(review.instructions).toContain(
       "Do not rewrite the whole paper unless asked",
     );
     expect(review.instructions).toContain("Never invent papers or DOIs.");
+    expect(review.instructions).toContain(
+      "Do not check, add, or repair citations",
+    );
     expect(review.instructions).not.toContain(
       "flag missing/unused/inconsistent citations",
     );
@@ -208,5 +214,87 @@ describe("builtin agent presets", () => {
 
     expect(profile.scope).toBe("user");
     expect(profile.skillIds).toEqual([]);
+  });
+
+  it("seeds the three missing user presets and skips ids that already exist", () => {
+    const skills = [
+      skill("academic-polish", "user"),
+      skill("writing-clarity", "user", { name: "Writing Clarity" }),
+      skill("humanizer-academic", "user"),
+      skill("citation-check", "user", { name: "Citation Check" }),
+      skill("zotero-cite", "user"),
+      skill("bibtex-check", "user"),
+      skill("latex-guard", "project"),
+    ];
+    const profiles = builtinPresetProfilesToSeed(
+      [
+        {
+          id: "academic-polish",
+          scope: "user",
+        },
+        {
+          id: "peer-review",
+          scope: "project",
+        },
+      ],
+      skills,
+    );
+
+    expect(profiles.map((profile) => profile.id)).toEqual([
+      "de-ai",
+      "peer-review",
+    ]);
+    expect(profiles.every((profile) => profile.scope === "user")).toBe(true);
+    expect(
+      profiles.find((profile) => profile.id === "de-ai")?.skillIds,
+    ).toEqual(["humanizer-academic"]);
+    const review = profiles.find((profile) => profile.id === "peer-review");
+    expect(review?.skillIds).toEqual([]);
+    expect(review?.instructions).toBe(PEER_REVIEW_INSTRUCTIONS);
+    expect(review?.instructions).toContain(
+      "Do not check, add, or repair citations",
+    );
+    expect(
+      profiles.flatMap((profile) => profile.skillIds).join(" "),
+    ).not.toMatch(/citation|zotero|bibtex/);
+  });
+
+  it("seeds all three presets when the agent list is empty", () => {
+    expect(
+      builtinPresetProfilesToSeed([], []).map((profile) => profile.id),
+    ).toEqual(["academic-polish", "de-ai", "peer-review"]);
+  });
+
+  it("refreshes builtin copy without touching skill toggles or custom agents", () => {
+    const polish = {
+      ...emptyAgentProfile("claude", "user"),
+      id: "academic-polish",
+      name: "润色",
+      description: "old",
+      instructions: "old prompt",
+      skillIds: ["writer", "my-toggle"],
+      model: "opus",
+    };
+    const custom = {
+      ...emptyAgentProfile("claude", "user"),
+      id: "reviewer",
+      name: "Reviewer",
+      skillIds: ["keep-me"],
+    };
+    const projectCopy = {
+      ...polish,
+      scope: "project" as const,
+      name: "项目里的抛光",
+    };
+
+    const updated = builtinPresetContentUpdate(polish);
+    expect(updated?.name).toBe("论文抛光机");
+    expect(updated?.description).toContain("贴回 LaTeX");
+    expect(updated?.instructions).toBe(ACADEMIC_POLISH_INSTRUCTIONS);
+    expect(updated?.skillIds).toEqual(["writer", "my-toggle"]);
+    expect(updated?.model).toBe("opus");
+    expect(builtinPresetContentUpdate(custom)).toBeNull();
+    expect(builtinPresetContentUpdate(projectCopy)).toBeNull();
+    expect(builtinPresetContentUpdate(updated!)).toBeNull();
   });
 });

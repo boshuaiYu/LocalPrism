@@ -15,6 +15,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useClaudeSetupStore } from "@/stores/claude-setup-store";
+import { useAgentStore } from "@/stores/agent-store";
 import { useSkillStore } from "@/stores/skill-store";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
 import { ErrorFallback } from "@/components/error-fallback";
@@ -301,6 +302,7 @@ export function App({ onReady }: { onReady?: () => void }) {
   useEffect(() => {
     void useClaudeSetupStore.getState().ensureEngine();
     void useSkillStore.getState().ensureDefaultSkillPacks();
+    void useAgentStore.getState().ensureBuiltinPresets();
   }, []);
 
   useEffect(() => {

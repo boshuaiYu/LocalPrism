@@ -11,7 +11,7 @@ vi.mock("next-themes", () => ({
   useTheme: () => ({ theme: "system", setTheme: vi.fn() }),
 }));
 
-describe("Sidebar reset layout", () => {
+describe("Sidebar chrome", () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -38,8 +38,7 @@ describe("Sidebar reset layout", () => {
     container.remove();
   });
 
-  it("exposes a one-click reset outside the layout menu", async () => {
-    const onResetLayout = vi.fn();
+  it("has settings and no reset-layout or updates control", async () => {
     await act(async () =>
       root.render(
         <Sidebar
@@ -52,23 +51,25 @@ describe("Sidebar reset layout", () => {
             setChatVisible: vi.fn(),
             setPdfVisible: vi.fn(),
             setSidebarVisible: vi.fn(),
-            onResetLayout,
-            layoutResetKey: 0,
           }}
         />,
       ),
     );
 
-    const resets = Array.from(
-      container.querySelectorAll('[data-testid="reset-workspace-layout"]'),
-    ).filter((node) => !node.closest('[aria-hidden="true"]'));
-    expect(resets).toHaveLength(1);
-    const button = resets[0];
-    expect(button).toBeInstanceOf(HTMLButtonElement);
-    expect(button?.textContent).toMatch(/Reset layout/);
-    expect(button?.closest("[data-radix-hover-card-content]")).toBeNull();
-
-    await act(async () => (button as HTMLButtonElement).click());
-    expect(onResetLayout).toHaveBeenCalledTimes(1);
+    const visibleText = Array.from(container.querySelectorAll("button, a"))
+      .filter((node) => !node.closest('[aria-hidden="true"]'))
+      .map((node) => node.textContent ?? "")
+      .join("\n");
+    expect(
+      container.querySelector('[data-testid="reset-workspace-layout"]'),
+    ).toBeNull();
+    expect(visibleText).not.toMatch(/Reset layout/);
+    expect(visibleText).not.toMatch(/重置布局/);
+    expect(
+      container.querySelector('[data-testid="update-settings"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[aria-label="Open settings"]'),
+    ).toBeTruthy();
   });
 });

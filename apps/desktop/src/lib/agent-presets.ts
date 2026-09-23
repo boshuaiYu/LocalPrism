@@ -5,38 +5,40 @@ import {
 } from "@/lib/compatible-skills";
 import { emptyAgentProfile } from "@/stores/agent-store";
 
-export const ACADEMIC_POLISH_INSTRUCTIONS = `You are an expert academic editor for LaTeX research papers (English or Chinese).
-Goals: clarity, precision, concision, scholarly tone, coherent paragraph flow.
+export const ACADEMIC_POLISH_INSTRUCTIONS = `You are an academic editor for LaTeX research papers (English or Chinese). Polish awkward prose until it is clear, precise, concise, and scholarly, and still pastes back into the manuscript.
 Hard rules:
-- Preserve meaning, technical terms, numbers, units, statistics, and claim strength (do not strengthen or invent claims).
-- Preserve LaTeX exactly: commands, environments, equations, labels, \\cite/\\citet/\\citep, BibTeX keys, figure/table refs, paths.
+- Preserve meaning, technical terms, numbers, units, statistics, and claim strength. Do not strengthen, soften, or invent claims.
+- Preserve LaTeX exactly: commands, environments, equations, labels, \\cite/\\citet/\\citep, BibTeX keys, figure/table refs, and paths.
 - Do not fabricate citations, data, results, or references.
 - Prefer readable scholarly language over rare words or inflated rhetoric.
 - If the user selected text, revise only that span; otherwise revise the provided excerpt.
-- Output: (1) revised text ready to paste; (2) brief bullet list of notable edits (why).
-When a latex-guard / academic-polish / citation skill is available, use it.`;
+Output: (1) revised text ready to paste; (2) a short bullet list of notable edits and why.
+If a latex-guard, writing, or academic-polish skill is installed, you may use it. Do not use citation, BibTeX, or Zotero tools.`;
 
-export const DE_AI_INSTRUCTIONS = `You humanize academic prose (Chinese or English) for journal/thesis style.
-Process: (1) scan for AI patterns; (2) rewrite only problematic spans; (3) keep meaning, terms, data, citations, LaTeX; (4) keep formal academic register; (5) vary sentence rhythm; avoid empty significance claims.
-Remove/reduce patterns such as:
-- Inflated significance (“crucial”, “pivotal”, “landscape”, “此外/值得注意的是/综上所述/具有重要意义”)
-- Mechanical enumeration (First/Second/Third; 首先/其次/再次) when unnatural
+export const DE_AI_INSTRUCTIONS = `You humanize academic prose (Chinese or English) for a journal or thesis. Strip template-like AI voice without changing the science.
+Process: (1) scan for AI tells; (2) rewrite only the problematic spans; (3) keep meaning, terms, numbers, data, citations, and LaTeX unchanged; (4) stay in a formal academic register; (5) vary sentence rhythm and do not add empty significance claims.
+Strip or reduce:
+- Inflated significance (“crucial”, “pivotal”, “landscape”, “underscore”, “此外”, “值得注意的是”, “综上所述”, “具有重要意义”)
+- Mechanical enumeration (First/Second/Third; 首先/其次/再次) when it is unnatural
 - Perfect triadic parallels and marketing adjectives
-- Vague attributions (“studies show” / “专家认为”) without sources — delete or make concrete only if source already in text
-- Chatbot tone, bold spam, emoji
+- Vague attributions (“studies show” / “专家认为”) with no source already in the text — delete them, or make them concrete only from text that is already present
+- Chatbot tone, bold spam, emoji, and filler transitions
 Do NOT: invent facts; change results; alter \\cite keys; promise detector scores.
-Output: revised text + short list of AI patterns you addressed.
-Attach humanizer / reduce-ai-style skills if installed.`;
+Output: revised text + a short list of the AI patterns you fixed.
+If a humanizer or reduce-ai-style skill is installed, you may use it. Do not use citation, BibTeX, or Zotero tools.`;
 
 // Critique only. Citation, BibTeX, and Zotero checks are not part of this preset.
-export const PEER_REVIEW_INSTRUCTIONS = `You are a senior peer reviewer for a top venue in the paper’s field.
+export const PEER_REVIEW_INSTRUCTIONS = `You are two harsh, independent reviewers plus the editor for a top venue in the paper’s field. Critique only.
 Produce:
-1) Reviewer 1 report: summary paragraph; major concerns (≥3, numbered, with why + where + concrete fix); minor concerns (2–4); recommendation (accept / minor / major / reject) with justification.
-2) Reviewer 2 report: same structure, independent emphasis (e.g. methods vs clarity).
-3) Editorial synthesis: one paragraph combining both; prioritized revision list.
-Be frank, specific, actionable; quote or point to passages when possible.
+1) Reviewer 1: a summary paragraph; at least 3 numbered major concerns (why it matters, where it is, and a concrete fix); 2–4 minor concerns; a recommendation (accept / minor revision / major revision / reject) with justification.
+2) Reviewer 2: the same structure, with an independent emphasis (for example methods versus clarity). Do not repeat Reviewer 1 unless you disagree.
+3) Editorial synthesis: one paragraph combining both reports, then a prioritized revision list.
+Be frank, specific, and actionable. Quote or point to passages.
 Do not rewrite the whole paper unless asked; focus on critique.
-Never invent papers or DOIs.`;
+Never invent papers or DOIs. Do not check, add, or repair citations, BibTeX, or Zotero, and do not use citation skills.`;
+
+/** Bump when builtin display copy or instructions should be written onto existing preset files once. */
+export const BUILTIN_AGENT_PRESET_SEED_VERSION = 2;
 
 export type BuiltinAgentPresetId = "academic-polish" | "de-ai" | "peer-review";
 
@@ -51,26 +53,23 @@ export interface BuiltinAgentPreset {
 export const BUILTIN_AGENT_PRESETS: readonly BuiltinAgentPreset[] = [
   {
     id: "academic-polish",
-    name: "润色",
-    titleSecondary: "Academic Polish",
-    description:
-      "提升清晰度、语法与学术语气，保留原意、LaTeX 与引用。 Improve clarity, grammar, and academic tone while preserving meaning, LaTeX, and citations.",
+    name: "论文抛光机",
+    titleSecondary: "Polish Lab",
+    description: "把拗口段落打磨得清楚、学术、还能贴回 LaTeX。",
     instructions: ACADEMIC_POLISH_INSTRUCTIONS,
   },
   {
     id: "de-ai",
-    name: "去AI",
+    name: "AI消除器",
     titleSecondary: "De-AI",
-    description:
-      "减弱模板化 AI 文风，不改事实、数据与引用。 Reduce template-like AI prose without changing facts, data, or citations.",
+    description: "干掉套话和模板腔，事实、数据、引用、LaTeX 原封不动。",
     instructions: DE_AI_INSTRUCTIONS,
   },
   {
     id: "peer-review",
-    name: "Peer Review",
-    titleSecondary: "审稿模拟",
-    description:
-      "以两位审稿人的视角给出具体、可执行的投稿前批评。 Simulate two reviewers with specific, actionable critique before submission.",
+    name: "毒舌审稿官",
+    titleSecondary: "Review Duo",
+    description: "两位苛刻审稿人 + 编辑综述，投稿前先挨顿有用的骂。",
     instructions: PEER_REVIEW_INSTRUCTIONS,
   },
 ];
@@ -162,6 +161,62 @@ function uniqueAssignmentIds(skills: RuntimeSkill[]): string[] {
   return ids;
 }
 
+/** User-scope preset ids that are not already saved. Existing ids are left alone. */
+export function builtinPresetIdsToSeed(
+  agents: readonly { id: string; scope?: string }[],
+): BuiltinAgentPresetId[] {
+  const installed = new Set(
+    agents.filter((agent) => agent.scope === "user").map((agent) => agent.id),
+  );
+  return BUILTIN_AGENT_PRESETS.map((preset) => preset.id).filter(
+    (id) => !installed.has(id),
+  );
+}
+
+/**
+ * Profiles to create on first seed. No project path, so presets stay user-scoped
+ * and only already-installed user skills are attached. Peer Review stays
+ * critique-only. Citation, BibTeX, and Zotero skills are never attached.
+ */
+export function builtinPresetProfilesToSeed(
+  agents: readonly { id: string; scope?: string }[],
+  skills: RuntimeSkill[],
+): AgentProfile[] {
+  return builtinPresetIdsToSeed(agents).map((id) =>
+    buildPresetAgentProfile(id, skills),
+  );
+}
+
+export function isBuiltinAgentPresetId(id: string): id is BuiltinAgentPresetId {
+  return BUILTIN_AGENT_PRESETS.some((preset) => preset.id === id);
+}
+
+/**
+ * Copy upgrade for an existing user-scope builtin. Skill ids and other
+ * user fields stay as they are. Returns null when the copy already matches
+ * or the agent is not one of the three builtins.
+ */
+export function builtinPresetContentUpdate(
+  agent: AgentProfile,
+): AgentProfile | null {
+  if (agent.runtime !== "claude" || agent.scope !== "user") return null;
+  if (!isBuiltinAgentPresetId(agent.id)) return null;
+  const preset = builtinAgentPreset(agent.id);
+  if (
+    agent.name === preset.name &&
+    agent.description === preset.description &&
+    agent.instructions === preset.instructions
+  ) {
+    return null;
+  }
+  return {
+    ...agent,
+    name: preset.name,
+    description: preset.description,
+    instructions: preset.instructions,
+  };
+}
+
 export function builtinAgentPreset(
   id: BuiltinAgentPresetId,
 ): BuiltinAgentPreset {
@@ -175,7 +230,7 @@ export function builtinAgentPreset(
 /**
  * Build a new Claude agent from a preset.
  * Scans enabled user and project skills. Writing/polish skills attach to
- * 润色; humanizer/de-ai skills attach to 去AI. Peer Review stays critique-only.
+ * 论文抛光机; humanizer/de-ai skills attach to AI消除器. 毒舌审稿官 stays critique-only.
  * An agent has one scope, so user-scope matches win when both are installed.
  */
 export function buildPresetAgentProfile(

@@ -101,6 +101,13 @@ vi.mock("@/stores/uv-setup-store", () => ({
     }),
   },
 }));
+vi.mock("@/stores/agent-store", () => ({
+  useAgentStore: {
+    getState: () => ({
+      ensureBuiltinPresets: vi.fn(() => Promise.resolve()),
+    }),
+  },
+}));
 vi.mock("@/stores/skill-store", () => ({
   useSkillStore: Object.assign(
     () => ({

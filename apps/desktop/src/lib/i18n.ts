@@ -10,6 +10,7 @@ const en = {
   "settings.providers": "Providers",
   "settings.skills": "Skills",
   "settings.agents": "Agents",
+  "settings.updates": "Updates",
 
   "chrome.settings": "Settings",
   "chrome.gettingStarted": "Getting Started",
@@ -24,7 +25,6 @@ const en = {
   "chrome.chat": "Chat",
   "chrome.pdf": "PDF",
   "chrome.sidebar": "Sidebar",
-  "chrome.resetLayout": "Reset layout",
   "chrome.renameProject": "Rename project folder",
   "chrome.hideChat": "Hide chat",
   "chrome.hide": "Hide",
@@ -48,7 +48,7 @@ const en = {
   "onboarding.stepSettings":
     "In Settings, an API key is the recommended way to chat. Official login is optional.",
   "onboarding.stepPanes":
-    "Drag the pane splitters to resize the file tree, editor, chat, and PDF. Reset layout restores the default widths.",
+    "Drag the pane splitters to resize the file tree, editor, chat, and PDF.",
   "onboarding.leavesProject":
     "Open setup guide closes this project and returns to the home screen.",
   "onboarding.stopFirst":
@@ -131,6 +131,7 @@ const en = {
   "agents.loading": "Loading agents…",
   "agents.empty": "No custom agents yet.",
   "agents.emptyHint": "Start from a writing preset, or create a custom agent.",
+  "agents.missingPresets": "Built-in presets you can add back.",
   "agents.custom": "Create custom agent",
   "agents.checkingSkills": "Checking installed skills…",
   "agents.edit": "Edit",
@@ -221,6 +222,7 @@ const zh: Record<MessageKey, string> = {
   "settings.providers": "服务商",
   "settings.skills": "技能",
   "settings.agents": "智能体",
+  "settings.updates": "更新",
 
   "chrome.settings": "设置",
   "chrome.gettingStarted": "入门指南",
@@ -235,7 +237,6 @@ const zh: Record<MessageKey, string> = {
   "chrome.chat": "对话",
   "chrome.pdf": "PDF",
   "chrome.sidebar": "侧边栏",
-  "chrome.resetLayout": "重置布局",
   "chrome.renameProject": "重命名项目文件夹",
   "chrome.hideChat": "隐藏对话",
   "chrome.hide": "隐藏",
@@ -257,8 +258,7 @@ const zh: Record<MessageKey, string> = {
   "onboarding.stepCreate": "从模板新建项目，或打开已有文件夹。",
   "onboarding.stepSettings":
     "在设置中，推荐使用 API 密钥来对话。官方登录是可选的。",
-  "onboarding.stepPanes":
-    "拖动分隔条可调整文件树、编辑器、对话和 PDF 的宽度。重置布局会恢复默认宽度。",
+  "onboarding.stepPanes": "拖动分隔条可调整文件树、编辑器、对话和 PDF 的宽度。",
   "onboarding.leavesProject": "打开设置引导会关闭当前项目并回到主页。",
   "onboarding.stopFirst": "请先停止当前对话回合，再打开设置引导。",
   "onboarding.close": "关闭",
@@ -336,6 +336,7 @@ const zh: Record<MessageKey, string> = {
   "agents.loading": "正在加载智能体…",
   "agents.empty": "还没有自定义智能体。",
   "agents.emptyHint": "可以从写作预设开始，或新建自定义智能体。",
+  "agents.missingPresets": "可以重新添加这些内置预设。",
   "agents.custom": "新建自定义智能体",
   "agents.checkingSkills": "正在检查已安装的技能…",
   "agents.edit": "编辑",
