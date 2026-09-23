@@ -4,6 +4,35 @@ import {
   useClaudeChatStore,
   type ClaudeStreamMessage,
 } from "@/stores/claude-chat-store";
+import { useDocumentStore } from "@/stores/document-store";
+import { useProviderStore } from "@/stores/provider-store";
+
+function allowRewindResend() {
+  useProviderStore.setState({
+    ready: true,
+    engineInstalled: true,
+    activeAuthenticated: true,
+  });
+  useDocumentStore.setState({
+    projectRoot: "/project-a",
+    projectGeneration: 1,
+    contentGeneration: 1,
+    files: [
+      {
+        id: "main.tex",
+        name: "main.tex",
+        relativePath: "main.tex",
+        absolutePath: "/project-a/main.tex",
+        type: "tex",
+        content: "Hello abstract",
+        isDirty: false,
+      },
+    ],
+    activeFileId: "main.tex",
+    selectionRange: { start: 0, end: 5 },
+    isProjectMutating: false,
+  });
+}
 
 function user(text: string, codexTurnId?: string): ClaudeStreamMessage {
   return {
@@ -28,6 +57,22 @@ describe("rewindToMessage", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
     vi.mocked(invoke).mockResolvedValue(undefined);
+    useProviderStore.setState({ ready: false });
+    useDocumentStore.setState({
+      projectRoot: null,
+      files: [],
+      activeFileId: "",
+      selectionRange: null,
+      isProjectMutating: false,
+    });
+    useClaudeChatStore.setState((state) => ({
+      isStreaming: false,
+      tabs: state.tabs.map((tab) => ({
+        ...tab,
+        isStreaming: false,
+        cancelledAttempts: [],
+      })),
+    }));
     useClaudeChatStore.getState().resetForProject("/project-a");
   });
 
@@ -139,6 +184,7 @@ describe("rewindToMessage", () => {
   });
 
   it("leaves the chat in place when the runtime rewind fails", async () => {
+    allowRewindResend();
     const tab = useClaudeChatStore.getState().tabs[0];
     const messages = [user("Keep me"), assistant("Still here"), user("Later")];
     useClaudeChatStore.setState({
@@ -165,6 +211,14 @@ describe("rewindToMessage", () => {
     expect(useClaudeChatStore.getState().messages).toEqual(messages);
     expect(useClaudeChatStore.getState().error).toMatch(/Couldn't rewind/);
     expect(useClaudeChatStore.getState().error).toMatch(/disk busy/);
+    expect(useClaudeChatStore.getState().isStreaming).toBe(false);
+    expect(
+      useClaudeChatStore.getState().tabs[0]?.rewindRegenerate ?? null,
+    ).toBeNull();
+    expect(invoke).not.toHaveBeenCalledWith(
+      "runtime_start_turn",
+      expect.anything(),
+    );
   });
 
   it("refuses a send while rewind is still writing the transcript", async () => {
@@ -233,5 +287,266 @@ describe("rewindToMessage", () => {
     const result = await useClaudeChatStore.getState().rewindToMessage(0);
     expect(result).toBe("skipped");
     expect(useClaudeChatStore.getState().messages).toEqual(messages);
+  });
+
+  it("resends the user turn after rewind so a new reply can stream", async () => {
+    allowRewindResend();
+    const tab = useClaudeChatStore.getState().tabs[0];
+    const messages = [user("你好"), assistant("Hello"), user("Later")];
+    const reference = {
+      runtime: "claude" as const,
+      sessionId: "session-a",
+      projectPath: "/project-a",
+    };
+    useClaudeChatStore.setState({
+      tabs: [
+        {
+          ...tab,
+          messages,
+          projectPath: "/project-a",
+          runtime: "claude",
+          sessionId: "session-a",
+          sessionRef: reference,
+        },
+      ],
+      messages,
+      sessionId: "session-a",
+      activeProjectPath: "/project-a",
+    });
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === "runtime_rewind_conversation") return reference;
+      return undefined;
+    });
+
+    const result = await useClaudeChatStore.getState().rewindToMessage(0);
+
+    expect(result).toBe("rewound");
+    expect(
+      useClaudeChatStore
+        .getState()
+        .messages.map((message) => message.message?.content?.[0]?.text),
+    ).toEqual(["你好"]);
+    expect(useClaudeChatStore.getState().isStreaming).toBe(true);
+    expect(
+      useClaudeChatStore.getState().tabs[0]?.rewindRegenerate ?? null,
+    ).toBeNull();
+    expect(invoke).toHaveBeenCalledWith("runtime_rewind_conversation", {
+      request: expect.objectContaining({
+        role: "user",
+        text: "你好",
+        includeAnchor: false,
+      }),
+    });
+    expect(invoke).toHaveBeenCalledWith("runtime_start_turn", {
+      request: expect.objectContaining({
+        prompt: "你好",
+        sessionId: "session-a",
+      }),
+    });
+  });
+
+  it("offers regenerate when a user rewind cannot safely resend", async () => {
+    const tab = useClaudeChatStore.getState().tabs[0];
+    const messages = [user("你好"), assistant("Hello")];
+    const reference = {
+      runtime: "claude" as const,
+      sessionId: "session-a",
+      projectPath: "/project-a",
+    };
+    useClaudeChatStore.setState({
+      tabs: [
+        {
+          ...tab,
+          messages,
+          projectPath: "/project-a",
+          runtime: "claude",
+          sessionId: "session-a",
+          sessionRef: reference,
+        },
+      ],
+      messages,
+      sessionId: "session-a",
+      activeProjectPath: "/project-a",
+    });
+    vi.mocked(invoke).mockResolvedValue(reference);
+
+    const result = await useClaudeChatStore.getState().rewindToMessage(0);
+
+    expect(result).toBe("rewound");
+    expect(useClaudeChatStore.getState().isStreaming).toBe(false);
+    expect(useClaudeChatStore.getState().error).toBeNull();
+    expect(
+      useClaudeChatStore.getState().tabs[0]?.rewindRegenerate,
+    ).toMatchObject({
+      prompt: "你好",
+      sessionIncludesAnchor: true,
+    });
+    expect(invoke).not.toHaveBeenCalledWith(
+      "runtime_start_turn",
+      expect.anything(),
+    );
+    expect(invoke).toHaveBeenCalledWith("runtime_rewind_conversation", {
+      request: expect.not.objectContaining({ includeAnchor: false }),
+    });
+
+    allowRewindResend();
+    await useClaudeChatStore.getState().regenerateRewoundUserTurn();
+
+    expect(
+      useClaudeChatStore
+        .getState()
+        .messages.map((message) => message.message?.content?.[0]?.text),
+    ).toEqual(["你好"]);
+    expect(useClaudeChatStore.getState().isStreaming).toBe(true);
+    expect(invoke).toHaveBeenCalledWith("runtime_rewind_conversation", {
+      request: expect.objectContaining({ includeAnchor: false }),
+    });
+    expect(invoke).toHaveBeenCalledWith("runtime_start_turn", {
+      request: expect.objectContaining({
+        prompt: "你好",
+        sessionId: "session-a",
+      }),
+    });
+  });
+
+  it("does not resend when rewind keeps the assistant reply", async () => {
+    allowRewindResend();
+    const tab = useClaudeChatStore.getState().tabs[0];
+    const messages = [
+      user("Draft", "turn-1"),
+      assistant("Drafted", "turn-1"),
+      user("Revise", "turn-2"),
+    ];
+    const reference = {
+      runtime: "codex" as const,
+      sessionId: "thread-old",
+      projectPath: "/project-a",
+    };
+    useClaudeChatStore.setState({
+      tabs: [
+        {
+          ...tab,
+          messages,
+          projectPath: "/project-a",
+          runtime: "codex",
+          sessionId: "thread-old",
+          sessionRef: reference,
+        },
+      ],
+      messages,
+      sessionId: "thread-old",
+      activeProjectPath: "/project-a",
+    });
+    vi.mocked(invoke).mockResolvedValue({
+      ...reference,
+      sessionId: "thread-fork",
+    });
+
+    const result = await useClaudeChatStore.getState().rewindToMessage(0);
+
+    expect(result).toBe("rewound");
+    expect(useClaudeChatStore.getState().messages).toHaveLength(2);
+    expect(useClaudeChatStore.getState().isStreaming).toBe(false);
+    expect(
+      useClaudeChatStore.getState().tabs[0]?.rewindRegenerate ?? null,
+    ).toBeNull();
+    expect(invoke).not.toHaveBeenCalledWith(
+      "runtime_start_turn",
+      expect.anything(),
+    );
+  });
+
+  it("resends a local draft without rewriting a runtime transcript", async () => {
+    allowRewindResend();
+    const tab = useClaudeChatStore.getState().tabs[0];
+    const messages = [user("你好"), assistant("Hello")];
+    useClaudeChatStore.setState({
+      tabs: [
+        {
+          ...tab,
+          messages,
+          projectPath: "/project-a",
+          runtime: "claude",
+          sessionId: null,
+          sessionRef: null,
+          isStreaming: false,
+        },
+      ],
+      messages,
+      sessionId: null,
+      isStreaming: false,
+      activeProjectPath: "/project-a",
+    });
+
+    const result = await useClaudeChatStore.getState().rewindToMessage(0);
+
+    expect(result).toBe("rewound");
+    expect(
+      useClaudeChatStore
+        .getState()
+        .messages.map((message) => message.message?.content?.[0]?.text),
+    ).toEqual(["你好"]);
+    expect(useClaudeChatStore.getState().isStreaming).toBe(true);
+    expect(invoke).not.toHaveBeenCalledWith(
+      "runtime_rewind_conversation",
+      expect.anything(),
+    );
+    expect(invoke).toHaveBeenCalledWith("runtime_start_turn", {
+      request: expect.objectContaining({
+        prompt: "你好",
+        sessionId: null,
+      }),
+    });
+  });
+
+  it("keeps the rewound user turn when dropping it from the session fails", async () => {
+    const tab = useClaudeChatStore.getState().tabs[0];
+    const messages = [user("你好"), assistant("Hello")];
+    const reference = {
+      runtime: "claude" as const,
+      sessionId: "session-a",
+      projectPath: "/project-a",
+    };
+    useClaudeChatStore.setState({
+      tabs: [
+        {
+          ...tab,
+          messages,
+          projectPath: "/project-a",
+          runtime: "claude",
+          sessionId: "session-a",
+          sessionRef: reference,
+          isStreaming: false,
+        },
+      ],
+      messages,
+      sessionId: "session-a",
+      isStreaming: false,
+      activeProjectPath: "/project-a",
+    });
+    vi.mocked(invoke).mockResolvedValueOnce(reference);
+
+    expect(await useClaudeChatStore.getState().rewindToMessage(0)).toBe(
+      "rewound",
+    );
+    allowRewindResend();
+    vi.mocked(invoke).mockRejectedValueOnce("disk busy");
+
+    await useClaudeChatStore.getState().regenerateRewoundUserTurn();
+
+    expect(
+      useClaudeChatStore
+        .getState()
+        .messages.map((message) => message.message?.content?.[0]?.text),
+    ).toEqual(["你好"]);
+    expect(useClaudeChatStore.getState().isStreaming).toBe(false);
+    expect(useClaudeChatStore.getState().error).toMatch(/disk busy/);
+    expect(
+      useClaudeChatStore.getState().tabs[0]?.rewindRegenerate?.prompt,
+    ).toBe("你好");
+    expect(invoke).not.toHaveBeenCalledWith(
+      "runtime_start_turn",
+      expect.anything(),
+    );
   });
 });

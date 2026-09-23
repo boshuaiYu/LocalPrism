@@ -95,5 +95,8 @@ describe("chat rewind control", () => {
         .getState()
         .messages.map((message) => message.message?.content?.[0]?.text),
     ).toEqual(["Rewrite the abstract"]);
+    expect(
+      container.querySelector('[data-testid="rewind-regenerate"]')?.textContent,
+    ).toBe("Regenerate");
   });
 });

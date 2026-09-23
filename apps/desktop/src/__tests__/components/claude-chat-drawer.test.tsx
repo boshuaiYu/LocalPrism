@@ -117,6 +117,8 @@ describe("ClaudeChatDrawer", () => {
     expect(card?.textContent).toContain(detail);
 
     await act(async () => (retry as HTMLButtonElement).click());
-    expect(sendPrompt).toHaveBeenCalledWith("please retry");
+    expect(sendPrompt).toHaveBeenCalledWith("please retry", undefined, {
+      reuseTrailingUserMessage: true,
+    });
   });
 });

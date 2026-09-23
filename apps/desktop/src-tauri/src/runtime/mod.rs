@@ -923,6 +923,14 @@ pub struct RewindConversationRequest {
     pub codex_turn_id: Option<String>,
     #[serde(default)]
     pub user_turn_ordinal: u32,
+    /// Keep the anchor line in the Claude transcript. False drops that user
+    /// turn so the next resume can append it once.
+    #[serde(default = "default_rewind_include_anchor")]
+    pub include_anchor: bool,
+}
+
+fn default_rewind_include_anchor() -> bool {
+    true
 }
 
 /// Drop conversation turns after the anchor. Claude rewrites the session file
@@ -948,6 +956,7 @@ pub async fn runtime_rewind_conversation(
                     text: request.text,
                     ordinal: request.ordinal,
                 },
+                request.include_anchor,
             )?;
             Ok(reference)
         }

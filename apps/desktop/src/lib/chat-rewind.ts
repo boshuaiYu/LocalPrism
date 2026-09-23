@@ -152,3 +152,35 @@ export function rewindAnchor(
     userTurnOrdinal,
   };
 }
+
+/**
+ * Prompt to send again after rewind. Present only when the kept transcript
+ * ends on that user turn, with no assistant reply left after it.
+ */
+export function rewindUserResendPrompt(
+  messages: readonly ClaudeStreamMessage[],
+  index: number,
+): string | null {
+  const end = rewindKeepEnd(messages, index);
+  if (end < index) return null;
+  const target = messages[index];
+  if (!target || !isUserPrompt(target)) return null;
+  for (let cursor = index + 1; cursor <= end; cursor += 1) {
+    const message = messages[cursor];
+    if (!message) continue;
+    if (message.type !== "assistant" && message.type !== "result") continue;
+    if (rewindMatchText(messagePlainText(message)).length > 0) return null;
+  }
+  const prompt = messagePlainText(target).trim();
+  return prompt.length > 0 ? prompt : null;
+}
+
+export function lastUserPromptIndex(
+  messages: readonly ClaudeStreamMessage[],
+): number {
+  let last = -1;
+  for (let index = 0; index < messages.length; index += 1) {
+    if (isUserPrompt(messages[index])) last = index;
+  }
+  return last;
+}
