@@ -512,6 +512,12 @@ describe("RuntimeSelector", () => {
       expect(view.container.textContent).toContain(
         "Choose a provider in Settings → Providers",
       );
+      expect(view.container.textContent).not.toContain("reasoning strength");
+      expect(
+        view.container.querySelector(
+          '[data-testid="reasoning-strength-control"]',
+        ),
+      ).toBeNull();
       expect(
         view.container
           .querySelector('[aria-label="Runtime controls"]')
@@ -534,6 +540,55 @@ describe("RuntimeSelector", () => {
       expect(view.container.textContent).not.toContain("Approvals");
       expect(view.container.textContent).not.toContain("Ask each time");
       expect(view.container.querySelector("#composer-agent-select")).toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  it("hides strength when the selected model cannot adjust it", async () => {
+    const view = await mountSelector({ selectedModelId: "embed-model" });
+    try {
+      useProviderStore.setState({
+        models: [
+          {
+            id: "embed-model",
+            displayName: "Embed",
+            reasoningEfforts: [],
+            isDefault: true,
+          },
+        ],
+      });
+      await view.rerender({ selectedModelId: "embed-model" });
+      expect(
+        view.container.querySelector(
+          '[data-testid="reasoning-strength-control"]',
+        ),
+      ).toBeNull();
+      expect(view.container.textContent?.toLowerCase()).not.toContain(
+        "reasoning strength",
+      );
+      expect(view.container.textContent).not.toContain("Low");
+      expect(view.container.textContent).not.toContain("Medium");
+      expect(view.container.textContent).not.toContain("High");
+
+      useProviderStore.setState({
+        models: [
+          {
+            id: "fixed-model",
+            displayName: "Fixed",
+            reasoningEfforts: ["high"],
+            isDefault: true,
+          },
+        ],
+      });
+      await view.rerender({ selectedModelId: "fixed-model" });
+      expect(
+        view.container.querySelector(
+          '[data-testid="reasoning-strength-control"]',
+        ),
+      ).toBeNull();
+      expect(view.container.textContent).not.toContain("fixed at");
+      expect(view.container.textContent).not.toContain("High");
     } finally {
       await view.unmount();
     }

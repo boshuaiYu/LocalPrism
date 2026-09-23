@@ -139,19 +139,16 @@ describe("reasoningStrengthChipLabel", () => {
     expect(reasoningStrengthChipLabel(control)).toBe("24");
   });
 
-  it("omits a suffix when the model has no adjustable effort", () => {
+  it("omits a suffix when the model cannot adjust strength", () => {
     const missing = deriveReasoningStrength(
       { id: "embed", reasoningEfforts: [] },
       "medium",
     );
-    expect(reasoningStrengthChipLabel(missing)).toBeNull();
-  });
-
-  it("keeps a single advertised effort because the model defines it", () => {
     const fixed = deriveReasoningStrength(
       { id: "fixed", reasoningEfforts: ["high"] },
       "low",
     );
-    expect(reasoningStrengthChipLabel(fixed)).toBe("High");
+    expect(reasoningStrengthChipLabel(missing)).toBeNull();
+    expect(reasoningStrengthChipLabel(fixed)).toBeNull();
   });
 });

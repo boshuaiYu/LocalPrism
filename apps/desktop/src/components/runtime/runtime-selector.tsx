@@ -15,6 +15,7 @@ import {
 } from "@/lib/reasoning-effort";
 import {
   deriveReasoningStrength,
+  reasoningStrengthIsAdjustable,
   reasoningStrengthWireValue,
 } from "@/lib/reasoning-strength";
 import { cn } from "@/lib/utils";
@@ -311,6 +312,7 @@ export function RuntimeSelector({
     selectedModel,
     reasoningEffort ?? selectedClaudeEffort,
   );
+  const adjustableStrength = reasoningStrengthIsAdjustable(strengthControl);
   const selectedEffort = reasoningStrengthWireValue(strengthControl);
   const fastPair = useMemo(
     () => resolveFastModelPair(selectedModel?.id, providerModels),
@@ -385,59 +387,63 @@ export function RuntimeSelector({
           ))
         )}
 
-        <div className="mt-1 flex flex-col gap-2 border-border border-t px-2 pt-2 pb-2">
-          {fastPair ? (
-            <button
-              type="button"
-              data-testid="reasoning-effort-fast-toggle"
-              aria-label={
-                selectedModel?.id === fastPair.fastId
-                  ? "Disable fast model"
-                  : "Enable fast model"
-              }
-              aria-pressed={selectedModel?.id === fastPair.fastId}
-              disabled={busy || !providerReady}
-              className={cn(
-                "flex h-7 items-center gap-1.5 self-start rounded-full px-2 text-xs",
-                selectedModel?.id === fastPair.fastId
-                  ? "bg-[#C17A5C]/15 text-[#C17A5C]"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                "disabled:cursor-not-allowed disabled:opacity-40",
-              )}
-              onClick={() => {
-                const enabled = selectedModel?.id === fastPair.fastId;
-                const nextId = enabled ? fastPair.baseId : fastPair.fastId;
-                const nextModel = providerModels.find(
-                  (model) => model.id === nextId,
-                );
-                applySelection(
-                  nextId,
-                  resolveReasoningEffort(
-                    selectedEffort,
-                    normalizeReasoningEffortOptions(
-                      nextModel?.reasoningEfforts,
+        {fastPair || adjustableStrength ? (
+          <div className="mt-1 flex flex-col gap-2 border-border border-t px-2 pt-2 pb-2">
+            {fastPair ? (
+              <button
+                type="button"
+                data-testid="reasoning-effort-fast-toggle"
+                aria-label={
+                  selectedModel?.id === fastPair.fastId
+                    ? "Disable fast model"
+                    : "Enable fast model"
+                }
+                aria-pressed={selectedModel?.id === fastPair.fastId}
+                disabled={busy || !providerReady}
+                className={cn(
+                  "flex h-7 items-center gap-1.5 self-start rounded-full px-2 text-xs",
+                  selectedModel?.id === fastPair.fastId
+                    ? "bg-[#C17A5C]/15 text-[#C17A5C]"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                  "disabled:cursor-not-allowed disabled:opacity-40",
+                )}
+                onClick={() => {
+                  const enabled = selectedModel?.id === fastPair.fastId;
+                  const nextId = enabled ? fastPair.baseId : fastPair.fastId;
+                  const nextModel = providerModels.find(
+                    (model) => model.id === nextId,
+                  );
+                  applySelection(
+                    nextId,
+                    resolveReasoningEffort(
+                      selectedEffort,
+                      normalizeReasoningEffortOptions(
+                        nextModel?.reasoningEfforts,
+                      ),
                     ),
-                  ),
-                  agentId,
-                );
-              }}
-            >
-              Fast
-            </button>
-          ) : null}
-          <ReasoningStrengthControl
-            control={strengthControl}
-            layout="narrow"
-            disabled={busy || !providerReady || !selectedModel}
-            onChange={(effort) =>
-              applySelection(
-                selectedModel?.id ?? selectedClaudeModel,
-                effort,
-                agentId,
-              )
-            }
-          />
-        </div>
+                    agentId,
+                  );
+                }}
+              >
+                Fast
+              </button>
+            ) : null}
+            {adjustableStrength ? (
+              <ReasoningStrengthControl
+                control={strengthControl}
+                layout="narrow"
+                disabled={busy || !providerReady || !selectedModel}
+                onChange={(effort) =>
+                  applySelection(
+                    selectedModel?.id ?? selectedClaudeModel,
+                    effort,
+                    agentId,
+                  )
+                }
+              />
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </section>
   );

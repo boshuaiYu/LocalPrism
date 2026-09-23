@@ -312,10 +312,23 @@ export function reasoningStrengthWireValue(
   return control.value;
 }
 
-/** Model-driven effort suffix for the composer chip. Null when the catalog lists none. */
+export type AdjustableReasoningStrength = Exclude<
+  ReasoningStrengthControl,
+  { kind: "unavailable" }
+>;
+
+/** True only when metadata gives the user a strength choice or range. */
+export function reasoningStrengthIsAdjustable(
+  control: ReasoningStrengthControl,
+): control is AdjustableReasoningStrength {
+  return control.kind !== "unavailable";
+}
+
+/** Model-driven effort suffix. Hidden when strength cannot be adjusted. */
 export function reasoningStrengthChipLabel(
   control: ReasoningStrengthControl,
 ): string | null {
+  if (!reasoningStrengthIsAdjustable(control)) return null;
   if (control.kind === "discrete") {
     const label =
       control.options.find((option) => option.value === control.value)?.label ??
@@ -323,8 +336,5 @@ export function reasoningStrengthChipLabel(
     const trimmed = label.trim();
     return trimmed || null;
   }
-  if (control.kind === "continuous") return String(control.value);
-  if (!control.value) return null;
-  const fixed = formatReasoningEffortLabel(control.value).trim();
-  return fixed || null;
+  return String(control.value);
 }
