@@ -20,6 +20,9 @@ interface SettingsState {
   setPermissionMode: (mode: PermissionMode) => void;
   uiLanguage: UiLanguage;
   setUiLanguage: (language: UiLanguage) => void;
+  /** True after the one-time built-in agent preset install has finished. */
+  builtinAgentPresetsSeeded: boolean;
+  setBuiltinAgentPresetsSeeded: (seeded: boolean) => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -37,6 +40,9 @@ export const useSettingsStore = create<SettingsState>()(
       uiLanguage: "en",
       setUiLanguage: (language) =>
         set({ uiLanguage: isUiLanguage(language) ? language : "en" }),
+      builtinAgentPresetsSeeded: false,
+      setBuiltinAgentPresetsSeeded: (seeded) =>
+        set({ builtinAgentPresetsSeeded: seeded }),
     }),
     {
       name: "claude-prism-settings",
@@ -48,6 +54,7 @@ export const useSettingsStore = create<SettingsState>()(
           autoCompile: state.autoCompile ?? true,
           permissionMode: normalizePermissionMode(state.permissionMode),
           uiLanguage: isUiLanguage(state.uiLanguage) ? state.uiLanguage : "en",
+          builtinAgentPresetsSeeded: state.builtinAgentPresetsSeeded === true,
         };
       },
       merge: (persisted, current) => {
@@ -61,6 +68,7 @@ export const useSettingsStore = create<SettingsState>()(
           uiLanguage: isUiLanguage(state.uiLanguage)
             ? state.uiLanguage
             : current.uiLanguage,
+          builtinAgentPresetsSeeded: state.builtinAgentPresetsSeeded === true,
         };
       },
     },

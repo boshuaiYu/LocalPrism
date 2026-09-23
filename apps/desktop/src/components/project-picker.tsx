@@ -66,7 +66,6 @@ import { areDefaultSkillPacksReady } from "@/lib/default-skill-packs";
 import { useAgentStore } from "@/stores/agent-store";
 import { useSkillStore } from "@/stores/skill-store";
 import { cn } from "@/lib/utils";
-import { LanguageSwitch } from "@/components/language-switch";
 import { useI18n } from "@/lib/use-i18n";
 
 interface DefaultProject {
@@ -303,7 +302,6 @@ export function ProjectPicker() {
             <MoonIcon className="size-4" />
           )}
         </Button>
-        <LanguageSwitch compact />
         <Button
           variant="ghost"
           className="h-8 gap-2 rounded-lg px-2 text-muted-foreground hover:text-foreground"

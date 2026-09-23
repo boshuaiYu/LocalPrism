@@ -149,6 +149,9 @@ describe("ProjectPicker runtime settings", () => {
     );
     expect(container.textContent).toContain("New Project");
     expect(container.textContent).toContain("Open Folder");
+    expect(
+      container.querySelector('[data-testid="language-switch"]'),
+    ).toBeNull();
 
     await act(async () => findButton(container, "Settings").click());
 

@@ -66,6 +66,9 @@ describe("Sidebar reset layout", () => {
     const button = resets[0];
     expect(button).toBeInstanceOf(HTMLButtonElement);
     expect(button?.textContent).toMatch(/Reset layout/);
+    expect(
+      container.querySelector('[data-testid="language-switch"]'),
+    ).toBeNull();
     expect(button?.closest("[data-radix-hover-card-content]")).toBeNull();
 
     await act(async () => (button as HTMLButtonElement).click());

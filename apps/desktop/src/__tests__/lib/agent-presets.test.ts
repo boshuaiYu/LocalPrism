@@ -5,6 +5,7 @@ import {
   DE_AI_INSTRUCTIONS,
   PEER_REVIEW_INSTRUCTIONS,
   buildPresetAgentProfile,
+  builtinPresetProfilesToSeed,
 } from "@/lib/agent-presets";
 import type { RuntimeSkill, SkillScope } from "@/runtime/types";
 
@@ -208,5 +209,52 @@ describe("builtin agent presets", () => {
 
     expect(profile.scope).toBe("user");
     expect(profile.skillIds).toEqual([]);
+  });
+
+  it("seeds the three missing user presets and skips ids that already exist", () => {
+    const skills = [
+      skill("academic-polish", "user"),
+      skill("writing-clarity", "user", { name: "Writing Clarity" }),
+      skill("humanizer-academic", "user"),
+      skill("citation-check", "user", { name: "Citation Check" }),
+      skill("zotero-cite", "user"),
+      skill("bibtex-check", "user"),
+      skill("latex-guard", "project"),
+    ];
+    const profiles = builtinPresetProfilesToSeed(
+      [
+        {
+          id: "academic-polish",
+          scope: "user",
+        },
+        {
+          id: "peer-review",
+          scope: "project",
+        },
+      ],
+      skills,
+    );
+
+    expect(profiles.map((profile) => profile.id)).toEqual([
+      "de-ai",
+      "peer-review",
+    ]);
+    expect(profiles.every((profile) => profile.scope === "user")).toBe(true);
+    expect(
+      profiles.find((profile) => profile.id === "de-ai")?.skillIds,
+    ).toEqual(["humanizer-academic"]);
+    const review = profiles.find((profile) => profile.id === "peer-review");
+    expect(review?.skillIds).toEqual([]);
+    expect(review?.instructions).toBe(PEER_REVIEW_INSTRUCTIONS);
+    expect(review?.instructions).not.toMatch(/zotero|bibtex/i);
+    expect(
+      profiles.flatMap((profile) => profile.skillIds).join(" "),
+    ).not.toMatch(/citation|zotero|bibtex/);
+  });
+
+  it("seeds all three presets when the agent list is empty", () => {
+    expect(
+      builtinPresetProfilesToSeed([], []).map((profile) => profile.id),
+    ).toEqual(["academic-polish", "de-ai", "peer-review"]);
   });
 });

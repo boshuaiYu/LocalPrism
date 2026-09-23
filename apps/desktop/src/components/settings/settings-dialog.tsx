@@ -40,7 +40,15 @@ export function SettingsDialog({
           <DialogDescription className="text-lp-meta">
             {t("settings.description")}
           </DialogDescription>
-          <LanguageSwitch />
+          <div
+            data-testid="settings-language"
+            className="flex items-center justify-between gap-3"
+          >
+            <span className="text-muted-foreground text-xs">
+              {t("language.label")}
+            </span>
+            <LanguageSwitch />
+          </div>
         </DialogHeader>
 
         <Tabs
@@ -60,7 +68,10 @@ export function SettingsDialog({
             value="runtimes"
             className="mt-0 min-h-0 flex-1 overflow-y-auto"
           >
-            <RuntimeSettings />
+            <div className="flex flex-col gap-4">
+              <RuntimeSettings />
+              <UpdateSettings />
+            </div>
           </TabsContent>
 
           <TabsContent
@@ -77,7 +88,6 @@ export function SettingsDialog({
             <AgentLibrary projectPath={projectPath} />
           </TabsContent>
         </Tabs>
-        <UpdateSettings />
       </DialogContent>
     </Dialog>
   );

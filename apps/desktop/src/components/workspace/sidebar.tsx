@@ -33,7 +33,6 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
-import { LanguageSwitch } from "@/components/language-switch";
 import { LatexOutline } from "@/components/workspace/latex-outline";
 import { useI18n } from "@/lib/use-i18n";
 import {
@@ -1326,7 +1325,6 @@ export function Sidebar({
               <span className="block truncate">{projectName}</span>
             </button>
             <div className="flex items-center justify-end gap-1">
-              <LanguageSwitch compact />
               <LayoutPaneSwitcher
                 controls={layoutControls}
                 collapsed={collapsed}

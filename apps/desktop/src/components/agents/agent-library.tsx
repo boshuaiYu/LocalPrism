@@ -28,6 +28,10 @@ export function AgentLibrary({ projectPath = null }: AgentLibraryProps) {
   const [preparingPreset, setPreparingPreset] = useState(false);
   const presetRequest = useRef(0);
   const { t } = useI18n();
+  const installedIds = new Set(agents.map((agent) => agent.id));
+  const missingPresets = BUILTIN_AGENT_PRESETS.filter(
+    (preset) => !installedIds.has(preset.id),
+  );
 
   useEffect(() => {
     void refresh("claude", projectPath ?? undefined);
@@ -146,16 +150,22 @@ export function AgentLibrary({ projectPath = null }: AgentLibraryProps) {
             </div>
           </li>
         ))}
-        {!loading && agents.length === 0 && !creating && !editing && (
+        {!loading && missingPresets.length > 0 && !creating && !editing && (
           <li data-testid="agent-preset-empty" className="space-y-3">
-            <div>
-              <p className="font-medium text-sm">{t("agents.empty")}</p>
-              <p className="mt-1 text-muted-foreground text-xs">
-                {t("agents.emptyHint")}
+            {agents.length === 0 ? (
+              <div>
+                <p className="font-medium text-sm">{t("agents.empty")}</p>
+                <p className="mt-1 text-muted-foreground text-xs">
+                  {t("agents.emptyHint")}
+                </p>
+              </div>
+            ) : (
+              <p className="text-muted-foreground text-xs">
+                {t("agents.missingPresets")}
               </p>
-            </div>
+            )}
             <div className="grid gap-2">
-              {BUILTIN_AGENT_PRESETS.map((preset) => (
+              {missingPresets.map((preset) => (
                 <button
                   key={preset.id}
                   type="button"
@@ -174,16 +184,18 @@ export function AgentLibrary({ projectPath = null }: AgentLibraryProps) {
                   </p>
                 </button>
               ))}
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                data-testid="agent-preset-custom"
-                disabled={preparingPreset}
-                onClick={startCustom}
-              >
-                {t("agents.custom")}
-              </Button>
+              {agents.length === 0 && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  data-testid="agent-preset-custom"
+                  disabled={preparingPreset}
+                  onClick={startCustom}
+                >
+                  {t("agents.custom")}
+                </Button>
+              )}
             </div>
             {preparingPreset && (
               <p className="text-muted-foreground text-xs">

@@ -162,6 +162,32 @@ function uniqueAssignmentIds(skills: RuntimeSkill[]): string[] {
   return ids;
 }
 
+/** User-scope preset ids that are not already saved. Existing ids are left alone. */
+export function builtinPresetIdsToSeed(
+  agents: readonly { id: string; scope?: string }[],
+): BuiltinAgentPresetId[] {
+  const installed = new Set(
+    agents.filter((agent) => agent.scope === "user").map((agent) => agent.id),
+  );
+  return BUILTIN_AGENT_PRESETS.map((preset) => preset.id).filter(
+    (id) => !installed.has(id),
+  );
+}
+
+/**
+ * Profiles to create on first seed. No project path, so presets stay user-scoped
+ * and only already-installed user skills are attached. Peer Review stays
+ * critique-only. Citation, BibTeX, and Zotero skills are never attached.
+ */
+export function builtinPresetProfilesToSeed(
+  agents: readonly { id: string; scope?: string }[],
+  skills: RuntimeSkill[],
+): AgentProfile[] {
+  return builtinPresetIdsToSeed(agents).map((id) =>
+    buildPresetAgentProfile(id, skills),
+  );
+}
+
 export function builtinAgentPreset(
   id: BuiltinAgentPresetId,
 ): BuiltinAgentPreset {

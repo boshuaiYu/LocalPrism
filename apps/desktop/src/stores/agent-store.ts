@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
+import { builtinPresetProfilesToSeed } from "@/lib/agent-presets";
 import type { AgentProfile, RuntimeKind, SkillScope } from "@/runtime/types";
+import { useSettingsStore } from "@/stores/settings-store";
 
 export interface AgentStoreState {
   agents: AgentProfile[];
@@ -20,6 +22,32 @@ export interface AgentStoreState {
     projectPath?: string,
   ) => Promise<AgentProfile>;
   compatible: (runtime: RuntimeKind) => AgentProfile[];
+  /**
+   * Create missing built-in presets once. Existing ids are not overwritten.
+   * Later deletions stay deleted until the user adds a preset again.
+   */
+  ensureBuiltinPresets: () => Promise<void>;
+}
+
+let builtinPresetSeed: Promise<void> | null = null;
+
+export function resetBuiltinPresetSeedForTests() {
+  builtinPresetSeed = null;
+}
+
+function agentAlreadyExists(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /already exists/i.test(message);
+}
+
+function whenSettingsHydrated(): Promise<void> {
+  if (useSettingsStore.persist.hasHydrated()) return Promise.resolve();
+  return new Promise((resolve) => {
+    const unsubscribe = useSettingsStore.persist.onFinishHydration(() => {
+      unsubscribe();
+      resolve();
+    });
+  });
 }
 
 export function emptyAgentProfile(
@@ -115,4 +143,43 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   compatible: (runtime) =>
     get().agents.filter((agent) => agent.runtime === runtime),
+
+  ensureBuiltinPresets: () => {
+    if (
+      useSettingsStore.persist.hasHydrated() &&
+      useSettingsStore.getState().builtinAgentPresetsSeeded
+    ) {
+      return Promise.resolve();
+    }
+    if (builtinPresetSeed) return builtinPresetSeed;
+    builtinPresetSeed = (async () => {
+      await whenSettingsHydrated();
+      if (useSettingsStore.getState().builtinAgentPresetsSeeded) return;
+      const { useSkillStore } = await import("@/stores/skill-store");
+      await useSkillStore.getState().refresh();
+      await get().refresh("claude");
+      const profiles = builtinPresetProfilesToSeed(
+        get().agents,
+        useSkillStore.getState().skills ?? [],
+      );
+      let failed = false;
+      for (const profile of profiles) {
+        try {
+          await get().save(profile, undefined, false);
+        } catch (error) {
+          if (!agentAlreadyExists(error)) {
+            failed = true;
+            continue;
+          }
+          set({ error: null, loading: false });
+        }
+      }
+      if (!failed) {
+        useSettingsStore.getState().setBuiltinAgentPresetsSeeded(true);
+      }
+    })().finally(() => {
+      builtinPresetSeed = null;
+    });
+    return builtinPresetSeed;
+  },
 }));

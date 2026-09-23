@@ -837,6 +837,15 @@ describe("ChatComposer provider wiring", () => {
       }
       expect(trigger.textContent).toContain("Opus");
       expect(trigger.textContent).toContain("High");
+      const triggerClasses = trigger.className.split(/\s+/);
+      expect(triggerClasses).toContain("w-fit");
+      expect(triggerClasses).toContain("self-start");
+      expect(triggerClasses).not.toContain("w-full");
+      expect(triggerClasses).not.toContain("flex-1");
+      expect(triggerClasses).not.toContain("justify-between");
+      expect(
+        trigger.querySelector("span")?.className.split(/\s+/),
+      ).not.toContain("flex-1");
       expect(
         document.querySelector('[data-testid="reasoning-strength-control"]'),
       ).toBeNull();

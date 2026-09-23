@@ -91,7 +91,10 @@ export function UpdateSettings() {
   const busy = status.state === "checking" || status.state === "downloading";
 
   return (
-    <section className="lp-panel shrink-0 rounded-xl border p-4">
+    <section
+      data-testid="update-settings"
+      className="lp-panel shrink-0 rounded-xl border p-4"
+    >
       <h3 className="font-medium text-sm">Updates</h3>
       <p className="mt-1 text-lp-meta text-sm leading-relaxed">
         {statusCopy(status)} In-app install applies to the AppImage, macOS, and

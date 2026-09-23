@@ -113,9 +113,14 @@ describe("AgentLibrary presets", () => {
     ).toBeTruthy();
   });
 
-  it("hides presets once an agent exists", async () => {
+  it("hides preset cards when the built-in agents are already installed", async () => {
+    const installed = ["academic-polish", "de-ai", "peer-review"].map((id) => ({
+      ...installedAgent(),
+      id,
+      name: id,
+    }));
     invokeMock.mockImplementation((command: string) => {
-      if (command === "list_agents") return Promise.resolve([installedAgent()]);
+      if (command === "list_agents") return Promise.resolve(installed);
       return Promise.resolve([]);
     });
 
@@ -124,10 +129,41 @@ describe("AgentLibrary presets", () => {
     });
 
     await vi.waitFor(() => {
-      expect(container.textContent).toContain("Existing Agent");
+      expect(container.textContent).toContain("academic-polish");
     });
     expect(
       container.querySelector("[data-testid='agent-preset-empty']"),
+    ).toBeNull();
+  });
+
+  it("keeps a card for a built-in preset that was deleted", async () => {
+    const installed = ["academic-polish", "de-ai"].map((id) => ({
+      ...installedAgent(),
+      id,
+      name: id,
+    }));
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "list_agents") return Promise.resolve(installed);
+      return Promise.resolve([]);
+    });
+
+    await act(async () => {
+      root.render(<AgentLibrary />);
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        container.querySelector("[data-testid='agent-preset-peer-review']"),
+      ).toBeTruthy();
+    });
+    expect(container.textContent).toContain(
+      "Built-in presets you can add back.",
+    );
+    expect(
+      container.querySelector("[data-testid='agent-preset-academic-polish']"),
+    ).toBeNull();
+    expect(
+      container.querySelector("[data-testid='agent-preset-de-ai']"),
     ).toBeNull();
   });
 

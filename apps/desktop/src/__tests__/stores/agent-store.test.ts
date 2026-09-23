@@ -6,8 +6,13 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invoke(...args),
 }));
 
-import { emptyAgentProfile, useAgentStore } from "@/stores/agent-store";
-import type { AgentProfile } from "@/runtime/types";
+import {
+  emptyAgentProfile,
+  resetBuiltinPresetSeedForTests,
+  useAgentStore,
+} from "@/stores/agent-store";
+import { useSettingsStore } from "@/stores/settings-store";
+import type { AgentProfile, RuntimeSkill } from "@/runtime/types";
 
 function sampleAgent(overrides: Partial<AgentProfile> = {}): AgentProfile {
   return {
@@ -30,6 +35,8 @@ describe("agent-store", () => {
       loading: false,
       error: null,
     });
+    useSettingsStore.setState({ builtinAgentPresetsSeeded: false });
+    resetBuiltinPresetSeedForTests();
   });
 
   it("refreshes agents for a runtime", async () => {
@@ -147,4 +154,124 @@ describe("agent-store", () => {
       ),
     ).toBe(false);
   });
+
+  it("seeds three built-in presets once and does not overwrite an edited one", async () => {
+    const edited = sampleAgent({
+      id: "academic-polish",
+      name: "My polish",
+      instructions: "Custom instructions stay",
+    });
+    const saved: AgentProfile[] = [];
+    invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "skill_list") {
+        return Promise.resolve([
+          presetSkill("academic-polish", "Academic Polish"),
+          presetSkill("humanizer-academic", "Humanizer"),
+          presetSkill("zotero-cite", "Zotero Cite"),
+          presetSkill("citation-check", "Citation Check"),
+        ]);
+      }
+      if (command === "list_agents") {
+        return Promise.resolve([edited, ...saved]);
+      }
+      if (command === "save_agent") {
+        const payload = args as {
+          profile: AgentProfile;
+          overwrite: boolean;
+          projectPath: string | null;
+        };
+        expect(payload.overwrite).toBe(false);
+        expect(payload.projectPath).toBeNull();
+        const stored = {
+          ...payload.profile,
+          sourcePath: `/agents/${payload.profile.id}.md`,
+        };
+        saved.push(stored);
+        return Promise.resolve(stored);
+      }
+      return Promise.resolve([]);
+    });
+
+    await useAgentStore.getState().ensureBuiltinPresets();
+
+    expect(saved.map((agent) => agent.id)).toEqual(["de-ai", "peer-review"]);
+    expect(saved.find((agent) => agent.id === "de-ai")?.skillIds).toEqual([
+      "humanizer-academic",
+    ]);
+    expect(saved.find((agent) => agent.id === "peer-review")?.skillIds).toEqual(
+      [],
+    );
+    expect(saved.flatMap((agent) => agent.skillIds).join(" ")).not.toMatch(
+      /zotero|citation/,
+    );
+    expect(useSettingsStore.getState().builtinAgentPresetsSeeded).toBe(true);
+
+    invoke.mockClear();
+    await useAgentStore.getState().ensureBuiltinPresets();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("treats an existing preset file as success without forcing overwrite", async () => {
+    const saved: AgentProfile[] = [];
+    invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "skill_list") return Promise.resolve([]);
+      if (command === "list_agents") return Promise.resolve(saved);
+      if (command === "save_agent") {
+        const payload = args as {
+          profile: AgentProfile;
+          overwrite: boolean;
+        };
+        expect(payload.overwrite).toBe(false);
+        if (payload.profile.id === "academic-polish") {
+          return Promise.reject(
+            new Error(
+              "Agent 'academic-polish' already exists at /agents/academic-polish.md. Pass overwrite=true to replace it.",
+            ),
+          );
+        }
+        const stored = {
+          ...payload.profile,
+          sourcePath: `/agents/${payload.profile.id}.md`,
+        };
+        saved.push(stored);
+        return Promise.resolve(stored);
+      }
+      return Promise.resolve([]);
+    });
+
+    await useAgentStore.getState().ensureBuiltinPresets();
+
+    expect(useSettingsStore.getState().builtinAgentPresetsSeeded).toBe(true);
+    expect(useAgentStore.getState().error).toBeNull();
+    expect(saved.map((agent) => agent.id)).toEqual(["de-ai", "peer-review"]);
+  });
+
+  it("does not mark presets seeded when saving fails", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "skill_list" || command === "list_agents") {
+        return Promise.resolve([]);
+      }
+      return Promise.reject(new Error("disk full"));
+    });
+
+    await useAgentStore.getState().ensureBuiltinPresets();
+
+    expect(useSettingsStore.getState().builtinAgentPresetsSeeded).toBe(false);
+    expect(useAgentStore.getState().error).toContain("disk full");
+  });
 });
+
+function presetSkill(folder: string, name: string): RuntimeSkill {
+  return {
+    id: `claude:user:${folder}`,
+    name,
+    description: name,
+    folder,
+    sourcePath: `/skills/user/${folder}`,
+    targets: [{ runtime: "claude", scope: "user" }],
+    managed: true,
+    compatibleRuntimes: ["claude"],
+    enabled: true,
+    discoveryError: null,
+  };
+}
