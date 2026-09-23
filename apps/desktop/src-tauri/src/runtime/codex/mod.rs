@@ -486,6 +486,38 @@ where
     Ok(())
 }
 
+pub(super) async fn fork_thread(
+    app: &tauri::AppHandle,
+    state: &CodexAppServerState,
+    thread_id: String,
+    last_turn_id: Option<String>,
+) -> Result<String, String> {
+    fork_thread_with_request(thread_id, last_turn_id, |method, params| {
+        state.request(app, method, params)
+    })
+    .await
+}
+
+async fn fork_thread_with_request<F, Fut>(
+    thread_id: String,
+    last_turn_id: Option<String>,
+    mut request: F,
+) -> Result<String, String>
+where
+    F: FnMut(&'static str, Value) -> Fut,
+    Fut: Future<Output = Result<Value, String>>,
+{
+    let params = serde_json::to_value(protocol::ThreadForkParams::new(thread_id, last_turn_id))
+        .map_err(|error| format!("Failed to serialize Codex thread fork: {error}"))?;
+    let response = request("thread/fork", params).await?;
+    let response: protocol::ThreadForkResponse = serde_json::from_value(response)
+        .map_err(|error| format!("Invalid Codex thread fork response: {error}"))?;
+    if response.thread.id.trim().is_empty() {
+        return Err("Codex fork did not return a thread id".into());
+    }
+    Ok(response.thread.id)
+}
+
 pub(super) async fn archive_thread(
     app: &tauri::AppHandle,
     state: &CodexAppServerState,

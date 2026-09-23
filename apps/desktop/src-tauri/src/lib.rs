@@ -639,6 +639,7 @@ pub fn run() {
             runtime::runtime_interrupt_turn,
             runtime::runtime_list_conversations,
             runtime::runtime_read_conversation,
+            runtime::runtime_rewind_conversation,
             runtime::runtime_archive_conversation,
             runtime::runtime_approvals_set_ready,
             runtime::runtime_request_respond,

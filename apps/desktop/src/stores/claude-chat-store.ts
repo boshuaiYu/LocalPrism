@@ -32,6 +32,11 @@ import {
   prependCompressionCarryover,
   summarizeTranscriptLocally,
 } from "@/lib/chat-compression";
+import {
+  canRewindTo,
+  rewindAnchor,
+  rewindKeepEnd,
+} from "@/lib/chat-rewind";
 import { uiText } from "@/lib/use-i18n";
 import { sameProjectPath } from "./chat-persistence";
 import { useSettingsStore } from "./settings-store";
@@ -41,6 +46,7 @@ import { cleanupTemporaryChatFiles } from "@/lib/chat-temporary-files";
 import {
   interruptRuntimeTurn,
   runtimeReadConversation,
+  runtimeRewindConversation,
   startRuntimeTurn,
 } from "@/runtime/commands";
 import type {
@@ -155,6 +161,10 @@ export interface ClaudeStreamMessage {
   result?: string;
   is_error?: boolean;
   num_turns?: number;
+  /** Codex app-server turn that produced this message. */
+  codexTurnId?: string;
+  /** Store index on display copies so rewind maps back past filtered rows. */
+  rewindIndex?: number;
   /** Folded earlier turns. Originals stay attached so the summary is not a silent delete. */
   contextSummary?: {
     text: string;
@@ -221,6 +231,7 @@ function nextResumeRequestId(tabId: string): string {
 
 const pendingRuntimeStarts = new Map<string, Promise<void>>();
 const compressionInFlight = new Set<string>();
+const rewindInFlight = new Set<string>();
 
 export interface TabState {
   id: string;
@@ -251,6 +262,10 @@ export interface TabState {
   totalInputTokens: number;
   totalOutputTokens: number;
   lastTurnUsage?: TokenUsageSnapshot | null;
+  /** Context window reported by the runtime for this conversation. */
+  contextWindowTokens?: number | null;
+  /** Codex turn that later messages in this tab should inherit. */
+  activeCodexTurnId?: string | null;
   draft: TabDraft;
   queuedGuidance?: QueuedGuidance[];
   forceQueuedGuidanceOnComplete?: boolean;
@@ -482,6 +497,22 @@ function usageFromMessage(msg: ClaudeStreamMessage): {
   };
 }
 
+function conversationReferenceForTab(
+  tab: TabState,
+  fallbackProjectPath: string | null,
+): ConversationRef | null {
+  if (tab.sessionRef?.sessionId && tab.sessionRef.projectPath) {
+    return tab.sessionRef;
+  }
+  const projectPath = tab.projectPath ?? fallbackProjectPath;
+  if (!tab.sessionId || !projectPath) return null;
+  return {
+    runtime: tab.runtime,
+    sessionId: tab.sessionId,
+    projectPath,
+  };
+}
+
 function usageTotalsForMessages(messages: ClaudeStreamMessage[]): {
   inputTokens: number;
   outputTokens: number;
@@ -617,11 +648,16 @@ function codexHistoryMessages(items: unknown[]): ClaudeStreamMessage[] {
     if (!item || typeof item !== "object") continue;
     const record = item as Record<string, unknown>;
     const type = typeof record.type === "string" ? record.type : "";
+    const codexTurnId =
+      typeof record.turnId === "string" && record.turnId.trim()
+        ? record.turnId.trim()
+        : undefined;
     if (type === "userMessage") {
       const text = codexTextFragments(record.text ?? record.content).join("\n");
       if (text) {
         messages.push({
           type: "user",
+          ...(codexTurnId ? { codexTurnId } : {}),
           message: { content: [{ type: "text", text }] },
         });
       }
@@ -630,6 +666,7 @@ function codexHistoryMessages(items: unknown[]): ClaudeStreamMessage[] {
       if (text) {
         messages.push({
           type: "assistant",
+          ...(codexTurnId ? { codexTurnId } : {}),
           message: { content: [{ type: "text", text }] },
         });
       }
@@ -641,6 +678,7 @@ function codexHistoryMessages(items: unknown[]): ClaudeStreamMessage[] {
         messages.push({
           type: "assistant",
           subtype: "reasoning",
+          ...(codexTurnId ? { codexTurnId } : {}),
           message: { content: [{ type: "thinking", thinking }] },
         });
       }
@@ -1055,6 +1093,9 @@ interface ClaudeChatState {
     force?: boolean;
     summarize?: (transcript: string) => Promise<string> | string;
   }) => Promise<"compressed" | "skipped" | "failed">;
+  rewindToMessage: (
+    index: number,
+  ) => Promise<"rewound" | "skipped" | "failed">;
   resetForProject: (projectPath: string | null) => ProjectChatResetResult;
   resumeConversation: (
     reference: ConversationRef,
@@ -1094,8 +1135,13 @@ interface ClaudeChatState {
     tabId: string,
     inputTokens: number,
     outputTokens: number,
-    extras?: { cacheReadTokens?: number; cacheCreationTokens?: number },
+    extras?: {
+      cacheReadTokens?: number;
+      cacheCreationTokens?: number;
+      contextWindow?: number | null;
+    },
   ) => void;
+  _tagCodexTurn: (tabId: string, turnId: string) => void;
   _consumeAttemptCancellation: (
     tabId: string,
     attemptId: string,
@@ -2350,6 +2396,102 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     }
   },
 
+  rewindToMessage: async (index) => {
+    const state = get();
+    const tabId = state.activeTabId;
+    const tab = state.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab || tab.isStreaming || (tab.cancelledAttempts?.length ?? 0) > 0) {
+      return "skipped";
+    }
+    if (rewindInFlight.has(tabId) || !canRewindTo(tab.messages, index)) {
+      return "skipped";
+    }
+    const anchor = rewindAnchor(tab.messages, index);
+    const end = rewindKeepEnd(tab.messages, index);
+    if (!anchor || end < 0) return "skipped";
+    const projectPath =
+      state.activeProjectPath ?? useDocumentStore.getState().projectRoot;
+    if (
+      projectPath &&
+      tab.projectPath &&
+      !sameProjectPath(tab.projectPath, projectPath)
+    ) {
+      return "skipped";
+    }
+
+    rewindInFlight.add(tabId);
+    const snapshotLength = tab.messages.length;
+    try {
+      const reference = conversationReferenceForTab(tab, projectPath);
+      let nextReference = reference;
+      if (reference?.sessionId) {
+        try {
+          nextReference = await runtimeRewindConversation({
+            reference,
+            role: anchor.role,
+            text: anchor.text,
+            ordinal: anchor.ordinal,
+            codexTurnId: anchor.codexTurnId,
+            userTurnOrdinal: anchor.userTurnOrdinal,
+          });
+        } catch (error) {
+          const detail =
+            error instanceof Error
+              ? error.message
+              : typeof error === "string"
+                ? error
+                : "";
+          set((current) => {
+            const currentTab = current.tabs.find(
+              (candidate) => candidate.id === tabId,
+            );
+            if (!currentTab || currentTab.messages.length !== snapshotLength) {
+              return {};
+            }
+            return applyTabUpdate(current, tabId, {
+              error: uiText("errors.rewindFailed", { detail }),
+            });
+          });
+          return "failed";
+        }
+      }
+
+      const currentTab = get().tabs.find((candidate) => candidate.id === tabId);
+      if (
+        !currentTab ||
+        currentTab.isStreaming ||
+        currentTab.messages.length !== snapshotLength
+      ) {
+        return "skipped";
+      }
+      const messages = currentTab.messages.slice(0, end + 1);
+      const totals = usageTotalsForMessages(messages);
+      const keptSummary = messages.some(
+        (message) => message.subtype === "context-summary",
+      );
+      set((current) =>
+        applyTabUpdate(current, tabId, {
+          messages,
+          ...(nextReference ? { sessionRef: nextReference } : {}),
+          totalInputTokens: totals.inputTokens,
+          totalOutputTokens: totals.outputTokens,
+          lastTurnUsage: lastTurnUsageFromMessages(messages),
+          activeCodexTurnId: null,
+          error: null,
+          compressionCarryover: keptSummary
+            ? (currentTab.compressionCarryover ?? null)
+            : null,
+          queuedGuidance: [],
+          forceQueuedGuidanceOnComplete: false,
+          forcedQueuedGuidanceId: null,
+        }),
+      );
+      return "rewound";
+    } finally {
+      rewindInFlight.delete(tabId);
+    }
+  },
+
   changeTabRuntime: (tabId, nextPeer, options) => {
     const state = get();
     const tab = state.tabs.find((candidate) => candidate.id === tabId);
@@ -2944,15 +3086,19 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
 
       const tab = state.tabs.find((t) => t.id === tabId);
       if (!tab) return {};
+      const stamped =
+        !msg.codexTurnId && tab.activeCodexTurnId
+          ? { ...msg, codexTurnId: tab.activeCodexTurnId }
+          : msg;
       const lastTurnUsage = snapshotHasTokens(incomingUsage)
         ? mergeTokenUsageSnapshots(tab.lastTurnUsage, incomingUsage)
         : undefined;
 
-      if (msg.type === "assistant" && msg.subtype === "streaming_delta") {
+      if (stamped.type === "assistant" && stamped.subtype === "streaming_delta") {
         const last = tab.messages[tab.messages.length - 1];
         if (last?.type === "assistant" && last.subtype === "streaming_delta") {
           const existing = last.message?.content ?? [];
-          const incoming = msg.message?.content ?? [];
+          const incoming = stamped.message?.content ?? [];
           if (incoming.length > 0) {
             const merged: ClaudeStreamMessage = {
               ...last,
@@ -2971,16 +3117,16 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         }
       }
 
-      if (msg.type === "assistant" && msg.subtype === "streaming_final") {
+      if (stamped.type === "assistant" && stamped.subtype === "streaming_final") {
         const last = tab.messages[tab.messages.length - 1];
         if (last?.type === "assistant" && last.subtype === "streaming_delta") {
           const finalized: ClaudeStreamMessage = {
-            ...msg,
+            ...stamped,
             message: {
-              ...msg.message,
+              ...stamped.message,
               content: finalizeStreamingContent(
                 last.message?.content ?? [],
-                msg.message?.content ?? [],
+                stamped.message?.content ?? [],
               ),
             },
           };
@@ -2994,7 +3140,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       }
 
       return applyTabUpdate(state, tabId, {
-        messages: [...tab.messages, msg],
+        messages: [...tab.messages, stamped],
         totalInputTokens: tab.totalInputTokens + inputDelta,
         totalOutputTokens: tab.totalOutputTokens + outputDelta,
         ...(lastTurnUsage ? { lastTurnUsage } : {}),
@@ -3093,7 +3239,11 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     tabId: string,
     inputTokens: number,
     outputTokens: number,
-    extras?: { cacheReadTokens?: number; cacheCreationTokens?: number },
+    extras?: {
+      cacheReadTokens?: number;
+      cacheCreationTokens?: number;
+      contextWindow?: number | null;
+    },
   ) => {
     set((state) => {
       const tab = state.tabs.find((candidate) => candidate.id === tabId);
@@ -3104,10 +3254,34 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         cacheReadTokens: extras?.cacheReadTokens || 0,
         cacheCreationTokens: extras?.cacheCreationTokens || 0,
       });
+      const contextWindow =
+        extras?.contextWindow && extras.contextWindow > 0
+          ? extras.contextWindow
+          : undefined;
       return applyTabUpdate(state, tabId, {
         totalInputTokens: tab.totalInputTokens + inputTokens,
         totalOutputTokens: tab.totalOutputTokens + outputTokens,
         lastTurnUsage,
+        ...(contextWindow ? { contextWindowTokens: contextWindow } : {}),
+      });
+    });
+  },
+
+  _tagCodexTurn: (tabId: string, turnId: string) => {
+    const clean = typeof turnId === "string" ? turnId.trim() : "";
+    if (!clean) return;
+    set((state) => {
+      const tab = state.tabs.find((candidate) => candidate.id === tabId);
+      if (!tab) return {};
+      const messages = tab.messages.map((message, index) => {
+        const isLast = index === tab.messages.length - 1;
+        if (!isLast || message.codexTurnId) return message;
+        if (message.type !== "user") return message;
+        return { ...message, codexTurnId: clean };
+      });
+      return applyTabUpdate(state, tabId, {
+        activeCodexTurnId: clean,
+        messages,
       });
     });
   },

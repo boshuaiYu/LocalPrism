@@ -119,6 +119,17 @@ export function runtimeReadConversation(
   });
 }
 
+export function runtimeRewindConversation(request: {
+  reference: ConversationRef;
+  role: "user" | "assistant";
+  text: string;
+  ordinal: number;
+  codexTurnId?: string | null;
+  userTurnOrdinal?: number;
+}): Promise<ConversationRef> {
+  return invoke<ConversationRef>("runtime_rewind_conversation", { request });
+}
+
 export function runtimeArchiveConversation(
   reference: ConversationRef,
 ): Promise<void> {

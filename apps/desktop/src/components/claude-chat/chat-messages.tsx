@@ -4,6 +4,7 @@ import {
   CheckIcon,
   CopyIcon,
   CornerDownRightIcon,
+  Undo2Icon,
 } from "lucide-react";
 import {
   useClaudeChatStore,
@@ -30,6 +31,7 @@ import {
   settleChatMessages,
 } from "@/lib/chat-turn-settlement";
 import { canOfferCompression } from "@/lib/chat-compression";
+import { canRewindTo, rewindAnchor } from "@/lib/chat-rewind";
 import { useI18n } from "@/lib/use-i18n";
 
 const EMPTY_PENDING_GUIDANCE: QueuedGuidance[] = [];
@@ -38,9 +40,21 @@ const THREAD_MAX_WIDTH = "max-w-[44rem]";
 const MessageActions: FC<{
   text: string;
   align?: "left" | "right";
-}> = ({ text, align = "left" }) => {
+  rewindIndex?: number;
+}> = ({ text, align = "left", rewindIndex }) => {
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
+  const [confirmingRewind, setConfirmingRewind] = useState(false);
+  const rewindToMessage = useClaudeChatStore((state) => state.rewindToMessage);
+  const rewindReady = useClaudeChatStore((state) => {
+    if (state.isStreaming || rewindIndex == null) return false;
+    const tab = state.tabs.find((candidate) => candidate.id === state.activeTabId);
+    const messages = tab?.messages ?? state.messages;
+    return (
+      canRewindTo(messages, rewindIndex) &&
+      rewindAnchor(messages, rewindIndex) != null
+    );
+  });
   const canCopy = text.trim().length > 0;
 
   const handleCopy = async () => {
@@ -50,29 +64,70 @@ const MessageActions: FC<{
     window.setTimeout(() => setCopied(false), 1200);
   };
 
-  if (!canCopy) return null;
+  if (!canCopy && !rewindReady && !confirmingRewind) return null;
 
   return (
     <div
       className={cn(
-        "flex gap-1 text-muted-foreground",
+        "flex items-center gap-1 text-muted-foreground",
         align === "right" ? "justify-end" : "justify-start",
       )}
     >
-      <TooltipIconButton
-        tooltip={copied ? t("chat.copied") : t("chat.copy")}
-        side="top"
-        variant="ghost"
-        size="icon"
-        className="size-8 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-        onClick={handleCopy}
-      >
-        {copied ? (
-          <CheckIcon className="fade-in zoom-in-50 size-4 animate-in duration-200" />
-        ) : (
-          <CopyIcon className="fade-in zoom-in-75 size-4 animate-in duration-150" />
-        )}
-      </TooltipIconButton>
+      {confirmingRewind ? (
+        <div className="flex max-w-full flex-wrap items-center gap-1">
+          <span className="px-1 text-xs leading-4">{t("chat.rewindHint")}</span>
+          <button
+            type="button"
+            data-testid="rewind-confirm"
+            className="rounded-md px-2 py-1 text-xs text-foreground hover:bg-muted"
+            onClick={() => {
+              if (rewindIndex == null) return;
+              setConfirmingRewind(false);
+              void rewindToMessage(rewindIndex);
+            }}
+          >
+            {t("chat.rewindConfirm")}
+          </button>
+          <button
+            type="button"
+            data-testid="rewind-cancel"
+            className="rounded-md px-2 py-1 text-xs hover:bg-muted"
+            onClick={() => setConfirmingRewind(false)}
+          >
+            {t("chat.rewindCancel")}
+          </button>
+        </div>
+      ) : (
+        rewindReady && (
+          <TooltipIconButton
+            tooltip={t("chat.rewind")}
+            side="top"
+            variant="ghost"
+            size="icon"
+            data-testid="rewind-here"
+            className="size-8 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+            onClick={() => setConfirmingRewind(true)}
+          >
+            <Undo2Icon className="size-4" />
+          </TooltipIconButton>
+        )
+      )}
+      {canCopy && (
+        <TooltipIconButton
+          tooltip={copied ? t("chat.copied") : t("chat.copy")}
+          side="top"
+          variant="ghost"
+          size="icon"
+          className="size-8 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+          onClick={handleCopy}
+        >
+          {copied ? (
+            <CheckIcon className="fade-in zoom-in-50 size-4 animate-in duration-200" />
+          ) : (
+            <CopyIcon className="fade-in zoom-in-75 size-4 animate-in duration-150" />
+          )}
+        </TooltipIconButton>
+      )}
     </div>
   );
 };
@@ -137,7 +192,11 @@ export const ChatMessages: FC = () => {
     }
 
     return collapseRepeatedSkillToolMessages(
-      messages.filter((msg) => {
+      messages
+        .map((msg, index) =>
+          msg.rewindIndex == null ? { ...msg, rewindIndex: index } : msg,
+        )
+        .filter((msg) => {
         if (msg.subtype === "context-summary") return true;
         if (msg.type === "system" && msg.subtype === "init") return false;
         if (
@@ -353,6 +412,7 @@ function SummaryMessage({
       <p className="mt-1 text-muted-foreground text-xs">
         {t("chat.summaryMeta", { count })}
       </p>
+      <MessageActions text={summary} rewindIndex={message.rewindIndex} />
       {originals.length > 0 && (
         <button
           type="button"
@@ -450,7 +510,11 @@ const UserMessage: FC<{ message: ClaudeStreamMessage }> = ({ message }) => {
         </div>
       </div>
       <div className="col-span-full col-start-1 row-start-2 -mr-1 flex justify-end">
-        <MessageActions text={bodyText} align="right" />
+        <MessageActions
+          text={bodyText}
+          align="right"
+          rewindIndex={message.rewindIndex}
+        />
       </div>
     </div>
   );
@@ -508,7 +572,11 @@ const UserMessage: FC<{ message: ClaudeStreamMessage }> = ({ message }) => {
         </div>
       </div>
       <div className="col-span-full col-start-1 row-start-2 -mr-1 flex justify-end">
-        <MessageActions text={textContent} align="right" />
+        <MessageActions
+          text={textContent}
+          align="right"
+          rewindIndex={message.rewindIndex}
+        />
       </div>
     </div>
   );
@@ -644,7 +712,7 @@ const AssistantMessage: FC<{
         })}
       </div>
       <div className="-mb-7.5 ml-2 flex min-h-7.5 items-center pt-1.5">
-        <MessageActions text={copyText} />
+        <MessageActions text={copyText} rewindIndex={message.rewindIndex} />
       </div>
     </div>
   );
@@ -682,7 +750,7 @@ const ResultMessage: FC<{ message: ClaudeStreamMessage }> = ({ message }) => {
         )}
       </div>
       <div className="-mb-7.5 ml-2 flex min-h-7.5 items-center pt-1.5">
-        <MessageActions text={resultText} />
+        <MessageActions text={resultText} rewindIndex={message.rewindIndex} />
       </div>
       {message.cost_usd != null && (
         <div className="mt-1 px-1 text-right text-muted-foreground text-xs">

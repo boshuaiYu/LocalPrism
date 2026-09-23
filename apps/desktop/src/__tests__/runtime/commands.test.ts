@@ -4,6 +4,7 @@ import {
   interruptRuntimeTurn,
   runtimeArchiveConversation,
   runtimeReadConversation,
+  runtimeRewindConversation,
   runtimeInstall,
   runtimeListConversations,
   runtimeListModels,
@@ -306,6 +307,34 @@ describe("runtime command wrappers", () => {
     expect(invoke).toHaveBeenCalledWith("runtime_list_conversations", {
       runtime: "codex",
       projectPath: "C:/work/paper",
+    });
+  });
+
+  it("rewinds a conversation with the selected anchor", async () => {
+    const reference: ConversationRef = {
+      runtime: "claude",
+      sessionId: "session-9",
+      projectPath: "C:/work/notes",
+    };
+    vi.mocked(invoke).mockResolvedValueOnce(reference);
+
+    await expect(
+      runtimeRewindConversation({
+        reference,
+        role: "user",
+        text: "Rewrite the abstract",
+        ordinal: 1,
+        userTurnOrdinal: 1,
+      }),
+    ).resolves.toBe(reference);
+    expect(invoke).toHaveBeenCalledWith("runtime_rewind_conversation", {
+      request: {
+        reference,
+        role: "user",
+        text: "Rewrite the abstract",
+        ordinal: 1,
+        userTurnOrdinal: 1,
+      },
     });
   });
 

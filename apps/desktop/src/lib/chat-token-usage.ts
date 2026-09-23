@@ -36,6 +36,8 @@ type UsageFields = {
 
 type UsageMessage = {
   type?: string;
+  parent_tool_use_id?: string | null;
+  parentToolUseId?: string | null;
   usage?: UsageFields;
   message?: { usage?: UsageFields };
 };
@@ -156,14 +158,21 @@ export function mergeTokenUsageSnapshots(
   };
 }
 
+function isSubagentUsage(message: UsageMessage): boolean {
+  const parent = message.parent_tool_use_id ?? message.parentToolUseId;
+  return typeof parent === "string" && parent.trim().length > 0;
+}
+
 function collectLastTurnUsage(
   messages: ReadonlyArray<UsageMessage>,
-  resultsOnly: boolean,
+  mode: "requests" | "results" | "any",
 ): TokenUsageSnapshot | null {
   let merged: TokenUsageSnapshot | null = null;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (resultsOnly && message.type !== "result") continue;
+    if (isSubagentUsage(message)) continue;
+    if (mode === "results" && message.type !== "result") continue;
+    if (mode === "requests" && message.type === "result") continue;
     const snapshot = usageFromStreamMessage(message);
     if (!snapshotHasTokens(snapshot)) continue;
     merged = merged ? mergeTokenUsageSnapshots(snapshot, merged) : snapshot;
@@ -176,9 +185,13 @@ export function lastTurnUsage(
   messages: ReadonlyArray<UsageMessage> | undefined | null,
 ): TokenUsageSnapshot | null {
   if (!messages?.length) return null;
+  // `result.usage` is cumulative across tool steps and, on a resumed Claude
+  // session, earlier spend. Context occupancy is the latest root request.
+  const requestUsage = collectLastTurnUsage(messages, "requests");
+  if (requestUsage && snapshotHasPromptTokens(requestUsage)) return requestUsage;
   return (
-    collectLastTurnUsage(messages, true) ??
-    collectLastTurnUsage(messages, false)
+    collectLastTurnUsage(messages, "results") ??
+    collectLastTurnUsage(messages, "any")
   );
 }
 
@@ -242,8 +255,9 @@ export function buildTokenMeterModel(options: {
   const outputTokens = last ? last.outputTokens : 0;
   const cacheReadTokens = last?.cacheReadTokens ?? 0;
   const cacheCreationTokens = last?.cacheCreationTokens ?? 0;
-  // Anthropic-shaped usage: input is exclusive of cache. OpenAI/Responses
-  // proxies subtract cached_tokens before emitting so this does not double-count.
+  // Prompt occupancy for the latest request. Anthropic input excludes cache.
+  // OpenAI-shaped snapshots are split before they reach this sum. Do not add
+  // session-cumulative result totals on top of this request.
   const usedTokens = last
     ? last.inputTokens + last.cacheReadTokens + last.cacheCreationTokens
     : 0;

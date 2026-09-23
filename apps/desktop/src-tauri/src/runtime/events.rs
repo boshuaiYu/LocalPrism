@@ -130,6 +130,10 @@ pub enum RuntimeEvent {
         output_tokens: u64,
         #[serde(default)]
         cache_read_tokens: u64,
+        /// Model context window reported with this snapshot, when the runtime
+        /// knows it. Absent when the event only carries token counts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
     },
     ApprovalRequested {
         request: RuntimeRequest,
@@ -349,6 +353,7 @@ mod tests {
                     input_tokens: 3,
                     output_tokens: 5,
                     cache_read_tokens: 0,
+                    context_window: None,
                 },
                 "usage",
             ),

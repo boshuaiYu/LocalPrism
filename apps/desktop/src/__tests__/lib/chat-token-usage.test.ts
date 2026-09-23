@@ -387,6 +387,78 @@ describe("chat token usage", () => {
     expect(meter.inputTokens).toBe(3588);
   });
 
+  it("uses the latest assistant request instead of cumulative result usage", () => {
+    const meter = buildTokenMeterModel({
+      modelLabel: "sonnet",
+      windowTokens: 200_000,
+      messages: [
+        {
+          type: "assistant",
+          message: {
+            usage: {
+              input_tokens: 4_000,
+              output_tokens: 80,
+              cache_read_input_tokens: 1_000,
+            },
+          },
+        },
+        {
+          type: "assistant",
+          message: {
+            usage: {
+              input_tokens: 12_000,
+              output_tokens: 200,
+              cache_read_input_tokens: 3_000,
+            },
+          },
+        },
+        {
+          type: "result",
+          usage: {
+            input_tokens: 90_000,
+            output_tokens: 4_000,
+            cache_read_input_tokens: 180_000,
+          },
+        },
+      ],
+    });
+    expect(meter.inputTokens).toBe(12_000);
+    expect(meter.cacheReadTokens).toBe(3_000);
+    expect(meter.usedTokens).toBe(15_000);
+    expect(meter.percent).toBe(8);
+  });
+
+  it("ignores subagent usage when measuring the root context", () => {
+    const meter = buildTokenMeterModel({
+      modelLabel: "sonnet",
+      windowTokens: 200_000,
+      messages: [
+        {
+          type: "assistant",
+          message: {
+            usage: {
+              input_tokens: 2_000,
+              cache_read_input_tokens: 500,
+              output_tokens: 10,
+            },
+          },
+        },
+        {
+          type: "assistant",
+          parent_tool_use_id: "toolu_sub",
+          message: {
+            usage: {
+              input_tokens: 80_000,
+              cache_read_input_tokens: 80_000,
+              output_tokens: 20,
+            },
+          },
+        },
+      ],
+    });
+    expect(meter.usedTokens).toBe(2_500);
+  });
+
   it("ignores leftover lastUsage when this conversation has no messages", () => {
     const meter = buildTokenMeterModel({
       modelLabel: "sonnet",

@@ -86,7 +86,10 @@ export function ChatTokenMeter() {
   const providerModels = useProviderStore((state) => state.models);
 
   const modelLabel = activeTab?.runtimeModel || selectedModel || "";
-  const windowTokens = catalogContextWindow(providerModels, modelLabel);
+  const windowTokens =
+    activeTab?.contextWindowTokens && activeTab.contextWindowTokens > 0
+      ? activeTab.contextWindowTokens
+      : catalogContextWindow(providerModels, modelLabel);
   const messages = activeTab?.messages ?? [];
   const lastUsage = activeTab?.lastTurnUsage ?? null;
 

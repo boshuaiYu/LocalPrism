@@ -222,7 +222,17 @@ fn codex_thread_to_history(
         items: thread
             .turns
             .into_iter()
-            .flat_map(|turn| turn.items)
+            .flat_map(|turn| {
+                let turn_id = turn.id;
+                turn.items.into_iter().map(move |mut item| {
+                    if let Some(object) = item.as_object_mut() {
+                        object
+                            .entry("turnId")
+                            .or_insert_with(|| serde_json::Value::String(turn_id.clone()));
+                    }
+                    item
+                })
+            })
             .collect(),
     })
 }
@@ -898,6 +908,84 @@ pub async fn runtime_read_conversation(
             let thread =
                 codex::read_thread(&app, &codex_state, reference.session_id.clone()).await?;
             codex_thread_to_history(thread, reference)
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RewindConversationRequest {
+    pub reference: ConversationRef,
+    pub role: String,
+    pub text: String,
+    pub ordinal: u32,
+    #[serde(default)]
+    pub codex_turn_id: Option<String>,
+    #[serde(default)]
+    pub user_turn_ordinal: u32,
+}
+
+/// Drop conversation turns after the anchor. Claude rewrites the session file
+/// after a one-time backup. Codex forks a new thread that ends at the turn,
+/// leaving the original thread and project files in place.
+#[tauri::command]
+pub async fn runtime_rewind_conversation(
+    app: AppHandle,
+    request: RewindConversationRequest,
+    codex_state: State<'_, codex::CodexAppServerState>,
+) -> Result<ConversationRef, String> {
+    let reference = request.reference;
+    if reference.session_id.trim().is_empty() || reference.project_path.trim().is_empty() {
+        return Err("A runtime conversation requires a session ID and project path".into());
+    }
+    match reference.runtime {
+        RuntimeKind::Claude => {
+            crate::claude::rewind_claude_session_file(
+                &reference.project_path,
+                &reference.session_id,
+                &crate::claude::SessionRewindAnchor {
+                    role: request.role,
+                    text: request.text,
+                    ordinal: request.ordinal,
+                },
+            )?;
+            Ok(reference)
+        }
+        RuntimeKind::Codex => {
+            let thread =
+                codex::read_thread(&app, &codex_state, reference.session_id.clone()).await?;
+            validate_codex_thread_reference(&thread, &reference)?;
+            let last_turn_id = if let Some(turn_id) = request
+                .codex_turn_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                if !thread.turns.iter().any(|turn| turn.id == turn_id) {
+                    return Err("That turn is not in this Codex conversation".into());
+                }
+                turn_id.to_string()
+            } else if request.user_turn_ordinal > 0 {
+                thread
+                    .turns
+                    .get(request.user_turn_ordinal as usize - 1)
+                    .map(|turn| turn.id.clone())
+                    .ok_or_else(|| "That turn is not in this Codex conversation".to_string())?
+            } else {
+                return Err("Choose a turn to rewind to".into());
+            };
+            let forked = codex::fork_thread(
+                &app,
+                &codex_state,
+                reference.session_id.clone(),
+                Some(last_turn_id),
+            )
+            .await?;
+            Ok(ConversationRef {
+                runtime: RuntimeKind::Codex,
+                session_id: forked,
+                project_path: reference.project_path,
+            })
         }
     }
 }
