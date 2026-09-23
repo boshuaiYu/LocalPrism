@@ -86,6 +86,7 @@ import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import { ProjectCloseButton } from "@/components/workspace/project-close-button";
 import { UvSetupDialog } from "@/components/uv-setup";
 import { SettingsDialog } from "@/components/settings/settings-dialog";
+import { PRODUCT_TOUR_EVENT, type ProductTourCue } from "@/lib/product-tour";
 import { SIDEBAR_SPLIT_AUTOSAVE_ID } from "@/lib/workspace-pane-layout";
 import { createLogger } from "@/lib/debug/logger";
 import { resolveNewProjectFile } from "@/lib/new-project-file";
@@ -957,9 +958,23 @@ export function Sidebar({
   const [settingsOpen, setSettingsOpen] = useState(false);
   useEffect(() => {
     const openSettings = () => setSettingsOpen(true);
+    const onTourCue = (event: Event) => {
+      const cue = (event as CustomEvent<ProductTourCue>).detail;
+      if (cue === "close-overlays" || cue === "open-skills") {
+        setSettingsOpen(false);
+        return;
+      }
+      if (cue === "open-agents") {
+        setSettingsTab("agents");
+        setSettingsOpen(true);
+      }
+    };
     window.addEventListener("localprism-open-settings", openSettings);
-    return () =>
+    window.addEventListener(PRODUCT_TOUR_EVENT, onTourCue);
+    return () => {
       window.removeEventListener("localprism-open-settings", openSettings);
+      window.removeEventListener(PRODUCT_TOUR_EVENT, onTourCue);
+    };
   }, []);
   const [settingsTab, setSettingsTab] = useState<
     "runtimes" | "skills" | "agents"
@@ -2159,6 +2174,21 @@ function EnvironmentSection({
     void refreshAgents("claude");
   }, [refreshAgents]);
 
+  useEffect(() => {
+    const onTourCue = (event: Event) => {
+      const cue = (event as CustomEvent<ProductTourCue>).detail;
+      if (cue === "open-skills") {
+        setShowOnboarding(true);
+        return;
+      }
+      if (cue === "close-overlays" || cue === "open-agents") {
+        setShowOnboarding(false);
+      }
+    };
+    window.addEventListener(PRODUCT_TOUR_EVENT, onTourCue);
+    return () => window.removeEventListener(PRODUCT_TOUR_EVENT, onTourCue);
+  }, []);
+
   // Lazy import onboarding
   const [OnboardingComponent, setOnboardingComponent] =
     useState<React.ComponentType<{
@@ -2216,10 +2246,11 @@ function EnvironmentSection({
               {pythonLabel}
             </span>
           </button>
-          <div data-tour="tour-agents-skills" className="space-y-0.5">
+          <div className="space-y-0.5">
             {/* Skills row — curated catalog (also available under Settings → Skills) */}
             <button
               className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-sidebar-accent/50"
+              data-tour="tour-skills"
               onClick={() => setShowOnboarding(true)}
               title={t("env.browseSkills")}
             >
@@ -2248,6 +2279,7 @@ function EnvironmentSection({
             {/* Agents row — Settings → Agents */}
             <button
               className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-sidebar-accent/50"
+              data-tour="tour-agents-open"
               onClick={onOpenAgents}
               title={t("env.manageAgents")}
             >

@@ -18,6 +18,7 @@ import { PdfPreview } from "./preview/pdf-preview";
 import { ChatRestoreButton } from "@/components/claude-chat/chat-restore-button";
 import { ClaudeChatDrawer } from "@/components/claude-chat/claude-chat-drawer";
 import { ProductTour } from "@/components/product-tour";
+import { PRODUCT_TOUR_EVENT, type ProductTourCue } from "@/lib/product-tour";
 import {
   AppStatusCluster,
   useAppVersion,
@@ -229,6 +230,15 @@ export function WorkspaceLayout() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [previewVisible, setPdfPaneVisible]);
+
+  useEffect(() => {
+    const onTourCue = (event: Event) => {
+      const cue = (event as CustomEvent<ProductTourCue>).detail;
+      if (cue === "show-chat") setChatPaneVisible(true);
+    };
+    window.addEventListener(PRODUCT_TOUR_EVENT, onTourCue);
+    return () => window.removeEventListener(PRODUCT_TOUR_EVENT, onTourCue);
+  }, [setChatPaneVisible]);
 
   // Cmd+Shift+A / Ctrl+Shift+A toggles the chat pane.
   useEffect(() => {

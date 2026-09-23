@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { BotIcon } from "lucide-react";
 import { useAgentStore } from "@/stores/agent-store";
+import { PRODUCT_TOUR_EVENT, type ProductTourCue } from "@/lib/product-tour";
 import { useI18n } from "@/lib/use-i18n";
 import { cn } from "@/lib/utils";
 import {
@@ -47,6 +48,25 @@ export function AgentSelector({
   const selected = options.find((agent) => agent.id === agentId) ?? null;
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const onTourCue = (event: Event) => {
+      const cue = (event as CustomEvent<ProductTourCue>).detail;
+      if (cue === "open-agent-menu") {
+        setOpen(true);
+        return;
+      }
+      if (
+        cue === "close-overlays" ||
+        cue === "open-skills" ||
+        cue === "open-agents"
+      ) {
+        setOpen(false);
+      }
+    };
+    window.addEventListener(PRODUCT_TOUR_EVENT, onTourCue);
+    return () => window.removeEventListener(PRODUCT_TOUR_EVENT, onTourCue);
+  }, []);
   const menuRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ left: 0, bottom: 0 });
 
@@ -65,7 +85,9 @@ export function AgentSelector({
       const target = event.target as Node;
       if (
         menuRef.current?.contains(target) ||
-        buttonRef.current?.contains(target)
+        buttonRef.current?.contains(target) ||
+        (target instanceof Element &&
+          target.closest('[data-testid="product-tour"]'))
       ) {
         return;
       }
@@ -81,6 +103,7 @@ export function AgentSelector({
         <button
           ref={buttonRef}
           type="button"
+          data-tour="tour-agent-switch"
           title={t("agents.one")}
           aria-label={t("agents.selectNamed", {
             name: selected?.name ?? t("agents.default"),
@@ -100,6 +123,7 @@ export function AgentSelector({
             <div
               ref={menuRef}
               role="menu"
+              data-tour="tour-agent-menu"
               aria-label={t("agents.select")}
               className="fixed w-64 max-w-[calc(100vw-1rem)] overflow-hidden rounded-xl border border-border bg-popover/95 p-1.5 text-popover-foreground shadow-lg backdrop-blur-sm"
               style={{ left: pos.left, bottom: pos.bottom, zIndex: 9999 }}
@@ -161,6 +185,7 @@ export function AgentSelector({
       </label>
       <select
         id="composer-agent-select"
+        data-tour="tour-agent-switch"
         aria-label={t("agents.select")}
         className={cn(
           "w-full rounded-lg border border-border bg-background px-3 py-2 text-xs",

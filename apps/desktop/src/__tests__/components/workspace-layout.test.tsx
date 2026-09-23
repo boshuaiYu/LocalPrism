@@ -228,14 +228,16 @@ describe("WorkspaceLayout chat pane", () => {
     useSettingsStore.setState({ productTour: "pending", uiLanguage: "en" });
     useDocumentStore.setState({ initialized: false, projectRoot: "C:/paper" });
     await act(async () => root.render(<WorkspaceLayout />));
-    expect(container.querySelector('[data-testid="product-tour"]')).toBeNull();
+    expect(
+      document.body.querySelector('[data-testid="product-tour"]'),
+    ).toBeNull();
 
     await act(async () => {
       useDocumentStore.setState({ initialized: true });
     });
     expect(
-      container.querySelector('[data-testid="product-tour"]'),
+      document.body.querySelector('[data-testid="product-tour"]'),
     ).not.toBeNull();
-    expect(container.textContent).toContain("Project files");
+    expect(document.body.textContent).toContain("Project files");
   });
 });

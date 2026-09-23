@@ -39,7 +39,7 @@ export function AppStatusCluster({
     status.state === "installing";
 
   return (
-    <div className="flex min-w-0 items-center gap-1.5">
+    <div className="flex min-w-0 items-center gap-1.5" data-tour="tour-updates">
       <span className="truncate">
         LocalPrism{version ? ` v${version}` : ""}
       </span>

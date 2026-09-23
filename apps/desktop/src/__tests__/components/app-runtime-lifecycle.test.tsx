@@ -240,7 +240,9 @@ describe("App runtime event lifecycle", () => {
     expect(
       container.querySelector('[data-testid="project-picker"]'),
     ).not.toBeNull();
-    expect(container.querySelector('[data-testid="product-tour"]')).toBeNull();
+    expect(
+      document.body.querySelector('[data-testid="product-tour"]'),
+    ).toBeNull();
   });
 
   it("does not auto-resume archived Codex conversations", async () => {

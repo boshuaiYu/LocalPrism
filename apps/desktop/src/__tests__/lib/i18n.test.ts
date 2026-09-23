@@ -28,6 +28,41 @@ describe("translate", () => {
     expect(translate("zh", "env.pythonEnvironment")).toBe("Python 环境 (uv)");
   });
 
+  it("translates the skills and agents tour in English and Chinese", () => {
+    const keys = [
+      "tour.skills.body",
+      "tour.skillCategories.body",
+      "tour.skillImport.body",
+      "tour.agents.body",
+      "tour.agentRoles.body",
+      "tour.agentSkills.body",
+      "tour.updates.body",
+    ] as const;
+    for (const key of keys) {
+      expect(translate("en", key).length).toBeGreaterThan(10);
+      expect(translate("zh", key).length).toBeGreaterThan(4);
+      expect(translate("zh", key)).not.toBe(translate("en", key));
+    }
+    expect(translate("en", "tour.skillCategories.body")).toContain(
+      "PaperSpine",
+    );
+    expect(translate("zh", "tour.skillCategories.body")).toContain(
+      "PaperSpine",
+    );
+    expect(translate("en", "tour.agentRoles.body").toLowerCase()).toContain(
+      "reviewer",
+    );
+    expect(translate("en", "tour.agentSkills.body").toLowerCase()).toContain(
+      "context",
+    );
+    expect(translate("zh", "tour.agentSkills.body")).toContain("上下文");
+    expect(translate("en", "tour.updates.body")).toContain("Beta");
+    expect(translate("zh", "tour.updates.body")).toContain("Beta");
+    expect(translate("en", "tour.skills.body").toLowerCase()).toContain(
+      "callable",
+    );
+  });
+
   it("interpolates named values", () => {
     expect(
       translate("en", "providers.signInTo", { name: "Claude Official" }),
