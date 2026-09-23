@@ -1,10 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
-import { ChevronDownIcon, ChevronRightIcon } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  FolderPlusIcon,
+  Link2Icon,
+  RefreshCwIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+} from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { SkillTargetPicker } from "@/components/skills/skill-target-picker";
 import { useSkillStore } from "@/stores/skill-store";
 import { skillCatalogDescription } from "@/lib/default-skill-packs";
 import {
@@ -18,23 +23,45 @@ export interface SkillLibraryProps {
   projectPath?: string | null;
 }
 
+/** User library is always included. Project scope is an explicit extra copy. */
+export function targetsForSkillImport(
+  includeProject: boolean,
+  projectPath?: string | null,
+): SkillTarget[] {
+  const user: SkillTarget = { runtime: "claude", scope: "user" };
+  if (includeProject && projectPath) {
+    return [user, { runtime: "claude", scope: "project" }];
+  }
+  return [user];
+}
+
 export function SkillLibrary({ projectPath = null }: SkillLibraryProps) {
   const skills = useSkillStore((state) => state.skills);
   const loading = useSkillStore((state) => state.loading);
   const error = useSkillStore((state) => state.error);
   const selectedTargets = useSkillStore((state) => state.selectedTargets);
-  const setSelectedTargets = useSkillStore((state) => state.setSelectedTargets);
   const refresh = useSkillStore((state) => state.refresh);
   const importFolder = useSkillStore((state) => state.importFolder);
   const importUrl = useSkillStore((state) => state.importUrl);
   const removeManaged = useSkillStore((state) => state.removeManaged);
-  const [importing, setImporting] = useState(false);
+  const [busy, setBusy] = useState<"folder" | "url" | null>(null);
+  const [scanning, setScanning] = useState(false);
   const [sourceUrl, setSourceUrl] = useState("");
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>(
     {},
   );
   const [catalog, setCatalog] = useState<CatalogSkillCategory[]>([]);
+  const [alsoProject, setAlsoProjectState] = useState(false);
+  const [alsoProjectPath, setAlsoProjectPath] = useState(projectPath);
+  const alsoProjectRef = useRef(false);
+  const projectPathRef = useRef(projectPath);
   const { t } = useI18n();
+  if (alsoProjectPath !== projectPath) {
+    setAlsoProjectPath(projectPath);
+    setAlsoProjectState(false);
+    alsoProjectRef.current = false;
+  }
+  projectPathRef.current = projectPath;
 
   useEffect(() => {
     void refresh(projectPath ?? null);
@@ -76,79 +103,178 @@ export function SkillLibrary({ projectPath = null }: SkillLibraryProps) {
       title: t("skills.importTitle"),
     });
     if (!selected || Array.isArray(selected)) return;
-    setImporting(true);
+    const path = projectPathRef.current;
+    setBusy("folder");
     try {
-      await importFolder(selected, selectedTargets, projectPath ?? undefined);
+      await importFolder(
+        selected,
+        targetsForSkillImport(alsoProjectRef.current, path),
+        path ?? undefined,
+      );
+    } catch {
+      // importFolder records the error on the skill store.
     } finally {
-      setImporting(false);
+      setBusy(null);
     }
   };
 
   const onImportUrl = async () => {
     const url = sourceUrl.trim();
-    if (!url) return;
-    setImporting(true);
+    if (!url || busy) return;
+    const path = projectPathRef.current;
+    setBusy("url");
     try {
-      await importUrl(url, selectedTargets, projectPath ?? undefined);
+      await importUrl(
+        url,
+        targetsForSkillImport(alsoProjectRef.current, path),
+        path ?? undefined,
+      );
       setSourceUrl("");
+    } catch {
+      // importUrl records the error on the skill store.
     } finally {
-      setImporting(false);
+      setBusy(null);
     }
+  };
+
+  const onRefreshList = async () => {
+    setScanning(true);
+    try {
+      await refresh(projectPath ?? undefined, { silent: true });
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const setAlsoProject = (checked: boolean) => {
+    const next = checked && Boolean(projectPathRef.current);
+    alsoProjectRef.current = next;
+    setAlsoProjectState(next);
   };
 
   return (
     <div className="space-y-4" data-testid="skill-library">
-      <div>
-        <p className="mb-2 font-medium text-sm">{t("skills.destination")}</p>
-        <SkillTargetPicker
-          value={selectedTargets}
-          projectPath={projectPath}
-          onChange={setSelectedTargets}
-        />
-      </div>
+      <section
+        className="lp-panel space-y-4 rounded-xl border p-4"
+        data-testid="skill-add-card"
+      >
+        <div>
+          <h3 className="font-medium text-sm">{t("skills.addTitle")}</h3>
+          <p className="mt-1 text-lp-meta text-xs">{t("skills.addHelp")}</p>
+        </div>
 
-      <div className="flex gap-2">
-        <Button
-          type="button"
-          disabled={importing || selectedTargets.length === 0}
-          onClick={() => void onImport()}
-        >
-          {importing ? t("skills.importing") : t("skills.importFolder")}
-        </Button>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="flex flex-col rounded-lg bg-muted/30 p-3">
+            <div className="flex items-center gap-2">
+              <FolderPlusIcon className="size-4 text-muted-foreground" />
+              <p className="font-medium text-sm">{t("skills.importFolder")}</p>
+            </div>
+            <p className="mt-1 flex-1 text-muted-foreground text-xs">
+              {t("skills.importFolderHelp")}
+            </p>
+            <Button
+              type="button"
+              size="sm"
+              className="mt-3 w-fit"
+              data-testid="skill-import-folder"
+              disabled={busy !== null}
+              onClick={() => void onImport()}
+            >
+              {busy === "folder"
+                ? t("skills.importing")
+                : t("skills.importFolder")}
+            </Button>
+          </div>
+
+          <form
+            className="flex flex-col rounded-lg bg-muted/30 p-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void onImportUrl();
+            }}
+          >
+            <div className="flex items-center gap-2">
+              <Link2Icon className="size-4 text-muted-foreground" />
+              <p className="font-medium text-sm">{t("skills.addUrl")}</p>
+            </div>
+            <p className="mt-1 text-muted-foreground text-xs">
+              {t("skills.addUrlHelp")}
+            </p>
+            <div className="mt-3 flex gap-2">
+              <Input
+                value={sourceUrl}
+                onChange={(event) => setSourceUrl(event.target.value)}
+                placeholder={t("skills.addUrlPlaceholder")}
+                aria-label={t("skills.addUrl")}
+                data-testid="skill-import-url-input"
+                disabled={busy !== null}
+              />
+              <Button
+                type="submit"
+                size="sm"
+                className="shrink-0"
+                data-testid="skill-import-url"
+                disabled={busy !== null || sourceUrl.trim().length === 0}
+              >
+                {busy === "url"
+                  ? t("skills.importing")
+                  : t("skills.addUrlAction")}
+              </Button>
+            </div>
+          </form>
+        </div>
+
+        {projectPath ? (
+          <details className="text-xs" data-testid="skill-import-advanced">
+            <summary className="cursor-pointer text-muted-foreground">
+              {t("skills.advanced")}
+            </summary>
+            <label className="mt-2 flex items-start gap-2">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                data-testid="skill-also-project"
+                checked={alsoProject}
+                onChange={(event) => setAlsoProject(event.target.checked)}
+              />
+              <span>
+                <span className="text-foreground">
+                  {t("skills.alsoProject")}
+                </span>
+                <span className="mt-0.5 block text-muted-foreground">
+                  {t("skills.alsoProjectHelp")}
+                </span>
+              </span>
+            </label>
+          </details>
+        ) : null}
+      </section>
+
+      {error && <p className="text-destructive text-sm">{error}</p>}
+
+      <div className="flex items-start justify-between gap-3 px-1">
+        <div className="min-w-0">
+          <p className="font-medium text-sm">{t("skills.installed")}</p>
+          <p className="mt-0.5 text-lp-meta text-xs">
+            {t("skills.refreshHelp")}
+          </p>
+        </div>
         <Button
           type="button"
           variant="outline"
-          onClick={() => void refresh(projectPath ?? undefined)}
+          size="sm"
+          className="shrink-0"
+          data-testid="skill-refresh-list"
+          title={t("skills.refreshHelp")}
+          aria-busy={scanning}
+          disabled={scanning}
+          onClick={() => void onRefreshList()}
         >
-          {t("skills.refresh")}
+          <RefreshCwIcon className={scanning ? "animate-spin" : undefined} />
+          {scanning ? t("skills.refreshing") : t("skills.refreshList")}
         </Button>
       </div>
 
-      <div className="space-y-2">
-        <p className="font-medium text-sm">{t("skills.addUrl")}</p>
-        <div className="flex gap-2">
-          <Input
-            value={sourceUrl}
-            onChange={(event) => setSourceUrl(event.target.value)}
-            placeholder="https://github.com/owner/skill-repo"
-            disabled={importing}
-          />
-          <Button
-            type="button"
-            variant="outline"
-            disabled={
-              importing ||
-              selectedTargets.length === 0 ||
-              sourceUrl.trim().length === 0
-            }
-            onClick={() => void onImportUrl()}
-          >
-            {t("skills.addUrlAction")}
-          </Button>
-        </div>
-      </div>
-
-      {error && <p className="text-destructive text-sm">{error}</p>}
       {loading && (
         <p className="text-muted-foreground text-sm">{t("skills.loading")}</p>
       )}

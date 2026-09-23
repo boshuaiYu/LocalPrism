@@ -1,9 +1,14 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SkillLibrary } from "@/components/skills/skill-library";
+import { open } from "@tauri-apps/plugin-dialog";
+import {
+  SkillLibrary,
+  targetsForSkillImport,
+} from "@/components/skills/skill-library";
+import { useSettingsStore } from "@/stores/settings-store";
 import { useSkillStore } from "@/stores/skill-store";
-import type { RuntimeSkill } from "@/runtime/types";
+import type { RuntimeSkill, SkillTarget } from "@/runtime/types";
 
 function skill(overrides: Partial<RuntimeSkill> = {}): RuntimeSkill {
   return {
@@ -21,6 +26,21 @@ function skill(overrides: Partial<RuntimeSkill> = {}): RuntimeSkill {
   };
 }
 
+describe("targetsForSkillImport", () => {
+  it("defaults to the user library and adds project only when asked", () => {
+    const user: SkillTarget[] = [{ runtime: "claude", scope: "user" }];
+    const both: SkillTarget[] = [
+      { runtime: "claude", scope: "user" },
+      { runtime: "claude", scope: "project" },
+    ];
+
+    expect(targetsForSkillImport(false, "/papers/demo")).toEqual(user);
+    expect(targetsForSkillImport(true, null)).toEqual(user);
+    expect(targetsForSkillImport(true, "/papers/demo")).toEqual(both);
+    expect(targetsForSkillImport(true, undefined)).toEqual(user);
+  });
+});
+
 describe("SkillLibrary", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -30,6 +50,7 @@ describe("SkillLibrary", () => {
   beforeEach(() => {
     snapshot = useSkillStore.getState();
     removeManaged.mockReset();
+    useSettingsStore.setState({ uiLanguage: "en" });
     useSkillStore.setState({
       skills: [
         skill(),
@@ -82,9 +103,23 @@ describe("SkillLibrary", () => {
     ).toBeNull();
     expect(container.textContent).not.toContain("claude-home/skills");
     expect(container.textContent).not.toContain("GitHub repo, skill folder");
-    expect(container.textContent).toContain("Import folder");
-    expect(container.textContent).toContain("Refresh");
-    expect(container.textContent).toContain("Add URL");
+    expect(container.textContent).not.toContain("Import destination");
+    expect(container.textContent).not.toContain("LocalPrism / user");
+    expect(
+      container.querySelector('[data-testid="skill-target-picker"]'),
+    ).toBeNull();
+    const addCard = container.querySelector('[data-testid="skill-add-card"]');
+    expect(addCard?.textContent).toContain("Add skills");
+    expect(addCard?.textContent).toContain("Import folder");
+    expect(addCard?.textContent).toContain("Add from GitHub or URL");
+    expect(addCard?.textContent).toContain(
+      "GitHub repo, folder URL, .tar.gz archive, or a raw SKILL.md link.",
+    );
+    expect(addCard?.textContent).not.toContain("LocalPrism / project");
+    expect(container.textContent).toContain("Refresh list");
+    expect(container.textContent).toContain(
+      "Rescan installed skills. This does not reinstall default packs.",
+    );
     expect(container.textContent).toContain("PaperSpine");
     expect(container.textContent).toContain("academic-research-skills");
     expect(container.textContent).not.toContain("paper-spine");
@@ -207,5 +242,221 @@ describe("SkillLibrary", () => {
       container.querySelector('[data-testid="skill-row-editaplot"]')
         ?.textContent,
     ).toContain("EditaPlot");
+  });
+
+  it("imports a folder and a URL into the user library", async () => {
+    const importFolder = vi.fn(async () => undefined);
+    const importUrl = vi.fn(async () => undefined);
+    useSkillStore.setState({ importFolder, importUrl });
+    vi.mocked(open).mockResolvedValue("/skills/demo");
+
+    await act(async () => {
+      root.render(<SkillLibrary projectPath="/papers/demo" />);
+    });
+
+    await act(async () => {
+      (
+        container.querySelector(
+          '[data-testid="skill-import-folder"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    expect(importFolder).toHaveBeenCalledWith(
+      "/skills/demo",
+      [{ runtime: "claude", scope: "user" }],
+      "/papers/demo",
+    );
+
+    const input = container.querySelector(
+      '[data-testid="skill-import-url-input"]',
+    ) as HTMLInputElement;
+    const assign = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    await act(async () => {
+      assign?.call(input, "https://github.com/owner/skill-repo");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      (
+        container.querySelector(
+          '[data-testid="skill-import-url"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    expect(importUrl).toHaveBeenCalledWith(
+      "https://github.com/owner/skill-repo",
+      [{ runtime: "claude", scope: "user" }],
+      "/papers/demo",
+    );
+  });
+
+  it("rescans the installed list without a full reload", async () => {
+    const refresh = vi.fn(async () => undefined);
+    useSkillStore.setState({ refresh });
+
+    await act(async () => {
+      root.render(<SkillLibrary projectPath="/papers/demo" />);
+    });
+    refresh.mockClear();
+
+    await act(async () => {
+      (
+        container.querySelector(
+          '[data-testid="skill-refresh-list"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+
+    expect(refresh).toHaveBeenCalledWith("/papers/demo", { silent: true });
+    expect(container.textContent).not.toContain("Loading skills…");
+  });
+
+  it("keeps project install behind an advanced option", async () => {
+    const importFolder = vi.fn(async () => undefined);
+    useSkillStore.setState({ importFolder });
+    vi.mocked(open).mockResolvedValue("/skills/demo");
+
+    await act(async () => {
+      root.render(<SkillLibrary projectPath="/papers/demo" />);
+    });
+
+    const advanced = container.querySelector(
+      '[data-testid="skill-import-advanced"]',
+    ) as HTMLDetailsElement;
+    expect(advanced.tagName).toBe("DETAILS");
+    expect(advanced.open).toBe(false);
+    const addCard = container.querySelector('[data-testid="skill-add-card"]');
+    expect(addCard?.querySelectorAll("button[data-variant]").length).toBe(2);
+
+    await act(async () => {
+      (
+        container.querySelector(
+          '[data-testid="skill-also-project"]',
+        ) as HTMLInputElement
+      ).click();
+    });
+    await act(async () => {
+      (
+        container.querySelector(
+          '[data-testid="skill-import-folder"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+
+    expect(importFolder).toHaveBeenCalledWith(
+      "/skills/demo",
+      [
+        { runtime: "claude", scope: "user" },
+        { runtime: "claude", scope: "project" },
+      ],
+      "/papers/demo",
+    );
+    expect(useSkillStore.getState().selectedTargets).toEqual([
+      { runtime: "claude", scope: "user" },
+    ]);
+  });
+
+  it("forgets the project copy when the open paper changes", async () => {
+    const importFolder = vi.fn(async () => undefined);
+    useSkillStore.setState({ importFolder });
+    vi.mocked(open).mockResolvedValue("/skills/demo");
+
+    await act(async () => {
+      root.render(<SkillLibrary projectPath="/papers/demo" />);
+    });
+    await act(async () => {
+      (
+        container.querySelector(
+          '[data-testid="skill-also-project"]',
+        ) as HTMLInputElement
+      ).click();
+    });
+
+    await act(async () => {
+      root.render(<SkillLibrary projectPath="/papers/other" />);
+    });
+    expect(
+      (
+        container.querySelector(
+          '[data-testid="skill-also-project"]',
+        ) as HTMLInputElement
+      ).checked,
+    ).toBe(false);
+
+    await act(async () => {
+      (
+        container.querySelector(
+          '[data-testid="skill-import-folder"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    expect(importFolder).toHaveBeenCalledWith(
+      "/skills/demo",
+      [{ runtime: "claude", scope: "user" }],
+      "/papers/other",
+    );
+  });
+
+  it("applies a project choice made while the folder dialog is open", async () => {
+    const importFolder = vi.fn(async () => undefined);
+    useSkillStore.setState({ importFolder });
+    vi.mocked(open).mockImplementation(async () => {
+      (
+        document.querySelector(
+          '[data-testid="skill-also-project"]',
+        ) as HTMLInputElement
+      ).click();
+      return "/skills/demo";
+    });
+
+    await act(async () => {
+      root.render(<SkillLibrary projectPath="/papers/demo" />);
+    });
+    await act(async () => {
+      (
+        container.querySelector(
+          '[data-testid="skill-import-folder"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+
+    expect(importFolder).toHaveBeenCalledWith(
+      "/skills/demo",
+      [
+        { runtime: "claude", scope: "user" },
+        { runtime: "claude", scope: "project" },
+      ],
+      "/papers/demo",
+    );
+    expect(useSkillStore.getState().selectedTargets).toEqual([
+      { runtime: "claude", scope: "user" },
+    ]);
+  });
+
+  it("hides the project option when no paper is open", async () => {
+    await act(async () => {
+      root.render(<SkillLibrary projectPath={null} />);
+    });
+    expect(
+      container.querySelector('[data-testid="skill-import-advanced"]'),
+    ).toBeNull();
+  });
+
+  it("uses Chinese labels for the add and refresh controls", async () => {
+    useSettingsStore.setState({ uiLanguage: "zh" });
+    await act(async () => {
+      root.render(<SkillLibrary projectPath="/papers/demo" />);
+    });
+    expect(container.textContent).toContain("添加技能");
+    expect(container.textContent).toContain("导入文件夹");
+    expect(container.textContent).toContain("从 GitHub 或链接添加");
+    expect(container.textContent).toContain("刷新列表");
+    expect(container.textContent).toContain(
+      "重新扫描已安装的技能，不会重新安装默认技能包。",
+    );
+    expect(container.textContent).not.toContain("导入位置");
+    expect(container.textContent).not.toContain("LocalPrism / 用户");
   });
 });
