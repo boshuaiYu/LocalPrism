@@ -26,6 +26,7 @@ import {
 } from "@/stores/document-store";
 import { useHistoryStore } from "@/stores/history-store";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
+import { useChatLayoutStore } from "@/stores/chat-layout-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { Button } from "@/components/ui/button";
 import {
@@ -42,6 +43,11 @@ import {
   PopoverContent,
 } from "@/components/ui/popover";
 import { HistoryPanel } from "@/components/workspace/history-panel";
+import {
+  COMPILE_FIX_WITH_AI_LABEL,
+  buildCompileFixPrompt,
+  compileErrorSummaries,
+} from "@/lib/compile-fix-prompt";
 import {
   synctexEdit,
   resolveCompileTarget,
@@ -91,17 +97,6 @@ const MAX_ALIVE_VIEWERS = 5;
 /** Clear zoom cache (e.g., on project close). */
 export function clearZoomCache(): void {
   zoomCache.clear();
-}
-
-function parseCompileErrors(compileError: string): string[] {
-  return [
-    ...new Set(
-      compileError
-        .split(/\s*!\s*/)
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0 && s !== "Compilation failed"),
-    ),
-  ];
 }
 
 const ZOOM_OPTIONS = [
@@ -694,6 +689,21 @@ export function PdfPreview() {
       window.removeEventListener("toggle-capture-mode", handleToggleCapture);
   }, [pdfData]);
 
+  const handleFixWithAi = useCallback(() => {
+    if (!compileError) return;
+    const request = buildCompileFixPrompt({
+      log: compileError,
+      files: files.map((file) => ({
+        relativePath: file.relativePath,
+        content: file.content,
+      })),
+    });
+    useChatLayoutStore.getState().reveal();
+    void useClaudeChatStore.getState().sendPrompt(request.prompt, undefined, {
+      displayPrompt: request.displayPrompt,
+    });
+  }, [compileError, files]);
+
   const renderContent = () => {
     if (isMarkdownActive) {
       return <MarkdownPreviewPane file={activeFile} />;
@@ -702,16 +712,7 @@ export function PdfPreview() {
       return <SourcePdfPreview file={activeFile} />;
     }
     if (compileError && !pdfData) {
-      const errors = parseCompileErrors(compileError);
-
-      const handleFixWithChat = () => {
-        const errorList = errors.map((e) => `- ${e}`).join("\n");
-        useClaudeChatStore
-          .getState()
-          .sendPrompt(
-            `[Compilation errors]\n${errorList}\n\nFix these LaTeX compilation errors.`,
-          );
-      };
+      const errors = compileErrorSummaries(compileError);
 
       return (
         <div className="flex flex-1 flex-col items-center justify-center bg-muted/30 p-6">
@@ -735,11 +736,13 @@ export function PdfPreview() {
             </div>
             <div className="mt-3 flex items-center gap-2">
               <button
-                onClick={handleFixWithChat}
+                type="button"
+                onClick={handleFixWithAi}
+                data-testid="fix-compile-with-ai"
                 className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-medium text-primary-foreground text-xs shadow-sm transition-colors hover:bg-primary/90"
               >
                 <MousePointerClickIcon className="size-3.5" />
-                Fix with Chat
+                {COMPILE_FIX_WITH_AI_LABEL}
               </button>
               <button
                 onClick={() => void handleCompile(true)}
@@ -810,15 +813,9 @@ export function PdfPreview() {
     // Keep-alive rendering: one PdfViewer per root file, toggle via CSS.
     // Use visibility:hidden + absolute positioning instead of display:none
     // so that the browser preserves scrollTop on the overflow container.
-    const compileErrors = compileError ? parseCompileErrors(compileError) : [];
-    const handleFixWithChat = () => {
-      const errorList = compileErrors.map((e) => `- ${e}`).join("\n");
-      useClaudeChatStore
-        .getState()
-        .sendPrompt(
-          `[Compilation errors]\n${errorList}\n\nFix these LaTeX compilation errors.`,
-        );
-    };
+    const compileErrors = compileError
+      ? compileErrorSummaries(compileError)
+      : [];
 
     return (
       <div className="relative flex min-h-0 flex-1">
@@ -910,11 +907,13 @@ export function PdfPreview() {
               </div>
               <div className="flex items-center gap-2 px-3 pb-2.5">
                 <button
-                  onClick={handleFixWithChat}
+                  type="button"
+                  onClick={handleFixWithAi}
+                  data-testid="fix-compile-with-ai"
                   className="flex items-center gap-1.5 rounded-lg bg-primary px-2.5 py-1 font-medium text-primary-foreground text-xs shadow-sm transition-colors hover:bg-primary/90"
                 >
                   <MousePointerClickIcon className="size-3.5" />
-                  Fix with Chat
+                  {COMPILE_FIX_WITH_AI_LABEL}
                 </button>
                 <button
                   onClick={() => void handleCompile(true)}
@@ -1042,17 +1041,32 @@ export function PdfPreview() {
             </Button>
           )}
           {showCompiledPreview && !isSaving && !isCompiling && compileError && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 gap-1.5 px-2.5 text-destructive text-xs hover:text-destructive"
-              onClick={() => handleCompile(true)}
-              disabled={!isTexActive}
-              title="Retry compile"
-            >
-              <RefreshCwIcon className="size-3.5" />
-              <span className="@[42rem]/pv:inline hidden">Retry</span>
-            </Button>
+            <>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1.5 px-2.5 text-xs"
+                onClick={handleFixWithAi}
+                data-testid="fix-compile-with-ai"
+                title={COMPILE_FIX_WITH_AI_LABEL}
+              >
+                <MousePointerClickIcon className="size-3.5" />
+                <span className="@[42rem]/pv:inline hidden">
+                  {COMPILE_FIX_WITH_AI_LABEL}
+                </span>
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1.5 px-2.5 text-destructive text-xs hover:text-destructive"
+                onClick={() => handleCompile(true)}
+                disabled={!isTexActive}
+                title="Retry compile"
+              >
+                <RefreshCwIcon className="size-3.5" />
+                <span className="@[42rem]/pv:inline hidden">Retry</span>
+              </Button>
+            </>
           )}
         </div>
         <div className="ml-auto flex shrink-0 items-center justify-end gap-0.5">
