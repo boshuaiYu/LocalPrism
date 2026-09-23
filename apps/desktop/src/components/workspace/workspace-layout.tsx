@@ -23,7 +23,6 @@ import { usePreviewStore } from "@/stores/preview-store";
 import { useChatLayoutStore } from "@/stores/chat-layout-store";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import {
-  clearPaneLayouts,
   paneIds,
   paneSizeMap,
   writePaneLayout,
@@ -77,19 +76,12 @@ export function WorkspaceLayout() {
     SIDEBAR_COLLAPSED_SIZE_FALLBACK,
   );
   const [codeVisible, setCodeVisible] = useState(true);
-  const [layoutEpoch, setLayoutEpoch] = useState(0);
   const paneVisibility: PaneVisibility = {
     code: codeVisible,
     chat: chatVisible,
     pdf: previewVisible,
   };
   const paneSizes = paneSizeMap(paneVisibility, localStorage);
-  const resetLayout = useCallback(() => {
-    clearPaneLayouts(localStorage);
-    expandedSidebarSizeRef.current = SIDEBAR_DEFAULT_SIZE;
-    setSidebarCollapsed(false);
-    setLayoutEpoch((epoch) => epoch + 1);
-  }, []);
   const persistLayout = useCallback(
     (sizes: number[]) => {
       const visibility = {
@@ -298,7 +290,6 @@ export function WorkspaceLayout() {
   return (
     <div ref={workspaceRef} className="relative h-full">
       <PanelGroup
-        key={layoutEpoch}
         direction="horizontal"
         className="h-full"
         onLayout={persistLayout}
@@ -333,8 +324,6 @@ export function WorkspaceLayout() {
               setChatVisible: setChatPaneVisible,
               setPdfVisible: setPdfPaneVisible,
               setSidebarVisible: (visible) => setSidebarPaneCollapsed(!visible),
-              onResetLayout: resetLayout,
-              layoutResetKey: layoutEpoch,
             }}
           />
         </Panel>

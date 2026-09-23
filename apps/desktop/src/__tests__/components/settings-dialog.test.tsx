@@ -94,6 +94,7 @@ describe("SettingsDialog", () => {
       providers.querySelector('[data-testid="update-settings"]'),
     ).toBeTruthy();
     expect(providers.textContent).toContain("Debian");
+    expect(providers.textContent).toContain("Updates");
     expect(providers.textContent).not.toContain("Agents body");
   });
 });

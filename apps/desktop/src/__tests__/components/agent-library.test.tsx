@@ -96,18 +96,15 @@ describe("AgentLibrary presets", () => {
       ).toBeTruthy();
     });
     const empty = container.querySelector("[data-testid='agent-preset-empty']");
-    expect(empty?.textContent).toContain("润色");
-    expect(empty?.textContent).toContain("Academic Polish");
-    expect(empty?.textContent).toContain("提升清晰度");
-    expect(empty?.textContent).toContain("academic tone");
-    expect(empty?.textContent).toContain("去AI");
+    expect(empty?.textContent).toContain("论文抛光机");
+    expect(empty?.textContent).toContain("Polish Lab");
+    expect(empty?.textContent).toContain("贴回 LaTeX");
+    expect(empty?.textContent).toContain("AI消除器");
     expect(empty?.textContent).toContain("De-AI");
-    expect(empty?.textContent).toContain("模板化");
-    expect(empty?.textContent).toContain("template-like");
-    expect(empty?.textContent).toContain("Peer Review");
-    expect(empty?.textContent).toContain("审稿模拟");
-    expect(empty?.textContent).toContain("审稿");
-    expect(empty?.textContent).toContain("actionable");
+    expect(empty?.textContent).toContain("模板腔");
+    expect(empty?.textContent).toContain("毒舌审稿官");
+    expect(empty?.textContent).toContain("Review Duo");
+    expect(empty?.textContent).toContain("苛刻审稿人");
     expect(
       container.querySelector("[data-testid='agent-preset-custom']"),
     ).toBeTruthy();
@@ -187,20 +184,19 @@ describe("AgentLibrary presets", () => {
 
     const name = await vi.waitFor(() => {
       const node = container.querySelector("#agent-name");
-      if (!(node instanceof HTMLInputElement) || node.value !== "润色") {
+      if (!(node instanceof HTMLInputElement) || node.value !== "论文抛光机") {
         throw new Error("preset name not applied");
       }
       return node;
     });
     const description = container.querySelector("#agent-description");
     const instructions = container.querySelector("#agent-instructions");
-    expect(name.value).toBe("润色");
+    expect(name.value).toBe("论文抛光机");
     expect(description).toBeInstanceOf(HTMLInputElement);
-    expect((description as HTMLInputElement).value).toContain("提升清晰度");
-    expect((description as HTMLInputElement).value).toContain("academic tone");
+    expect((description as HTMLInputElement).value).toContain("贴回 LaTeX");
     expect(instructions).toBeInstanceOf(HTMLTextAreaElement);
     expect((instructions as HTMLTextAreaElement).value).toContain(
-      "You are an expert academic editor for LaTeX research papers",
+      "You are an academic editor for LaTeX research papers",
     );
     expect((instructions as HTMLTextAreaElement).value).toContain(
       "Preserve LaTeX exactly",
@@ -231,7 +227,7 @@ describe("AgentLibrary presets", () => {
           projectPath: "/papers/demo",
           profile: expect.objectContaining({
             id: "academic-polish",
-            name: "润色",
+            name: "论文抛光机",
             scope: "user",
             runtime: "claude",
             skillIds: ["academic-polish", "writing-clarity"],
@@ -243,7 +239,7 @@ describe("AgentLibrary presets", () => {
       ([command]) => command === "save_agent",
     )?.[1] as { profile: AgentProfile };
     expect(saved.profile.instructions).toContain("Preserve LaTeX exactly");
-    expect(saved.profile.description).toContain("academic tone");
+    expect(saved.profile.description).toContain("贴回 LaTeX");
     expect(saved.profile.skillIds).not.toEqual(
       expect.arrayContaining(["citation-check", "zotero-cite", "latex-guard"]),
     );
@@ -296,15 +292,15 @@ describe("AgentLibrary presets", () => {
 
     const name = await vi.waitFor(() => {
       const node = container.querySelector("#agent-name");
-      if (!(node instanceof HTMLInputElement) || node.value !== "Peer Review") {
+      if (!(node instanceof HTMLInputElement) || node.value !== "毒舌审稿官") {
         throw new Error("peer review name not applied");
       }
       return node;
     });
-    expect(name.value).toBe("Peer Review");
+    expect(name.value).toBe("毒舌审稿官");
     const instructions = container.querySelector("#agent-instructions");
     expect((instructions as HTMLTextAreaElement).value).toContain(
-      "You are a senior peer reviewer for a top venue",
+      "You are two harsh, independent reviewers plus the editor",
     );
     await vi.waitFor(() => {
       expect(container.textContent).toContain("0 selected");

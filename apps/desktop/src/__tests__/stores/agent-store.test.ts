@@ -35,7 +35,10 @@ describe("agent-store", () => {
       loading: false,
       error: null,
     });
-    useSettingsStore.setState({ builtinAgentPresetsSeeded: false });
+    useSettingsStore.setState({
+      builtinAgentPresetsSeeded: false,
+      builtinAgentPresetsSeedVersion: 0,
+    });
     resetBuiltinPresetSeedForTests();
   });
 
@@ -155,11 +158,19 @@ describe("agent-store", () => {
     ).toBe(false);
   });
 
-  it("seeds three built-in presets once and does not overwrite an edited one", async () => {
+  it("seeds missing presets and upgrades builtin copy once without touching custom agents", async () => {
     const edited = sampleAgent({
       id: "academic-polish",
-      name: "My polish",
+      name: "润色",
+      description: "old",
       instructions: "Custom instructions stay",
+      skillIds: ["writer", "my-toggle"],
+      model: "opus",
+    });
+    const custom = sampleAgent({
+      id: "reviewer",
+      name: "Reviewer",
+      skillIds: ["keep-me"],
     });
     const saved: AgentProfile[] = [];
     invoke.mockImplementation((command: string, args?: unknown) => {
@@ -172,7 +183,7 @@ describe("agent-store", () => {
         ]);
       }
       if (command === "list_agents") {
-        return Promise.resolve([edited, ...saved]);
+        return Promise.resolve([edited, custom, ...saved]);
       }
       if (command === "save_agent") {
         const payload = args as {
@@ -180,8 +191,16 @@ describe("agent-store", () => {
           overwrite: boolean;
           projectPath: string | null;
         };
-        expect(payload.overwrite).toBe(false);
         expect(payload.projectPath).toBeNull();
+        expect(payload.profile.id).not.toBe("reviewer");
+        if (payload.profile.id === "academic-polish") {
+          expect(payload.overwrite).toBe(true);
+          expect(payload.profile.skillIds).toEqual(["writer", "my-toggle"]);
+          expect(payload.profile.model).toBe("opus");
+          expect(payload.profile.name).toBe("论文抛光机");
+        } else {
+          expect(payload.overwrite).toBe(false);
+        }
         const stored = {
           ...payload.profile,
           sourcePath: `/agents/${payload.profile.id}.md`,
@@ -194,16 +213,24 @@ describe("agent-store", () => {
 
     await useAgentStore.getState().ensureBuiltinPresets();
 
-    expect(saved.map((agent) => agent.id)).toEqual(["de-ai", "peer-review"]);
+    expect(saved.map((agent) => agent.id)).toEqual([
+      "de-ai",
+      "peer-review",
+      "academic-polish",
+    ]);
     expect(saved.find((agent) => agent.id === "de-ai")?.skillIds).toEqual([
       "humanizer-academic",
     ]);
     expect(saved.find((agent) => agent.id === "peer-review")?.skillIds).toEqual(
       [],
     );
-    expect(saved.flatMap((agent) => agent.skillIds).join(" ")).not.toMatch(
-      /zotero|citation/,
-    );
+    expect(
+      saved
+        .filter((agent) => agent.id !== "academic-polish")
+        .flatMap((agent) => agent.skillIds)
+        .join(" "),
+    ).not.toMatch(/zotero|citation/);
+    expect(useSettingsStore.getState().builtinAgentPresetsSeedVersion).toBe(2);
     expect(useSettingsStore.getState().builtinAgentPresetsSeeded).toBe(true);
 
     invoke.mockClear();
@@ -257,6 +284,7 @@ describe("agent-store", () => {
     await useAgentStore.getState().ensureBuiltinPresets();
 
     expect(useSettingsStore.getState().builtinAgentPresetsSeeded).toBe(false);
+    expect(useSettingsStore.getState().builtinAgentPresetsSeedVersion).toBe(0);
     expect(useAgentStore.getState().error).toContain("disk full");
   });
 });

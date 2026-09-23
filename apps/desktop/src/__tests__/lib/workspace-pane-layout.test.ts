@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   PANE_LAYOUT_STORAGE_KEY,
-  SIDEBAR_SPLIT_AUTOSAVE_ID,
-  clearPaneLayouts,
   defaultPaneSizes,
   paneSizeMap,
   readPaneLayout,
@@ -57,19 +55,5 @@ describe("workspace pane layout", () => {
       JSON.stringify({ "sidebar+code+chat+pdf": [10, 20] }),
     );
     expect(readPaneLayout(allPanes, storage)).toBeNull();
-  });
-
-  it("reset clears saved widths and the sidebar splitter", () => {
-    const storage = memoryStorage();
-    writePaneLayout(allPanes, [20, 30, 20, 30], storage);
-    storage.setItem(
-      `react-resizable-panels:${SIDEBAR_SPLIT_AUTOSAVE_ID}`,
-      "{}",
-    );
-    clearPaneLayouts(storage);
-    expect(readPaneLayout(allPanes, storage)).toBeNull();
-    expect(
-      storage.getItem(`react-resizable-panels:${SIDEBAR_SPLIT_AUTOSAVE_ID}`),
-    ).toBeNull();
   });
 });

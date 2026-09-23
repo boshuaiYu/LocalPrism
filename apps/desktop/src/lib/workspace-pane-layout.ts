@@ -108,11 +108,6 @@ export function writePaneLayout(
   storage.setItem(PANE_LAYOUT_STORAGE_KEY, JSON.stringify(next));
 }
 
-export function clearPaneLayouts(storage: PaneLayoutStorage): void {
-  storage.removeItem(PANE_LAYOUT_STORAGE_KEY);
-  storage.removeItem(`react-resizable-panels:${SIDEBAR_SPLIT_AUTOSAVE_ID}`);
-}
-
 export function paneSizeMap(
   visibility: PaneVisibility,
   storage: PaneLayoutStorage,

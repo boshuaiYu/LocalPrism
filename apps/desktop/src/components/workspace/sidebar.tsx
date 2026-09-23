@@ -10,7 +10,6 @@ import {
   PencilIcon,
   UploadIcon,
   RefreshCwIcon,
-  RotateCcwIcon,
   SunIcon,
   MoonIcon,
   MonitorIcon,
@@ -356,13 +355,6 @@ function LayoutPaneSwitcher({
             checked={controls.sidebarVisible}
             onCheckedChange={controls.setSidebarVisible}
           />
-          <button
-            type="button"
-            className="lp-focus flex h-10 w-full items-center rounded-lg px-2 text-left font-medium text-sm hover:bg-accent/70"
-            onClick={controls.onResetLayout}
-          >
-            {t("chrome.resetLayout")}
-          </button>
         </div>
       </HoverCardContent>
     </HoverCard>
@@ -427,8 +419,6 @@ interface LayoutControls {
   setChatVisible: (visible: boolean) => void;
   setPdfVisible: (visible: boolean) => void;
   setSidebarVisible: (visible: boolean) => void;
-  onResetLayout: () => void;
-  layoutResetKey: number;
 }
 
 export function Sidebar({
@@ -1228,20 +1218,6 @@ export function Sidebar({
             variant="ghost"
             size="icon"
             className="size-7 transition-transform duration-300 ease-in-out hover:scale-105"
-            onClick={layoutControls.onResetLayout}
-            data-testid="reset-workspace-layout"
-            title="Reset layout"
-            aria-label="Reset layout"
-          >
-            <RotateCcwIcon className="size-3.5" />
-            <span className="sr-only">Reset layout</span>
-          </Button>
-        )}
-        {layoutControls && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-7 transition-transform duration-300 ease-in-out hover:scale-105"
             onClick={() =>
               layoutControls.setChatVisible(!layoutControls.chatVisible)
             }
@@ -1338,7 +1314,6 @@ export function Sidebar({
 
           {/* Resizable sections */}
           <PanelGroup
-            key={layoutControls?.layoutResetKey ?? 0}
             autoSaveId={SIDEBAR_SPLIT_AUTOSAVE_ID}
             direction="vertical"
             className="min-h-0 flex-1"
@@ -1546,19 +1521,6 @@ export function Sidebar({
               setSettingsOpen(true);
             }}
           />
-
-          {layoutControls && (
-            <button
-              type="button"
-              data-testid="reset-workspace-layout"
-              className="lp-focus flex h-8 w-full shrink-0 items-center justify-center border-sidebar-border border-t px-3 font-medium text-foreground text-xs hover:bg-sidebar-accent"
-              title="Restore default pane widths"
-              aria-label="Reset layout"
-              onClick={layoutControls.onResetLayout}
-            >
-              Reset layout
-            </button>
-          )}
 
           {/* Footer */}
           <div className="flex h-9 items-center justify-between border-sidebar-border border-t px-3 text-muted-foreground text-xs">
