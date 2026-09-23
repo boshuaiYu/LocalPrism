@@ -15,7 +15,7 @@ import {
 } from "@/stores/runtime-store";
 
 vi.mock("@tauri-apps/api/app", () => ({
-  getVersion: vi.fn().mockResolvedValue("1.0.7"),
+  getVersion: vi.fn().mockResolvedValue("1.0.8"),
 }));
 
 vi.mock("next-themes", () => ({
