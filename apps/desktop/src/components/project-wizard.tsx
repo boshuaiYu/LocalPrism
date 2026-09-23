@@ -31,6 +31,7 @@ import {
   isOnboardingTextField,
   onboardingEscape,
   onboardingHasDraft,
+  releaseOnboardingTextFocus,
   resolveOnboardingStep,
 } from "@/lib/onboarding-flow";
 import { DEFAULT_PROJECT_INSTRUCTIONS } from "@/lib/default-claude-md";
@@ -290,7 +291,9 @@ function ScratchForm({ onBack }: { onBack: () => void }) {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || isCreating) return;
+      if (event.key !== "Escape" || event.defaultPrevented || isCreating) {
+        return;
+      }
       const action = onboardingEscape({
         surface: "scratch",
         searchQuery: "",
@@ -301,9 +304,7 @@ function ScratchForm({ onBack }: { onBack: () => void }) {
       });
       if (action.type === "blur-field") {
         event.preventDefault();
-        if (document.activeElement instanceof HTMLElement) {
-          document.activeElement.blur();
-        }
+        releaseOnboardingTextFocus(document.activeElement);
         return;
       }
       if (action.type === "close-section") {

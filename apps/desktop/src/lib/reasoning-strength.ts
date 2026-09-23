@@ -311,3 +311,30 @@ export function reasoningStrengthWireValue(
   if (control.kind === "continuous") return String(control.value);
   return control.value;
 }
+
+export type AdjustableReasoningStrength = Exclude<
+  ReasoningStrengthControl,
+  { kind: "unavailable" }
+>;
+
+/** True only when metadata gives the user a strength choice or range. */
+export function reasoningStrengthIsAdjustable(
+  control: ReasoningStrengthControl,
+): control is AdjustableReasoningStrength {
+  return control.kind !== "unavailable";
+}
+
+/** Model-driven effort suffix. Hidden when strength cannot be adjusted. */
+export function reasoningStrengthChipLabel(
+  control: ReasoningStrengthControl,
+): string | null {
+  if (!reasoningStrengthIsAdjustable(control)) return null;
+  if (control.kind === "discrete") {
+    const label =
+      control.options.find((option) => option.value === control.value)?.label ??
+      control.value;
+    const trimmed = label.trim();
+    return trimmed || null;
+  }
+  return String(control.value);
+}

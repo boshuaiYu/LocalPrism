@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   onboardingEscape,
+  onboardingGalleryEscape,
   onboardingHasDraft,
+  releaseOnboardingTextFocus,
   resolveOnboardingStep,
 } from "@/lib/onboarding-flow";
 
@@ -138,5 +140,73 @@ describe("onboardingEscape", () => {
         hasDraft: false,
       }),
     ).toEqual({ type: "exit" });
+  });
+});
+
+describe("onboardingGalleryEscape", () => {
+  it("lets a closed preview dialog consume Escape without leaving the gallery", () => {
+    expect(
+      onboardingGalleryEscape({
+        defaultPrevented: true,
+        previewOpen: false,
+        searchQuery: "",
+        fieldFocused: false,
+      }),
+    ).toBeNull();
+  });
+
+  it("leaves an open preview to the dialog and exits only from the gallery", () => {
+    expect(
+      onboardingGalleryEscape({
+        defaultPrevented: false,
+        previewOpen: true,
+        searchQuery: "ieee",
+        fieldFocused: true,
+      }),
+    ).toBeNull();
+    expect(
+      onboardingGalleryEscape({
+        defaultPrevented: false,
+        previewOpen: false,
+        searchQuery: "ieee",
+        fieldFocused: true,
+      }),
+    ).toEqual({ type: "clear-search" });
+    expect(
+      onboardingGalleryEscape({
+        defaultPrevented: false,
+        previewOpen: false,
+        searchQuery: "",
+        fieldFocused: false,
+      }),
+    ).toEqual({ type: "exit" });
+  });
+});
+
+describe("releaseOnboardingTextFocus", () => {
+  it("parks focus on the dialog so the next Escape can step back", () => {
+    const dialog = document.createElement("div");
+    dialog.setAttribute("data-slot", "dialog-content");
+    dialog.tabIndex = -1;
+    const input = document.createElement("input");
+    dialog.append(input);
+    document.body.append(dialog);
+    input.focus();
+
+    releaseOnboardingTextFocus(document.activeElement);
+
+    expect(document.activeElement).toBe(dialog);
+    dialog.remove();
+  });
+
+  it("blurs a field that is not inside a dialog", () => {
+    const input = document.createElement("input");
+    document.body.append(input);
+    input.focus();
+
+    releaseOnboardingTextFocus(input);
+
+    expect(document.activeElement).not.toBe(input);
+    input.remove();
   });
 });

@@ -1,4 +1,4 @@
-import type { ReasoningStrengthControl } from "@/lib/reasoning-strength";
+import type { AdjustableReasoningStrength } from "@/lib/reasoning-strength";
 import { cn } from "@/lib/utils";
 
 export function ReasoningStrengthControl({
@@ -7,27 +7,11 @@ export function ReasoningStrengthControl({
   disabled = false,
   onChange,
 }: {
-  control: ReasoningStrengthControl;
+  control: AdjustableReasoningStrength;
   layout: "wide" | "narrow";
   disabled?: boolean;
   onChange: (value: string) => void;
 }) {
-  if (control.kind === "unavailable") {
-    return (
-      <p
-        data-testid="reasoning-strength-control"
-        data-kind="unavailable"
-        title={control.reason}
-        className={cn(
-          "truncate text-muted-foreground text-xs",
-          layout === "narrow" ? "w-full px-1" : "max-w-56 shrink-0 px-1",
-        )}
-      >
-        {control.reason}
-      </p>
-    );
-  }
-
   if (control.kind === "continuous") {
     return (
       <label

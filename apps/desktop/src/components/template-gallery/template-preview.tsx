@@ -30,8 +30,10 @@ import { Button } from "@/components/ui/button";
 import { OnboardingStepper } from "@/components/onboarding/onboarding-stepper";
 import {
   isOnboardingTextField,
+  onboardingDialogShell,
   onboardingEscape,
   onboardingHasDraft,
+  releaseOnboardingTextFocus,
   resolveOnboardingStep,
   type OnboardingDismiss,
 } from "@/lib/onboarding-flow";
@@ -554,9 +556,11 @@ export function TemplatePreview() {
   };
   const applyDismiss = (action: OnboardingDismiss) => {
     if (action.type === "blur-field") {
-      if (document.activeElement instanceof HTMLElement) {
-        document.activeElement.blur();
+      const active = document.activeElement;
+      if (onboardingDialogShell(active)) {
+        deferProjectNameBlur(deferNameBlurRef);
       }
+      releaseOnboardingTextFocus(active);
       return;
     }
     if (action.type === "close-section") {
@@ -601,6 +605,8 @@ export function TemplatePreview() {
         className={`flex max-w-none flex-col gap-0 overflow-hidden p-0 transition-[width] duration-300 sm:max-w-none ${modalWidth} ${modalStep === "preview" ? "h-[70vh]" : "max-h-[80vh]"}`}
         onEscapeKeyDown={(event) => {
           event.preventDefault();
+          event.stopPropagation();
+          if (isCreating) return;
           applyDismiss(
             onboardingEscape({
               surface: modalStep === "details" ? "details" : "preview",
