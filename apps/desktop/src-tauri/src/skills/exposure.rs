@@ -151,7 +151,8 @@ mod tests {
 
     #[test]
     fn slash_skill_survives_later_paragraphs_and_compression_carryover() {
-        let file_then_notes = "[Currently open file: paper.tex]\n\n/scanpy plot this\n\nKeep the axis labels.";
+        let file_then_notes =
+            "[Currently open file: paper.tex]\n\n/scanpy plot this\n\nKeep the axis labels.";
         let exposed = exposure_for_turn(None, None, file_then_notes);
         assert_eq!(exposed.folders, vec!["scanpy".to_string()]);
 
@@ -161,6 +162,21 @@ mod tests {
 
         let traversal = exposure_for_turn(None, None, "/../../providers");
         assert!(traversal.folders.is_empty());
+
+        let cited = "\
+[Currently open file: paper.tex]
+[Selection: @paper.tex:2:1-2:10]
+[Selected text:
+claim [1]
+]
+
+/scanpy plot this
+
+See Smith [1]
+
+more notes";
+        let exposed = exposure_for_turn(None, None, cited);
+        assert_eq!(exposed.folders, vec!["scanpy".to_string()]);
     }
 
     #[test]
