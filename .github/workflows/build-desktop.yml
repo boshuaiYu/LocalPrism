@@ -218,8 +218,18 @@ jobs:
           if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
             EXTRA="--config src-tauri/tauri.local-build.conf.json"
           fi
+          # Do not pass `--no-sign` when TAURI_SIGNING_PRIVATE_KEY is set.
+          # In Tauri CLI 2 that flag skips Apple codesign AND updater minisign
+          # ("Updater signing is skipped due to --no-sign flag."), so
+          # *.app.tar.gz.sig is never written and publish cannot build latest.json.
+          # With an updater key but no Developer ID, use Tauri's ad-hoc identity
+          # "-" (https://v2.tauri.app/distribute/sign/macos/#ad-hoc-signing).
           if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
-            EXTRA="$EXTRA --no-sign"
+            if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+              export APPLE_SIGNING_IDENTITY="-"
+            else
+              EXTRA="$EXTRA --no-sign"
+            fi
           fi
           pnpm --filter @claude-prism/desktop tauri build --target aarch64-apple-darwin $EXTRA
 
@@ -377,8 +387,15 @@ jobs:
           if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
             EXTRA="--config src-tauri/tauri.local-build.conf.json"
           fi
+          # Same footgun as build-macos: `--no-sign` also disables updater .sig
+          # generation. Ad-hoc identity "-" keeps updater signing without a
+          # Developer ID. See https://v2.tauri.app/distribute/sign/macos/#ad-hoc-signing
           if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
-            EXTRA="$EXTRA --no-sign"
+            if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+              export APPLE_SIGNING_IDENTITY="-"
+            else
+              EXTRA="$EXTRA --no-sign"
+            fi
           fi
           pnpm --filter @claude-prism/desktop tauri build --target x86_64-apple-darwin $EXTRA
 
