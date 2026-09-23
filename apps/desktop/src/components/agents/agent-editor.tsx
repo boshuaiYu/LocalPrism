@@ -24,7 +24,10 @@ import { Label } from "@/components/ui/label";
 export interface AgentEditorProps {
   runtime?: RuntimeKind;
   projectPath?: string | null;
+  /** Saved agent being edited. Saving overwrites that file. */
   initial?: AgentProfile | null;
+  /** Draft for a new agent, including preset name, prompt, and skills. */
+  seed?: AgentProfile | null;
   onSaved?: (profile: AgentProfile) => void;
   onCancel?: () => void;
 }
@@ -33,6 +36,7 @@ export function AgentEditor({
   runtime: _runtime = "claude",
   projectPath,
   initial = null,
+  seed = null,
   onSaved,
   onCancel,
 }: AgentEditorProps) {
@@ -45,7 +49,7 @@ export function AgentEditor({
   const refreshSkills = useSkillStore((state) => state.refresh);
   const catalogModels = useProviderStore((state) => state.models);
   const [profile, setProfile] = useState<AgentProfile>(
-    () => initial ?? emptyAgentProfile(runtime, "user"),
+    () => initial ?? seed ?? emptyAgentProfile(runtime, "user"),
   );
   const [overwrite, setOverwrite] = useState(false);
   const [saving, setSaving] = useState(false);

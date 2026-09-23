@@ -1,7 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AgentEditor } from "@/components/agents/agent-editor";
 import { Button } from "@/components/ui/button";
+import {
+  BUILTIN_AGENT_PRESETS,
+  buildPresetAgentProfile,
+  type BuiltinAgentPresetId,
+} from "@/lib/agent-presets";
 import { useAgentStore } from "@/stores/agent-store";
+import { useSkillStore } from "@/stores/skill-store";
 import type { AgentProfile } from "@/runtime/types";
 
 export interface AgentLibraryProps {
@@ -14,12 +20,39 @@ export function AgentLibrary({ projectPath = null }: AgentLibraryProps) {
   const error = useAgentStore((state) => state.error);
   const refresh = useAgentStore((state) => state.refresh);
   const remove = useAgentStore((state) => state.remove);
+  const refreshSkills = useSkillStore((state) => state.refresh);
   const [editing, setEditing] = useState<AgentProfile | null>(null);
   const [creating, setCreating] = useState(false);
+  const [seed, setSeed] = useState<AgentProfile | null>(null);
+  const [preparingPreset, setPreparingPreset] = useState(false);
+  const presetRequest = useRef(0);
 
   useEffect(() => {
     void refresh("claude", projectPath ?? undefined);
   }, [projectPath, refresh]);
+
+  const startCustom = () => {
+    presetRequest.current += 1;
+    setPreparingPreset(false);
+    setSeed(null);
+    setCreating(true);
+    setEditing(null);
+  };
+
+  const startPreset = async (id: BuiltinAgentPresetId) => {
+    const request = ++presetRequest.current;
+    setPreparingPreset(true);
+    await refreshSkills(projectPath ?? undefined);
+    if (request !== presetRequest.current) return;
+    setSeed(
+      buildPresetAgentProfile(id, useSkillStore.getState().skills, {
+        projectPath,
+      }),
+    );
+    setCreating(true);
+    setEditing(null);
+    setPreparingPreset(false);
+  };
 
   return (
     <div className="space-y-4" data-testid="agent-library">
@@ -32,10 +65,7 @@ export function AgentLibrary({ projectPath = null }: AgentLibraryProps) {
           type="button"
           size="sm"
           className="ml-auto"
-          onClick={() => {
-            setCreating(true);
-            setEditing(null);
-          }}
+          onClick={startCustom}
         >
           New agent
         </Button>
@@ -48,16 +78,28 @@ export function AgentLibrary({ projectPath = null }: AgentLibraryProps) {
 
       {(creating || editing) && (
         <AgentEditor
+          key={
+            editing
+              ? `edit:${editing.scope}:${editing.id}`
+              : (seed?.id ?? "custom")
+          }
           runtime="claude"
           projectPath={projectPath}
           initial={editing}
+          seed={editing ? null : seed}
           onCancel={() => {
+            presetRequest.current += 1;
+            setPreparingPreset(false);
             setCreating(false);
             setEditing(null);
+            setSeed(null);
           }}
           onSaved={() => {
+            presetRequest.current += 1;
+            setPreparingPreset(false);
             setCreating(false);
             setEditing(null);
+            setSeed(null);
           }}
         />
       )}
@@ -84,6 +126,9 @@ export function AgentLibrary({ projectPath = null }: AgentLibraryProps) {
                   size="sm"
                   variant="ghost"
                   onClick={() => {
+                    presetRequest.current += 1;
+                    setPreparingPreset(false);
+                    setSeed(null);
                     setEditing(agent);
                     setCreating(false);
                   }}
@@ -103,8 +148,49 @@ export function AgentLibrary({ projectPath = null }: AgentLibraryProps) {
           </li>
         ))}
         {!loading && agents.length === 0 && !creating && !editing && (
-          <li className="text-muted-foreground text-sm">
-            No custom agents yet.
+          <li data-testid="agent-preset-empty" className="space-y-3">
+            <div>
+              <p className="font-medium text-sm">No custom agents yet.</p>
+              <p className="mt-1 text-muted-foreground text-xs">
+                Start from a writing preset, or create a custom agent.
+              </p>
+            </div>
+            <div className="grid gap-2">
+              {BUILTIN_AGENT_PRESETS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  data-testid={`agent-preset-${preset.id}`}
+                  className="rounded-lg border border-border px-3 py-2 text-left hover:bg-muted/60 disabled:opacity-60"
+                  disabled={preparingPreset}
+                  onClick={() => void startPreset(preset.id)}
+                >
+                  <span className="font-medium text-sm">{preset.name}</span>
+                  <span className="text-muted-foreground text-xs">
+                    {" "}
+                    · {preset.titleSecondary}
+                  </span>
+                  <p className="mt-1 text-muted-foreground text-xs">
+                    {preset.description}
+                  </p>
+                </button>
+              ))}
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                data-testid="agent-preset-custom"
+                disabled={preparingPreset}
+                onClick={startCustom}
+              >
+                自定义 · Create custom agent
+              </Button>
+            </div>
+            {preparingPreset && (
+              <p className="text-muted-foreground text-xs">
+                Checking installed skills…
+              </p>
+            )}
           </li>
         )}
       </ul>
