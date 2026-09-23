@@ -385,12 +385,14 @@ export function WorkspaceLayout() {
             className="min-w-0"
           >
             {!chatVisible && !codeVisible ? (
-              <div className="relative h-full min-w-0">
+              <div className="relative h-full min-w-0" data-tour="tour-compile">
                 <PdfPreview />
                 {chatRestoreButton}
               </div>
             ) : (
-              <PdfPreview />
+              <div className="h-full min-w-0" data-tour="tour-compile">
+                <PdfPreview />
+              </div>
             )}
           </Panel>
         )}

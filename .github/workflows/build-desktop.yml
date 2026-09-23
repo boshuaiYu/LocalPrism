@@ -98,19 +98,6 @@ jobs:
           fi
           pnpm --filter @claude-prism/desktop tauri build --target x86_64-pc-windows-msvc $EXTRA
 
-      - name: Collect updater artifacts
-        id: collect
-        shell: bash
-        run: |
-          BUNDLE="apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle"
-          NSIS_SIG=$(find "$BUNDLE/nsis" -name '*-setup.exe.sig' 2>/dev/null | head -1)
-          NSIS_EXE=$(find "$BUNDLE/nsis" -name '*-setup.exe' ! -name '*.sig' 2>/dev/null | head -1)
-
-          if [ -n "$NSIS_SIG" ] && [ -n "$NSIS_EXE" ]; then
-            echo "sig=$(cat "$NSIS_SIG")" >> $GITHUB_OUTPUT
-            echo "url=$(basename "$NSIS_EXE")" >> $GITHUB_OUTPUT
-          fi
-
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -120,10 +107,6 @@ jobs:
             apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.msi
             apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.sig
           if-no-files-found: warn
-
-    outputs:
-      sig: ${{ steps.collect.outputs.sig }}
-      url: ${{ steps.collect.outputs.url }}
 
   # ──────────────────────────────────────────────
   # macOS (Apple Silicon)
@@ -272,18 +255,6 @@ jobs:
           xcrun stapler staple "$DMG_PATH"
           xcrun stapler staple "$APP_PATH"
 
-      - name: Collect updater artifacts
-        id: collect
-        run: |
-          BUNDLE="apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle"
-          TAR_SIG=$(find "$BUNDLE/macos" -name '*.app.tar.gz.sig' 2>/dev/null | head -1)
-          TAR_GZ=$(find "$BUNDLE/macos" -name '*.app.tar.gz' ! -name '*.sig' 2>/dev/null | head -1)
-
-          if [ -n "$TAR_SIG" ] && [ -n "$TAR_GZ" ]; then
-            echo "sig=$(cat "$TAR_SIG")" >> $GITHUB_OUTPUT
-            echo "url=$(basename "$TAR_GZ")" >> $GITHUB_OUTPUT
-          fi
-
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -293,10 +264,6 @@ jobs:
             apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/**/*.app.tar.gz
             apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/**/*.sig
           if-no-files-found: warn
-
-    outputs:
-      sig: ${{ steps.collect.outputs.sig }}
-      url: ${{ steps.collect.outputs.url }}
 
   # ──────────────────────────────────────────────
   # macOS (Intel x86_64)
@@ -447,18 +414,6 @@ jobs:
           xcrun stapler staple "$DMG_PATH"
           xcrun stapler staple "$APP_PATH"
 
-      - name: Collect updater artifacts
-        id: collect
-        run: |
-          BUNDLE="apps/desktop/src-tauri/target/x86_64-apple-darwin/release/bundle"
-          TAR_SIG=$(find "$BUNDLE/macos" -name '*.app.tar.gz.sig' 2>/dev/null | head -1)
-          TAR_GZ=$(find "$BUNDLE/macos" -name '*.app.tar.gz' ! -name '*.sig' 2>/dev/null | head -1)
-
-          if [ -n "$TAR_SIG" ] && [ -n "$TAR_GZ" ]; then
-            echo "sig=$(cat "$TAR_SIG")" >> $GITHUB_OUTPUT
-            echo "url=$(basename "$TAR_GZ")" >> $GITHUB_OUTPUT
-          fi
-
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -468,10 +423,6 @@ jobs:
             apps/desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/**/*.app.tar.gz
             apps/desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/**/*.sig
           if-no-files-found: warn
-
-    outputs:
-      sig: ${{ steps.collect.outputs.sig }}
-      url: ${{ steps.collect.outputs.url }}
 
   # ──────────────────────────────────────────────
   # Linux
@@ -531,18 +482,6 @@ jobs:
           bash scripts/check-linux-desktop-symbols.sh \
             apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/claude-prism-desktop
 
-      - name: Collect updater artifacts
-        id: collect
-        run: |
-          BUNDLE="apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle"
-          APPIMAGE_SIG=$(find "$BUNDLE/appimage" -name '*.AppImage.sig' 2>/dev/null | head -1)
-          APPIMAGE=$(find "$BUNDLE/appimage" -name '*.AppImage' ! -name '*.sig' 2>/dev/null | head -1)
-
-          if [ -n "$APPIMAGE_SIG" ] && [ -n "$APPIMAGE" ]; then
-            echo "sig=$(cat "$APPIMAGE_SIG")" >> $GITHUB_OUTPUT
-            echo "url=$(basename "$APPIMAGE")" >> $GITHUB_OUTPUT
-          fi
-
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -554,12 +493,10 @@ jobs:
             apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/**/*.sig
           if-no-files-found: warn
 
-    outputs:
-      sig: ${{ steps.collect.outputs.sig }}
-      url: ${{ steps.collect.outputs.url }}
-
   # ──────────────────────────────────────────────
   # Publish: generate latest.json & upload to release
+  # Signatures are read from .sig artifacts. Job outputs cannot carry
+  # multiline minisign files, which previously published platforms: {}.
   # ──────────────────────────────────────────────
   publish:
     needs: [build-windows, build-macos, build-macos-intel, build-linux]
@@ -583,43 +520,17 @@ jobs:
         with:
           path: artifacts
 
-      - name: Generate latest.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Generate latest.json from updater artifacts
         env:
           TAG: ${{ steps.tag.outputs.tag }}
-          WIN_SIG: ${{ needs.build-windows.outputs.sig }}
-          WIN_URL: ${{ needs.build-windows.outputs.url }}
-          MAC_SIG: ${{ needs.build-macos.outputs.sig }}
-          MAC_URL: ${{ needs.build-macos.outputs.url }}
-          MAC_INTEL_SIG: ${{ needs.build-macos-intel.outputs.sig }}
-          MAC_INTEL_URL: ${{ needs.build-macos-intel.outputs.url }}
-          LIN_SIG: ${{ needs.build-linux.outputs.sig }}
-          LIN_URL: ${{ needs.build-linux.outputs.url }}
         run: |
-          VERSION="${TAG#v}"
-          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          export BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/$TAG"
-
-          node -e "
-            const BASE = process.env.BASE_URL;
-            const platforms = {};
-            if (process.env.MAC_SIG)
-              platforms['darwin-aarch64'] = { signature: process.env.MAC_SIG, url: BASE + '/LocalPrism-macOS.app.tar.gz' };
-            if (process.env.MAC_INTEL_SIG)
-              platforms['darwin-x86_64'] = { signature: process.env.MAC_INTEL_SIG, url: BASE + '/LocalPrism-macOS-Intel.app.tar.gz' };
-            if (process.env.LIN_SIG)
-              platforms['linux-x86_64'] = { signature: process.env.LIN_SIG, url: BASE + '/LocalPrism-Linux.AppImage' };
-            if (process.env.WIN_SIG)
-              platforms['windows-x86_64'] = { signature: process.env.WIN_SIG, url: BASE + '/LocalPrism-Windows-setup.exe' };
-
-            const data = {
-              version: '$VERSION',
-              notes: 'LocalPrism $TAG',
-              pub_date: '$PUB_DATE',
-              platforms
-            };
-            require('fs').writeFileSync('latest.json', JSON.stringify(data, null, 2));
-            console.log(JSON.stringify(data, null, 2));
-          "
+          node --experimental-strip-types --disable-warning=ExperimentalWarning apps/desktop/scripts/generate-latest-json.ts \
+            --artifacts artifacts \
+            --upload upload
 
       - name: Create draft release
         env:
@@ -629,29 +540,11 @@ jobs:
           gh release view "$TAG" > /dev/null 2>&1 || \
             gh release create "$TAG" --title "LocalPrism $TAG" --generate-notes --draft
 
-      - name: Rename and upload assets
+      - name: Upload release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
-          mkdir -p upload
-
-          # Rename platform artifacts to version-free names
-          # macOS Apple Silicon (from desktop-macos artifact)
-          find artifacts/desktop-macos -name "*.dmg" 2>/dev/null | head -1 | xargs -I{} cp {} upload/LocalPrism-macOS.dmg
-          find artifacts/desktop-macos -name "*.app.tar.gz" 2>/dev/null | head -1 | xargs -I{} cp {} upload/LocalPrism-macOS.app.tar.gz
-          # macOS Intel (from desktop-macos-intel artifact)
-          find artifacts/desktop-macos-intel -name "*.dmg" 2>/dev/null | head -1 | xargs -I{} cp {} upload/LocalPrism-macOS-Intel.dmg
-          find artifacts/desktop-macos-intel -name "*.app.tar.gz" 2>/dev/null | head -1 | xargs -I{} cp {} upload/LocalPrism-macOS-Intel.app.tar.gz
-          # Windows
-          find artifacts/desktop-windows -name "*-setup.exe" 2>/dev/null | head -1 | xargs -I{} cp {} upload/LocalPrism-Windows-setup.exe
-          find artifacts/desktop-windows -name "*.msi" 2>/dev/null | head -1 | xargs -I{} cp {} upload/LocalPrism-Windows.msi
-          # Linux
-          find artifacts/desktop-linux -name "*.deb" 2>/dev/null | head -1 | xargs -I{} cp {} upload/LocalPrism-Linux.deb
-          find artifacts/desktop-linux -name "*.rpm" 2>/dev/null | head -1 | xargs -I{} cp {} upload/LocalPrism-Linux.rpm
-          find artifacts/desktop-linux -name "*.AppImage" 2>/dev/null | head -1 | xargs -I{} cp {} upload/LocalPrism-Linux.AppImage
-
-          cp latest.json upload/
 
           echo "==> Uploading:"
           ls -la upload/

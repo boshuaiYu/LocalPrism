@@ -4,6 +4,8 @@ import {
   BUILTIN_AGENT_PRESETS,
   DE_AI_INSTRUCTIONS,
   PEER_REVIEW_INSTRUCTIONS,
+  BUILTIN_AGENT_PRESET_SEED_VERSION,
+  BUILTIN_AGENT_SKILL_FOLDERS,
   buildPresetAgentProfile,
   builtinPresetContentUpdate,
   builtinPresetProfilesToSeed,
@@ -52,6 +54,8 @@ describe("builtin agent presets", () => {
     expect(polish.instructions).toContain(
       "Do not fabricate citations, data, results, or references.",
     );
+    expect(polish.instructions).toContain("What NOT to do");
+    expect(polish.instructions).toContain("Output format");
     expect(polish.scope).toBe("user");
     expect(polish.skillIds).toEqual([]);
     expect(polish.runtime).toBe("claude");
@@ -82,6 +86,11 @@ describe("builtin agent presets", () => {
     expect(review.instructions).toContain("Never invent papers or DOIs.");
     expect(review.instructions).toContain(
       "Do not check, add, or repair citations",
+    );
+    expect(review.instructions).toContain("What NOT to do");
+    expect(BUILTIN_AGENT_PRESET_SEED_VERSION).toBe(3);
+    expect(BUILTIN_AGENT_SKILL_FOLDERS["peer-review"].join(" ")).not.toMatch(
+      /citation|zotero|bibtex|bib/,
     );
     expect(review.instructions).not.toContain(
       "flag missing/unused/inconsistent citations",
@@ -146,6 +155,33 @@ describe("builtin agent presets", () => {
     ]);
 
     expect(profile.skillIds).toEqual(["de-ai-prose"]);
+  });
+
+  it("attaches shipped writing, polish, and review skills without citation tools", () => {
+    const installed = [
+      skill("nature-polishing", "user"),
+      skill("nature-writing", "user"),
+      skill("academic-paper", "user"),
+      skill("academic-paper-reviewer", "user"),
+      skill("peer-review", "user"),
+      skill("nature-reader", "user"),
+      skill("nature-citation", "user"),
+      skill("reference-checker", "user"),
+      skill("zotero-cite", "user"),
+      skill("bibtex-check", "user"),
+    ];
+
+    expect(
+      buildPresetAgentProfile("academic-polish", installed).skillIds,
+    ).toEqual(["nature-polishing", "nature-writing", "academic-paper"]);
+    expect(buildPresetAgentProfile("de-ai", installed).skillIds).toEqual([
+      "nature-polishing",
+    ]);
+    expect(buildPresetAgentProfile("peer-review", installed).skillIds).toEqual([
+      "academic-paper-reviewer",
+      "peer-review",
+      "nature-reader",
+    ]);
   });
 
   it("keeps peer review critique-only and does not bind citation or writing skills", () => {
@@ -287,14 +323,24 @@ describe("builtin agent presets", () => {
       name: "项目里的抛光",
     };
 
-    const updated = builtinPresetContentUpdate(polish);
+    const updated = builtinPresetContentUpdate(polish, [
+      skill("academic-polish", "user"),
+      skill("nature-writing", "user"),
+      skill("zotero-cite", "user"),
+      skill("my-toggle", "user", { name: "My Toggle" }),
+    ]);
     expect(updated?.name).toBe("论文抛光机");
     expect(updated?.description).toContain("贴回 LaTeX");
     expect(updated?.instructions).toBe(ACADEMIC_POLISH_INSTRUCTIONS);
-    expect(updated?.skillIds).toEqual(["writer", "my-toggle"]);
+    expect(updated?.skillIds).toEqual(["academic-polish", "nature-writing"]);
     expect(updated?.model).toBe("opus");
-    expect(builtinPresetContentUpdate(custom)).toBeNull();
-    expect(builtinPresetContentUpdate(projectCopy)).toBeNull();
-    expect(builtinPresetContentUpdate(updated!)).toBeNull();
+    expect(builtinPresetContentUpdate(custom, [])).toBeNull();
+    expect(builtinPresetContentUpdate(projectCopy, [])).toBeNull();
+    expect(
+      builtinPresetContentUpdate(updated!, [
+        skill("academic-polish", "user"),
+        skill("nature-writing", "user"),
+      ]),
+    ).toBeNull();
   });
 });

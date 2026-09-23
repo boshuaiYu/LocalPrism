@@ -6,6 +6,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invoke(...args),
 }));
 
+import { BUILTIN_AGENT_PRESET_SEED_VERSION } from "@/lib/agent-presets";
 import {
   emptyAgentProfile,
   resetBuiltinPresetSeedForTests,
@@ -195,7 +196,7 @@ describe("agent-store", () => {
         expect(payload.profile.id).not.toBe("reviewer");
         if (payload.profile.id === "academic-polish") {
           expect(payload.overwrite).toBe(true);
-          expect(payload.profile.skillIds).toEqual(["writer", "my-toggle"]);
+          expect(payload.profile.skillIds).toEqual(["academic-polish"]);
           expect(payload.profile.model).toBe("opus");
           expect(payload.profile.name).toBe("论文抛光机");
         } else {
@@ -230,7 +231,10 @@ describe("agent-store", () => {
         .flatMap((agent) => agent.skillIds)
         .join(" "),
     ).not.toMatch(/zotero|citation/);
-    expect(useSettingsStore.getState().builtinAgentPresetsSeedVersion).toBe(2);
+    expect(useSettingsStore.getState().builtinAgentPresetsSeedVersion).toBe(
+      BUILTIN_AGENT_PRESET_SEED_VERSION,
+    );
+    expect(BUILTIN_AGENT_PRESET_SEED_VERSION).toBe(3);
     expect(useSettingsStore.getState().builtinAgentPresetsSeeded).toBe(true);
 
     invoke.mockClear();

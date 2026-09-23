@@ -13,8 +13,27 @@ export function updateApplyMode(
   return channel === "linux-package" ? "manual-package" : "background-restart";
 }
 
+export type UpdateErrorKind = "missing-platform" | "generic";
+
+/**
+ * Tauri's updater throws this when latest.json has no entry for the
+ * running target (including an empty platforms object).
+ */
+export function classifyUpdateError(message: string): UpdateErrorKind {
+  const text = message.toLowerCase();
+  if (
+    text.includes("were found in the response platforms") ||
+    text.includes("platforms object") ||
+    text.includes("fallback platforms") ||
+    /no (?:compatible|matching) platform/.test(text)
+  ) {
+    return "missing-platform";
+  }
+  return "generic";
+}
+
 export function updateBannerVisible(
-  status: { state: string; explicit?: boolean },
+  status: { state: string; explicit?: boolean; message?: string },
   dismissed: boolean,
 ): boolean {
   if (status.state === "downloading" || status.state === "installing") {
@@ -22,6 +41,12 @@ export function updateBannerVisible(
   }
   if (dismissed) return false;
   if (status.state === "ready" || status.state === "manual") return true;
-  if (status.state === "error" && status.explicit) return true;
+  if (
+    status.state === "error" &&
+    (status.explicit ||
+      classifyUpdateError(status.message ?? "") === "missing-platform")
+  ) {
+    return true;
+  }
   return false;
 }

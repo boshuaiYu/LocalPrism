@@ -1,14 +1,14 @@
 import { useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/lib/use-i18n";
-import { updateBannerVisible } from "@/lib/update-policy";
+import { classifyUpdateError, updateBannerVisible } from "@/lib/update-policy";
 import {
   ensureUpdateCheck,
   useUpdateStore,
   type UpdateStatus,
 } from "@/stores/update-store";
 
-function statusCopy(status: UpdateStatus): string {
+function statusCopy(status: UpdateStatus, missingPlatform: string): string {
   switch (status.state) {
     case "checking":
       return "Checking for updates…";
@@ -25,13 +25,16 @@ function statusCopy(status: UpdateStatus): string {
     case "installing":
       return `Installing ${status.version} and restarting…`;
     case "error":
-      return status.message;
+      return classifyUpdateError(status.message) === "missing-platform"
+        ? missingPlatform
+        : status.message;
     default:
       return "Updates download in the background. Restart only after you confirm.";
   }
 }
 
 export function UpdatePrompt() {
+  const { t } = useI18n();
   const status = useUpdateStore((state) => state.status);
   const dismissed = useUpdateStore((state) => state.bannerDismissed);
   const dismissBanner = useUpdateStore((state) => state.dismissBanner);
@@ -49,7 +52,9 @@ export function UpdatePrompt() {
       data-testid="update-prompt"
       className="lp-chrome fixed inset-x-0 bottom-4 z-40 mx-auto flex w-[min(40rem,calc(100vw-2rem))] flex-col gap-3 rounded-xl border px-4 py-3 shadow-lg"
     >
-      <p className="text-sm leading-relaxed">{statusCopy(status)}</p>
+      <p className="text-sm leading-relaxed">
+        {statusCopy(status, t("updates.missingPlatform"))}
+      </p>
       <div className="flex flex-wrap justify-end gap-2">
         {status.state === "ready" && (
           <Button
@@ -69,6 +74,16 @@ export function UpdatePrompt() {
             View releases
           </Button>
         )}
+        {status.state === "error" &&
+          classifyUpdateError(status.message) === "missing-platform" && (
+            <Button
+              type="button"
+              className="h-9 rounded-lg"
+              onClick={() => void openReleases()}
+            >
+              {t("updates.viewReleases")}
+            </Button>
+          )}
         {status.state !== "installing" && status.state !== "downloading" && (
           <Button
             type="button"
@@ -99,9 +114,10 @@ export function UpdateSettings() {
     >
       <h3 className="font-medium text-sm">{t("settings.updates")}</h3>
       <p className="mt-1 text-lp-meta text-sm leading-relaxed">
-        {statusCopy(status)} In-app install applies to the AppImage, macOS, and
-        Windows. Debian and RPM installs stay on the package from Releases.
-        Downloads are checked with the existing updater signature.
+        {statusCopy(status, t("updates.missingPlatform"))} In-app install
+        applies to the AppImage, macOS, and Windows. Debian and RPM installs
+        stay on the package from Releases. Downloads are checked with the
+        existing updater signature.
       </p>
       <div className="mt-3 flex flex-wrap gap-2">
         <Button
@@ -111,7 +127,7 @@ export function UpdateSettings() {
           disabled={busy || status.state === "installing"}
           onClick={() => void checkForUpdate({ explicit: true })}
         >
-          Check for updates
+          {t("updates.check")}
         </Button>
         {status.state === "ready" && (
           <Button

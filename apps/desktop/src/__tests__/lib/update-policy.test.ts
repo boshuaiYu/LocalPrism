@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { updateApplyMode, updateBannerVisible } from "@/lib/update-policy";
+import {
+  classifyUpdateError,
+  updateApplyMode,
+  updateBannerVisible,
+} from "@/lib/update-policy";
 
 describe("update apply mode", () => {
   it("keeps deb and rpm on the manual package path", () => {
@@ -22,5 +26,23 @@ describe("update apply mode", () => {
     expect(updateBannerVisible({ state: "error", explicit: true }, false)).toBe(
       true,
     );
+  });
+
+  it("treats an empty updater manifest as a missing platform, not a generic failure", () => {
+    const raw =
+      'None of the fallback platforms ["windows-x86_64-nsis", "windows-x86_64"] were found in the response platforms object';
+    expect(classifyUpdateError(raw)).toBe("missing-platform");
+    expect(
+      classifyUpdateError(
+        'None of the fallback platforms ["linux-x86_64"] were found in the response platforms object',
+      ),
+    ).toBe("missing-platform");
+    expect(classifyUpdateError("network down")).toBe("generic");
+    expect(
+      updateBannerVisible(
+        { state: "error", explicit: false, message: raw },
+        false,
+      ),
+    ).toBe(true);
   });
 });

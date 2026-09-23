@@ -5,7 +5,8 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { open } from "@tauri-apps/plugin-shell";
 import { check } from "@tauri-apps/plugin-updater";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { UpdatePrompt } from "@/components/update-prompt";
+import { UpdatePrompt, UpdateSettings } from "@/components/update-prompt";
+import { translate } from "@/lib/i18n";
 import { resetUpdateStoreForTests } from "@/stores/update-store";
 
 function updateFixture(overrides?: { failInstall?: boolean }) {
@@ -115,5 +116,28 @@ describe("UpdatePrompt", () => {
     expect(open).toHaveBeenCalledWith(
       "https://github.com/boshuaiYu/LocalPrism/releases/latest",
     );
+  });
+
+  it("replaces an empty platform manifest error with a localized explanation", async () => {
+    const raw =
+      'None of the fallback platforms ["windows-x86_64-nsis", "windows-x86_64"] were found in the response platforms object';
+    vi.mocked(check).mockRejectedValue(new Error(raw));
+
+    await act(async () => {
+      root.render(<UpdateSettings />);
+    });
+    const checkButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "Check for updates",
+    );
+    await act(async () => {
+      checkButton?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain(
+      translate("en", "updates.missingPlatform"),
+    );
+    expect(container.textContent).not.toContain("fallback platforms");
+    expect(container.textContent).not.toContain("were found in the response");
   });
 });

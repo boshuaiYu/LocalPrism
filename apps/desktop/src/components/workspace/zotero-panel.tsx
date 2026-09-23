@@ -243,7 +243,10 @@ export function ZoteroHeader() {
   const loadCollections = useZoteroStore((s) => s.loadCollections);
 
   return (
-    <div className="relative flex w-full items-center justify-center px-3">
+    <div
+      className="relative flex w-full items-center justify-center px-3"
+      data-tour="tour-zotero"
+    >
       <div className="flex items-center gap-2">
         <span
           className={cn(

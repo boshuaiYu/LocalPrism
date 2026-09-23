@@ -32,6 +32,29 @@ const en = {
   "chrome.chapters": "Chapters",
   "chrome.missingFile": "Not in this project yet",
 
+  "updates.check": "Check for updates",
+  "updates.missingPlatform":
+    "This release has no installer for this computer. The update list is empty or does not include your system. Download a build from GitHub Releases. Nothing was corrupted.",
+  "updates.viewReleases": "View releases",
+
+  "tour.back": "Back",
+  "tour.next": "Next",
+  "tour.done": "Done",
+  "tour.skip": "Skip",
+  "tour.progress": "{{current}} / {{total}}",
+  "tour.projects.title": "Project navigation",
+  "tour.projects.body":
+    "Create a project or open a folder here. After it opens, the sidebar lists the paper's files.",
+  "tour.zotero.title": "Connect Zotero",
+  "tour.zotero.body":
+    "In the project sidebar, use the existing Zotero panel to sign in and sync a library. This step only points at that connection.",
+  "tour.agents.title": "Agents, skills, and chat",
+  "tour.agents.body":
+    "Built-in writing agents and skills are in the sidebar Environment section and in Settings. The chat pane is where you ask them to edit the paper.",
+  "tour.compile.title": "Compile and PDF",
+  "tour.compile.body":
+    "The PDF pane compiles the LaTeX project and shows the preview. Use Compile there when you want a fresh build.",
+
   "onboarding.progress": "Project setup progress",
   "onboarding.step.template": "Template",
   "onboarding.step.details": "Details",
@@ -243,6 +266,29 @@ const zh: Record<MessageKey, string> = {
   "chrome.backHome": "返回主页",
   "chrome.chapters": "章节",
   "chrome.missingFile": "项目中还没有这个文件",
+
+  "updates.check": "检查更新",
+  "updates.missingPlatform":
+    "这次发布没有当前电脑可用的安装包。更新清单是空的，或没有你的系统。请到 GitHub Releases 下载。安装包没有损坏。",
+  "updates.viewReleases": "查看发布页",
+
+  "tour.back": "上一步",
+  "tour.next": "下一步",
+  "tour.done": "完成",
+  "tour.skip": "跳过",
+  "tour.progress": "{{current}} / {{total}}",
+  "tour.projects.title": "项目导航",
+  "tour.projects.body":
+    "在这里新建项目或打开文件夹。打开之后，侧边栏会列出文稿里的文件。",
+  "tour.zotero.title": "连接 Zotero",
+  "tour.zotero.body":
+    "打开项目后，在左侧栏已有的 Zotero 面板里登录并同步文库。这一步只是指向那个入口。",
+  "tour.agents.title": "智能体、技能和对话",
+  "tour.agents.body":
+    "内置写作智能体和技能在侧边栏的 Environment，也可以在设置里管理。对话面板用来让它们改文稿。",
+  "tour.compile.title": "编译和 PDF",
+  "tour.compile.body":
+    "PDF 窗格会编译 LaTeX 并显示预览。需要重新生成时，用那里的编译按钮。",
 
   "onboarding.progress": "项目创建进度",
   "onboarding.step.template": "模板",
