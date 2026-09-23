@@ -101,12 +101,9 @@ describe("skill categories", () => {
       groups.map((group) => [group.id, group.items.map((item) => item.folder)]),
     ).toEqual([
       ["nature-skills", ["nature-polishing"]],
-      ["category:bioinformatics", ["scanpy"]],
+      ["scientific-agent-skills", ["scanpy"]],
       ["category:my-writer", ["my-writer"]],
     ]);
-    expect(
-      groups.find((group) => group.id === "category:bioinformatics")?.name,
-    ).toBe("Bioinformatics");
   });
 
   it("uses the skill folder only after frontmatter, parent folder, and built-in packs", () => {
@@ -146,7 +143,25 @@ describe("skill categories", () => {
         snapshot,
         catalog,
       ).id,
-    ).toBe("category:写作");
+    ).toBe("scientific-agent-skills");
+    expect(
+      resolveSkillCategory(
+        {
+          folder: "nature-new-skill",
+          name: "Nature new skill",
+          category: "Other",
+        },
+        snapshot,
+        catalog,
+      ).id,
+    ).toBe("nature-skills");
+    expect(
+      resolveSkillCategory(
+        { folder: "lab-helper", name: "literature-review" },
+        snapshot,
+        catalog,
+      ).id,
+    ).toBe("academic-research-skills");
 
     expect(
       resolveSkillCategory(

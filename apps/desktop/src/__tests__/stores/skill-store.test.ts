@@ -97,6 +97,10 @@ describe("skill-store", () => {
     expect(invoke).toHaveBeenCalledWith("skill_list", {
       projectPath: "/paper",
     });
+    expect(invoke).not.toHaveBeenCalledWith(
+      "skill_import_url",
+      expect.anything(),
+    );
     expect(useSkillStore.getState().loading).toBe(false);
   });
 

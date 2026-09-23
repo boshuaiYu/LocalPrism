@@ -232,24 +232,26 @@ export function resolveSkillCategory(
   catalog: CatalogSkillCategory[],
   catalogMap = catalogFolderMap(catalog),
 ): ResolvedSkillCategory {
+  const scientificFolders = new Set(
+    [...catalogMap.keys()].map((folder) => folder.toLowerCase()),
+  );
+  // Pack membership (folder or name) wins over a SKILL.md category label so
+  // scanpy stays in scientific-agent-skills even when frontmatter says otherwise.
+  const packId = resolveSkillPackId(input, scientificFolders);
+  if (packId !== IMPORTED_SKILL_PACK_ID) {
+    return packCategory(packId);
+  }
   const explicit = explicitCategoryLabel(input.category);
   if (explicit) {
-    const packId = packIdFromCategoryLabel(explicit);
-    if (packId && packId !== IMPORTED_SKILL_PACK_ID) {
-      return packCategory(packId);
+    const labeledPack = packIdFromCategoryLabel(explicit);
+    if (labeledPack && labeledPack !== IMPORTED_SKILL_PACK_ID) {
+      return packCategory(labeledPack);
     }
     return {
       id: `category:${categoryIdFromName(explicit)}`,
       name: explicit,
       source: "custom",
     };
-  }
-  const scientificFolders = new Set(
-    [...catalogMap.keys()].map((folder) => folder.toLowerCase()),
-  );
-  const packId = resolveSkillPackId(input, scientificFolders);
-  if (packId !== IMPORTED_SKILL_PACK_ID) {
-    return packCategory(packId);
   }
   // Flat `skills/<name>/SKILL.md` installs have no frontmatter or parent folder.
   // The folder name is the category; built-in packs are already resolved above.

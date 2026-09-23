@@ -238,6 +238,23 @@ function folderMatchesPack(folder: string, pack: DefaultSkillPack): boolean {
   return false;
 }
 
+function skillKeys(skill: { folder: string; name?: string }): string[] {
+  const keys = [skill.folder, skill.name ?? ""]
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  return [...new Set(keys)];
+}
+
+function matchesScientificFolder(
+  value: string,
+  scientificFolders?: ReadonlySet<string>,
+): boolean {
+  const key = value.trim();
+  if (!key || !scientificFolders) return false;
+  return scientificFolders.has(key) || scientificFolders.has(key.toLowerCase());
+}
+
+/** Group a newly added skill by folder or display name, using the five default packs. */
 export function resolveSkillPackId(
   skill: { folder: string; name?: string },
   scientificFolders?: ReadonlySet<string>,
@@ -250,7 +267,7 @@ export function resolveSkillPackId(
   ) {
     return "paper-spine";
   }
-  const folder = skill.folder.trim();
+  const keys = skillKeys(skill);
   const academic = DEFAULT_SKILL_PACKS.find(
     (pack) => pack.id === "academic-research-skills",
   );
@@ -263,19 +280,21 @@ export function resolveSkillPackId(
   const humanizer = DEFAULT_SKILL_PACKS.find(
     (pack) => pack.id === "paper-humanizer-skill",
   );
-  if (academic && folderMatchesPack(folder, academic)) {
+  if (academic && keys.some((key) => folderMatchesPack(key, academic))) {
     return "academic-research-skills";
   }
-  if (nature && folderMatchesPack(folder, nature)) {
+  if (nature && keys.some((key) => folderMatchesPack(key, nature))) {
     return "nature-skills";
   }
-  if (humanizer && folderMatchesPack(folder, humanizer)) {
+  if (humanizer && keys.some((key) => folderMatchesPack(key, humanizer))) {
     return "paper-humanizer-skill";
   }
   if (
-    (scientific && folderMatchesPack(folder, scientific)) ||
-    scientificFolders?.has(folder) ||
-    scientificFolders?.has(folder.toLowerCase())
+    keys.some(
+      (key) =>
+        (scientific && folderMatchesPack(key, scientific)) ||
+        matchesScientificFolder(key, scientificFolders),
+    )
   ) {
     return "scientific-agent-skills";
   }

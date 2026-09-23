@@ -60,13 +60,77 @@ fn first_paperspine_dir(root: &Path) -> Option<PathBuf> {
     matches.into_iter().next()
 }
 
-fn user_intent_from_prompt(prompt: &str) -> &str {
-    if prompt.starts_with("[Currently open file:") {
-        if let Some(idx) = prompt.rfind("\n\n") {
-            return &prompt[idx + 2..];
+/// User text after a LocalPrism file-context prefix.
+///
+/// The host writes `[Currently open file: …]`, then optional `[Selection: …]`
+/// and `[Selected text: … ]`, then a blank line and the user prompt. Citations
+/// in that prompt (`[1]` followed by a blank line) must stay in the user text.
+/// Compression carryover may precede the prefix; the current prefix is the last
+/// host file marker.
+pub(crate) fn user_intent_from_prompt(prompt: &str) -> &str {
+    let Some(marker_at) = prompt
+        .rfind("[Currently open file:")
+        .or_else(|| prompt.rfind("[File:"))
+    else {
+        return prompt;
+    };
+    let after = &prompt[marker_at..];
+    let Some(mut rest) = consume_bracket_line(after, "[Currently open file:")
+        .or_else(|| consume_bracket_line(after, "[File:"))
+    else {
+        return prompt;
+    };
+    if rest.starts_with("[Selection:") {
+        let Some(next) = consume_bracket_line(rest, "[Selection:") else {
+            return prompt;
+        };
+        rest = next;
+    }
+    if rest.starts_with("[Selected text:") {
+        let Some(next) = skip_selected_text_block(rest) else {
+            return prompt;
+        };
+        rest = next;
+    }
+    rest
+}
+
+fn has_line_break(text: &str) -> bool {
+    text.contains('\n') || text.contains('\r')
+}
+
+/// Drop one single-line `[Prefix …]` host header and return the suffix.
+fn consume_bracket_line<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = text.strip_prefix(prefix)?;
+    let (end, width) = if let Some(index) = rest.find("]\r\n") {
+        (index, 3)
+    } else if let Some(index) = rest.find("]\n") {
+        (index, 2)
+    } else if rest.ends_with(']') && !has_line_break(&rest[..rest.len() - 1]) {
+        return Some("");
+    } else {
+        return None;
+    };
+    if has_line_break(&rest[..end]) {
+        return None;
+    }
+    Some(&rest[end + width..])
+}
+
+/// Drop `[Selected text:\n…\n]` and return the suffix after that closing line.
+fn skip_selected_text_block(text: &str) -> Option<&str> {
+    let body = text
+        .strip_prefix("[Selected text:\r\n")
+        .or_else(|| text.strip_prefix("[Selected text:\n"))?;
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        let content = line.trim_end_matches(['\n', '\r']);
+        offset += line.len();
+        if content == "]" {
+            return Some(&body[offset..]);
         }
     }
-    prompt
+    None
 }
 
 fn parse_slash_command(text: &str) -> Option<(String, String)> {
@@ -100,7 +164,8 @@ fn paperspine_localprism_prompt(user_notes: &str) -> String {
         ),
         None => "Playbooks live in the LocalPrism `claude-home/skills/paper-spine`. Read only the one file needed for this goal.".to_string(),
     };
-    let guard = "You are inside LocalPrism, a local academic writing app. The user invoked PaperSpine.\n\
+    let guard =
+        "You are inside LocalPrism, a local academic writing app. The user invoked PaperSpine.\n\
          \n\
          LocalPrism is not the PaperSpine web host. Do not invoke the Skill tool for paper-spine. \
          Do not run launch --no-open, launch_paperspine_ui, intake_wizard, host tools, host wait, \
@@ -166,10 +231,7 @@ mod tests {
             !rewritten.contains("Confirm the user's goal first"),
             "{rewritten}"
         );
-        assert!(
-            rewritten.contains("Do not confirm it"),
-            "{rewritten}"
-        );
+        assert!(rewritten.contains("Do not confirm it"), "{rewritten}");
         assert!(rewritten.len() < 2_500, "adapter itself must stay small");
 
         let with_context = adapt_host_bound_skill_prompt(
@@ -180,6 +242,72 @@ mod tests {
         assert!(!with_context
             .lines()
             .any(|line| line.trim().starts_with("/paper-spine")));
+
+        let with_notes = adapt_host_bound_skill_prompt(
+            "[Currently open file: main.tex]\n\n/paper-spine outline\n\nKeep the citations.",
+        );
+        assert!(with_notes.contains("outline"));
+        assert!(with_notes.contains("Keep the citations."));
+        assert!(!with_notes
+            .lines()
+            .any(|line| line.trim().starts_with("/paper-spine")));
+
+        let with_carryover = adapt_host_bound_skill_prompt(
+            "Summary:\nEarlier draft.\n\n[Currently open file: main.tex]\n\n/paper-spine revise",
+        );
+        assert!(with_carryover.contains("Summary:"));
+        assert!(with_carryover.contains("revise"));
+        assert!(!with_carryover
+            .lines()
+            .any(|line| line.trim().starts_with("/paper-spine")));
+    }
+
+    #[test]
+    fn citation_brackets_do_not_hide_paperspine_or_paperspine_alias() {
+        let prompt = "\
+[Currently open file: main.tex]
+
+/paper-spine revise the claim
+
+See Smith [1]
+
+Keep the citation.";
+        let rewritten = adapt_host_bound_skill_prompt(prompt);
+        assert!(rewritten.starts_with("[Currently open file: main.tex]"));
+        assert!(rewritten.contains("See Smith [1]"));
+        assert!(rewritten.contains("Keep the citation."));
+        assert!(rewritten.contains("revise the claim"));
+        assert!(!rewritten
+            .lines()
+            .any(|line| line.trim().starts_with("/paper-spine")));
+
+        let with_selection = "\
+Summary:\nEarlier draft.
+
+[Currently open file: main.tex]
+[Selection: @main.tex:1:1-1:8]
+[Selected text:
+claim [1]
+]
+
+/paperspine outline
+
+Next [1]
+
+still here";
+        let rewritten = adapt_host_bound_skill_prompt(with_selection);
+        assert!(rewritten.contains("Summary:"));
+        assert!(rewritten.contains("[Selected text:"));
+        assert!(rewritten.contains("Next [1]"));
+        assert!(rewritten.contains("still here"));
+        assert!(rewritten.contains("outline"));
+        assert!(!rewritten
+            .lines()
+            .any(|line| line.trim().starts_with("/paperspine")));
+        assert_eq!(
+            user_intent_from_prompt(with_selection).trim(),
+            "/paperspine outline\n\nNext [1]\n\nstill here"
+        );
     }
 
     #[test]

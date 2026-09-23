@@ -324,7 +324,10 @@ export const useSkillStore = create<SkillStoreState>((set, get) => ({
 
 let scheduledSkillsRefresh: ReturnType<typeof setTimeout> | null = null;
 
-/** Reload the skills list after a chat install or a backend skills-changed event. */
+/**
+ * Reload the installed skills list after a chat install or skills-changed event.
+ * This does not call ensureDefaultSkillPacks or skill_import_url.
+ */
 export function scheduleSkillsRefresh() {
   if (scheduledSkillsRefresh) clearTimeout(scheduledSkillsRefresh);
   scheduledSkillsRefresh = setTimeout(() => {

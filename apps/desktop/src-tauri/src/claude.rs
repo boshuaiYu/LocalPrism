@@ -1,3 +1,4 @@
+use crate::skills::paths::SessionSkillExposure;
 use crate::anthropic_proxy::{
     start_anthropic_passthrough_proxy, start_openai_anthropic_proxy, OpenAiProxyCredential,
 };
@@ -1861,7 +1862,8 @@ fn create_command(
     args: Vec<String>,
     cwd: &str,
     effort_level: Option<&str>,
-) -> Command {
+    exposure: &SessionSkillExposure,
+) -> Result<Command, String> {
     let clean_program = strip_nul(program);
     let clean_args: Vec<Cow<str>> = args.iter().map(|a| strip_nul(a)).collect();
     let clean_cwd = strip_nul(cwd);
@@ -1909,12 +1911,19 @@ fn create_command(
     // Set effort level (default: low for fast responses)
     cmd.env("CLAUDE_CODE_EFFORT_LEVEL", effort_level.unwrap_or("low"));
 
-    // Keep skills/agents inside LocalPrism instead of sharing ~/.claude with Claude Code.
-    if let Ok(config_dir) = crate::skills::paths::prepare_isolated_claude_home(Some(
-        std::path::Path::new(clean_cwd.as_ref()),
-    )) {
-        cmd.env("CLAUDE_CONFIG_DIR", config_dir);
-    }
+    // Point Claude Code at this turn's runtime dir. Its skills folder contains
+    // only `exposure`, never the installed library. A failed setup must not
+    // fall back to claude-home, which is what injected the full catalog.
+    let config_dir = crate::skills::paths::prepare_isolated_claude_home(
+        Some(std::path::Path::new(clean_cwd.as_ref())),
+        exposure,
+    )
+    .map_err(|error| {
+        format!(
+            "Failed to prepare a turn-scoped skill view: {error}. Refusing to start with the full skill library."
+        )
+    })?;
+    cmd.env("CLAUDE_CONFIG_DIR", config_dir);
 
     // Keep uv/python cache, managed interpreters, and tools inside LocalPrism home.
     crate::uv::apply_uv_isolation_env(&mut cmd);
@@ -2022,7 +2031,7 @@ fn create_command(
 
     cmd.env("PATH", current_path);
 
-    cmd
+    Ok(cmd)
 }
 
 fn clear_anthropic_provider_env(cmd: &mut Command) {
@@ -3033,8 +3042,10 @@ fn prism_system_prompt(
          and structure intact. Only add or modify what is needed for the current step.\n\
          5. LaTeX BEST PRACTICES: Use proper sectioning (\\chapter, \\section, \\subsection), \
          citations (\\cite), cross-references (\\label, \\ref), and BibTeX for bibliographies.\n\
-         6. SKILLS: If scientific skills are installed in claude-home/skills/, follow their guidelines \
-         for domain-specific tasks. Use skill-provided LaTeX packages (.sty) and code patterns.\n\
+         6. SKILLS: Use only the skills listed for this turn — skills attached to the active agent, \
+         and a skill the user explicitly invoked with /name. Do not load, summarize, or follow the rest \
+         of the installed skill library. Use skill-provided LaTeX packages (.sty) and code patterns \
+         only from those listed skills.\n\
          7. PYTHON: If a .venv/ exists in the project, it is already activated. \
          Use `uv pip install` to add packages and `python` to run scripts.\n\
          8. READ TOOL: pages is optional and PDF-only. Omit it for text, markdown, and code. \
@@ -3441,6 +3452,7 @@ async fn execute_openai_compatible_via_claude_proxy(
     credential: StoredOpenAiCompatibleCredential,
     reservation: ClaudeStartReservation,
     permission_mode: Option<String>,
+    exposure: &SessionSkillExposure,
 ) -> Result<(), String> {
     let model_transformers = credential
         .model_transformers
@@ -3466,7 +3478,13 @@ async fn execute_openai_compatible_via_claude_proxy(
         credential.model.as_str(),
     ));
 
-    let mut cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
+    let mut cmd = create_command(
+        &claude_path,
+        args,
+        &project_path,
+        effort_level.as_deref(),
+        exposure,
+    )?;
     clear_anthropic_provider_env(&mut cmd);
     cmd.env("ANTHROPIC_API_KEY", "claude-prism-local-proxy");
     cmd.env("ANTHROPIC_BASE_URL", proxy_url);
@@ -3497,6 +3515,7 @@ async fn execute_openai_compatible_provider(
     credential: StoredOpenAiCompatibleCredential,
     reservation: ClaudeStartReservation,
     permission_mode: Option<String>,
+    exposure: &SessionSkillExposure,
 ) -> Result<(), String> {
     ensure_secure_known_provider_base_url(&credential.base_url)?;
 
@@ -3511,6 +3530,7 @@ async fn execute_openai_compatible_provider(
             credential,
             reservation,
             permission_mode,
+            exposure,
         )
         .await;
     }
@@ -3525,6 +3545,7 @@ async fn execute_openai_compatible_provider(
         credential,
         reservation,
         permission_mode,
+        exposure,
     )
     .await
 }
@@ -3539,6 +3560,7 @@ async fn execute_openai_compatible_via_native_anthropic(
     credential: StoredOpenAiCompatibleCredential,
     reservation: ClaudeStartReservation,
     permission_mode: Option<String>,
+    exposure: &SessionSkillExposure,
 ) -> Result<(), String> {
     let anthropic_base_url = native_anthropic_base_url(&credential)
         .ok_or_else(|| "Provider does not expose a native Anthropic endpoint".to_string())?;
@@ -3563,7 +3585,13 @@ async fn execute_openai_compatible_via_native_anthropic(
         credential.model.as_str(),
     ));
 
-    let mut cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
+    let mut cmd = create_command(
+        &claude_path,
+        args,
+        &project_path,
+        effort_level.as_deref(),
+        exposure,
+    )?;
     apply_native_anthropic_provider_env(&mut cmd, &credential, &anthropic_base_url);
     cmd.env("ANTHROPIC_BASE_URL", proxy_url);
 
@@ -3733,6 +3761,11 @@ pub async fn execute_claude_code(
     let failure_window = window.clone();
     let failure_reservation = reservation.clone();
     let result = async move {
+        let exposure = crate::skills::exposure::exposure_for_turn(
+            Some(Path::new(&project_path)),
+            agent_id.as_deref(),
+            &prompt,
+        );
         let permission_mode = resolve_claude_permission_mode(
             &project_path,
             agent_id.as_deref(),
@@ -3756,6 +3789,7 @@ pub async fn execute_claude_code(
                 credential,
                 reservation,
                 permission_mode,
+                &exposure,
             )
             .await;
         }
@@ -3775,7 +3809,13 @@ pub async fn execute_claude_code(
             selected_model.as_deref(),
         ));
 
-        let mut cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
+        let mut cmd = create_command(
+            &claude_path,
+            args,
+            &project_path,
+            effort_level.as_deref(),
+            &exposure,
+        )?;
         crate::providers::apply_managed_provider(
             &mut cmd,
             selected_model.as_deref(),
@@ -3812,6 +3852,8 @@ pub async fn continue_claude_code(
     let failure_window = window.clone();
     let failure_reservation = reservation.clone();
     let result = async move {
+        let exposure =
+            crate::skills::exposure::exposure_for_turn(Some(Path::new(&project_path)), None, &prompt);
         let permission_mode = resolve_claude_permission_mode(
             &project_path,
             None,
@@ -3835,6 +3877,7 @@ pub async fn continue_claude_code(
                 credential,
                 reservation,
                 permission_mode,
+                &exposure,
             )
             .await;
         }
@@ -3853,7 +3896,13 @@ pub async fn continue_claude_code(
             selected_model.as_deref(),
         ));
 
-        let mut cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
+        let mut cmd = create_command(
+            &claude_path,
+            args,
+            &project_path,
+            effort_level.as_deref(),
+            &exposure,
+        )?;
         crate::providers::apply_managed_provider(
             &mut cmd,
             selected_model.as_deref(),
@@ -3892,6 +3941,11 @@ pub async fn resume_claude_code(
     let failure_window = window.clone();
     let failure_reservation = reservation.clone();
     let result = async move {
+        let exposure = crate::skills::exposure::exposure_for_turn(
+            Some(Path::new(&project_path)),
+            agent_id.as_deref(),
+            &prompt,
+        );
         let permission_mode = resolve_claude_permission_mode(
             &project_path,
             agent_id.as_deref(),
@@ -3915,6 +3969,7 @@ pub async fn resume_claude_code(
                 credential,
                 reservation,
                 permission_mode,
+                &exposure,
             )
             .await;
         }
@@ -3935,7 +3990,13 @@ pub async fn resume_claude_code(
             selected_model.as_deref(),
         ));
 
-        let mut cmd = create_command(&claude_path, args, &project_path, effort_level.as_deref());
+        let mut cmd = create_command(
+            &claude_path,
+            args,
+            &project_path,
+            effort_level.as_deref(),
+            &exposure,
+        )?;
         crate::providers::apply_managed_provider(
             &mut cmd,
             selected_model.as_deref(),
@@ -5017,7 +5078,7 @@ pub async fn run_shell_command(command: String, cwd: String) -> Result<ShellComm
     let (shell, args) = ("sh", vec!["-c".to_string(), command]);
     #[cfg(target_os = "windows")]
     let (shell, args) = ("cmd", vec!["/C".to_string(), command]);
-    let mut cmd = create_command(shell, args, &cwd, None);
+    let mut cmd = create_command(shell, args, &cwd, None, &SessionSkillExposure::none())?;
     cmd.kill_on_drop(true);
 
     let child = cmd
@@ -5856,6 +5917,9 @@ mod tests {
             .map(|pair| pair[1].as_str())
             .unwrap_or_else(|| panic!("missing system prompt flag in {args:?}"));
         assert!(prompt.contains("LaTeX"), "{prompt}");
+        assert!(prompt.len() < 4000, "system prompt grew to {}", prompt.len());
+        assert!(prompt.contains("skills listed for this turn"));
+        assert!(!prompt.contains("waypoint-bio"));
     }
 
     #[test]
@@ -6375,7 +6439,14 @@ mod tests {
     #[test]
     fn test_create_command_sets_args_and_cwd() {
         let args = vec!["--version".to_string()];
-        let cmd = create_command("/usr/bin/claude", args, "/tmp/project", None);
+        let cmd = create_command(
+            "/usr/bin/claude",
+            args,
+            "/tmp/project",
+            None,
+            &SessionSkillExposure::none(),
+        )
+        .unwrap();
         // Command is created 鈥?we can verify via its Debug representation
         let debug_str = format!("{:?}", cmd);
         assert!(debug_str.contains("--version"));
@@ -6383,7 +6454,14 @@ mod tests {
 
     #[test]
     fn test_create_command_default_effort_level() {
-        let cmd = create_command("/usr/bin/claude", vec![], "/tmp", None);
+        let cmd = create_command(
+            "/usr/bin/claude",
+            vec![],
+            "/tmp",
+            None,
+            &SessionSkillExposure::none(),
+        )
+        .unwrap();
         let debug_str = format!("{:?}", cmd);
         // The env setup is internal; just verify the command is created
         assert!(debug_str.contains("claude"));
@@ -6391,7 +6469,14 @@ mod tests {
 
     #[test]
     fn test_create_command_custom_effort_level() {
-        let cmd = create_command("/usr/bin/claude", vec![], "/tmp", Some("high"));
+        let cmd = create_command(
+            "/usr/bin/claude",
+            vec![],
+            "/tmp",
+            Some("high"),
+            &SessionSkillExposure::none(),
+        )
+        .unwrap();
         let debug_str = format!("{:?}", cmd);
         assert!(debug_str.contains("claude"));
     }
@@ -6402,7 +6487,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let previous = std::env::var("LOCALPRISM_HOME").ok();
         std::env::set_var("LOCALPRISM_HOME", dir.path());
-        let cmd = create_command("/usr/bin/claude", vec![], "/tmp/project", None);
+        let cmd = create_command(
+            "/usr/bin/claude",
+            vec![],
+            "/tmp/project",
+            None,
+            &SessionSkillExposure::none(),
+        )
+        .unwrap();
         let cache = dir.path().join("uv").join("cache");
         let python = dir.path().join("uv").join("python");
         let found_cache = cmd.as_std().get_envs().any(|(key, value)| {
@@ -6424,6 +6516,55 @@ mod tests {
             "create_command should set UV_PYTHON_INSTALL_DIR under LocalPrism home"
         );
         assert!(cache.is_dir());
+    }
+
+    #[test]
+    fn test_create_command_does_not_point_claude_at_the_full_skill_library() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("lp-home");
+        let library = home.join("claude-home").join("skills");
+        for name in ["scanpy", "waypoint-bio"] {
+            let skill = library.join(name);
+            std::fs::create_dir_all(&skill).unwrap();
+            std::fs::write(skill.join("SKILL.md"), format!("# {name}\n")).unwrap();
+        }
+        for index in 0..40 {
+            let skill = library.join(format!("bulk-skill-{index}"));
+            std::fs::create_dir_all(&skill).unwrap();
+            std::fs::write(skill.join("SKILL.md"), format!("# bulk {index}\n")).unwrap();
+        }
+        let previous = std::env::var("LOCALPRISM_HOME").ok();
+        std::env::set_var("LOCALPRISM_HOME", &home);
+        let exposure = SessionSkillExposure {
+            folders: vec!["scanpy".into()],
+        };
+        let cmd = create_command("/usr/bin/claude", vec![], "/tmp/project", None, &exposure).unwrap();
+        let config = cmd
+            .as_std()
+            .get_envs()
+            .find_map(|(key, value)| {
+                (key == "CLAUDE_CONFIG_DIR").then(|| value.map(|value| value.to_os_string()))
+            })
+            .flatten()
+            .map(std::path::PathBuf::from)
+            .expect("CLAUDE_CONFIG_DIR");
+        if let Some(value) = previous {
+            std::env::set_var("LOCALPRISM_HOME", value);
+        } else {
+            std::env::remove_var("LOCALPRISM_HOME");
+        }
+
+        assert_ne!(config, home.join("claude-home"));
+        assert!(config.starts_with(home.join("claude-home").join("runtimes")));
+        let names: Vec<_> = std::fs::read_dir(config.join("skills"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["scanpy".to_string()]);
+        assert!(library.join("waypoint-bio").join("SKILL.md").exists());
+        assert!(library.join("bulk-skill-39").join("SKILL.md").exists());
     }
 
     // --- clean_user_message_title edge cases ---

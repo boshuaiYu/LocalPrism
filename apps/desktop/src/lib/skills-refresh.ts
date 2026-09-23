@@ -1,6 +1,10 @@
 import { isSkillToolName } from "@/lib/skill-tool-result";
 
-/** Tauri event emitted after a settings or marketplace skill install/delete. */
+/**
+ * Tauri event emitted after a settings or marketplace skill install/delete.
+ * Listeners reload the Skills list only. They must not reinstall default packs
+ * or attach the catalog to a model request.
+ */
 export const SKILLS_CHANGED_EVENT = "skills-changed";
 
 /** Browser event after the skills store finishes reloading. */
