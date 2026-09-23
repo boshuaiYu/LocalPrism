@@ -17,7 +17,7 @@ import {
 } from "@/stores/runtime-store";
 
 vi.mock("@tauri-apps/api/app", () => ({
-  getVersion: vi.fn().mockResolvedValue("1.0.8-1"),
+  getVersion: vi.fn().mockResolvedValue("1.0.8-2"),
 }));
 
 vi.mock("next-themes", () => ({
@@ -193,7 +193,7 @@ describe("ProjectPicker runtime settings", () => {
     vi.mocked(check).mockResolvedValue({
       version: "1.0.9-1",
       body: "beta",
-      currentVersion: "1.0.8-1",
+      currentVersion: "1.0.8-2",
       download,
       install: vi.fn(),
       close: vi.fn(async () => undefined),
@@ -209,7 +209,7 @@ describe("ProjectPicker runtime settings", () => {
 
     const header = container.querySelector("[data-testid='app-chrome-header']");
     expect(header?.textContent).toContain("LocalPrism");
-    expect(header?.textContent).toContain("v1.0.8-1");
+    expect(header?.textContent).toContain("v1.0.8-2");
     expect(
       header?.querySelector("[data-testid='language-switch']"),
     ).toBeTruthy();
