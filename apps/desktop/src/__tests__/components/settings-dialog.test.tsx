@@ -48,22 +48,19 @@ describe("SettingsDialog", () => {
     document.body.querySelector("[role='dialog']")?.remove();
   });
 
-  it("keeps language in the dialog and updates inside the Providers tab", async () => {
+  it("omits the language switch and keeps updates inside the Providers tab", async () => {
     await act(async () => {
       root.render(
         <SettingsDialog open onOpenChange={vi.fn()} defaultTab="agents" />,
       );
     });
 
-    const language = document.body.querySelector(
-      '[data-testid="settings-language"]',
-    );
-    expect(language?.textContent).toContain("Language");
-    expect(language?.textContent).toContain("中文");
-    expect(language?.textContent).toContain("English");
+    expect(
+      document.body.querySelector('[data-testid="settings-language"]'),
+    ).toBeNull();
     expect(
       document.body.querySelector('[data-testid="language-switch"]'),
-    ).toBeTruthy();
+    ).toBeNull();
 
     const agents = activePanel();
     expect(agents.textContent).toContain("Agents body");

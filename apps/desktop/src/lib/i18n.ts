@@ -42,18 +42,24 @@ const en = {
   "tour.done": "Done",
   "tour.skip": "Skip",
   "tour.progress": "{{current}} / {{total}}",
-  "tour.projects.title": "Project navigation",
-  "tour.projects.body":
-    "Create a project or open a folder here. After it opens, the sidebar lists the paper's files.",
-  "tour.zotero.title": "Connect Zotero",
+  "tour.files.title": "Project files",
+  "tour.files.body":
+    "The left sidebar lists this paper's files. Open, add, and organize the LaTeX project from here.",
+  "tour.zotero.title": "Zotero",
   "tour.zotero.body":
-    "In the project sidebar, use the existing Zotero panel to sign in and sync a library. This step only points at that connection.",
-  "tour.agents.title": "Agents, skills, and chat",
-  "tour.agents.body":
-    "Built-in writing agents and skills are in the sidebar Environment section and in Settings. The chat pane is where you ask them to edit the paper.",
-  "tour.compile.title": "Compile and PDF",
-  "tour.compile.body":
-    "The PDF pane compiles the LaTeX project and shows the preview. Use Compile there when you want a fresh build.",
+    "The Zotero panel sits under the file tree. Connect a library and bring citations into the paper.",
+  "tour.latex.title": "LaTeX editor",
+  "tour.latex.body":
+    "Write the paper in the center editor. Edits stay in the project files.",
+  "tour.chat.title": "AI chat",
+  "tour.chat.body":
+    "Ask the writing assistant to draft, revise, and explain the paper in this chat.",
+  "tour.pdf.title": "PDF preview",
+  "tour.pdf.body":
+    "The right side compiles the project and shows the PDF so you can check the layout.",
+  "tour.agentsSkills.title": "Agents and skills",
+  "tour.agentsSkills.body":
+    "Agents and skills sit at the bottom of the sidebar. Pick a writing agent or a skill for the task.",
 
   "onboarding.progress": "Project setup progress",
   "onboarding.step.template": "Template",
@@ -140,6 +146,8 @@ const en = {
   "skills.loading": "Loading skills…",
   "skills.empty": "No skills found.",
   "skills.remove": "Remove",
+  "skills.showPath": "Show path",
+  "skills.hidePath": "Hide path",
   "skills.userTarget": "LocalPrism / user",
   "skills.projectTarget": "LocalPrism / project",
   "skills.managed": "managed",
@@ -277,18 +285,20 @@ const zh: Record<MessageKey, string> = {
   "tour.done": "完成",
   "tour.skip": "跳过",
   "tour.progress": "{{current}} / {{total}}",
-  "tour.projects.title": "项目导航",
-  "tour.projects.body":
-    "在这里新建项目或打开文件夹。打开之后，侧边栏会列出文稿里的文件。",
-  "tour.zotero.title": "连接 Zotero",
-  "tour.zotero.body":
-    "打开项目后，在左侧栏已有的 Zotero 面板里登录并同步文库。这一步只是指向那个入口。",
-  "tour.agents.title": "智能体、技能和对话",
-  "tour.agents.body":
-    "内置写作智能体和技能在侧边栏的 Environment，也可以在设置里管理。对话面板用来让它们改文稿。",
-  "tour.compile.title": "编译和 PDF",
-  "tour.compile.body":
-    "PDF 窗格会编译 LaTeX 并显示预览。需要重新生成时，用那里的编译按钮。",
+  "tour.files.title": "侧边文件",
+  "tour.files.body":
+    "左侧边栏列出这篇文稿的文件。在这里打开、添加和整理 LaTeX 项目。",
+  "tour.zotero.title": "Zotero",
+  "tour.zotero.body": "Zotero 在文件树下方。连接文库，把文献引用放进文稿。",
+  "tour.latex.title": "中间 LaTeX",
+  "tour.latex.body": "在中间的编辑器里写文稿。修改会保存在项目文件中。",
+  "tour.chat.title": "AI 对话",
+  "tour.chat.body": "在这个对话里让写作助手起草、修改和解释文稿。",
+  "tour.pdf.title": "右侧预览",
+  "tour.pdf.body": "右侧编译项目并显示 PDF，写的时候可以对照版式。",
+  "tour.agentsSkills.title": "智能体和 Skill",
+  "tour.agentsSkills.body":
+    "智能体和 Skill 在侧边栏底部。按任务选择写作智能体或技能。",
 
   "onboarding.progress": "项目创建进度",
   "onboarding.step.template": "模板",
@@ -368,6 +378,8 @@ const zh: Record<MessageKey, string> = {
   "skills.loading": "正在加载技能…",
   "skills.empty": "没有找到技能。",
   "skills.remove": "移除",
+  "skills.showPath": "显示路径",
+  "skills.hidePath": "隐藏路径",
   "skills.userTarget": "LocalPrism / 用户",
   "skills.projectTarget": "LocalPrism / 项目",
   "skills.managed": "托管",

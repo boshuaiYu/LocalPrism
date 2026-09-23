@@ -2,7 +2,8 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { isUiLanguage, type UiLanguage } from "@/lib/i18n";
 import {
-  normalizeProductTourStatus,
+  PRODUCT_TOUR_VERSION,
+  resolveStoredProductTour,
   type ProductTourStatus,
 } from "@/lib/product-tour";
 import {
@@ -31,11 +32,14 @@ interface SettingsState {
    * Last applied builtin preset copy. 0 = never seeded, 1 = first install,
    * 2 = playful names and stronger prompts,
    * 3 = richer instructions and refreshed skill attachments.
+   * 4 = shorter prompts; de-ai attaches only humanizer/de-ai skills.
    */
   builtinAgentPresetsSeedVersion: number;
   setBuiltinAgentPresetsSeedVersion: (version: number) => void;
-  /** First-run product tour. Skip and finish both stick. */
+  /** First-run product tour. Skip and finish both stick for the current version. */
   productTour: ProductTourStatus;
+  /** Matches PRODUCT_TOUR_VERSION after the current tour is stored. */
+  productTourVersion: number;
   setProductTour: (status: ProductTourStatus) => void;
 }
 
@@ -74,14 +78,22 @@ export const useSettingsStore = create<SettingsState>()(
           builtinAgentPresetsSeeded: version > 0,
         }),
       productTour: "pending",
+      productTourVersion: PRODUCT_TOUR_VERSION,
       setProductTour: (status) =>
-        set({ productTour: normalizeProductTourStatus(status) }),
+        set({
+          productTour: resolveStoredProductTour(PRODUCT_TOUR_VERSION, status),
+          productTourVersion: PRODUCT_TOUR_VERSION,
+        }),
     }),
     {
       name: "claude-prism-settings",
-      version: 4,
-      migrate: (persisted) => {
+      version: 5,
+      migrate: (persisted, fromVersion) => {
         const state = persisted as Partial<SettingsState>;
+        const storedTourVersion =
+          typeof fromVersion === "number" && fromVersion < 5
+            ? 0
+            : state.productTourVersion;
         return {
           ...state,
           autoCompile: state.autoCompile ?? true,
@@ -89,7 +101,11 @@ export const useSettingsStore = create<SettingsState>()(
           uiLanguage: isUiLanguage(state.uiLanguage) ? state.uiLanguage : "en",
           builtinAgentPresetsSeeded: state.builtinAgentPresetsSeeded === true,
           builtinAgentPresetsSeedVersion: normalizeSeedVersion(state),
-          productTour: normalizeProductTourStatus(state.productTour),
+          productTour: resolveStoredProductTour(
+            storedTourVersion,
+            state.productTour,
+          ),
+          productTourVersion: PRODUCT_TOUR_VERSION,
         };
       },
       merge: (persisted, current) => {
@@ -107,7 +123,11 @@ export const useSettingsStore = create<SettingsState>()(
           builtinAgentPresetsSeeded:
             seedVersion > 0 || state.builtinAgentPresetsSeeded === true,
           builtinAgentPresetsSeedVersion: seedVersion,
-          productTour: normalizeProductTourStatus(state.productTour),
+          productTour: resolveStoredProductTour(
+            state.productTourVersion,
+            state.productTour,
+          ),
+          productTourVersion: PRODUCT_TOUR_VERSION,
         };
       },
     },

@@ -2,8 +2,14 @@ import type { MessageKey } from "@/lib/i18n";
 
 export type ProductTourStatus = "pending" | "completed" | "skipped";
 
+/**
+ * Bump when the tour steps change so a completed or skipped older tour
+ * shows once more. 1 was the home-screen tour. 2 is the LaTeX workspace tour.
+ */
+export const PRODUCT_TOUR_VERSION = 2;
+
 export interface ProductTourStep {
-  id: "projects" | "zotero" | "agents" | "compile";
+  id: "files" | "zotero" | "latex" | "chat" | "pdf" | "agents-skills";
   anchor: string;
   titleKey: MessageKey;
   bodyKey: MessageKey;
@@ -11,10 +17,10 @@ export interface ProductTourStep {
 
 export const PRODUCT_TOUR_STEPS: readonly ProductTourStep[] = [
   {
-    id: "projects",
-    anchor: "tour-projects",
-    titleKey: "tour.projects.title",
-    bodyKey: "tour.projects.body",
+    id: "files",
+    anchor: "tour-files",
+    titleKey: "tour.files.title",
+    bodyKey: "tour.files.body",
   },
   {
     id: "zotero",
@@ -23,21 +29,45 @@ export const PRODUCT_TOUR_STEPS: readonly ProductTourStep[] = [
     bodyKey: "tour.zotero.body",
   },
   {
-    id: "agents",
-    anchor: "tour-agents",
-    titleKey: "tour.agents.title",
-    bodyKey: "tour.agents.body",
+    id: "latex",
+    anchor: "tour-latex",
+    titleKey: "tour.latex.title",
+    bodyKey: "tour.latex.body",
   },
   {
-    id: "compile",
-    anchor: "tour-compile",
-    titleKey: "tour.compile.title",
-    bodyKey: "tour.compile.body",
+    id: "chat",
+    anchor: "tour-chat",
+    titleKey: "tour.chat.title",
+    bodyKey: "tour.chat.body",
+  },
+  {
+    id: "pdf",
+    anchor: "tour-pdf",
+    titleKey: "tour.pdf.title",
+    bodyKey: "tour.pdf.body",
+  },
+  {
+    id: "agents-skills",
+    anchor: "tour-agents-skills",
+    titleKey: "tour.agentsSkills.title",
+    bodyKey: "tour.agentsSkills.body",
   },
 ];
 
 export function normalizeProductTourStatus(value: unknown): ProductTourStatus {
   return value === "completed" || value === "skipped" ? value : "pending";
+}
+
+/**
+ * A stored tour counts only for the current version. Older completions and
+ * skips become pending so the LaTeX workspace tour can show once.
+ */
+export function resolveStoredProductTour(
+  storedVersion: unknown,
+  status: unknown,
+): ProductTourStatus {
+  if (storedVersion !== PRODUCT_TOUR_VERSION) return "pending";
+  return normalizeProductTourStatus(status);
 }
 
 /** Auto-show only until the user finishes or skips. */

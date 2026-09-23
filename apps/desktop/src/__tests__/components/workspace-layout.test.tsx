@@ -9,6 +9,7 @@ import {
 import { useDocumentStore } from "@/stores/document-store";
 import { usePreviewStore } from "@/stores/preview-store";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
+import { useSettingsStore } from "@/stores/settings-store";
 
 vi.mock("@/hooks/use-runtime-events", () => ({
   useRuntimeEvents: () => undefined,
@@ -51,6 +52,7 @@ describe("WorkspaceLayout chat pane", () => {
     resetChatLayoutStoreForTests();
     usePreviewStore.setState({ visible: true });
     useDocumentStore.setState({ initialized: true, projectRoot: "C:/paper" });
+    useSettingsStore.setState({ productTour: "completed", uiLanguage: "en" });
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -220,5 +222,20 @@ describe("WorkspaceLayout chat pane", () => {
 
     expect(useChatLayoutStore.getState().visible).toBe(true);
     expect(container.querySelector('[data-testid="chat-pane"]')).not.toBeNull();
+  });
+
+  it("shows the product tour only after the LaTeX workspace is ready", async () => {
+    useSettingsStore.setState({ productTour: "pending", uiLanguage: "en" });
+    useDocumentStore.setState({ initialized: false, projectRoot: "C:/paper" });
+    await act(async () => root.render(<WorkspaceLayout />));
+    expect(container.querySelector('[data-testid="product-tour"]')).toBeNull();
+
+    await act(async () => {
+      useDocumentStore.setState({ initialized: true });
+    });
+    expect(
+      container.querySelector('[data-testid="product-tour"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain("Project files");
   });
 });

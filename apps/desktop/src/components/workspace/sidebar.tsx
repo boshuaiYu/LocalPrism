@@ -1312,7 +1312,7 @@ export function Sidebar({
                 ref={sidebarFilesRef}
                 className="flex h-full flex-col"
                 data-sidebar-files
-                data-tour="tour-projects"
+                data-tour="tour-files"
               >
                 <div className="flex h-8 shrink-0 items-center justify-between gap-2 border-sidebar-border border-b px-3">
                   <div className="flex min-w-0 items-center gap-2">
@@ -1491,7 +1491,7 @@ export function Sidebar({
 
             {/* Zotero */}
             <Panel defaultSize={15} minSize={10}>
-              <div className="flex h-full flex-col">
+              <div className="flex h-full flex-col" data-tour="tour-zotero">
                 <div className="flex h-8 shrink-0 items-center">
                   <ZoteroHeader />
                 </div>
@@ -2202,55 +2202,60 @@ function EnvironmentSection({
               {pythonLabel}
             </span>
           </button>
-          {/* Skills row — curated catalog (also available under Settings → Skills) */}
-          <button
-            className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-sidebar-accent/50"
-            onClick={() => setShowOnboarding(true)}
-            title="Browse curated scientific skills"
-          >
-            <FlaskConicalIcon
-              className={cn(
-                "size-3.5 shrink-0",
-                skillsStatus?.installed
-                  ? "text-foreground"
-                  : "text-muted-foreground",
-              )}
-            />
-            <span className="min-w-0 flex-1 truncate text-xs">Skills</span>
-            <span
-              className={cn(
-                "shrink-0 text-xs",
-                skillsStatus?.installed
-                  ? "text-foreground"
-                  : "text-muted-foreground",
-              )}
+          <div data-tour="tour-agents-skills" className="space-y-0.5">
+            {/* Skills row — curated catalog (also available under Settings → Skills) */}
+            <button
+              className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-sidebar-accent/50"
+              onClick={() => setShowOnboarding(true)}
+              title="Browse curated scientific skills"
             >
-              {skillsLabel}
-            </span>
-          </button>
-          {/* Agents row — Settings → Agents */}
-          <button
-            className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-sidebar-accent/50"
-            data-tour="tour-agents"
-            onClick={onOpenAgents}
-            title="Manage custom subagents"
-          >
-            <BotIcon
-              className={cn(
-                "size-3.5 shrink-0",
-                agents.length > 0 ? "text-foreground" : "text-muted-foreground",
-              )}
-            />
-            <span className="min-w-0 flex-1 truncate text-xs">Agents</span>
-            <span
-              className={cn(
-                "shrink-0 text-xs",
-                agents.length > 0 ? "text-foreground" : "text-muted-foreground",
-              )}
+              <FlaskConicalIcon
+                className={cn(
+                  "size-3.5 shrink-0",
+                  skillsStatus?.installed
+                    ? "text-foreground"
+                    : "text-muted-foreground",
+                )}
+              />
+              <span className="min-w-0 flex-1 truncate text-xs">Skills</span>
+              <span
+                className={cn(
+                  "shrink-0 text-xs",
+                  skillsStatus?.installed
+                    ? "text-foreground"
+                    : "text-muted-foreground",
+                )}
+              >
+                {skillsLabel}
+              </span>
+            </button>
+            {/* Agents row — Settings → Agents */}
+            <button
+              className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-sidebar-accent/50"
+              onClick={onOpenAgents}
+              title="Manage custom subagents"
             >
-              {agentsLabel}
-            </span>
-          </button>
+              <BotIcon
+                className={cn(
+                  "size-3.5 shrink-0",
+                  agents.length > 0
+                    ? "text-foreground"
+                    : "text-muted-foreground",
+                )}
+              />
+              <span className="min-w-0 flex-1 truncate text-xs">Agents</span>
+              <span
+                className={cn(
+                  "shrink-0 text-xs",
+                  agents.length > 0
+                    ? "text-foreground"
+                    : "text-muted-foreground",
+                )}
+              >
+                {agentsLabel}
+              </span>
+            </button>
+          </div>
         </div>
       </div>
 
