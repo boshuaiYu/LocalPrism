@@ -1,6 +1,7 @@
 use super::tools::{
-    duplicate_skill_tool_call, normalized_tool_call_id, repair_tool_arguments,
-    repaired_tool_arguments_value,
+    duplicate_skill_tool_call, normalized_tool_call_id, prepare_forwarded_tool_description,
+    prepare_forwarded_tool_schema, repair_tool_arguments, repaired_tool_arguments_value,
+    sanitize_tool_input,
 };
 use std::collections::HashSet;
 use super::transformers::ProxyTransformerChain;
@@ -515,7 +516,8 @@ fn assistant_content_to_openai(content: &Value) -> (String, Vec<Value>, Option<V
                     .get("name")
                     .and_then(|value| value.as_str())
                     .unwrap_or("unknown");
-                let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
+                let input =
+                    sanitize_tool_input(block.get("input").cloned().unwrap_or_else(|| json!({})));
                 tool_calls.push(json!({
                     "id": id,
                     "type": "function",
@@ -571,14 +573,18 @@ fn tool_result_content_to_openai(content: &Value) -> (String, Vec<Value>) {
 
 fn anthropic_tool_to_openai_tool(tool: &Value) -> Option<Value> {
     let name = tool.get("name")?.as_str()?;
-    let description = tool
-        .get("description")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let parameters = tool
-        .get("input_schema")
-        .cloned()
-        .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
+    let description = prepare_forwarded_tool_description(
+        name,
+        tool.get("description")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default(),
+    );
+    let parameters = prepare_forwarded_tool_schema(
+        name,
+        tool.get("input_schema")
+            .cloned()
+            .unwrap_or_else(|| json!({ "type": "object", "properties": {} })),
+    );
 
     Some(json!({
         "type": "function",

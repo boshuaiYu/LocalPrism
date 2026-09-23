@@ -19,10 +19,7 @@ pub fn anthropic_to_codex_responses(
     let mut input = Vec::new();
     if let Some(system) = flatten_text(request.get("system")) {
         if !system.trim().is_empty() {
-            let system = super::identity::bind_hosted_model_identity(
-                &system,
-                &credential.model,
-            );
+            let system = super::identity::bind_hosted_model_identity(&system, &credential.model);
             input.push(json!({
                 "role": "developer",
                 "content": [{"type": "input_text", "text": system}],
@@ -102,7 +99,9 @@ fn append_input_for_message(input: &mut Vec<Value>, message: &Value) {
                             "type": "function_call",
                             "call_id": block.get("id").and_then(Value::as_str).unwrap_or(""),
                             "name": block.get("name").and_then(Value::as_str).unwrap_or(""),
-                            "arguments": block.get("input").cloned().unwrap_or(json!({})).to_string(),
+                            "arguments": super::tools::sanitize_tool_input(
+                                block.get("input").cloned().unwrap_or(json!({}))
+                            ).to_string(),
                         }));
                     }
                     Some("tool_result") => {
@@ -136,11 +135,23 @@ fn append_input_for_message(input: &mut Vec<Value>, message: &Value) {
 
 fn anthropic_tool_to_function(tool: &Value) -> Option<Value> {
     let name = tool.get("name").and_then(Value::as_str)?;
+    let description = super::tools::prepare_forwarded_tool_description(
+        name,
+        tool.get("description")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
+    let parameters = super::tools::prepare_forwarded_tool_schema(
+        name,
+        tool.get("input_schema")
+            .cloned()
+            .unwrap_or_else(|| json!({"type":"object","properties":{}})),
+    );
     Some(json!({
         "type": "function",
         "name": name,
-        "description": tool.get("description").and_then(Value::as_str).unwrap_or(""),
-        "parameters": tool.get("input_schema").cloned().unwrap_or_else(|| json!({"type":"object","properties":{}})),
+        "description": description,
+        "parameters": parameters,
     }))
 }
 
@@ -152,6 +163,9 @@ pub struct ResponsesToAnthropic {
     next_index: usize,
     text_index: Option<usize>,
     tool_index: Option<usize>,
+    tool_arguments: String,
+    tool_arguments_emitted: bool,
+    tool_saw_delta: bool,
     input_tokens: u64,
     output_tokens: u64,
     cache_read_tokens: u64,
@@ -167,6 +181,9 @@ impl Default for ResponsesToAnthropic {
             next_index: 0,
             text_index: None,
             tool_index: None,
+            tool_arguments: String::new(),
+            tool_arguments_emitted: false,
+            tool_saw_delta: false,
             input_tokens: 0,
             output_tokens: 0,
             cache_read_tokens: 0,
@@ -235,9 +252,21 @@ impl ResponsesToAnthropic {
                 }
                 let mut out = self.start_message();
                 out.push_str(&self.close_text());
+                if self.tool_index.is_some() {
+                    out.push_str(&self.close_tool());
+                }
                 let index = self.next_index;
                 self.next_index += 1;
                 self.tool_index = Some(index);
+                self.tool_arguments_emitted = false;
+                if !self.tool_saw_delta {
+                    self.tool_arguments.clear();
+                    if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
+                        if !arguments.is_empty() {
+                            self.tool_arguments = arguments.to_string();
+                        }
+                    }
+                }
                 out.push_str(&sse_event(
                     "content_block_start",
                     &json!({
@@ -254,18 +283,39 @@ impl ResponsesToAnthropic {
                 out
             }
             "response.function_call_arguments.delta" => {
-                let Some(index) = self.tool_index else {
-                    return String::new();
-                };
                 let delta = data.get("delta").and_then(Value::as_str).unwrap_or("");
-                sse_event(
-                    "content_block_delta",
-                    &json!({
-                        "type": "content_block_delta",
-                        "index": index,
-                        "delta": { "type": "input_json_delta", "partial_json": delta }
-                    }),
-                )
+                if !delta.is_empty() {
+                    if !self.tool_saw_delta {
+                        // Deltas are the full argument JSON, not a patch on item.arguments.
+                        self.tool_arguments.clear();
+                        self.tool_saw_delta = true;
+                    }
+                    self.tool_arguments.push_str(delta);
+                }
+                String::new()
+            }
+            "response.function_call_arguments.done" => {
+                if let Some(arguments) = data.get("arguments").and_then(Value::as_str) {
+                    if !arguments.is_empty() {
+                        self.tool_arguments = arguments.to_string();
+                        self.tool_saw_delta = true;
+                    }
+                }
+                self.emit_tool_arguments()
+            }
+            "response.output_item.done" => {
+                let item = data.get("item").cloned().unwrap_or(Value::Null);
+                if item.get("type").and_then(Value::as_str) != Some("function_call") {
+                    return String::new();
+                }
+                if !self.tool_arguments_emitted {
+                    if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
+                        if !arguments.is_empty() {
+                            self.tool_arguments = arguments.to_string();
+                        }
+                    }
+                }
+                self.close_tool()
             }
             "response.completed" | "response.incomplete" => {
                 self.apply_usage(data);
@@ -349,6 +399,46 @@ impl ResponsesToAnthropic {
         )
     }
 
+    fn emit_tool_arguments(&mut self) -> String {
+        if self.tool_arguments_emitted || self.tool_index.is_none() {
+            return String::new();
+        }
+        self.tool_arguments_emitted = true;
+        if self.tool_arguments.trim().is_empty() {
+            return String::new();
+        }
+        let index = self.tool_index.unwrap_or(0);
+        let repaired = super::tools::repair_tool_arguments(&self.tool_arguments);
+        sse_event(
+            "content_block_delta",
+            &json!({
+                "type": "content_block_delta",
+                "index": index,
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": repaired,
+                }
+            }),
+        )
+    }
+
+    fn close_tool(&mut self) -> String {
+        let mut out = self.emit_tool_arguments();
+        if let Some(index) = self.tool_index.take() {
+            out.push_str(&sse_event(
+                "content_block_stop",
+                &json!({
+                    "type": "content_block_stop",
+                    "index": index,
+                }),
+            ));
+        }
+        self.tool_arguments.clear();
+        self.tool_arguments_emitted = false;
+        self.tool_saw_delta = false;
+        out
+    }
+
     fn close_text(&mut self) -> String {
         if !self.text_open {
             return String::new();
@@ -384,12 +474,7 @@ impl ResponsesToAnthropic {
             ));
         }
         out.push_str(&self.close_text());
-        if let Some(index) = self.tool_index.take() {
-            out.push_str(&sse_event(
-                "content_block_stop",
-                &json!({ "type": "content_block_stop", "index": index }),
-            ));
-        }
+        out.push_str(&self.close_tool());
         out.push_str(&sse_event(
             "message_delta",
             &json!({
@@ -420,10 +505,7 @@ impl ResponsesToAnthropic {
         }
         let cache = super::usage::openai_cache_read_tokens(&usage);
         let input = super::usage::exclusive_openai_input_tokens(
-            super::usage::usage_token(
-                &usage,
-                &["input_tokens", "prompt_tokens", "inputTokens"],
-            ),
+            super::usage::usage_token(&usage, &["input_tokens", "prompt_tokens", "inputTokens"]),
             cache,
         );
         let output = super::usage::usage_token(
@@ -659,11 +741,128 @@ mod tests {
     #[test]
     fn fail_emits_visible_text_and_error() {
         let mut translator = ResponsesToAnthropic::for_model("gpt-5.6-terra");
-        let out = translator.fail("Codex Responses produced no output for gpt-5.6-terra within 45s.");
+        let out =
+            translator.fail("Codex Responses produced no output for gpt-5.6-terra within 45s.");
         assert!(out.contains("message_start"));
         assert!(out.contains("text_delta"));
         assert!(out.contains("gpt-5.6-terra"));
         assert!(out.contains("\"type\":\"error\""));
         assert!(out.contains("message_stop"));
+    }
+
+    #[test]
+    fn streamed_read_arguments_drop_empty_pages_and_keep_ranges() {
+        let mut translator = ResponsesToAnthropic::default();
+        let start = translator.handle_event(
+            "response.output_item.added",
+            &json!({
+                "item": {
+                    "type": "function_call",
+                    "call_id": "c1",
+                    "name": "Read",
+                    "arguments": ""
+                }
+            }),
+        );
+        assert!(start.contains("tool_use"));
+        assert!(!start.contains("input_json_delta"));
+        assert!(translator
+            .handle_event(
+                "response.function_call_arguments.delta",
+                &json!({ "delta": "{\"file_path\":\"main.tex\",\"pa" }),
+            )
+            .is_empty());
+        assert!(translator
+            .handle_event(
+                "response.function_call_arguments.delta",
+                &json!({ "delta": "ges\":\"\",\"limit\":200}" }),
+            )
+            .is_empty());
+        let done = translator.handle_event(
+            "response.function_call_arguments.done",
+            &json!({
+                "arguments": "{\"file_path\":\"main.tex\",\"pages\":\"\",\"limit\":200}"
+            }),
+        );
+        assert!(done.contains("input_json_delta"));
+        assert!(done.contains("main.tex"));
+        assert!(!done.contains("pages"));
+
+        let mut from_deltas = ResponsesToAnthropic::default();
+        from_deltas.handle_event(
+            "response.output_item.added",
+            &json!({ "item": { "type": "function_call", "call_id": "c2", "name": "Read" } }),
+        );
+        from_deltas.handle_event(
+            "response.function_call_arguments.delta",
+            &json!({ "delta": "{\"file_path\":\"notes.md\",\"pages\":\"\"}" }),
+        );
+        let completed = from_deltas.handle_event("response.completed", &json!({}));
+        assert!(completed.contains("notes.md"));
+        assert!(!completed.contains("pages"));
+        assert!(completed.contains("message_stop"));
+
+        let mut ranged = ResponsesToAnthropic::default();
+        ranged.handle_event(
+            "response.output_item.added",
+            &json!({ "item": { "type": "function_call", "call_id": "c3", "name": "Read" } }),
+        );
+        let flushed = ranged.handle_event(
+            "response.output_item.done",
+            &json!({
+                "item": {
+                    "type": "function_call",
+                    "arguments": "{\"file_path\":\"paper.pdf\",\"pages\":\"10-20\"}"
+                }
+            }),
+        );
+        assert!(flushed.contains("10-20"));
+        assert!(flushed.contains("paper.pdf"));
+        assert!(flushed.contains("content_block_stop"));
+    }
+
+    #[test]
+    fn read_tool_schema_tells_codex_that_empty_pages_is_invalid() {
+        let body = anthropic_to_codex_responses(
+            &json!({
+                "messages": [{ "role": "user", "content": "Read the file" }],
+                "tools": [{
+                    "name": "Read",
+                    "description": "Read a file",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["file_path", "pages"],
+                        "properties": {
+                            "file_path": { "type": "string" },
+                            "pages": { "type": "string", "default": "" }
+                        }
+                    }
+                }]
+            }),
+            &CodexProxyCredential {
+                access_token: "t".into(),
+                refresh_token: None,
+                account_id: None,
+                model: "gpt-5.6-sol".into(),
+                effort: None,
+            },
+        )
+        .expect("convert");
+        let tool = &body["tools"][0];
+        let description = tool["description"].as_str().unwrap();
+        assert!(description.contains("empty string"));
+        assert!(tool["parameters"]["properties"]["pages"]
+            .get("default")
+            .is_none());
+        assert!(tool["parameters"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item.as_str() != Some("pages")));
+        let pages_description = tool["parameters"]["properties"]["pages"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(pages_description.contains("1-5"));
+        assert!(pages_description.contains("10-20"));
     }
 }
