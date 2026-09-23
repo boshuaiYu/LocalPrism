@@ -123,7 +123,7 @@ export function EnvironmentOnboarding() {
             <DialogTitle className="font-semibold text-xl">
               LocalPrism
             </DialogTitle>
-            <DialogDescription className="max-w-xl text-sm leading-relaxed">
+            <DialogDescription className="max-w-xl text-lp-meta text-sm leading-relaxed">
               {t("onboarding.envBody")}
             </DialogDescription>
           </DialogHeader>

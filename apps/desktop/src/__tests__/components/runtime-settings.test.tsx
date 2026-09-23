@@ -83,14 +83,27 @@ describe("RuntimeSettings", () => {
 
     expect(container.textContent).toContain("Use an API key");
     expect(container.textContent).toContain("DeepSeek");
-    expect(container.textContent).toContain("Kimi");
-    expect(container.textContent).toContain("Cursor");
+    expect(container.textContent).not.toContain("Kimi");
+    expect(container.textContent).not.toContain("Cursor");
     expect(container.textContent).toMatch(/not required/i);
     expect(
       container.querySelector('input[placeholder="API key"]'),
     ).not.toBeNull();
     expect(container.textContent).not.toContain("Sign in to Claude Official");
     expect(container.textContent).not.toContain("Writing engine");
+
+    const advancedToggle = container.querySelector(
+      '[data-testid="provider-advanced"]',
+    );
+    expect(advancedToggle).toBeInstanceOf(HTMLButtonElement);
+
+    await act(async () => {
+      if (advancedToggle instanceof HTMLButtonElement) advancedToggle.click();
+    });
+
+    expect(container.textContent).toContain("Kimi");
+    expect(container.textContent).toContain("Cursor");
+    expect(container.textContent).not.toContain("Sign in to Claude Official");
 
     const officialToggle = Array.from(
       container.querySelectorAll("button"),

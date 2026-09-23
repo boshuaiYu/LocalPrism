@@ -9,6 +9,7 @@ import {
   SettingsIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { LinuxRuntimeNote } from "@/components/linux-runtime-note";
 import { RuntimeSettings } from "@/components/runtime/runtime-settings";
 import { areDefaultSkillPacksReady } from "@/lib/default-skill-packs";
 import { skillPaperWorkflowGuidance } from "@/lib/skill-workflow-copy";
@@ -178,8 +179,8 @@ function SetupStep() {
           Install your writing environment
         </h1>
         <p className="mx-auto mt-2 max-w-xl text-muted-foreground text-sm leading-relaxed">
-          Python, PaperSpine, and a model are optional to skip. Official Claude
-          or ChatGPT sign-in is optional — a third-party API key is enough.
+          Python and skill packs can wait. Start with one DeepSeek API key.
+          Other providers and official login stay under Advanced.
         </p>
         <p className="mx-auto mt-2 max-w-xl text-muted-foreground text-xs leading-relaxed">
           {skillPaperWorkflowGuidance()}
@@ -283,12 +284,14 @@ function SetupStep() {
         />
       </section>
 
+      <LinuxRuntimeNote />
+
       <section className="overflow-hidden rounded-2xl border border-border/70 bg-background/80 shadow-sm">
         <div className="border-border/60 border-b px-5 py-3">
-          <h2 className="font-medium text-sm">Choose a provider</h2>
-          <p className="mt-1 text-muted-foreground text-xs">
-            Paste an API key from DeepSeek, Kimi, Qwen, or another provider. You
-            can skip and configure this later in Settings.
+          <h2 className="font-medium text-sm">Add an API key</h2>
+          <p className="mt-1 text-lp-meta text-xs">
+            DeepSeek is enough to start. You can skip this and open Advanced
+            later in Settings.
           </p>
         </div>
         <RuntimeSettings refreshOnMount showEngine={false} />

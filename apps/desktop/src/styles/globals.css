@@ -27,6 +27,8 @@
   --color-input: var(--input);
   --color-border: var(--border);
   --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-lp-meta: var(--lp-meta);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
@@ -53,6 +55,7 @@
   --space-unit: 8px;
   --control-height: calc(var(--space-unit) * 5);
   --lp-meta: oklch(0.4 0 0);
+  --destructive-foreground: oklch(0.985 0 0);
   --prism-cta: linear-gradient(
     135deg,
     oklch(0.46 0.16 265),
@@ -108,12 +111,13 @@
   --secondary: oklch(0.269 0 0);
   --secondary-foreground: oklch(0.985 0 0);
   --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
+  --muted-foreground: oklch(0.8 0 0);
   --accent: oklch(0.269 0 0);
   --accent-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
+  --destructive-foreground: oklch(0.145 0.02 25);
+  --border: oklch(1 0 0 / 22%);
+  --input: oklch(1 0 0 / 24%);
   --ring: oklch(0.556 0 0);
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
@@ -126,9 +130,9 @@
   --sidebar-primary-foreground: oklch(0.985 0 0);
   --sidebar-accent: oklch(0.269 0 0);
   --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-border: oklch(1 0 0 / 22%);
   --sidebar-ring: oklch(0.556 0 0);
-  --lp-meta: oklch(0.82 0 0);
+  --lp-meta: oklch(0.86 0 0);
 }
 
 @layer base {
@@ -626,4 +630,42 @@
 .lp-focus:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
+}
+
+/* Shared chrome. Dark-theme contrast lives in the tokens above. */
+.lp-chrome {
+  background: var(--background);
+  color: var(--foreground);
+  border-color: var(--border);
+}
+
+.lp-empty {
+  background: var(--card);
+  color: var(--card-foreground);
+  border-color: var(--border);
+}
+
+.lp-empty-title {
+  color: var(--foreground);
+}
+
+.lp-empty-body {
+  color: var(--lp-meta);
+}
+
+.lp-error-card {
+  color: var(--destructive);
+  background: color-mix(in oklch, var(--destructive) 12%, var(--background));
+  border: 1px solid color-mix(in oklch, var(--destructive) 48%, transparent);
+}
+
+.lp-error-action {
+  background: var(--destructive);
+  color: var(--destructive-foreground);
+}
+
+.lp-panel {
+  background: var(--card);
+  color: var(--card-foreground);
+  border-color: var(--border);
 }

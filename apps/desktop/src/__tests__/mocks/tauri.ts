@@ -108,6 +108,14 @@ vi.mock("@tauri-apps/plugin-shell", () => ({
   },
 }));
 
+vi.mock("@tauri-apps/plugin-updater", () => ({
+  check: vi.fn(async () => null),
+}));
+
+vi.mock("@tauri-apps/plugin-process", () => ({
+  relaunch: vi.fn(async () => undefined),
+}));
+
 // Mock @tauri-apps/plugin-dialog
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),

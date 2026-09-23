@@ -139,6 +139,36 @@ LocalPrism 是一个**独立**的桌面应用：稿件留在本机文件夹，Te
 
 macOS / Linux 包由 GitHub Actions 构建；Windows 也可以在本机执行 `pnpm build:desktop`。
 
+### Linux
+
+发布页有 AppImage、`.deb` 和 `.rpm`。窗口依赖 WebKitGTK 4.1。
+
+| 文件 | 安装 | 更新 |
+|---|---|---|
+| `LocalPrism-Linux.AppImage` | `chmod +x LocalPrism-Linux.AppImage` | 应用内后台下载，然后询问是否重启。更新器安装的就是这个文件。 |
+| `LocalPrism-Linux.deb` | `sudo apt install ./LocalPrism-Linux.deb` | 到 Releases 下载新的 `.deb`。应用内更新不会用 AppImage 替换 deb。 |
+| `LocalPrism-Linux.rpm` | `sudo dnf install ./LocalPrism-Linux.rpm` | 与 deb 相同，自行安装新的 `.rpm`。 |
+
+不要只用 `dpkg -i`。它不会安装依赖，程序解压后会在窗口出现前退出，因为缺少 `libwebkit2gtk-4.1.so.0`。请用 apt 安装 deb。包依赖：
+
+- `libwebkit2gtk-4.1-0`
+- `libgtk-3-0`；Ubuntu 24.04 和 Debian 13 上如果没有 `libgtk-3-0`，用 `libgtk-3-0t64`
+- `libayatana-appindicator3-1` 或 `libappindicator3-1`
+
+deb 的桌面入口会先运行 `localprism-launch`。若仍然缺少 WebKit，它会显示安装命令，而不是静默失败。也可以直接安装这些库：
+
+```bash
+sudo apt install libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1
+```
+
+rpm 依赖 Fedora 上的 `webkit2gtk4.1` 和 `gtk3`。openSUSE 手动安装时的库名是 `libwebkit2gtk-4_1-0` 和 `gtk3`。
+
+AppImage 会尽量自带 WebKit。如果它一启动就退出，请在终端里运行。若提示缺少 `libwebkit2gtk-4.1.so.0`，仍需安装上面的 apt 包。
+
+Ubuntu 22.04 和 Debian 12 是提供 WebKitGTK 4.1 的最早版本。Ubuntu 20.04 和 Debian 11 没有这个库。
+
+已安装的 AppImage、macOS 和 Windows 会在启动时检查更新，后台下载，然后等你点 **Restart to update**。签名校验沿用应用里已有的更新公钥。在你确认之前不会替换当前安装。
+
 ## 贡献
 
 开发环境、测试和打包见 [CONTRIBUTING.md](./CONTRIBUTING.md)。

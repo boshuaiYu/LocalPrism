@@ -1,0 +1,30 @@
+#!/bin/sh
+# Runs after the deb is configured. Depends should already have installed
+# WebKitGTK; this is the message when a forced install left them out.
+set -eu
+
+if [ -f /usr/bin/localprism-launch ]; then
+  chmod 755 /usr/bin/localprism-launch || true
+fi
+
+if ldconfig -p 2>/dev/null | grep -q 'libwebkit2gtk-4.1.so'; then
+  echo "LocalPrism: WebKitGTK 4.1 is available."
+  exit 0
+fi
+
+cat >&2 <<'EOF'
+LocalPrism needs WebKitGTK 4.1 before the window can open.
+
+Debian / Ubuntu:
+  sudo apt install libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1
+
+If libgtk-3-0 is not found (Ubuntu 24.04 or Debian 13):
+  sudo apt install libwebkit2gtk-4.1-0 libgtk-3-0t64 libayatana-appindicator3-1
+
+Install the package with apt so these dependencies are pulled in:
+  sudo apt install ./LocalPrism-Linux.deb
+dpkg -i does not install missing dependencies. The desktop launcher
+then explains the same packages instead of exiting with no window.
+EOF
+
+exit 0

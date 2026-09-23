@@ -11,7 +11,8 @@ Contributions are welcome! This guide covers the development environment, workfl
 - [Rust](https://rustup.rs/) (stable)
 - Platform-specific native dependencies (required by [Tectonic](https://tectonic-typesetting.github.io/)):
   - **macOS:** `brew install icu4c harfbuzz pkg-config`
-  - **Linux:** `apt install libicu-dev libgraphite2-dev libharfbuzz-dev libfreetype-dev libfontconfig-dev libwebkit2gtk-4.1-dev libappindicator3-dev libssl-dev patchelf`
+  - **Linux (build machine):** `apt install libicu-dev libgraphite2-dev libharfbuzz-dev libfreetype-dev libfontconfig-dev libwebkit2gtk-4.1-dev libappindicator3-dev libssl-dev patchelf`
+  - **Linux (end-user runtime, not the `-dev` packages):** see the Installation section in the README. The `.deb` depends on `libwebkit2gtk-4.1-0`, GTK 3, and an appindicator package. The `.rpm` depends on `webkit2gtk4.1` and `gtk3`.
   - Linux packages: `bash scripts/build-linux.sh` (AppImage and .deb). The script checks that the binary does not export static GLib/expat symbols; smoke-test with `xvfb-run -a dbus-run-session -- <binary>`.
   - **Windows:** Visual Studio Build Tools (C++ workload) + vcpkg — see detailed steps below
 
