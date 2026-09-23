@@ -613,3 +613,181 @@ describe("close last conversation", () => {
     expect(state.tabs[0].title).toBe("Stopping");
   });
 });
+
+describe("close sessions after an account switch", () => {
+  const accountA = "official-claude\0a@example.com";
+  const accountB = "official-chatgpt\0b@example.com";
+
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke).mockResolvedValue(true);
+    resetChatToSingleIdleTab();
+    useClaudeChatStore.setState((state) => ({
+      activeAccountKey: null,
+      accountObserved: false,
+      isStreaming: false,
+      tabs: state.tabs.map((tab) => ({
+        ...tab,
+        openedUnderAccountKey: undefined,
+        isStreaming: false,
+        streamingStartedAt: null,
+        cancelledAttempts: [],
+        activeAttemptId: null,
+      })),
+    }));
+  });
+
+  afterEach(() => {
+    useClaudeChatStore.setState({
+      activeAccountKey: null,
+      accountObserved: false,
+    });
+    resetChatToSingleIdleTab();
+  });
+
+  function streamActiveTab(attemptId: string) {
+    const tabId = useClaudeChatStore.getState().activeTabId;
+    useClaudeChatStore.setState((state) => ({
+      isStreaming: true,
+      tabs: state.tabs.map((tab) =>
+        tab.id === tabId
+          ? {
+              ...tab,
+              title: "Live turn",
+              isStreaming: true,
+              streamingStartedAt: 1,
+              activeAttemptId: attemptId,
+              cancelledAttempts: [],
+            }
+          : tab,
+      ),
+    }));
+    return tabId;
+  }
+
+  it("keeps the first signed-in account's live turn from being closed", () => {
+    const tabId = streamActiveTab("attempt-current");
+
+    useClaudeChatStore.getState().noteActiveAccount(accountA);
+
+    const claimed = useClaudeChatStore.getState().tabs[0];
+    expect(claimed?.openedUnderAccountKey).toBe(accountA);
+    expect(claimed?.isStreaming).toBe(true);
+    useClaudeChatStore.getState().closeTab(tabId);
+    expect(
+      useClaudeChatStore.getState().tabs.some((tab) => tab.id === tabId),
+    ).toBe(true);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("closes a session that is still running under the previous account", () => {
+    const foreignId = streamActiveTab("attempt-foreign");
+    useClaudeChatStore.getState().noteActiveAccount(accountA);
+    useClaudeChatStore.getState().noteActiveAccount(accountB);
+
+    const released = useClaudeChatStore
+      .getState()
+      .tabs.find((tab) => tab.id === foreignId);
+    expect(released?.openedUnderAccountKey).toBe(accountA);
+    expect(released?.isStreaming).toBe(false);
+    expect(released?.cancelledAttempts).toEqual([]);
+    expect(invoke).toHaveBeenCalledWith("runtime_interrupt_turn", {
+      runtime: "claude",
+      tabId: foreignId,
+      attemptId: "attempt-foreign",
+      mode: "terminate",
+    });
+
+    useClaudeChatStore.setState((state) => ({
+      isStreaming: true,
+      tabs: state.tabs.map((tab) =>
+        tab.id === foreignId
+          ? {
+              ...tab,
+              isStreaming: true,
+              streamingStartedAt: 2,
+              activeAttemptId: "attempt-stuck",
+            }
+          : tab,
+      ),
+    }));
+    useClaudeChatStore.getState().closeTab(foreignId);
+
+    const state = useClaudeChatStore.getState();
+    expect(state.tabs.some((tab) => tab.id === foreignId)).toBe(false);
+    expect(state.tabs[0]?.openedUnderAccountKey).toBe(accountB);
+    expect(invoke).toHaveBeenCalledWith("runtime_interrupt_turn", {
+      runtime: "claude",
+      tabId: foreignId,
+      attemptId: "attempt-stuck",
+      mode: "terminate",
+    });
+  });
+
+  it("still refuses to close a live turn owned by the signed-in account", () => {
+    const foreignId = streamActiveTab("attempt-foreign");
+    useClaudeChatStore.getState().noteActiveAccount(accountA);
+    useClaudeChatStore.getState().noteActiveAccount(accountB);
+    const currentId = useClaudeChatStore.getState().createTab();
+    useClaudeChatStore.setState((state) => ({
+      isStreaming: true,
+      tabs: state.tabs.map((tab) =>
+        tab.id === currentId
+          ? {
+              ...tab,
+              title: "Current account",
+              isStreaming: true,
+              streamingStartedAt: 3,
+              activeAttemptId: "attempt-current",
+            }
+          : tab,
+      ),
+    }));
+
+    useClaudeChatStore.getState().closeTab(currentId);
+    expect(
+      useClaudeChatStore.getState().tabs.some((tab) => tab.id === currentId),
+    ).toBe(true);
+    expect(
+      useClaudeChatStore.getState().tabs.find((tab) => tab.id === currentId)
+        ?.openedUnderAccountKey,
+    ).toBe(accountB);
+
+    useClaudeChatStore.getState().closeTab(foreignId);
+    expect(
+      useClaudeChatStore.getState().tabs.some((tab) => tab.id === foreignId),
+    ).toBe(false);
+  });
+
+  it("unlocks a session that is stuck stopping after the account changes", () => {
+    const tabId = useClaudeChatStore.getState().activeTabId;
+    useClaudeChatStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === tabId
+          ? {
+              ...tab,
+              title: "Stopping",
+              isStreaming: false,
+              cancelledAttempts: [
+                {
+                  attemptId: "attempt-stop",
+                  attemptEpoch: 1,
+                  runtime: "claude",
+                  mode: "terminate",
+                },
+              ],
+            }
+          : tab,
+      ),
+    }));
+    useClaudeChatStore.getState().noteActiveAccount(accountA);
+    useClaudeChatStore.getState().noteActiveAccount(accountB);
+
+    const released = useClaudeChatStore.getState().tabs[0];
+    expect(released?.cancelledAttempts).toEqual([]);
+    useClaudeChatStore.getState().closeTab(tabId);
+    expect(
+      useClaudeChatStore.getState().tabs.some((tab) => tab.id === tabId),
+    ).toBe(false);
+  });
+});

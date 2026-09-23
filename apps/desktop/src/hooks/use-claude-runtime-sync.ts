@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { providerAccountKey } from "@/lib/provider-account";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import { useClaudeSetupStore } from "@/stores/claude-setup-store";
 import {
@@ -29,8 +30,15 @@ function syncChatSelectionToCatalog(
   });
 }
 
+function syncActiveAccount(
+  state: Parameters<typeof providerAccountKey>[0],
+): void {
+  useClaudeChatStore.getState().noteActiveAccount(providerAccountKey(state));
+}
+
 export function useClaudeRuntimeSync(): void {
   useEffect(() => {
+    syncActiveAccount(useProviderStore.getState());
     void useProviderStore
       .getState()
       .refresh()
@@ -42,6 +50,9 @@ export function useClaudeRuntimeSync(): void {
           state.activeId !== previousState.activeId
         ) {
           syncChatSelectionToCatalog(state.models);
+        }
+        if (providerAccountKey(state) !== providerAccountKey(previousState)) {
+          syncActiveAccount(state);
         }
         if (state.ready && !previousState.ready) {
           useClaudeChatStore.getState().ensureWritableTab();

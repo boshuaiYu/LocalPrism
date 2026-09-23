@@ -41,6 +41,7 @@ import {
   rewindUserResendPrompt,
   type RewindAnchor,
 } from "@/lib/chat-rewind";
+import { tabOpenedUnderOtherAccount } from "@/lib/provider-account";
 import { uiText } from "@/lib/use-i18n";
 import { sameProjectPath } from "./chat-persistence";
 import { useSettingsStore } from "./settings-store";
@@ -257,6 +258,11 @@ export interface TabState {
   providerKey: string | null;
   /** Provider that last executed this session, used for safe resume/switching. */
   sessionProviderKey: string | null;
+  /**
+   * Workspace account that opened this tab. Unset until the first signed-in
+   * account is observed, so startup does not mark every tab as foreign.
+   */
+  openedUnderAccountKey?: string | null;
   messages: ClaudeStreamMessage[];
   isStreaming: boolean;
   streamingStartedAt: number | null;
@@ -408,6 +414,42 @@ function makeDefaultTab(
     cancelledAttempts: [],
     compressionCarryover: null,
   };
+}
+
+function currentAccountOwnership(
+  state: Pick<ClaudeChatState, "accountObserved" | "activeAccountKey">,
+): Partial<Pick<TabState, "openedUnderAccountKey">> {
+  if (!state.accountObserved) return {};
+  return { openedUnderAccountKey: state.activeAccountKey };
+}
+
+function releaseForeignTurn(tab: TabState): TabState {
+  return {
+    ...tab,
+    isStreaming: false,
+    streamingStartedAt: null,
+    streamingStatus: null,
+    cancelledAttempts: [],
+    activeAttemptId: null,
+    preflightAttemptEpoch: null,
+    attemptEpoch: (tab.attemptEpoch ?? 0) + 1,
+  };
+}
+
+function foreignTurnAttemptId(tab: TabState): string | null {
+  return tab.activeAttemptId ?? tab.cancelledAttempts?.[0]?.attemptId ?? null;
+}
+
+function abandonForeignRuntime(tab: TabState) {
+  const attemptId = foreignTurnAttemptId(tab);
+  if (!attemptId) return;
+  try {
+    void Promise.resolve(
+      interruptRuntimeTurn(tab.runtime, tab.id, attemptId, "terminate"),
+    ).catch(() => undefined);
+  } catch {
+    // Closing the session must not depend on the runtime accepting the stop.
+  }
 }
 
 function providerSessionKey(providerCredentialId: string | null): string {
@@ -1076,6 +1118,11 @@ interface ClaudeChatState {
   tabs: TabState[];
   activeTabId: string;
   activeProjectPath: string | null;
+  /** Signed-in workspace account. Null when logged out. */
+  activeAccountKey: string | null;
+  /** True after the first authenticated account has been observed. */
+  accountObserved: boolean;
+  noteActiveAccount: (accountKey: string | null) => void;
 
   /** Deferred prompt to send once the workspace is ready (set by project wizard) */
   pendingInitialPrompt: string | null;
@@ -1230,6 +1277,60 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
   tabs: [makeDefaultTab(DEFAULT_TAB_ID)],
   activeTabId: DEFAULT_TAB_ID,
   activeProjectPath: null,
+  activeAccountKey: null,
+  accountObserved: false,
+  noteActiveAccount: (accountKey) => {
+    const state = get();
+    if (!state.accountObserved) {
+      if (!accountKey) return;
+      set({
+        activeAccountKey: accountKey,
+        accountObserved: true,
+        tabs: state.tabs.map((tab) =>
+          tab.openedUnderAccountKey != null
+            ? tab
+            : { ...tab, openedUnderAccountKey: accountKey },
+        ),
+      });
+      return;
+    }
+    if (state.activeAccountKey === accountKey) return;
+
+    const previousKey = state.activeAccountKey;
+    const released: TabState[] = [];
+    const tabs = state.tabs.map((tab) => {
+      if (
+        tab.openedUnderAccountKey == null &&
+        previousKey == null &&
+        accountKey
+      ) {
+        return { ...tab, openedUnderAccountKey: accountKey };
+      }
+      const owner = tab.openedUnderAccountKey ?? previousKey;
+      const stamped =
+        tab.openedUnderAccountKey != null
+          ? tab
+          : { ...tab, openedUnderAccountKey: owner };
+      if (owner === accountKey || owner == null) return stamped;
+      const busy =
+        stamped.isStreaming || (stamped.cancelledAttempts?.length ?? 0) > 0;
+      if (!busy) return stamped;
+      released.push(stamped);
+      return releaseForeignTurn(stamped);
+    });
+    const active = tabs.find((tab) => tab.id === state.activeTabId);
+    set({
+      activeAccountKey: accountKey,
+      tabs,
+      isStreaming: active?.isStreaming ?? false,
+      streamingStartedAt: active?.streamingStartedAt ?? null,
+      streamingStatus: active?.streamingStatus ?? null,
+    });
+    for (const tab of released) {
+      void useApprovalStore.getState().cancelForTab(tab.id);
+      abandonForeignRuntime(tab);
+    }
+  },
 
   selectedModel: "",
   setSelectedModel: (model) => set({ selectedModel: model }),
@@ -2243,12 +2344,22 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
 
   resetForProject: (projectPath) => {
     const state = get();
-    if (
-      state.tabs.some(
-        (tab) => tab.isStreaming || (tab.cancelledAttempts?.length ?? 0) > 0,
-      )
-    ) {
+    const currentAccountBusy = state.tabs.some(
+      (tab) =>
+        (tab.isStreaming || (tab.cancelledAttempts?.length ?? 0) > 0) &&
+        !tabOpenedUnderOtherAccount(tab, state),
+    );
+    if (currentAccountBusy) {
       return "blocked-stopping";
+    }
+    for (const tab of state.tabs) {
+      if (
+        (tab.isStreaming || (tab.cancelledAttempts?.length ?? 0) > 0) &&
+        tabOpenedUnderOtherAccount(tab, state)
+      ) {
+        abandonForeignRuntime(tab);
+        void useApprovalStore.getState().cancelForTab(tab.id);
+      }
     }
     const tabsAlreadyScoped =
       state.activeProjectPath === projectPath &&
@@ -2267,7 +2378,10 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     const restoredActiveTabId = restoredTabs.find(
       (tab) => tab.id === persisted?.activeTabId,
     )?.id;
-    const fallbackTab = makeDefaultTab(nextTabId(), projectPath);
+    const fallbackTab = {
+      ...makeDefaultTab(nextTabId(), projectPath),
+      ...currentAccountOwnership(state),
+    };
     const tabs = (restoredTabs.length > 0 ? restoredTabs : [fallbackTab]).map(
       (restoredTab) => {
         const previousAttemptEpoch =
@@ -2357,6 +2471,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         reasoningEffort: activeTab.reasoningEffort,
         agentId: activeTab.agentId,
         providerKey: activeTab.providerKey,
+        ...currentAccountOwnership(get()),
       };
       set({
         tabs: [...tabs, newTab],
@@ -2405,6 +2520,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         preflightAttemptEpoch: null,
         resumeRequestId: null,
         rewindRegenerate: null,
+        ...currentAccountOwnership(s),
       }),
       activeProjectPath: projectPath,
     }));
@@ -2900,6 +3016,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
             providerKeyForSelectedCredential(
               get().selectedProviderCredentialId,
             ),
+          ...currentAccountOwnership(get()),
         };
         tabs = [...tabs, newTab];
         activeTabId = id;
@@ -3149,6 +3266,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         activeTab,
         state.selectedProviderCredentialId,
       ),
+      ...currentAccountOwnership(state),
     };
     set((s) => ({
       tabs: [...s.tabs, newTab],
@@ -3195,8 +3313,17 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
   closeTab: (tabId: string) => {
     const state = get();
     const tab = state.tabs.find((t) => t.id === tabId);
-    // Prevent closing a streaming or stopping tab.
-    if (tab?.isStreaming || (tab?.cancelledAttempts?.length ?? 0) > 0) return;
+    const openedUnderOtherAccount = tab
+      ? tabOpenedUnderOtherAccount(tab, state)
+      : false;
+    const busy =
+      !!tab && (tab.isStreaming || (tab.cancelledAttempts?.length ?? 0) > 0);
+    // A live turn for the signed-in account stays open until it stops.
+    // Sessions left running by another account can still be closed.
+    if (busy && !openedUnderOtherAccount) return;
+    if (busy && tab && openedUnderOtherAccount) {
+      abandonForeignRuntime(tab);
+    }
 
     const idx = state.tabs.findIndex((t) => t.id === tabId);
     if (idx === -1) return;
@@ -3212,6 +3339,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       const replacement = {
         ...makeDefaultTab(nextTabId(), projectPath),
         ...inheritWritableTabSelection(tab, state.selectedProviderCredentialId),
+        ...currentAccountOwnership(state),
       };
       const nextSelectedProviderCredentialId =
         selectedCredentialForProviderKey(replacement.providerKey) ??
