@@ -7,6 +7,7 @@ import {
   catalogContextWindow,
   formatTokenCount,
 } from "@/lib/chat-token-usage";
+import { useI18n } from "@/lib/use-i18n";
 import { cn } from "@/lib/utils";
 
 function meterTone(percent: number): string {
@@ -75,6 +76,7 @@ function panelPosition(trigger: HTMLElement): {
 }
 
 export function ChatTokenMeter() {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState({ left: 0, bottom: 0, maxHeight: 280 });
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -147,11 +149,11 @@ export function ChatTokenMeter() {
         ref={buttonRef}
         type="button"
         data-testid="chat-token-meter-trigger"
-        aria-label={`Context ${meter.percent}%`}
+        aria-label={t("chat.contextPercent", { percent: meter.percent })}
         aria-expanded={open}
         aria-haspopup="dialog"
         aria-controls="chat-token-meter-panel"
-        title={`Context ${meter.percent}%`}
+        title={t("chat.contextPercent", { percent: meter.percent })}
         className="flex size-6 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         onClick={() => setOpen((value) => !value)}
       >
@@ -164,7 +166,7 @@ export function ChatTokenMeter() {
               id="chat-token-meter-panel"
               data-testid="chat-token-meter"
               role="dialog"
-              aria-label="Token usage"
+              aria-label={t("chat.tokenUsage")}
               className="fixed w-64 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-xl border border-border bg-popover p-3 text-popover-foreground shadow-lg"
               style={{
                 left: pos.left,
@@ -174,7 +176,9 @@ export function ChatTokenMeter() {
               }}
             >
               <div className="flex items-baseline justify-between gap-3">
-                <p className="font-medium text-foreground text-xs">Context</p>
+                <p className="font-medium text-foreground text-xs">
+                  {t("chat.context")}
+                </p>
                 <p className="font-medium text-foreground text-sm tabular-nums">
                   {meter.percent}%
                 </p>
@@ -198,36 +202,47 @@ export function ChatTokenMeter() {
               <dl className="mt-2.5 space-y-1.5 text-xs">
                 <div className="grid grid-cols-2 gap-x-4">
                   <div>
-                    <dt className="text-muted-foreground">Used</dt>
+                    <dt className="text-muted-foreground">{t("chat.used")}</dt>
                     <dd className="font-medium tabular-nums">
                       {formatTokenCount(meter.usedTokens)}
                     </dd>
                   </div>
                   <div className="text-right">
-                    <dt className="text-muted-foreground">Remaining</dt>
+                    <dt className="text-muted-foreground">
+                      {t("chat.remaining")}
+                    </dt>
                     <dd className="font-medium tabular-nums">
                       {formatTokenCount(meter.remainingTokens)}
                     </dd>
                   </div>
                 </div>
                 <div>
-                  <dt className="text-muted-foreground">Window</dt>
+                  <dt className="text-muted-foreground">{t("chat.window")}</dt>
                   <dd className="tabular-nums">
                     {formatTokenCount(meter.windowTokens)}
                   </dd>
                 </div>
-                <MeterRow label="Cache read" value={meter.cacheReadTokens} />
                 <MeterRow
-                  label="Cache write"
+                  label={t("chat.cacheRead")}
+                  value={meter.cacheReadTokens}
+                />
+                <MeterRow
+                  label={t("chat.cacheWrite")}
                   value={meter.cacheCreationTokens}
                 />
-                <MeterRow label="Input tokens" value={meter.inputTokens} />
-                <MeterRow label="Output tokens" value={meter.outputTokens} />
+                <MeterRow
+                  label={t("chat.inputTokens")}
+                  value={meter.inputTokens}
+                />
+                <MeterRow
+                  label={t("chat.outputTokens")}
+                  value={meter.outputTokens}
+                />
               </dl>
               <p className="mt-2 text-[11px] text-muted-foreground">
                 {meter.estimated
-                  ? "Waiting for usage · model window"
-                  : "This conversation · model window"}
+                  ? t("chat.waitingUsage")
+                  : t("chat.thisConversation")}
               </p>
             </aside>,
             document.body,

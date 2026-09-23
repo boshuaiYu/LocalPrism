@@ -9,6 +9,13 @@ describe("translate", () => {
     expect(translate("zh", "chat.compress")).toBe("压缩更早的消息");
     expect(translate("en", "onboarding.skip")).toBe("Skip");
     expect(translate("en", "onboarding.getStarted")).toBe("Get started");
+    expect(translate("en", "chrome.outline")).toBe("Outline");
+    expect(translate("zh", "chrome.outline")).toBe("大纲");
+    expect(translate("en", "chrome.environment")).toBe("Environment");
+    expect(translate("zh", "chrome.environment")).toBe("环境");
+    expect(translate("zh", "settings.environment")).toBe("环境");
+    expect(translate("zh", "editor.openIn")).toBe("在编辑器中打开");
+    expect(translate("zh", "env.pythonEnvironment")).toBe("Python 环境 (uv)");
   });
 
   it("interpolates named values", () => {

@@ -37,6 +37,7 @@ import {
 import { InstallProgress } from "./install-progress";
 import { useSkillStore } from "@/stores/skill-store";
 import { useDocumentStore } from "@/stores/document-store";
+import { useI18n } from "@/lib/use-i18n";
 import {
   buildSkillsBrowserCategories,
   packIdFromBrowserCategoryId,
@@ -79,6 +80,7 @@ interface ScientificSkillsOnboardingProps {
 export function ScientificSkillsOnboarding({
   onClose,
 }: ScientificSkillsOnboardingProps) {
+  const { t } = useI18n();
   const [categories, setCategories] = useState<SkillCategoryData[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isInstalling, setIsInstalling] = useState(false);
@@ -241,7 +243,9 @@ export function ScientificSkillsOnboarding({
   const handleInstall = useCallback(async () => {
     installBackendLogSeenRef.current = false;
     let noBackendLogTimer: number | undefined;
-    setInstallLogs(["Preparing installer..."]);
+    const preparing = t("skills.preparing");
+    const preparingPrefix = t("skills.preparingPrefix");
+    setInstallLogs([preparing]);
     setIsInstalling(true);
     setIsComplete(false);
     setInstallResult(null);
@@ -252,10 +256,10 @@ export function ScientificSkillsOnboarding({
         if (installBackendLogSeenRef.current || !mountedRef.current) return;
         setInstallLogs((previous) => {
           const hasBackendLog = previous.some(
-            (line) => !line.startsWith("Preparing installer"),
+            (line) => !line.startsWith(preparingPrefix),
           );
           if (hasBackendLog) return previous;
-          return [...previous, "Waiting for the installer command to start..."];
+          return [...previous, t("skills.waitingInstaller")];
         });
       }, 2500);
 
@@ -272,7 +276,9 @@ export function ScientificSkillsOnboarding({
       ).length;
       const failed = results.find((item) => item.status === "error");
       if (failed) {
-        throw new Error(failed.error ?? `Failed to update ${failed.id}`);
+        throw new Error(
+          failed.error ?? t("skills.updateFailedId", { id: failed.id }),
+        );
       }
       setInstallResult({
         success: true,
@@ -294,7 +300,7 @@ export function ScientificSkillsOnboarding({
       setError(message);
       setIsInstalling(false);
     }
-  }, [checkStatus, projectPath, refreshSkills, updateDefaultSkillPacks]);
+  }, [checkStatus, projectPath, refreshSkills, t, updateDefaultSkillPacks]);
 
   const handleUninstall = useCallback(async () => {
     setIsUninstalling(true);
@@ -310,16 +316,16 @@ export function ScientificSkillsOnboarding({
       if (!gsAfter.installed) {
         localStorage.removeItem(STORAGE_KEY);
       }
-      toast.success("All skills uninstalled");
+      toast.success(t("skills.toastUninstalled"));
     } catch (e) {
       console.error("Failed to uninstall:", e);
-      toast.error("Failed to uninstall skills", {
+      toast.error(t("skills.toastUninstallFailed"), {
         description: String(e),
       });
     } finally {
       setIsUninstalling(false);
     }
-  }, [checkStatus, projectPath, refreshSkills]);
+  }, [checkStatus, projectPath, refreshSkills, t]);
 
   const handleImportSkill = useCallback(async () => {
     setIsImporting(true);
@@ -327,7 +333,7 @@ export function ScientificSkillsOnboarding({
       const selectedFolder = await open({
         directory: true,
         multiple: false,
-        title: "Import Skill Folder",
+        title: t("skills.importFolderTitle"),
       });
 
       if (typeof selectedFolder !== "string") return;
@@ -338,17 +344,17 @@ export function ScientificSkillsOnboarding({
       localStorage.setItem(STORAGE_KEY, "true");
       await checkStatus();
       await refreshSkills(projectPath ?? undefined);
-      toast.success("Skill imported", {
-        description: "Saved to claude-home/skills",
+      toast.success(t("skills.toastImported"), {
+        description: t("skills.toastImportedBody"),
       });
     } catch (e) {
-      toast.error("Failed to import skill", {
+      toast.error(t("skills.toastImportFailed"), {
         description: String(e),
       });
     } finally {
       setIsImporting(false);
     }
-  }, [checkStatus, importFolder, projectPath, refreshSkills]);
+  }, [checkStatus, importFolder, projectPath, refreshSkills, t]);
 
   const handleConfirmDeleteSkill = useCallback(async () => {
     if (!deleteTarget) return;
@@ -357,20 +363,20 @@ export function ScientificSkillsOnboarding({
       await invoke("delete_installed_skill", {
         skillFolder: deleteTarget.folder,
       });
-      toast.success("Skill deleted", {
+      toast.success(t("skills.toastDeleted"), {
         description: deleteTarget.name,
       });
       setDeleteTarget(null);
       await checkStatus();
       await refreshSkills(projectPath ?? undefined);
     } catch (e) {
-      toast.error("Failed to delete skill", {
+      toast.error(t("skills.toastDeleteFailed"), {
         description: String(e),
       });
     } finally {
       setDeletingSkillFolder(null);
     }
-  }, [checkStatus, deleteTarget, projectPath, refreshSkills]);
+  }, [checkStatus, deleteTarget, projectPath, refreshSkills, t]);
 
   // ─── Installing / Complete state ───
   if (isInstalling || isComplete || error) {
@@ -387,7 +393,7 @@ export function ScientificSkillsOnboarding({
         >
           <button
             type="button"
-            aria-label="Close"
+            aria-label={t("onboarding.close")}
             className="absolute top-4 right-4 z-10 rounded-xs opacity-70 transition-opacity hover:opacity-100 focus:outline-hidden focus:ring-2 focus:ring-ring focus:ring-offset-2"
             onClick={(event) => {
               event.preventDefault();
@@ -407,15 +413,16 @@ export function ScientificSkillsOnboarding({
                 <FlaskConicalIcon className="size-5 text-muted-foreground" />
               )}
               {isComplete
-                ? "Update Complete"
+                ? t("skills.updateComplete")
                 : error
-                  ? "Update Failed"
-                  : "Updating Skills"}
+                  ? t("skills.updateFailed")
+                  : t("skills.updating")}
             </DialogTitle>
             {isComplete && (
               <DialogDescription>
-                {installResult?.skills_installed ?? 0} default skill packs were
-                updated.
+                {t("skills.packsUpdated", {
+                  count: installResult?.skills_installed ?? 0,
+                })}
               </DialogDescription>
             )}
           </DialogHeader>
@@ -445,12 +452,12 @@ export function ScientificSkillsOnboarding({
                 className="gap-1.5"
               >
                 <RefreshCwIcon className="size-3.5" />
-                Retry
+                {t("errors.retry")}
               </Button>
             )}
             {(isComplete || error) && (
               <Button size="sm" onClick={onClose}>
-                {isComplete ? "Done" : "Close"}
+                {isComplete ? t("onboarding.done") : t("onboarding.close")}
               </Button>
             )}
           </div>
@@ -476,14 +483,14 @@ export function ScientificSkillsOnboarding({
           <DialogHeader className="shrink-0 border-border border-b px-6 py-3">
             <div className="flex items-center gap-4">
               <div className="min-w-0 flex-1">
-                <DialogTitle className="text-sm">Skills</DialogTitle>
+                <DialogTitle className="text-sm">
+                  {t("settings.skills")}
+                </DialogTitle>
                 <DialogDescription className="mt-0.5 text-xs">
-                  Skills stay in claude-home/skills, grouped by pack:
-                  PaperSpine, academic-research-skills, nature-skills,
-                  scientific-agent-skills, and paper-humanizer-skill. Update
-                  refreshes those default packs without overwriting unrelated
-                  imports. {totalSkills} skills across{" "}
-                  {displayCategories.length} packs.
+                  {t("skills.catalogBody", {
+                    count: totalSkills,
+                    packs: displayCategories.length,
+                  })}
                 </DialogDescription>
               </div>
               <div className="flex shrink-0 items-center gap-2">
@@ -491,7 +498,7 @@ export function ScientificSkillsOnboarding({
                   <>
                     <Badge variant="secondary" className="gap-1 text-xs">
                       <CheckCircle2Icon className="size-3" />
-                      {totalSkills} installed
+                      {t("skills.installedBadge", { count: totalSkills })}
                     </Badge>
                     <Button
                       variant="outline"
@@ -500,7 +507,7 @@ export function ScientificSkillsOnboarding({
                       className="gap-1.5"
                     >
                       <RefreshCwIcon className="size-3.5" />
-                      Update
+                      {t("skills.update")}
                     </Button>
                     <Button
                       variant="outline"
@@ -514,13 +521,13 @@ export function ScientificSkillsOnboarding({
                       ) : (
                         <Trash2Icon className="size-3.5" />
                       )}
-                      Uninstall
+                      {t("skills.uninstall")}
                     </Button>
                   </>
                 ) : (
                   <Button size="sm" onClick={handleInstall} className="gap-1.5">
                     <DownloadIcon className="size-3.5" />
-                    Install All
+                    {t("skills.installAll")}
                   </Button>
                 )}
                 <Badge variant="secondary" className="h-8 px-2 text-xs">
@@ -543,7 +550,7 @@ export function ScientificSkillsOnboarding({
                   ) : (
                     <FolderPlusIcon className="size-3.5 text-muted-foreground" />
                   )}
-                  Import Skill
+                  {t("skills.importSkill")}
                 </Button>
               </div>
             </div>
@@ -562,7 +569,7 @@ export function ScientificSkillsOnboarding({
                       <div key={cat.id}>
                         {index === 0 && (
                           <p className="px-3 pt-1 pb-1 font-medium text-[11px] text-muted-foreground/80 uppercase tracking-wide">
-                            Skill packs
+                            {t("skills.packs")}
                           </p>
                         )}
                         <button
@@ -606,7 +613,7 @@ export function ScientificSkillsOnboarding({
                 </ScrollArea>
               ) : (
                 <div className="flex flex-1 items-center justify-center text-muted-foreground text-sm">
-                  Select a category
+                  {t("skills.selectCategory")}
                 </div>
               )}
             </div>
@@ -623,7 +630,7 @@ export function ScientificSkillsOnboarding({
               onClick={onClose}
               className="text-muted-foreground"
             >
-              Close
+              {t("onboarding.close")}
             </Button>
           </div>
         </DialogContent>
@@ -637,10 +644,11 @@ export function ScientificSkillsOnboarding({
       >
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
-            <DialogTitle>Delete Skill</DialogTitle>
+            <DialogTitle>{t("skills.deleteTitle")}</DialogTitle>
             <DialogDescription>
-              Delete {deleteTarget?.name ?? "this skill"} from its installed
-              skill destination. This cannot be undone.
+              {t("skills.deleteBody", {
+                name: deleteTarget?.name ?? t("settings.skills"),
+              })}
             </DialogDescription>
           </DialogHeader>
           <div className="rounded-lg border border-border/60 bg-muted/30 px-3 py-2 font-mono text-muted-foreground text-xs">
@@ -653,7 +661,7 @@ export function ScientificSkillsOnboarding({
               disabled={deletingSkillFolder !== null}
               onClick={() => setDeleteTarget(null)}
             >
-              Cancel
+              {t("chrome.cancel")}
             </Button>
             <Button
               variant="destructive"
@@ -667,7 +675,7 @@ export function ScientificSkillsOnboarding({
               ) : (
                 <Trash2Icon className="size-3.5" />
               )}
-              Delete
+              {t("chrome.delete")}
             </Button>
           </div>
         </DialogContent>
@@ -681,14 +689,15 @@ export function ScientificSkillsOnboarding({
       >
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
-            <DialogTitle>Uninstall All Skills</DialogTitle>
+            <DialogTitle>{t("skills.uninstallAllTitle")}</DialogTitle>
             <DialogDescription>
-              This will uninstall managed skills from their skill destinations,
-              including imported local skills. This cannot be undone.
+              {t("skills.uninstallAllBody")}
             </DialogDescription>
           </DialogHeader>
           <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-destructive text-xs">
-            {status?.skill_count ?? 0} installed skills will be removed.
+            {t("skills.uninstallAllCount", {
+              count: status?.skill_count ?? 0,
+            })}
           </div>
           <div className="flex justify-end gap-2">
             <Button
@@ -697,7 +706,7 @@ export function ScientificSkillsOnboarding({
               disabled={isUninstalling}
               onClick={() => setConfirmUninstallAllOpen(false)}
             >
-              Cancel
+              {t("chrome.cancel")}
             </Button>
             <Button
               variant="destructive"
@@ -714,7 +723,7 @@ export function ScientificSkillsOnboarding({
               ) : (
                 <Trash2Icon className="size-3.5" />
               )}
-              Uninstall All
+              {t("skills.uninstallAllAction")}
             </Button>
           </div>
         </DialogContent>
@@ -736,16 +745,17 @@ function categorySourceUrl(
 }
 
 function SkillGithubLink({ href, label }: { href: string; label: string }) {
+  const { t } = useI18n();
   return (
     <a
       href={href}
       data-testid="skill-pack-github-link"
       title={href}
-      aria-label={`Open ${label} on GitHub`}
+      aria-label={t("skills.openGithub", { label })}
       onClick={(event) => {
         event.preventDefault();
         void shellOpen(href).catch((error) => {
-          toast.error("Failed to open GitHub", {
+          toast.error(t("skills.githubFailed"), {
             description: String(error),
           });
         });
@@ -771,6 +781,7 @@ function CategoryDetail({
   deletingSkillFolder: string | null;
   onDeleteSkill: (skill: SkillEntryData) => void;
 }) {
+  const { t } = useI18n();
   const Icon = ICON_MAP[category.icon] || FlaskConicalIcon;
   const packSourceUrl = categorySourceUrl(category);
   const packHomeUrl = packSourceUrl ? skillGithubUrl(packSourceUrl) : null;
@@ -854,7 +865,7 @@ function CategoryDetail({
               className="size-8 shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
               disabled={deletingSkillFolder === selectedSkill.folder}
               onClick={() => onDeleteSkill(selectedSkill)}
-              title="Delete skill"
+              title={t("skills.deleteSkill")}
             >
               {deletingSkillFolder === selectedSkill.folder ? (
                 <Loader2Icon className="size-4 animate-spin" />
@@ -870,7 +881,7 @@ function CategoryDetail({
         {loadingContent ? (
           <div className="flex items-center gap-2 py-4 text-muted-foreground text-xs">
             <Loader2Icon className="size-3.5 animate-spin" />
-            Loading skill content…
+            {t("skills.loadingContent")}
           </div>
         ) : fetchError ? (
           <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
@@ -900,12 +911,12 @@ function CategoryDetail({
           <h3 className="font-semibold text-sm">{category.name}</h3>
           <div className="mt-1 flex items-center gap-2">
             <Badge variant="secondary" className="text-xs">
-              {category.skill_count} skills
+              {t("env.skillCount", { count: category.skill_count })}
             </Badge>
             {isInstalled && (
               <Badge variant="secondary" className="gap-1 text-xs">
                 <CheckCircle2Icon className="size-3" />
-                Installed
+                {t("env.installed")}
               </Badge>
             )}
           </div>
@@ -922,12 +933,11 @@ function CategoryDetail({
 
       <div>
         <h4 className="mb-2 font-medium text-muted-foreground text-xs uppercase tracking-wider">
-          Skills
+          {t("settings.skills")}
         </h4>
         {category.skills.length === 0 ? (
           <p className="rounded-lg border border-dashed px-3 py-6 text-center text-muted-foreground text-xs">
-            No skills in this category yet. Import a folder to add one, then
-            click a skill to view its SKILL.md.
+            {t("skills.emptyCategory")}
           </p>
         ) : (
           <div className="grid grid-cols-2 gap-1.5">
@@ -950,8 +960,8 @@ function CategoryDetail({
                   {canDelete && (
                     <button
                       type="button"
-                      aria-label={`Delete ${skill.name}`}
-                      title="Delete skill"
+                      aria-label={t("skills.deleteNamed", { name: skill.name })}
+                      title={t("skills.deleteSkill")}
                       disabled={isDeleting}
                       onClick={(event) => {
                         event.stopPropagation();

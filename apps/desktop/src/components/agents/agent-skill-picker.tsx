@@ -78,16 +78,19 @@ export function AgentSkillPicker({
         id="agent-skill-search"
         value={query}
         onChange={(event) => setQuery(event.target.value)}
-        placeholder="Search skills by name, folder, or description"
-        aria-label="Search skills"
+        placeholder={t("skills.searchPlaceholder")}
+        aria-label={t("skills.searchLabel")}
       />
       <p className="text-muted-foreground text-xs">
-        {selectedIds.length} selected · {visible.length} shown
+        {t("skills.selectedShown", {
+          selected: selectedIds.length,
+          shown: visible.length,
+        })}
       </p>
       <div className="space-y-3 rounded-md border border-border p-2">
         {selected.length > 0 && (
           <SkillGroup
-            title="Selected"
+            title={t("skills.selectedGroup")}
             skills={selected}
             selectedIds={selectedIds}
             onToggle={onToggle}

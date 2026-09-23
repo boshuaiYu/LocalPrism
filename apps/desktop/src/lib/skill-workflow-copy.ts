@@ -2,6 +2,8 @@ import {
   DEFAULT_SKILL_PACKS,
   skillPackDisplayName,
 } from "@/lib/default-skill-packs";
+import { translate } from "@/lib/i18n";
+import { useSettingsStore } from "@/stores/settings-store";
 
 function formatEnglishList(items: string[]): string {
   if (items.length <= 1) return items[0] ?? "";
@@ -11,8 +13,10 @@ function formatEnglishList(items: string[]): string {
 
 /** Light helper copy. Names come from the default skill packs in this repo. */
 export function skillPaperWorkflowGuidance(): string {
+  const language = useSettingsStore.getState().uiLanguage;
   const names = DEFAULT_SKILL_PACKS.map((pack) =>
     skillPackDisplayName(pack.id),
   );
-  return `Skills help paper workflows. Default packs such as ${formatEnglishList(names)} include PaperSpine-style helpers the agent can use while drafting and revising a paper.`;
+  const packs = language === "zh" ? names.join("、") : formatEnglishList(names);
+  return translate(language, "env.workflow", { packs });
 }

@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { useI18n } from "@/lib/use-i18n";
 
 export interface AgentEditorProps {
   runtime?: RuntimeKind;
@@ -40,6 +41,7 @@ export function AgentEditor({
   onSaved,
   onCancel,
 }: AgentEditorProps) {
+  const { t } = useI18n();
   const runtime: RuntimeKind = "claude";
   const save = useAgentStore((state) => state.save);
   const error = useAgentStore((state) => state.error);
@@ -175,7 +177,7 @@ export function AgentEditor({
   return (
     <div className="space-y-3" data-testid="agent-editor">
       <div className="grid gap-2">
-        <Label htmlFor="agent-name">Name</Label>
+        <Label htmlFor="agent-name">{t("providers.name")}</Label>
         <Input
           id="agent-name"
           value={profile.name}
@@ -183,7 +185,7 @@ export function AgentEditor({
         />
       </div>
       <div className="grid gap-2">
-        <Label htmlFor="agent-description">Description</Label>
+        <Label htmlFor="agent-description">{t("agents.description")}</Label>
         <Input
           id="agent-description"
           value={profile.description}
@@ -191,7 +193,7 @@ export function AgentEditor({
         />
       </div>
       <div className="grid gap-2">
-        <Label htmlFor="agent-scope">Scope</Label>
+        <Label htmlFor="agent-scope">{t("agents.scope")}</Label>
         <select
           id="agent-scope"
           className="rounded-md border border-border bg-background px-3 py-2 text-sm"
@@ -201,14 +203,14 @@ export function AgentEditor({
           }
           disabled={!projectPath && profile.scope === "user"}
         >
-          <option value="user">User</option>
+          <option value="user">{t("agents.user")}</option>
           <option value="project" disabled={!projectPath}>
-            Project
+            {t("agents.project")}
           </option>
         </select>
       </div>
       <div className="grid gap-2">
-        <Label htmlFor="agent-model">Model</Label>
+        <Label htmlFor="agent-model">{t("providers.model")}</Label>
         <select
           id="agent-model"
           className="h-9 rounded-md border border-input bg-background px-3 text-sm"
@@ -217,7 +219,7 @@ export function AgentEditor({
             onModelChange(event.target.value.trim() ? event.target.value : null)
           }
         >
-          <option value="">Workspace default</option>
+          <option value="">{t("agents.workspaceDefault")}</option>
           {modelOptions.map((model) => (
             <option key={model.id} value={model.id}>
               {model.label}
@@ -226,7 +228,7 @@ export function AgentEditor({
         </select>
       </div>
       <div className="grid gap-2">
-        <Label htmlFor="agent-effort">Effort</Label>
+        <Label htmlFor="agent-effort">{t("agents.effort")}</Label>
         <select
           id="agent-effort"
           className="h-9 rounded-md border border-input bg-background px-3 text-sm"
@@ -238,7 +240,7 @@ export function AgentEditor({
             )
           }
         >
-          <option value="">Workspace default</option>
+          <option value="">{t("agents.workspaceDefault")}</option>
           {effortOptions.map((effort) => (
             <option key={effort} value={effort}>
               {formatReasoningEffortLabel(effort) || effort}
@@ -247,7 +249,7 @@ export function AgentEditor({
         </select>
       </div>
       <div className="grid gap-2">
-        <Label htmlFor="agent-permission">Approvals</Label>
+        <Label htmlFor="agent-permission">{t("agents.approvals")}</Label>
         <select
           id="agent-permission"
           className="h-9 rounded-md border border-input bg-background px-3 text-sm"
@@ -259,7 +261,7 @@ export function AgentEditor({
             )
           }
         >
-          <option value="">Use workspace default</option>
+          <option value="">{t("agents.useWorkspaceDefault")}</option>
           {PERMISSION_MODE_OPTIONS.map((option) => (
             <option key={option.id} value={option.id}>
               {option.label}
@@ -273,22 +275,20 @@ export function AgentEditor({
         )}
       </div>
       <div className="grid gap-2">
-        <Label>Assigned skills</Label>
+        <Label>{t("agents.assigned")}</Label>
         <p className="text-muted-foreground text-xs">
-          Only skills installed for Claude / {profile.scope} can be assigned.
-          Saving writes native Claude <code>skills:</code> fields.
-          {profile.scope === "project"
-            ? " Project agents only see project-installed skills; switch Scope to User for the default library."
-            : null}
+          {t("agents.assignedHelp", { scope: profile.scope })}
+          {profile.scope === "project" ? ` ${t("agents.projectHint")}` : null}
         </p>
         {!catalogReady ? (
-          <p className="text-muted-foreground text-sm">Loading skills…</p>
+          <p className="text-muted-foreground text-sm">
+            {t("agents.loadingSkills")}
+          </p>
         ) : skillsError && compatibleSkills.length === 0 ? (
           <p className="text-destructive text-sm">{skillsError}</p>
         ) : compatibleSkills.length === 0 ? (
           <p className="text-muted-foreground text-sm">
-            No compatible skills for this scope. Import skills in the Skills tab
-            first, or switch Scope to User.
+            {t("agents.noCompatible")}
           </p>
         ) : (
           <AgentSkillPicker
@@ -299,7 +299,7 @@ export function AgentEditor({
         )}
       </div>
       <div className="grid gap-2">
-        <Label htmlFor="agent-instructions">Instructions</Label>
+        <Label htmlFor="agent-instructions">{t("agents.instructions")}</Label>
         <Textarea
           id="agent-instructions"
           rows={8}
@@ -314,7 +314,7 @@ export function AgentEditor({
             checked={overwrite}
             onChange={(event) => setOverwrite(event.target.checked)}
           />
-          Overwrite if an agent with the same name already exists
+          {t("agents.overwrite")}
         </label>
       )}
       {(localError || error) && (
@@ -323,7 +323,7 @@ export function AgentEditor({
       <div className="flex justify-end gap-2">
         {onCancel && (
           <Button type="button" variant="ghost" onClick={onCancel}>
-            Cancel
+            {t("chrome.cancel")}
           </Button>
         )}
         <Button
@@ -331,7 +331,7 @@ export function AgentEditor({
           disabled={saving || !catalogReady || !profile.name.trim()}
           onClick={() => void onSubmit()}
         >
-          {saving ? "Saving…" : "Save agent"}
+          {saving ? t("agents.saving") : t("agents.save")}
         </Button>
       </div>
     </div>

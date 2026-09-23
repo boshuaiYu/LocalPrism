@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useSkillCategoryStore } from "@/stores/skill-category-store";
+import { useI18n } from "@/lib/use-i18n";
 import { cn } from "@/lib/utils";
 
 export function SkillCategoryPicker({
@@ -11,6 +12,7 @@ export function SkillCategoryPicker({
   value: string;
   onChange: (id: string) => void;
 }) {
+  const { t } = useI18n();
   const categories = useSkillCategoryStore((state) => state.categories);
   const addCategory = useSkillCategoryStore((state) => state.addCategory);
   const [draft, setDraft] = useState("");
@@ -38,7 +40,7 @@ export function SkillCategoryPicker({
         <Input
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
-          placeholder="New category name"
+          placeholder={t("skills.newCategory")}
           onKeyDown={(event) => {
             if (event.key !== "Enter") return;
             const created = addCategory(draft);
@@ -61,7 +63,7 @@ export function SkillCategoryPicker({
             }
           }}
         >
-          Add
+          {t("chrome.add")}
         </Button>
       </div>
     </div>

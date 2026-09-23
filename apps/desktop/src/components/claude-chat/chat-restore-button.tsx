@@ -1,5 +1,6 @@
 import { MessageCircleIcon } from "lucide-react";
 
+import { useI18n } from "@/lib/use-i18n";
 import { cn } from "@/lib/utils";
 
 export function ChatRestoreButton({
@@ -11,12 +12,13 @@ export function ChatRestoreButton({
   onOpen: () => void;
   className?: string;
 }) {
+  const { t } = useI18n();
   return (
     <button
       type="button"
       data-testid="open-ai-assistant"
-      aria-label="Open AI Assistant"
-      title="Open AI chat"
+      aria-label={t("chrome.openAiAssistant")}
+      title={t("chrome.openAiChat")}
       onClick={onOpen}
       className={cn(
         "relative flex size-12 items-center justify-center rounded-full border border-border bg-background text-foreground shadow-lg transition-all duration-300 ease-out hover:scale-105 hover:shadow-xl",

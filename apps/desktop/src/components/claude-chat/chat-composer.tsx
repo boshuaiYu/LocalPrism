@@ -1436,17 +1436,17 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
                       className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2 font-normal text-muted-foreground transition-colors hover:bg-muted-foreground/15 hover:text-foreground/90 dark:hover:bg-muted"
                       title={
                         isStreaming
-                          ? "Guide this item now"
-                          : "Send this guidance"
+                          ? t("chat.guideNow")
+                          : t("chat.sendGuidance")
                       }
                       onClick={() => handleGuideQueuedGuidance(guidance)}
                     >
                       <CornerDownRightIcon className="size-3" />
-                      Guide
+                      {t("chat.guide")}
                     </button>
                     <button
                       type="button"
-                      aria-label="Remove queued guidance"
+                      aria-label={t("chat.removeQueued")}
                       className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-red-500/10 hover:text-red-600 dark:hover:bg-red-500/15 dark:hover:text-red-400"
                       onClick={() => {
                         void cleanupTemporaryFilePaths(
@@ -1478,7 +1478,7 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
                       className="block h-16 w-auto object-contain"
                     />
                     <button
-                      aria-label="Remove attachment"
+                      aria-label={t("chat.removeAttachment")}
                       onClick={() => {
                         void cleanupTemporaryPinnedContext(ctx);
                         setPinnedContexts((prev) =>
@@ -1497,7 +1497,7 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
                   >
                     {ctx.label}
                     <button
-                      aria-label="Remove context"
+                      aria-label={t("chat.removeContext")}
                       onClick={() => {
                         void cleanupTemporaryPinnedContext(ctx);
                         setPinnedContexts((prev) =>
@@ -1517,7 +1517,7 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
           {isDragOver ? (
             <div className="flex min-h-10 items-center justify-center px-2.5 py-1 text-muted-foreground text-sm">
               <PaperclipIcon className="mr-2 size-4" />
-              Drop files to attach
+              {t("chat.dropFiles")}
             </div>
           ) : (
             <textarea
@@ -1528,10 +1528,10 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
               onPaste={handlePaste}
               placeholder={
                 isStreaming
-                  ? "Add guidance for the next turn..."
+                  ? t("chat.placeholderStreaming")
                   : engineInstalling
-                    ? "Installing writing engine…"
-                    : "Ask me anything (/ for commands, @ to mention)"
+                    ? t("chat.placeholderInstalling")
+                    : t("chat.placeholder")
               }
               className="max-h-32 min-h-11 w-full resize-none bg-transparent px-2.5 py-1.5 text-base leading-relaxed outline-none placeholder:text-muted-foreground/70"
               rows={1}

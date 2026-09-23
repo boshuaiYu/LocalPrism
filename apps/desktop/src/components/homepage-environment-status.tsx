@@ -1,6 +1,7 @@
 import { CheckCircle2Icon, Loader2Icon } from "lucide-react";
 import { useHomepageEnvironment } from "@/hooks/use-homepage-environment";
 import { skillPaperWorkflowGuidance } from "@/lib/skill-workflow-copy";
+import { useI18n } from "@/lib/use-i18n";
 import { cn } from "@/lib/utils";
 
 function StatusChip({
@@ -38,6 +39,7 @@ function StatusChip({
 }
 
 export function HomepageEnvironmentStatus() {
+  const { t } = useI18n();
   const {
     uvStatus,
     uvInstalling,
@@ -58,25 +60,25 @@ export function HomepageEnvironmentStatus() {
         <StatusChip
           ok={uvOk}
           busy={uvBusy}
-          label="Python (uv)"
+          label={t("env.pythonUv")}
           detail={
             uvBusy
-              ? "Installing…"
+              ? t("env.installing")
               : uvOk
-                ? (uvVersion ?? "Ready")
-                : (uvError ?? "Not installed")
+                ? (uvVersion ?? t("env.ready"))
+                : (uvError ?? t("env.notInstalled"))
           }
         />
         <StatusChip
           ok={paperSpineInstalled}
           busy={paperBusy}
-          label="PaperSpine + default skills"
+          label={t("env.paperSpine")}
           detail={
             paperBusy
-              ? "Installing PaperSpine, academic-research, nature, and scientific skills…"
+              ? t("env.installingPacks")
               : paperSpineInstalled
-                ? "Default skill packs ready"
-                : (paperSpineError ?? "Not installed")
+                ? t("env.packsReady")
+                : (paperSpineError ?? t("env.notInstalled"))
           }
         />
       </div>

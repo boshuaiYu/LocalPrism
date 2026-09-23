@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { BotIcon } from "lucide-react";
 import { useAgentStore } from "@/stores/agent-store";
+import { useI18n } from "@/lib/use-i18n";
 import { cn } from "@/lib/utils";
 import {
   wireRuntimeFromPeer,
@@ -28,6 +29,7 @@ export function AgentSelector({
   variant = "select",
   onAgentChange,
 }: AgentSelectorProps) {
+  const { t } = useI18n();
   const runtime: RuntimeKind = wireRuntimeFromPeer(peer);
   const agents = useAgentStore((state) => state.agents);
   const loading = useAgentStore((state) => state.loading);
@@ -79,8 +81,10 @@ export function AgentSelector({
         <button
           ref={buttonRef}
           type="button"
-          title="Agent"
-          aria-label={`Select custom agent ${selected?.name ?? "Default"}`}
+          title={t("agents.one")}
+          aria-label={t("agents.selectNamed", {
+            name: selected?.name ?? t("agents.default"),
+          })}
           aria-expanded={open}
           disabled={busy || loading}
           onClick={() => setOpen((value) => !value)}
@@ -88,7 +92,7 @@ export function AgentSelector({
         >
           <BotIcon className="size-3.5" />
           <span className="max-w-28 truncate">
-            {selected?.name ?? "Default"}
+            {selected?.name ?? t("agents.default")}
           </span>
         </button>
         {open &&
@@ -96,15 +100,15 @@ export function AgentSelector({
             <div
               ref={menuRef}
               role="menu"
-              aria-label="Select custom agent"
+              aria-label={t("agents.select")}
               className="fixed w-64 max-w-[calc(100vw-1rem)] overflow-hidden rounded-xl border border-border bg-popover/95 p-1.5 text-popover-foreground shadow-lg backdrop-blur-sm"
               style={{ left: pos.left, bottom: pos.bottom, zIndex: 9999 }}
             >
               <p className="px-2 py-1 font-medium text-muted-foreground text-xs">
-                Agent
+                {t("agents.one")}
               </p>
               {[
-                { id: "", name: "Default", scope: "user" as const },
+                { id: "", name: t("agents.default"), scope: "user" as const },
                 ...options,
               ].map((agent) => {
                 const active = (selected?.id ?? "") === agent.id;
@@ -132,7 +136,9 @@ export function AgentSelector({
                   >
                     <span className="truncate">
                       {agent.name}
-                      {agent.scope === "project" ? " (project)" : ""}
+                      {agent.scope === "project"
+                        ? ` ${t("agents.projectBadge")}`
+                        : ""}
                     </span>
                     {active && <span aria-hidden>✓</span>}
                   </button>
@@ -151,11 +157,11 @@ export function AgentSelector({
         htmlFor="composer-agent-select"
         className="mb-1 block font-medium text-muted-foreground text-xs"
       >
-        Agent
+        {t("agents.one")}
       </label>
       <select
         id="composer-agent-select"
-        aria-label="Select custom agent"
+        aria-label={t("agents.select")}
         className={cn(
           "w-full rounded-lg border border-border bg-background px-3 py-2 text-xs",
           "disabled:cursor-not-allowed disabled:opacity-50",
@@ -171,11 +177,11 @@ export function AgentSelector({
           onAgentChange(options.find((agent) => agent.id === next) ?? null);
         }}
       >
-        <option value="">Default</option>
+        <option value="">{t("agents.default")}</option>
         {options.map((agent) => (
           <option key={`${agent.scope}:${agent.id}`} value={agent.id}>
             {agent.name}
-            {agent.scope === "project" ? " (project)" : ""}
+            {agent.scope === "project" ? ` ${t("agents.projectBadge")}` : ""}
           </option>
         ))}
       </select>
