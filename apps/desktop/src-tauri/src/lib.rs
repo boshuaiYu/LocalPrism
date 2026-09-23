@@ -516,7 +516,10 @@ struct UpdateDownloadProgress {
 #[tauri::command]
 fn clear_prepared_update(app: tauri::AppHandle) {
     let state = app.state::<PreparedManifestUpdateState>();
-    if let Ok(mut guard) = state.0.lock() {
+    // Keep the lock `Result` in a local. A tail `if let` drops that temporary
+    // after `state`, which is E0597 on the `State` deref borrow.
+    let lock_result = state.0.lock();
+    if let Ok(mut guard) = lock_result {
         *guard = None;
     }
 }
@@ -532,7 +535,10 @@ async fn download_manifest_update(
     let parsed = url::Url::parse(&endpoint).map_err(|err| err.to_string())?;
     {
         let state = app.state::<PreparedManifestUpdateState>();
-        if let Ok(mut guard) = state.0.lock() {
+        // Same E0597 constraint as `clear_prepared_update`: bind the lock
+        // `Result` so it does not outlive `state` as a tail temporary.
+        let lock_result = state.0.lock();
+        if let Ok(mut guard) = lock_result {
             *guard = None;
         }
     }
