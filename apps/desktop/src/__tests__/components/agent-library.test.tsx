@@ -98,13 +98,13 @@ describe("AgentLibrary presets", () => {
     const empty = container.querySelector("[data-testid='agent-preset-empty']");
     expect(empty?.textContent).toContain("论文抛光机");
     expect(empty?.textContent).toContain("Polish Lab");
-    expect(empty?.textContent).toContain("贴回 LaTeX");
+    expect(empty?.textContent).toContain("你是一个学术 LaTeX 文本润色的智能体");
     expect(empty?.textContent).toContain("AI消除器");
     expect(empty?.textContent).toContain("De-AI");
-    expect(empty?.textContent).toContain("模板腔");
+    expect(empty?.textContent).toContain("你是一个学术文本去模板化的智能体");
     expect(empty?.textContent).toContain("毒舌审稿官");
     expect(empty?.textContent).toContain("Review Duo");
-    expect(empty?.textContent).toContain("合理");
+    expect(empty?.textContent).toContain("可执行");
     expect(
       container.querySelector("[data-testid='agent-preset-custom']"),
     ).toBeTruthy();
@@ -193,13 +193,15 @@ describe("AgentLibrary presets", () => {
     const instructions = container.querySelector("#agent-instructions");
     expect(name.value).toBe("论文抛光机");
     expect(description).toBeInstanceOf(HTMLInputElement);
-    expect((description as HTMLInputElement).value).toContain("贴回 LaTeX");
+    expect((description as HTMLInputElement).value).toContain(
+      "你是一个学术 LaTeX 文本润色的智能体",
+    );
     expect(instructions).toBeInstanceOf(HTMLTextAreaElement);
     expect((instructions as HTMLTextAreaElement).value).toContain(
-      "You are an academic line editor for LaTeX research papers",
+      "你是一个学术 LaTeX 论文润色的智能体",
     );
     expect((instructions as HTMLTextAreaElement).value).toContain(
-      "Preserve LaTeX exactly",
+      "原样保留 LaTeX",
     );
 
     await vi.waitFor(() => {
@@ -238,8 +240,10 @@ describe("AgentLibrary presets", () => {
     const saved = invokeMock.mock.calls.find(
       ([command]) => command === "save_agent",
     )?.[1] as { profile: AgentProfile };
-    expect(saved.profile.instructions).toContain("Preserve LaTeX exactly");
-    expect(saved.profile.description).toContain("贴回 LaTeX");
+    expect(saved.profile.instructions).toContain("原样保留 LaTeX");
+    expect(saved.profile.description).toContain(
+      "你是一个学术 LaTeX 文本润色的智能体",
+    );
     expect(saved.profile.skillIds).not.toEqual(
       expect.arrayContaining(["citation-check", "zotero-cite", "latex-guard"]),
     );
@@ -300,7 +304,7 @@ describe("AgentLibrary presets", () => {
     expect(name.value).toBe("毒舌审稿官");
     const instructions = container.querySelector("#agent-instructions");
     expect((instructions as HTMLTextAreaElement).value).toContain(
-      "You are two independent reviewers plus the editor",
+      "你是一个论文审稿的智能体",
     );
     await vi.waitFor(() => {
       expect(container.textContent).toContain("0 selected");

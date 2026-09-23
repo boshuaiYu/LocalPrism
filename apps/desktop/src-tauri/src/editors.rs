@@ -43,9 +43,16 @@ enum EditorLaunch {
     /// macOS app bundle opened with `/usr/bin/open -a`.
     MacApp { app_path: PathBuf, goto_flag: bool },
     /// Codex desktop deep link (`codex://threads/new?path=`).
+    ///
+    /// `path` is a workspace directory. A selected file is carried in `prompt`,
+    /// which the desktop app places in the composer and does not send.
     CodexDesktop { macos_app: Option<PathBuf> },
-    /// Codex CLI opened in the workspace directory.
-    CodexCli { program: PathBuf },
+    /// Codex CLI. macOS and Windows accept `codex app <directory>`.
+    /// Linux has no `app` subcommand, so the TUI starts in the workspace.
+    CodexCli {
+        program: PathBuf,
+        app_subcommand: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,7 +193,12 @@ fn locate_codex(env: &EditorEnvironment) -> Option<DetectedEditor> {
     Some(DetectedEditor {
         id: "codex".to_string(),
         name: "Codex".to_string(),
-        launch: EditorLaunch::CodexCli { program },
+        launch: EditorLaunch::CodexCli {
+            program,
+            // `codex app` exists on macOS and Windows only. It opens the
+            // desktop app on a directory; Linux launches the TUI instead.
+            app_subcommand: matches!(env.os, HostOs::Macos | HostOs::Windows),
+        },
     })
 }
 
@@ -557,10 +569,12 @@ fn plan_launch(
             goto_flag,
         } => mac_app_launch(app_path, *goto_flag, &project, file_ref, line),
         EditorLaunch::CodexDesktop { macos_app } => {
-            let target = file_ref.unwrap_or(&project);
-            codex_desktop_launch(macos_app.as_deref(), target)
+            codex_desktop_launch(macos_app.as_deref(), &project, file_ref, line)
         }
-        EditorLaunch::CodexCli { program } => codex_cli_launch(program, &project, file_ref),
+        EditorLaunch::CodexCli {
+            program,
+            app_subcommand,
+        } => codex_cli_launch(program, *app_subcommand, &project, file_ref),
     })
 }
 
@@ -638,8 +652,15 @@ fn mac_app_launch(
     }
 }
 
-fn codex_desktop_launch(macos_app: Option<&Path>, target: &Path) -> LaunchCommand {
-    let url = codex_new_thread_url(target);
+fn codex_desktop_launch(
+    macos_app: Option<&Path>,
+    project: &Path,
+    file: Option<&Path>,
+    line: Option<u32>,
+) -> LaunchCommand {
+    let workspace = codex_workspace_dir(project, file);
+    let prompt = file.map(|path| codex_file_prompt(project, path, line));
+    let url = codex_new_thread_url(&workspace, prompt.as_deref());
     if let Some(app) = macos_app {
         LaunchCommand {
             program: PathBuf::from("/usr/bin/open"),
@@ -648,13 +669,15 @@ fn codex_desktop_launch(macos_app: Option<&Path>, target: &Path) -> LaunchComman
             hide_console: false,
         }
     } else {
+        // One -Command string. A separate argv would let `&prompt=` split the
+        // PowerShell statement, so the file reference never reaches Start-Process.
+        let literal = url.replace('\'', "''");
         LaunchCommand {
             program: PathBuf::from("powershell.exe"),
             args: vec![
                 "-NoProfile".to_string(),
                 "-Command".to_string(),
-                "& { param($target) Start-Process -FilePath $target }".to_string(),
-                url,
+                format!("Start-Process -FilePath '{literal}'"),
             ],
             current_dir: None,
             hide_console: true,
@@ -662,15 +685,73 @@ fn codex_desktop_launch(macos_app: Option<&Path>, target: &Path) -> LaunchComman
     }
 }
 
-fn codex_cli_launch(program: &Path, project: &Path, file: Option<&Path>) -> LaunchCommand {
-    let cwd = if !project.as_os_str().is_empty() {
-        Some(project.to_path_buf())
+fn codex_cli_launch(
+    program: &Path,
+    app_subcommand: bool,
+    project: &Path,
+    file: Option<&Path>,
+) -> LaunchCommand {
+    let workspace = codex_workspace_dir(project, file);
+    let cwd = if !workspace.as_os_str().is_empty() {
+        Some(workspace.clone())
     } else {
-        file.and_then(|path| path.parent().map(Path::to_path_buf))
-            .or_else(|| file.map(Path::to_path_buf))
+        None
+    };
+    // `codex app PATH` is the documented desktop handoff. PATH must be a
+    // directory. The CLI has no file or line argument (openai/codex#22474).
+    let args = if app_subcommand && !workspace.as_os_str().is_empty() {
+        vec!["app".to_string(), path_for_url(&workspace)]
+    } else {
+        Vec::new()
     };
     let program = prefer_native_executable(program.to_path_buf());
-    script_launch(&program, Vec::new(), cwd, false)
+    script_launch(&program, args, cwd, false)
+}
+
+/// Directory Codex will accept as `path`. A file path is rejected by the
+/// desktop app, which is why the selected file must not be used here.
+fn codex_workspace_dir(project: &Path, file: Option<&Path>) -> PathBuf {
+    if !project.as_os_str().is_empty() {
+        return project.to_path_buf();
+    }
+    file.and_then(|path| path.parent().map(Path::to_path_buf))
+        .or_else(|| file.map(Path::to_path_buf))
+        .unwrap_or_default()
+}
+
+/// Composer text for the current file. Codex has no `line` query parameter;
+/// `prompt` is the supported way to name a file, and the app does not send it.
+fn codex_file_prompt(project: &Path, file: &Path, line: Option<u32>) -> String {
+    let reference = workspace_relative_file(project, file);
+    match line {
+        Some(line) if line > 0 => format!("@{reference}:{line}"),
+        _ => format!("@{reference}"),
+    }
+}
+
+fn workspace_relative_file(project: &Path, file: &Path) -> String {
+    let project_text = path_for_url(project);
+    let file_text = path_for_url(file);
+    strip_workspace_prefix(&project_text, &file_text).unwrap_or(file_text.replace('\\', "/"))
+}
+
+fn strip_workspace_prefix(project: &str, file: &str) -> Option<String> {
+    let project = project.trim_end_matches(['/', '\\']);
+    if project.is_empty() {
+        return None;
+    }
+    let file_cmp = file.to_ascii_lowercase();
+    let project_cmp = project.to_ascii_lowercase();
+    let rest = file_cmp.strip_prefix(&project_cmp)?;
+    if !rest.starts_with('/') && !rest.starts_with('\\') {
+        return None;
+    }
+    let relative = file[project.len()..].trim_start_matches(['/', '\\']);
+    if relative.is_empty() {
+        None
+    } else {
+        Some(relative.replace('\\', "/"))
+    }
 }
 
 fn resolve_target(project_path: &str, file_path: Option<&str>) -> (PathBuf, Option<PathBuf>) {
@@ -697,11 +778,16 @@ fn goto_parameter(file: &Path, line: Option<u32>) -> String {
     }
 }
 
-fn codex_new_thread_url(path: &Path) -> String {
-    format!(
+fn codex_new_thread_url(workspace: &Path, prompt: Option<&str>) -> String {
+    let mut url = format!(
         "codex://threads/new?path={}",
-        encode_query_component(&path_for_url(path))
-    )
+        encode_query_component(&path_for_url(workspace))
+    );
+    if let Some(prompt) = prompt.filter(|value| !value.is_empty()) {
+        url.push_str("&prompt=");
+        url.push_str(&encode_query_component(prompt));
+    }
+    url
 }
 
 fn path_for_url(path: &Path) -> String {
@@ -1134,14 +1220,26 @@ mod tests {
             found[0].launch,
             EditorLaunch::CodexDesktop { macos_app: None }
         );
-        let command = plan_launch(&found[0], r"C:\work\paper", Some("main.tex"), None).unwrap();
-        let file = PathBuf::from(r"C:\work\paper").join("main.tex");
+        let command = plan_launch(&found[0], r"C:\work\paper", Some("main.tex"), Some(8)).unwrap();
+        let project = PathBuf::from(r"C:\work\paper");
+        let file = project.join("main.tex");
+        let url = codex_new_thread_url(
+            &project,
+            Some(&super::codex_file_prompt(&project, &file, Some(8))),
+        );
         assert_eq!(command.program, PathBuf::from("powershell.exe"));
         assert!(command.hide_console);
         assert_eq!(
-            command.args.last().map(String::as_str),
-            Some(codex_new_thread_url(&file).as_str())
+            command.args,
+            vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                format!("Start-Process -FilePath '{url}'"),
+            ]
         );
+        assert!(url.contains("path=C%3A%5Cwork%5Cpaper"));
+        assert!(!url.split("prompt=").next().unwrap().contains("main.tex"));
+        assert!(url.contains("prompt=%40main.tex%3A8"));
     }
 
     #[test]
@@ -1183,12 +1281,18 @@ mod tests {
         let found = detect_installed_editors(&env);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "codex");
-        let command = plan_launch(&found[0], r"C:\work", None, None).unwrap();
+        let command = plan_launch(&found[0], r"C:\work", Some("main.tex"), Some(3)).unwrap();
         assert_eq!(command.program, PathBuf::from("cmd.exe"));
         assert_eq!(
             command.args,
-            vec!["/C".to_string(), shim.display().to_string()]
+            vec![
+                "/C".to_string(),
+                shim.display().to_string(),
+                "app".to_string(),
+                r"C:\work".to_string(),
+            ]
         );
+        assert_eq!(command.current_dir, Some(PathBuf::from(r"C:\work")));
     }
 
     #[test]
@@ -1250,14 +1354,14 @@ mod tests {
         let editor = detect_installed_editors(&env).remove(0);
         let command =
             plan_launch(&editor, "/work/paper", Some("sections/intro.tex"), Some(4)).unwrap();
-        let file = PathBuf::from("/work/paper").join("sections/intro.tex");
+        let project = PathBuf::from("/work/paper");
         assert_eq!(command.program, PathBuf::from("/usr/bin/open"));
         assert_eq!(
             command.args,
             vec![
                 "-a".to_string(),
                 app.display().to_string(),
-                codex_new_thread_url(&file),
+                codex_new_thread_url(&project, Some("@sections/intro.tex:4")),
             ]
         );
     }
@@ -1271,8 +1375,20 @@ mod tests {
         let editor = detect_installed_editors(&env).remove(0);
         let command = plan_launch(&editor, "/work/paper", Some("main.tex"), Some(3)).unwrap();
         assert_eq!(command.program, cli);
+        // Linux `codex` has no `app` subcommand and no file/line flag.
+        // A positional prompt would submit a turn, so the file stays out of argv.
         assert!(command.args.is_empty());
         assert_eq!(command.current_dir, Some(PathBuf::from("/work/paper")));
+    }
+
+    #[test]
+    fn codex_thread_url_keeps_a_file_out_of_the_workspace_path() {
+        let project = PathBuf::from("/work/paper");
+        let url = codex_new_thread_url(&project, Some("@main.tex:12"));
+        assert_eq!(
+            url,
+            "codex://threads/new?path=%2Fwork%2Fpaper&prompt=%40main.tex%3A12"
+        );
     }
 
     #[test]
