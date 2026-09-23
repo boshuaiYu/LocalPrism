@@ -16,6 +16,7 @@ import { cn } from "@/lib/utils";
 import { MarkdownRenderer } from "./markdown-renderer";
 import { StreamingIndicator } from "./streaming-indicator";
 import { ThinkingWidget, ToolWidget } from "./tool-widgets";
+import { parseDisplayedCompileBullet } from "@/lib/compile-fix-prompt";
 import {
   isSkillInstructionDump,
   isSkillToolName,
@@ -395,9 +396,7 @@ const UserMessage: FC<{ message: ClaudeStreamMessage }> = ({ message }) => {
     const errors = errorLines
       .trim()
       .split("\n")
-      .map((line) => ({
-        message: line.replace(/^- /, ""),
-      }));
+      .map((line) => parseDisplayedCompileBullet(line));
     return renderErrorBlock(
       `Compilation ${errors.length === 1 ? "Error" : "Errors"}`,
       errors,

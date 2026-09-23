@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { SkillTargetPicker } from "@/components/skills/skill-target-picker";
 import { useSkillStore } from "@/stores/skill-store";
 import { groupItemsBySkillCategory } from "@/lib/skill-categories";
+import { skillPaperWorkflowGuidance } from "@/lib/skill-workflow-copy";
 import type { RuntimeSkill } from "@/runtime/types";
 
 export interface SkillLibraryProps {
@@ -68,6 +69,12 @@ export function SkillLibrary({ projectPath = null }: SkillLibraryProps) {
 
   return (
     <div className="space-y-4" data-testid="skill-library">
+      <p
+        className="text-muted-foreground text-xs leading-relaxed"
+        data-testid="skill-paper-workflow-hint"
+      >
+        {skillPaperWorkflowGuidance()}
+      </p>
       <div>
         <p className="mb-2 font-medium text-sm">Import destination</p>
         <p className="mb-2 text-muted-foreground text-xs">
@@ -188,6 +195,7 @@ function SkillRow({
               )
               .join(", ")}
             {skill.managed ? " · managed" : " · unmanaged"}
+            {skill.enabled ? " · enabled" : " · disabled"}
           </p>
           <p className="mt-1 break-all text-muted-foreground text-xs">
             {skill.sourcePath}

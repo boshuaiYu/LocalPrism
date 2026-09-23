@@ -1,5 +1,6 @@
 import { CheckCircle2Icon, Loader2Icon } from "lucide-react";
 import { useHomepageEnvironment } from "@/hooks/use-homepage-environment";
+import { skillPaperWorkflowGuidance } from "@/lib/skill-workflow-copy";
 import { cn } from "@/lib/utils";
 
 function StatusChip({
@@ -52,31 +53,36 @@ export function HomepageEnvironmentStatus() {
   const paperBusy = paperSpine === "checking" || paperSpine === "installing";
 
   return (
-    <div className="mt-6 flex flex-wrap justify-center gap-2">
-      <StatusChip
-        ok={uvOk}
-        busy={uvBusy}
-        label="Python (uv)"
-        detail={
-          uvBusy
-            ? "Installing…"
-            : uvOk
-              ? (uvVersion ?? "Ready")
-              : (uvError ?? "Not installed")
-        }
-      />
-      <StatusChip
-        ok={paperSpineInstalled}
-        busy={paperBusy}
-        label="PaperSpine + default skills"
-        detail={
-          paperBusy
-            ? "Installing PaperSpine, academic-research, nature, and scientific skills…"
-            : paperSpineInstalled
-              ? "Default skill packs ready"
-              : (paperSpineError ?? "Not installed")
-        }
-      />
+    <div className="mt-6">
+      <div className="flex flex-wrap justify-center gap-2">
+        <StatusChip
+          ok={uvOk}
+          busy={uvBusy}
+          label="Python (uv)"
+          detail={
+            uvBusy
+              ? "Installing…"
+              : uvOk
+                ? (uvVersion ?? "Ready")
+                : (uvError ?? "Not installed")
+          }
+        />
+        <StatusChip
+          ok={paperSpineInstalled}
+          busy={paperBusy}
+          label="PaperSpine + default skills"
+          detail={
+            paperBusy
+              ? "Installing PaperSpine, academic-research, nature, and scientific skills…"
+              : paperSpineInstalled
+                ? "Default skill packs ready"
+                : (paperSpineError ?? "Not installed")
+          }
+        />
+      </div>
+      <p className="mx-auto mt-3 max-w-xl text-center text-muted-foreground text-xs leading-relaxed">
+        {skillPaperWorkflowGuidance()}
+      </p>
     </div>
   );
 }

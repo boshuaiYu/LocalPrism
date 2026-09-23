@@ -11,6 +11,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { RuntimeSettings } from "@/components/runtime/runtime-settings";
 import { areDefaultSkillPacksReady } from "@/lib/default-skill-packs";
+import { skillPaperWorkflowGuidance } from "@/lib/skill-workflow-copy";
 import { markWelcomeCompleted } from "@/lib/welcome";
 import { cn } from "@/lib/utils";
 import { useAgentStore } from "@/stores/agent-store";
@@ -173,6 +174,9 @@ function SetupStep() {
         <p className="mx-auto mt-2 max-w-xl text-muted-foreground text-sm leading-relaxed">
           Python, PaperSpine, and a model are optional to skip. Official Claude
           or ChatGPT sign-in is optional — a third-party API key is enough.
+        </p>
+        <p className="mx-auto mt-2 max-w-xl text-muted-foreground text-xs leading-relaxed">
+          {skillPaperWorkflowGuidance()}
         </p>
       </div>
 
