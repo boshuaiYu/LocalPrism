@@ -93,6 +93,13 @@ describe("EditorToolbar external editors", () => {
       expect(document.body.textContent).toContain("Codex");
     });
 
+    for (const name of ["Cursor", "VS Code", "Codex"]) {
+      const item = [
+        ...document.body.querySelectorAll('[role="menuitem"]'),
+      ].find((node) => node.textContent?.includes(name));
+      expect(item?.querySelector("img"), name).toBeTruthy();
+    }
+
     const codex = [...document.body.querySelectorAll('[role="menuitem"]')].find(
       (item) => item.textContent?.includes("Codex"),
     );

@@ -19,6 +19,8 @@ import {
 } from "lucide-react";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Button } from "@/components/ui/button";
+import codexIcon from "@/assets/codex.svg";
+import cursorIcon from "@/assets/cursor.svg";
 import vscodeIcon from "@/assets/vscode.svg";
 import {
   DropdownMenu,
@@ -54,12 +56,19 @@ const ZOOM_OPTIONS = [
   { value: "4", label: "400%" },
 ];
 
+const EDITOR_ICONS: Record<string, string> = {
+  cursor: cursorIcon,
+  vscode: vscodeIcon,
+  codex: codexIcon,
+};
+
 function EditorMenuLabel({ editor }: { editor: EditorInfo }) {
-  if (editor.id !== "vscode") return editor.name;
+  const icon = EDITOR_ICONS[editor.id];
+  if (!icon) return editor.name;
   return (
     <span className="flex items-center gap-2">
       <img
-        src={vscodeIcon}
+        src={icon}
         alt=""
         aria-hidden="true"
         draggable={false}
