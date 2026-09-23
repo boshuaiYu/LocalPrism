@@ -50,7 +50,11 @@ export function ClaudeChatDrawer() {
           error={error}
           retryPrompt={lastUserPrompt(messages)}
           busy={isStreaming}
-          onRetry={(prompt) => void sendPrompt(prompt)}
+          onRetry={(prompt) =>
+            void sendPrompt(prompt, undefined, {
+              reuseTrailingUserMessage: true,
+            })
+          }
           onClearConversation={clearMessages}
           onDismiss={() => setError(activeTabId, null)}
         />

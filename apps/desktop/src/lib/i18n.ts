@@ -249,6 +249,7 @@ const en = {
   "chat.rewindCancel": "Cancel",
   "chat.rewindHint":
     "Later messages in this chat are removed. Project files stay.",
+  "chat.regenerate": "Regenerate",
 
   "chrome.outline": "Outline",
   "chrome.expandOutline": "Expand Outline",
@@ -681,6 +682,7 @@ const zh: Record<MessageKey, string> = {
   "chat.rewindConfirm": "删除此后消息",
   "chat.rewindCancel": "取消",
   "chat.rewindHint": "将删除此对话中此后的消息。项目文件会保留。",
+  "chat.regenerate": "重新生成",
 
   "chrome.outline": "大纲",
   "chrome.expandOutline": "展开大纲",

@@ -126,6 +126,8 @@ export function runtimeRewindConversation(request: {
   ordinal: number;
   codexTurnId?: string | null;
   userTurnOrdinal?: number;
+  /** When false, the saved transcript drops the anchor user turn before resume. */
+  includeAnchor?: boolean;
 }): Promise<ConversationRef> {
   return invoke<ConversationRef>("runtime_rewind_conversation", { request });
 }

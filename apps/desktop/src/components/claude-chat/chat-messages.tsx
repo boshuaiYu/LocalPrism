@@ -33,7 +33,12 @@ import {
 } from "@/lib/chat-turn-settlement";
 import { canOfferCompression } from "@/lib/chat-compression";
 import { transcriptHasContentBelow } from "@/lib/chat-scroll";
-import { canRewindTo, rewindAnchor } from "@/lib/chat-rewind";
+import {
+  canRewindTo,
+  isUserPrompt,
+  lastUserPromptIndex,
+  rewindAnchor,
+} from "@/lib/chat-rewind";
 import { useI18n } from "@/lib/use-i18n";
 
 const EMPTY_PENDING_GUIDANCE: QueuedGuidance[] = [];
@@ -48,6 +53,26 @@ const MessageActions: FC<{
   const [copied, setCopied] = useState(false);
   const [confirmingRewind, setConfirmingRewind] = useState(false);
   const rewindToMessage = useClaudeChatStore((state) => state.rewindToMessage);
+  const regenerateRewoundUserTurn = useClaudeChatStore(
+    (state) => state.regenerateRewoundUserTurn,
+  );
+  const showRegenerate = useClaudeChatStore((state) => {
+    if (state.isStreaming || align !== "right" || rewindIndex == null) {
+      return false;
+    }
+    const tab = state.tabs.find(
+      (candidate) => candidate.id === state.activeTabId,
+    );
+    const pending = tab?.rewindRegenerate?.prompt;
+    if (!pending || text.trim() !== pending) return false;
+    const messages = tab?.messages ?? [];
+    const message = messages[rewindIndex];
+    return (
+      !!message &&
+      isUserPrompt(message) &&
+      lastUserPromptIndex(messages) === rewindIndex
+    );
+  });
   const rewindReady = useClaudeChatStore((state) => {
     if (state.isStreaming || rewindIndex == null) return false;
     const tab = state.tabs.find(
@@ -68,7 +93,9 @@ const MessageActions: FC<{
     window.setTimeout(() => setCopied(false), 1200);
   };
 
-  if (!canCopy && !rewindReady && !confirmingRewind) return null;
+  if (!canCopy && !rewindReady && !confirmingRewind && !showRegenerate) {
+    return null;
+  }
 
   return (
     <div
@@ -102,19 +129,33 @@ const MessageActions: FC<{
           </button>
         </div>
       ) : (
-        rewindReady && (
-          <TooltipIconButton
-            tooltip={t("chat.rewind")}
-            side="top"
-            variant="ghost"
-            size="icon"
-            data-testid="rewind-here"
-            className="size-8 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-            onClick={() => setConfirmingRewind(true)}
-          >
-            <Undo2Icon className="size-4" />
-          </TooltipIconButton>
-        )
+        <>
+          {showRegenerate && (
+            <button
+              type="button"
+              data-testid="rewind-regenerate"
+              className="rounded-md px-2 py-1 text-foreground text-xs hover:bg-muted"
+              onClick={() => {
+                void regenerateRewoundUserTurn();
+              }}
+            >
+              {t("chat.regenerate")}
+            </button>
+          )}
+          {rewindReady && (
+            <TooltipIconButton
+              tooltip={t("chat.rewind")}
+              side="top"
+              variant="ghost"
+              size="icon"
+              data-testid="rewind-here"
+              className="size-8 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+              onClick={() => setConfirmingRewind(true)}
+            >
+              <Undo2Icon className="size-4" />
+            </TooltipIconButton>
+          )}
+        </>
       )}
       {canCopy && (
         <TooltipIconButton

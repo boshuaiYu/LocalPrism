@@ -28,11 +28,19 @@ import {
   applyCompression,
   buildCompressionCarryover,
   compressionFailureMessage,
+  messagePlainText,
   planCompression,
   prependCompressionCarryover,
   summarizeTranscriptLocally,
 } from "@/lib/chat-compression";
-import { canRewindTo, rewindAnchor, rewindKeepEnd } from "@/lib/chat-rewind";
+import {
+  canRewindTo,
+  isUserPrompt,
+  rewindAnchor,
+  rewindKeepEnd,
+  rewindUserResendPrompt,
+  type RewindAnchor,
+} from "@/lib/chat-rewind";
 import { uiText } from "@/lib/use-i18n";
 import { sameProjectPath } from "./chat-persistence";
 import { useSettingsStore } from "./settings-store";
@@ -282,6 +290,18 @@ export interface TabState {
    * Keeps the shortened thread usable without resuming the full session.
    */
   compressionCarryover?: string | null;
+  /**
+   * Set when rewind left a user turn with no reply and did not start one.
+   * Cleared once a reply actually starts streaming.
+   */
+  rewindRegenerate?: RewindRegenerateState | null;
+}
+
+export interface RewindRegenerateState {
+  prompt: string;
+  anchor: RewindAnchor;
+  /** Claude transcript still contains this user turn; drop it before resume. */
+  sessionIncludesAnchor: boolean;
 }
 
 export type TabRuntimeSelection = Pick<
@@ -491,6 +511,49 @@ function usageFromMessage(msg: ClaudeStreamMessage): {
     input_tokens: usage?.input_tokens || 0,
     output_tokens: usage?.output_tokens || 0,
   };
+}
+
+function canAutoResendRewoundTurn(
+  tab: TabState,
+  activeProjectPath: string | null,
+): boolean {
+  if (tab.runtime === "codex") return false;
+  if (tab.isStreaming || (tab.cancelledAttempts?.length ?? 0) > 0) return false;
+  if (!useProviderStore.getState().ready) return false;
+  const documentState = useDocumentStore.getState();
+  const projectRoot = documentState.projectRoot;
+  if (!projectRoot || documentState.isProjectMutating) return false;
+  if (!tab.projectPath || !sameProjectPath(tab.projectPath, projectRoot)) {
+    return false;
+  }
+  return (
+    activeProjectPath != null && sameProjectPath(activeProjectPath, projectRoot)
+  );
+}
+
+function reuseTrailingUserMessage(
+  messages: readonly ClaudeStreamMessage[],
+  prompt: string,
+): boolean {
+  const expected = prompt.trim();
+  if (!expected) return false;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || !isUserPrompt(message)) continue;
+    if (messagePlainText(message).trim() !== expected) return false;
+    for (let cursor = index + 1; cursor < messages.length; cursor += 1) {
+      const later = messages[cursor];
+      if (
+        later &&
+        (later.type === "assistant" || later.type === "result") &&
+        messagePlainText(later).trim().length > 0
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return false;
 }
 
 function conversationReferenceForTab(
@@ -1062,6 +1125,10 @@ interface ClaudeChatState {
       tabId?: string;
       preserveTabProvider?: boolean;
       displayPrompt?: string;
+      /** Start a reply without appending a second copy of the trailing user turn. */
+      reuseTrailingUserMessage?: boolean;
+      /** Send the prompt text as-is, without the open file or selection wrapper. */
+      skipAmbientContext?: boolean;
     },
   ) => Promise<void>;
   queueGuidance: (
@@ -1090,6 +1157,8 @@ interface ClaudeChatState {
     summarize?: (transcript: string) => Promise<string> | string;
   }) => Promise<"compressed" | "skipped" | "failed">;
   rewindToMessage: (index: number) => Promise<"rewound" | "skipped" | "failed">;
+  /** Send the user turn left open by rewind, after an explicit regenerate click. */
+  regenerateRewoundUserTurn: () => Promise<void>;
   resetForProject: (projectPath: string | null) => ProjectChatResetResult;
   resumeConversation: (
     reference: ConversationRef,
@@ -1243,6 +1312,8 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       tabId?: string;
       preserveTabProvider?: boolean;
       displayPrompt?: string;
+      reuseTrailingUserMessage?: boolean;
+      skipAmbientContext?: boolean;
     },
   ) => {
     useChatLayoutStore.getState().reveal();
@@ -1452,11 +1523,12 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     const activeFile = docState.files.find(
       (f) => f.id === docState.activeFileId,
     );
+    const skipAmbientContext = options?.skipAmbientContext === true;
     let contextLabel: string | null = null;
 
-    if (contextOverride) {
+    if (!skipAmbientContext && contextOverride) {
       contextLabel = contextOverride.label;
-    } else if (activeFile) {
+    } else if (!skipAmbientContext && activeFile) {
       const selRange = docState.selectionRange;
       if (selRange && activeFile.content) {
         const content = activeFile.content;
@@ -1479,17 +1551,25 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         content: [{ type: "text", text: displayText }],
       },
     };
+    const keepTrailingUserMessage =
+      options?.reuseTrailingUserMessage === true &&
+      reuseTrailingUserMessage(activeTab.messages, visiblePrompt);
 
     // Auto-set tab title from first prompt
-    const isFirstMessage = activeTab && activeTab.messages.length === 0;
+    const isFirstMessage =
+      activeTab && activeTab.messages.length === 0 && !keepTrailingUserMessage;
     const tabTitle = isFirstMessage
       ? summarizeChatTitle(visiblePrompt)
       : undefined;
 
     set((s) => {
       const currentTab = s.tabs.find((t) => t.id === activeTabId);
+      const existingMessages = currentTab?.messages ?? [];
       const tabUpdates: Partial<TabState> = {
-        messages: [...(currentTab?.messages ?? []), userMessage],
+        messages: keepTrailingUserMessage
+          ? existingMessages
+          : [...existingMessages, userMessage],
+        rewindRegenerate: null,
         projectPath,
         sessionId: resumeSessionId,
         isStreaming: true,
@@ -1562,7 +1642,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       // Build prompt with full context for the selected runtime.
       let prompt = userPrompt;
       const compressionCarryover = activeTab.compressionCarryover ?? null;
-      if (activeFile) {
+      if (!skipAmbientContext && activeFile) {
         const selRange = docState.selectionRange;
         const selectedText =
           selRange && activeFile.content
@@ -2154,6 +2234,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         forcedQueuedGuidanceId: null,
         compressionCarryover: null,
         resumeRequestId: null,
+        rewindRegenerate: null,
         ...(!isBusy ? { pendingTemporaryFilePaths: [] } : {}),
       }),
     );
@@ -2323,6 +2404,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         activeAttemptId: null,
         preflightAttemptEpoch: null,
         resumeRequestId: null,
+        rewindRegenerate: null,
       }),
       activeProjectPath: projectPath,
     }));
@@ -2421,10 +2503,18 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       return "skipped";
     }
 
+    const resendPrompt = rewindUserResendPrompt(tab.messages, index);
+    const autoResend =
+      resendPrompt != null &&
+      canAutoResendRewoundTurn(tab, state.activeProjectPath);
+    const reference = conversationReferenceForTab(tab, projectPath);
+    const stripAnchorFromSession = autoResend && Boolean(reference?.sessionId);
+
     rewindInFlight.add(tabId);
     const snapshotLength = tab.messages.length;
+    let outcome: "rewound" | "failed" = "failed";
+    let promptToSend: string | null = null;
     try {
-      const reference = conversationReferenceForTab(tab, projectPath);
       let nextReference = reference;
       if (reference?.sessionId) {
         try {
@@ -2435,6 +2525,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
             ordinal: anchor.ordinal,
             codexTurnId: anchor.codexTurnId,
             userTurnOrdinal: anchor.userTurnOrdinal,
+            ...(stripAnchorFromSession ? { includeAnchor: false } : {}),
           });
         } catch (error) {
           const detail =
@@ -2494,6 +2585,20 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       const keptSummary = messages.some(
         (message) => message.subtype === "context-summary",
       );
+      const stillAutoResend =
+        autoResend &&
+        resendPrompt != null &&
+        canAutoResendRewoundTurn(currentTab, get().activeProjectPath);
+      const sessionIncludesAnchor =
+        Boolean(reference?.sessionId) && !stripAnchorFromSession;
+      const rewindRegenerate =
+        resendPrompt && !stillAutoResend && currentTab.runtime !== "codex"
+          ? {
+              prompt: resendPrompt,
+              anchor,
+              sessionIncludesAnchor,
+            }
+          : null;
       set((current) =>
         applyTabUpdate(current, tabId, {
           messages,
@@ -2517,11 +2622,112 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
           queuedGuidance: [],
           forceQueuedGuidanceOnComplete: false,
           forcedQueuedGuidanceId: null,
+          rewindRegenerate,
         }),
       );
-      return "rewound";
+      if (stillAutoResend && resendPrompt && !currentTab.isStreaming) {
+        promptToSend = resendPrompt;
+      }
+      outcome = "rewound";
     } finally {
       rewindInFlight.delete(tabId);
+    }
+
+    if (outcome === "rewound" && promptToSend) {
+      const prompt = promptToSend;
+      await get().sendPrompt(prompt, undefined, {
+        tabId,
+        reuseTrailingUserMessage: true,
+        skipAmbientContext: true,
+      });
+      const after = get().tabs.find((candidate) => candidate.id === tabId);
+      if (after && !after.isStreaming) {
+        set((current) =>
+          applyTabUpdate(current, tabId, {
+            rewindRegenerate: {
+              prompt,
+              anchor,
+              sessionIncludesAnchor:
+                Boolean(reference?.sessionId) && !stripAnchorFromSession,
+            },
+          }),
+        );
+      }
+    }
+    return outcome;
+  },
+
+  regenerateRewoundUserTurn: async () => {
+    const state = get();
+    const tabId = state.activeTabId;
+    const tab = state.tabs.find((candidate) => candidate.id === tabId);
+    const pending = tab?.rewindRegenerate;
+    if (!tab || !pending) return;
+    if (tab.runtime === "codex") return;
+    if (tab.isStreaming || (tab.cancelledAttempts?.length ?? 0) > 0) return;
+    if (rewindInFlight.has(tabId)) return;
+
+    set((current) =>
+      applyTabUpdate(current, tabId, { rewindRegenerate: null }),
+    );
+
+    let sessionIncludesAnchor = pending.sessionIncludesAnchor;
+    if (sessionIncludesAnchor) {
+      const projectPath =
+        state.activeProjectPath ?? useDocumentStore.getState().projectRoot;
+      const reference = conversationReferenceForTab(tab, projectPath);
+      if (reference?.sessionId) {
+        rewindInFlight.add(tabId);
+        try {
+          const nextReference = await runtimeRewindConversation({
+            reference,
+            role: pending.anchor.role,
+            text: pending.anchor.text,
+            ordinal: pending.anchor.ordinal,
+            codexTurnId: pending.anchor.codexTurnId,
+            userTurnOrdinal: pending.anchor.userTurnOrdinal,
+            includeAnchor: false,
+          });
+          sessionIncludesAnchor = false;
+          set((current) =>
+            applyTabUpdate(current, tabId, {
+              ...(nextReference ? { sessionRef: nextReference } : {}),
+            }),
+          );
+        } catch (error) {
+          const detail =
+            error instanceof Error
+              ? error.message
+              : typeof error === "string"
+                ? error
+                : "";
+          set((current) =>
+            applyTabUpdate(current, tabId, {
+              error: uiText("errors.rewindFailed", { detail }),
+              rewindRegenerate: pending,
+            }),
+          );
+          return;
+        } finally {
+          rewindInFlight.delete(tabId);
+        }
+      } else {
+        sessionIncludesAnchor = false;
+      }
+    }
+
+    await get().sendPrompt(pending.prompt, undefined, {
+      tabId,
+      reuseTrailingUserMessage: true,
+      skipAmbientContext: true,
+    });
+    const after = get().tabs.find((candidate) => candidate.id === tabId);
+    if (after && !after.isStreaming) {
+      set((current) =>
+        applyTabUpdate(current, tabId, {
+          rewindRegenerate: { ...pending, sessionIncludesAnchor },
+        }),
+      );
     }
   },
 
@@ -2586,6 +2792,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         activeAttemptId: null,
         preflightAttemptEpoch: null,
         resumeRequestId: null,
+        rewindRegenerate: null,
       }),
     }));
     cleanupDiscardedTemporaryFiles(discardedTemporaryFilePaths);
@@ -2786,6 +2993,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         activeAttemptId: null,
         preflightAttemptEpoch: null,
         resumeRequestId,
+        rewindRegenerate: null,
       }),
       activeProjectPath: reference.projectPath,
     }));

@@ -4760,6 +4760,7 @@ pub(crate) fn rewind_claude_session_file(
     project_path: &str,
     session_id: &str,
     anchor: &SessionRewindAnchor,
+    include_anchor: bool,
 ) -> Result<(), String> {
     if !is_valid_session_id(session_id) {
         return Err("Invalid session id".to_string());
@@ -4775,7 +4776,7 @@ pub(crate) fn rewind_claude_session_file(
     let original = std::fs::read_to_string(&session_path)
         .map_err(|error| format!("Failed to read session file: {error}"))?;
     let lines: Vec<String> = original.lines().map(str::to_owned).collect();
-    let kept = truncate_session_lines(&lines, anchor)?;
+    let kept = truncate_session_lines(&lines, anchor, include_anchor)?;
     let backup = sessions_dir.join(format!("{session_id}.jsonl.pre-rewind"));
     if !backup.exists() {
         std::fs::write(&backup, &original)
@@ -4841,6 +4842,7 @@ fn replace_existing_file(source: &Path, destination: &Path) -> std::io::Result<(
 fn truncate_session_lines(
     lines: &[String],
     anchor: &SessionRewindAnchor,
+    include_anchor: bool,
 ) -> Result<Vec<String>, String> {
     let wanted_role = anchor.role.trim();
     let wanted_text = normalize_rewind_text(&anchor.text);
@@ -4864,6 +4866,9 @@ fn truncate_session_lines(
     let anchor_index = anchor_index.ok_or_else(|| {
         "Could not find that message in the saved conversation".to_string()
     })?;
+    if !include_anchor {
+        return Ok(lines[..anchor_index].to_vec());
+    }
     let mut end = anchor_index;
     let mut cursor = anchor_index + 1;
     while cursor < lines.len() {
@@ -6563,6 +6568,7 @@ mod tests {
                 text: "Done with the abstract".into(),
                 ordinal: 1,
             },
+            true,
         )
         .unwrap();
         assert_eq!(kept.len(), 3);
@@ -6575,8 +6581,26 @@ mod tests {
                 text: "@main.tex:1:1 Rewrite the abstract".into(),
                 ordinal: 1,
             },
+            true,
         )
         .unwrap();
+        let user_dropped = truncate_session_lines(
+            &lines,
+            &SessionRewindAnchor {
+                role: "user".into(),
+                text: "Second question".into(),
+                ordinal: 1,
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(user_dropped.len(), 3);
+        assert!(user_dropped[0].contains("Rewrite the abstract"));
+        assert!(
+            !user_dropped
+                .iter()
+                .any(|line| line.contains("Second question"))
+        );
         assert_eq!(user_cut.len(), 1);
         assert!(user_cut[0].contains("Rewrite the abstract"));
     }
@@ -6597,6 +6621,7 @@ mod tests {
                 text: "Rewrite the abstract carefully now".into(),
                 ordinal: 1,
             },
+            true,
         )
         .unwrap();
         assert_eq!(kept.len(), 3);
@@ -6626,8 +6651,8 @@ mod tests {
             text: "Rewrite the abstract".into(),
             ordinal: 1,
         };
-        rewind_claude_session_file(&project, session_id, &anchor).unwrap();
-        rewind_claude_session_file(&project, session_id, &anchor).unwrap();
+        rewind_claude_session_file(&project, session_id, &anchor, true).unwrap();
+        rewind_claude_session_file(&project, session_id, &anchor, true).unwrap();
 
         let backup = dir.join(format!("{session_id}.jsonl.pre-rewind"));
         assert!(backup.is_file());

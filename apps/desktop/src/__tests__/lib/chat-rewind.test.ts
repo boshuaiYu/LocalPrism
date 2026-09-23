@@ -6,6 +6,7 @@ import {
   rewindKeepEnd,
   rewindMatchText,
   rewindTextsMatch,
+  rewindUserResendPrompt,
 } from "@/lib/chat-rewind";
 
 function user(text: string, extra: Partial<ClaudeStreamMessage> = {}) {
@@ -112,5 +113,21 @@ describe("chat rewind", () => {
     ];
     expect(rewindAnchor(messages, 0)?.ordinal).toBe(1);
     expect(rewindAnchor(messages, 2)?.ordinal).toBe(2);
+  });
+
+  it("asks to resend a user turn whose reply was removed", () => {
+    const messages = [user("你好"), assistant("Hello"), user("Next")];
+    expect(rewindUserResendPrompt(messages, 0)).toBe("你好");
+    expect(rewindUserResendPrompt(messages, 1)).toBeNull();
+  });
+
+  it("does not resend a Codex turn that still includes its reply", () => {
+    const messages = [
+      user("Draft", { codexTurnId: "turn-1" }),
+      assistant("Drafted", { codexTurnId: "turn-1" }),
+      user("Revise", { codexTurnId: "turn-2" }),
+    ];
+    expect(rewindUserResendPrompt(messages, 0)).toBeNull();
+    expect(rewindUserResendPrompt(messages, 2)).toBe("Revise");
   });
 });
