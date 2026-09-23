@@ -20,11 +20,19 @@ const SAFE_TAG_RE = /^[A-Za-z0-9._+-]+$/;
 const SEMVER_RE =
   /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 
+/** `v1.0.8beta2` / `1.0.8BETA3`. Not `1.0.8-beta.2`. */
+const COMPACT_BETA_RE = /^v?(\d+)\.(\d+)\.(\d+)beta(\d+)$/i;
+
 export interface SemVer {
   major: number;
   minor: number;
   patch: number;
   prerelease: string[];
+  /**
+   * Post-release build for tags such as `v1.0.8beta3`.
+   * Null for plain releases and hyphenated semver.
+   */
+  compactBeta: number | null;
 }
 
 export type UpdateApplyMode = "background-restart" | "manual-package";
@@ -84,6 +92,16 @@ export function updateBannerVisible(
 }
 
 export function parseSemver(input: string): SemVer | null {
+  const compact = COMPACT_BETA_RE.exec(input.trim());
+  if (compact) {
+    return {
+      major: Number(compact[1]),
+      minor: Number(compact[2]),
+      patch: Number(compact[3]),
+      prerelease: [],
+      compactBeta: Number(compact[4]),
+    };
+  }
   const match = SEMVER_RE.exec(input.trim());
   if (!match) return null;
   return {
@@ -91,16 +109,19 @@ export function parseSemver(input: string): SemVer | null {
     minor: Number(match[2]),
     patch: Number(match[3]),
     prerelease: match[4] ? match[4].split(".") : [],
+    compactBeta: null,
   };
 }
 
 /**
- * A semver prerelease such as `1.0.8-1` or `1.0.8-beta.1`.
- * `1.0.8beta1` is not a prerelease identifier; that form needs a hyphen.
+ * Prerelease if the version is hyphenated semver (`1.0.8-1`, `1.0.8-beta.1`)
+ * or a compact tag (`1.0.8beta2`, `v1.0.8beta3`).
  */
 export function isPrereleaseVersion(version: string): boolean {
   const parsed = parseSemver(version);
-  return !!parsed && parsed.prerelease.length > 0;
+  return (
+    !!parsed && (parsed.prerelease.length > 0 || parsed.compactBeta !== null)
+  );
 }
 
 function compareIdentifier(left: string, right: string): number {
@@ -123,6 +144,14 @@ export function compareSemver(left: SemVer, right: SemVer): number {
   if (left.major !== right.major) return left.major - right.major;
   if (left.minor !== right.minor) return left.minor - right.minor;
   if (left.patch !== right.patch) return left.patch - right.patch;
+  if (left.compactBeta !== null || right.compactBeta !== null) {
+    if (left.compactBeta !== null && right.compactBeta !== null) {
+      return left.compactBeta - right.compactBeta;
+    }
+    // `v1.0.8beta2` is published after stable `v1.0.8`, so it sorts newer
+    // than that release and newer than hyphen prereleases of the same core.
+    return left.compactBeta !== null ? 1 : -1;
+  }
   if (left.prerelease.length === 0 && right.prerelease.length === 0) return 0;
   if (left.prerelease.length === 0) return 1;
   if (right.prerelease.length === 0) return -1;
@@ -246,46 +275,65 @@ function releaseVersion(version: string): string {
   return version.trim().replace(/^v(?=\d)/, "");
 }
 
+function prereleaseManifestForVersion(version: string): string | null {
+  const trimmed = releaseVersion(version);
+  if (!isPrereleaseVersion(trimmed)) return null;
+  return betaManifestUrlForTag(`v${trimmed}`);
+}
+
 /**
  * Stable builds from `releases/latest` may download immediately.
- * A newer beta waits for confirmation and is never taken from that URL.
- * When both exist, the greater semver wins. `1.0.8` is newer than `1.0.8-1`.
+ * Prereleases, including `v1.0.8beta3`, stay hidden unless `allowPrerelease`.
+ * A compact beta of the same core is newer than that stable tag.
+ * `1.0.8` is still newer than hyphenated `1.0.8-1`.
+ * Beta manifests are `releases/download/<tag>/latest.json`, never `releases/latest`.
  */
 export function chooseUpdateOffer(input: {
   currentVersion: string;
   stable: { version: string; notes?: string } | null;
   betas: readonly ReleaseCandidate[];
+  /** Default false. Join prerelease / Beta turns this on. */
+  allowPrerelease?: boolean;
 }): UpdateOffer {
+  const allowPrerelease = input.allowPrerelease === true;
+  const stable =
+    input.stable &&
+    (allowPrerelease ||
+      !isPrereleaseVersion(releaseVersion(input.stable.version)))
+      ? input.stable
+      : null;
+  const betas = allowPrerelease ? input.betas : [];
   const current = parseSemver(input.currentVersion);
-  const stableVersion = input.stable
-    ? releaseVersion(input.stable.version)
-    : null;
+  const stableVersion = stable ? releaseVersion(stable.version) : null;
   const stableParsed = stableVersion ? parseSemver(stableVersion) : null;
   const stableIsBeta = stableVersion
     ? isPrereleaseVersion(stableVersion)
     : false;
 
   if (!current) {
-    if (input.stable && stableIsBeta) {
-      return {
-        action: "confirm",
-        version: stableVersion ?? input.stable.version,
-        notes: input.stable.notes,
-        manifestUrl: null,
-      };
+    if (stable && stableIsBeta && stableVersion) {
+      const manifestUrl = prereleaseManifestForVersion(stableVersion);
+      if (manifestUrl) {
+        return {
+          action: "confirm",
+          version: stableVersion,
+          notes: stable.notes,
+          manifestUrl,
+        };
+      }
     }
-    if (input.stable && stableVersion) {
+    if (stable && stableVersion && !stableIsBeta) {
       return {
         action: "download",
         version: stableVersion,
-        notes: input.stable.notes,
+        notes: stable.notes,
       };
     }
     return { action: "none" };
   }
 
   let bestBeta: (ReleaseCandidate & { parsed: SemVer }) | null = null;
-  for (const beta of input.betas) {
+  for (const beta of betas) {
     if (beta.draft) continue;
     if (!isBetaRelease(beta)) continue;
     const parsed = parseSemver(beta.version);
@@ -298,19 +346,28 @@ export function chooseUpdateOffer(input: {
     }
   }
 
-  if (
-    input.stable &&
+  const stableBetaManifest =
+    stable &&
     stableIsBeta &&
     stableParsed &&
     stableVersion &&
-    compareSemver(stableParsed, current) > 0 &&
+    compareSemver(stableParsed, current) > 0
+      ? prereleaseManifestForVersion(stableVersion)
+      : null;
+
+  if (
+    stable &&
+    stableIsBeta &&
+    stableParsed &&
+    stableVersion &&
+    stableBetaManifest &&
     (!bestBeta || compareSemver(stableParsed, bestBeta.parsed) >= 0)
   ) {
     return {
       action: "confirm",
       version: stableVersion,
-      notes: input.stable.notes,
-      manifestUrl: null,
+      notes: stable.notes,
+      manifestUrl: stableBetaManifest,
     };
   }
 
@@ -329,7 +386,7 @@ export function chooseUpdateOffer(input: {
   }
 
   if (
-    input.stable &&
+    stable &&
     stableVersion &&
     !stableIsBeta &&
     stableParsed &&
@@ -338,15 +395,15 @@ export function chooseUpdateOffer(input: {
     return {
       action: "download",
       version: stableVersion,
-      notes: input.stable.notes,
+      notes: stable.notes,
     };
   }
 
-  if (input.stable && stableVersion && !stableParsed && !stableIsBeta) {
+  if (stable && stableVersion && !stableParsed && !stableIsBeta) {
     return {
       action: "download",
       version: stableVersion,
-      notes: input.stable.notes,
+      notes: stable.notes,
     };
   }
 

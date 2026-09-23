@@ -532,7 +532,6 @@ async fn download_manifest_update(
     use tauri_plugin_updater::UpdaterExt;
 
     let endpoint = beta_manifest_endpoint(&manifest_url)?;
-    let parsed = url::Url::parse(&endpoint).map_err(|err| err.to_string())?;
     {
         let state = app.state::<PreparedManifestUpdateState>();
         // Same E0597 constraint as `clear_prepared_update`: bind the lock
@@ -543,18 +542,40 @@ async fn download_manifest_update(
         }
     }
 
-    let updater = app
+    let gated = if beta_manifest::manifest_needs_version_gate(&endpoint) {
+        Some(fetch_gated_beta_manifest(&endpoint, &app.package_info().version.to_string()).await?)
+    } else {
+        None
+    };
+    let check_url = gated
+        .as_ref()
+        .map(|item| item.url.as_str())
+        .unwrap_or(&endpoint);
+    let parsed = url::Url::parse(check_url).map_err(|err| err.to_string())?;
+    let mut builder = app
         .updater_builder()
         .endpoints(vec![parsed])
-        .map_err(|err| err.to_string())?
-        .build()
         .map_err(|err| err.to_string())?;
+    if gated.is_some() {
+        // The plugin's reqwest 0.13 client cannot take a certificate from
+        // this crate's reqwest 0.12. The manifest JSON was already fetched
+        // above with normal TLS. This flag only lets that client read the
+        // loopback copy. The binary URL and signature are unchanged, and
+        // the updater still checks the minisign signature before install.
+        builder = builder.configure_client(|client| client.danger_accept_invalid_certs(true));
+    }
+    let updater = builder.build().map_err(|err| err.to_string())?;
     let update = updater
         .check()
         .await
         .map_err(|err| err.to_string())?
         .ok_or_else(|| "That beta is not newer than this install.".to_string())?;
-    let version = update.version.clone();
+    let version = gated
+        .as_ref()
+        .map(|item| item.display_version.clone())
+        .unwrap_or_else(|| update.version.clone());
+    // Stop the localhost manifest before the signed binary is downloaded.
+    drop(gated);
     let app_emit = app.clone();
     let mut downloaded: u64 = 0;
     let bytes = update
@@ -575,6 +596,47 @@ async fn download_manifest_update(
     let mut guard = state.0.lock().map_err(|err| err.to_string())?;
     *guard = Some(PreparedManifestUpdate { update, bytes });
     Ok(version)
+}
+
+struct GatedBetaManifest {
+    url: String,
+    display_version: String,
+    _server: beta_manifest::LocalManifest,
+}
+
+/// `v1.0.8beta3` is not semver, so Tauri cannot read that manifest.
+/// Fetch it over normal TLS, rewrite only `version` to a newer gate,
+/// and serve the copy on a one-shot localhost certificate. The binary
+/// URL and signature stay the published ones. The UI still sees
+/// `1.0.8beta3`.
+async fn fetch_gated_beta_manifest(
+    endpoint: &str,
+    current_version: &str,
+) -> Result<GatedBetaManifest, String> {
+    let client = reqwest::Client::builder()
+        .user_agent("LocalPrism")
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|err| err.to_string())?;
+    let response = client
+        .get(endpoint)
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Beta manifest request failed ({}).",
+            response.status()
+        ));
+    }
+    let body = response.text().await.map_err(|err| err.to_string())?;
+    let rewritten = beta_manifest::rewrite_compact_manifest(&body, current_version)?;
+    let server = beta_manifest::serve_local_manifest(rewritten.json).await?;
+    Ok(GatedBetaManifest {
+        url: server.url.clone(),
+        display_version: rewritten.display_version,
+        _server: server,
+    })
 }
 
 #[tauri::command]
@@ -984,6 +1046,14 @@ mod update_channel_tests {
             super::beta_manifest_endpoint(allowed).ok().as_deref(),
             Some(allowed)
         );
+        let compact =
+            "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8beta3/latest.json";
+        assert_eq!(
+            super::beta_manifest_endpoint(compact).ok().as_deref(),
+            Some(compact)
+        );
+        assert!(beta_manifest::manifest_needs_version_gate(compact));
+        assert!(!beta_manifest::manifest_needs_version_gate(allowed));
         assert!(super::beta_manifest_endpoint(
             "https://github.com/boshuaiYu/LocalPrism/releases/latest/download/latest.json"
         )

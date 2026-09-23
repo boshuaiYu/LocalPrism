@@ -8,7 +8,6 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RuntimeSettings } from "@/components/runtime/runtime-settings";
-import { UpdateSettings } from "@/components/update-prompt";
 import { SkillLibrary } from "@/components/skills/skill-library";
 import { AgentLibrary } from "@/components/agents/agent-library";
 import { useProductTourDialogGuard } from "@/components/product-tour";
@@ -65,7 +64,6 @@ export function SettingsDialog({
           >
             <div className="flex flex-col gap-4">
               <RuntimeSettings />
-              <UpdateSettings />
             </div>
           </TabsContent>
 

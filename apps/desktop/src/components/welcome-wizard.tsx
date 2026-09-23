@@ -21,7 +21,6 @@ import { useProviderStore } from "@/stores/provider-store";
 import { useSkillStore } from "@/stores/skill-store";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
 import { LanguageSwitch } from "@/components/language-switch";
-import { UpdatePrompt } from "@/components/update-prompt";
 import { useI18n } from "@/lib/use-i18n";
 
 interface SkillsStatus {
@@ -74,7 +73,6 @@ export function WelcomeWizard({ onComplete }: { onComplete?: () => void }) {
           </Button>
         </div>
       </header>
-      <UpdatePrompt />
 
       <main className="relative z-10 min-h-0 flex-1 overflow-y-auto px-6 pb-4">
         <SetupStep />

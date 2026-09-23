@@ -197,6 +197,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "beta-manifest"
+version = "0.1.0"
+dependencies = [
+ "rustls",
+ "serde_json",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -505,6 +515,7 @@ name = "claude-prism-desktop"
 version = "1.0.8-2"
 dependencies = [
  "base64 0.22.1",
+ "beta-manifest",
  "chrono",
  "dirs 5.0.1",
  "dotenvy",

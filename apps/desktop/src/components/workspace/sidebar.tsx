@@ -30,6 +30,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { AppStatusBar } from "@/components/app-status-cluster";
 import { LatexOutline } from "@/components/workspace/latex-outline";
 import { useI18n } from "@/lib/use-i18n";
 import {
@@ -1542,54 +1543,58 @@ export function Sidebar({
             }}
           />
 
-          {/* Footer */}
-          <div className="flex min-h-9 items-center justify-end gap-0.5 border-sidebar-border border-t px-2 py-1 text-muted-foreground text-xs">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-6"
-              onClick={() => setSettingsOpen(true)}
-              title={t("chrome.settings")}
-              aria-label={t("chrome.openSettings")}
-            >
-              <SettingsIcon className="size-3.5" />
-            </Button>
-            <Button variant="ghost" size="icon" className="size-6" asChild>
-              <a
-                href="https://github.com/boshuaiYu/LocalPrism"
-                target="_blank"
-                rel="noopener noreferrer"
-                title="GitHub"
-              >
-                <GithubIcon className="size-3.5" />
-              </a>
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-6"
-              onClick={() => {
-                if (theme === "system") setTheme("light");
-                else if (theme === "light") setTheme("dark");
-                else setTheme("system");
-              }}
-              title={
-                theme === "system"
-                  ? "System theme"
-                  : theme === "light"
-                    ? "Light mode"
-                    : "Dark mode"
-              }
-            >
-              {theme === "system" ? (
-                <MonitorIcon className="size-3.5" />
-              ) : theme === "light" ? (
-                <SunIcon className="size-3.5" />
-              ) : (
-                <MoonIcon className="size-3.5" />
-              )}
-            </Button>
-          </div>
+          <AppStatusBar
+            className="border-sidebar-border bg-sidebar text-sidebar-foreground"
+            trailing={
+              <>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-6"
+                  onClick={() => setSettingsOpen(true)}
+                  title={t("chrome.settings")}
+                  aria-label={t("chrome.openSettings")}
+                >
+                  <SettingsIcon className="size-3.5" />
+                </Button>
+                <Button variant="ghost" size="icon" className="size-6" asChild>
+                  <a
+                    href="https://github.com/boshuaiYu/LocalPrism"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title="GitHub"
+                  >
+                    <GithubIcon className="size-3.5" />
+                  </a>
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-6"
+                  onClick={() => {
+                    if (theme === "system") setTheme("light");
+                    else if (theme === "light") setTheme("dark");
+                    else setTheme("system");
+                  }}
+                  title={
+                    theme === "system"
+                      ? "System theme"
+                      : theme === "light"
+                        ? "Light mode"
+                        : "Dark mode"
+                  }
+                >
+                  {theme === "system" ? (
+                    <MonitorIcon className="size-3.5" />
+                  ) : theme === "light" ? (
+                    <SunIcon className="size-3.5" />
+                  ) : (
+                    <MoonIcon className="size-3.5" />
+                  )}
+                </Button>
+              </>
+            }
+          />
 
           <SettingsDialog
             open={settingsOpen}

@@ -48,7 +48,7 @@ describe("SettingsDialog", () => {
     document.body.querySelector("[role='dialog']")?.remove();
   });
 
-  it("omits the language switch and keeps updates inside the Providers tab", async () => {
+  it("omits the language switch and does not put updates in Providers", async () => {
     await act(async () => {
       root.render(
         <SettingsDialog open onOpenChange={vi.fn()} defaultTab="agents" />,
@@ -66,12 +66,9 @@ describe("SettingsDialog", () => {
     expect(agents.textContent).toContain("Agents body");
     expect(agents.querySelector('[data-testid="update-settings"]')).toBeNull();
     expect(agents.textContent).not.toContain("Debian");
-    const parkedUpdates = document.body.querySelector(
-      '[data-testid="update-settings"]',
-    );
-    if (parkedUpdates) {
-      expect(parkedUpdates.closest('[role="tabpanel"]')).not.toBe(agents);
-    }
+    expect(
+      document.body.querySelector('[data-testid="update-settings"]'),
+    ).toBeNull();
 
     const providersTab = [
       ...document.body.querySelectorAll('[role="tab"]'),
@@ -89,9 +86,9 @@ describe("SettingsDialog", () => {
     expect(providers.textContent).toContain("Providers body");
     expect(
       providers.querySelector('[data-testid="update-settings"]'),
-    ).toBeTruthy();
-    expect(providers.textContent).toContain("Debian");
-    expect(providers.textContent).toContain("Updates");
+    ).toBeNull();
+    expect(providers.textContent).not.toContain("Debian");
+    expect(providers.textContent).not.toContain("Check for updates");
     expect(providers.textContent).not.toContain("Agents body");
   });
 });

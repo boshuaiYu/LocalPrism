@@ -163,12 +163,21 @@ describe("ProjectPicker runtime settings", () => {
     );
     expect(container.textContent).toContain("New Project");
     expect(container.textContent).toContain("Open Folder");
+    const statusBar = container.querySelector('[data-testid="app-status-bar"]');
     expect(
-      container.querySelector('[data-testid="language-switch"]'),
+      statusBar?.querySelector('[data-testid="language-switch"]'),
     ).not.toBeNull();
     expect(
-      container.querySelector('[data-testid="check-for-updates"]'),
+      statusBar?.querySelector('[data-testid="check-for-updates"]'),
     ).not.toBeNull();
+    expect(
+      statusBar?.querySelector('[data-testid="beta-channel-toggle"]'),
+    ).not.toBeNull();
+    expect(
+      container
+        .querySelector("[data-testid='app-chrome-header']")
+        ?.querySelector('[data-testid="language-switch"]'),
+    ).toBeNull();
     expect(container.textContent).not.toContain("Getting Started");
 
     await act(async () => findButton(container, "Settings").click());
@@ -188,7 +197,7 @@ describe("ProjectPicker runtime settings", () => {
     expect(checkClaudeStatus).not.toHaveBeenCalled();
   });
 
-  it("places a beta download banner directly under the top header", async () => {
+  it("keeps version, Beta, and the refresh check in the bottom bar", async () => {
     const download = vi.fn();
     vi.mocked(check).mockResolvedValue({
       version: "1.0.9-1",
@@ -208,21 +217,37 @@ describe("ProjectPicker runtime settings", () => {
     });
 
     const header = container.querySelector("[data-testid='app-chrome-header']");
-    expect(header?.textContent).toContain("LocalPrism");
-    expect(header?.textContent).toContain("v1.0.8-2");
-    expect(
-      header?.querySelector("[data-testid='language-switch']"),
-    ).toBeTruthy();
+    expect(header?.textContent).not.toContain("v1.0.8-2");
+    expect(header?.querySelector("[data-testid='language-switch']")).toBeNull();
     expect(
       header?.querySelector("[data-testid='check-for-updates']"),
-    ).toBeTruthy();
+    ).toBeNull();
     expect(header?.textContent).toContain("Settings");
-    expect(header?.nextElementSibling?.getAttribute("data-testid")).toBe(
-      "update-prompt",
-    );
-    expect(container.textContent).toContain("Download");
-    expect(container.textContent).toContain("Later");
+    expect(container.querySelector("[data-testid='update-prompt']")).toBeNull();
     expect(download).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain("1.0.9-1");
+
+    const bar = container.querySelector("[data-testid='app-status-bar']");
+    expect(bar?.textContent).toContain("v1.0.8-2");
+    expect(
+      bar?.querySelector("[data-testid='check-for-updates']"),
+    ).toBeTruthy();
+    const beta = bar?.querySelector("[data-testid='beta-channel-toggle']");
+    expect(beta?.getAttribute("aria-checked")).toBe("false");
+
+    await act(async () => {
+      if (beta instanceof HTMLButtonElement) beta.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+
+    expect(download).not.toHaveBeenCalled();
+    expect(container.querySelector("[data-testid='update-prompt']")).toBeNull();
+    const flash = container.querySelector("[data-testid='update-flash']");
+    expect(flash?.textContent).toContain("1.0.9-1");
+    expect(flash?.className).toMatch(/lp-update-flash/);
     expect(container.querySelector("[role='dialog']")).toBeNull();
   });
 });
