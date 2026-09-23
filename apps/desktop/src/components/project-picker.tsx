@@ -42,8 +42,7 @@ import { useProviderStore } from "@/stores/provider-store";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
 import { getMupdfClient } from "@/lib/mupdf/mupdf-client";
 import { exists, join } from "@/lib/tauri/fs";
-import { AppStatusCluster } from "@/components/app-status-cluster";
-import { UpdatePrompt } from "@/components/update-prompt";
+import { AppStatusBar } from "@/components/app-status-cluster";
 import { HomeEmptyState } from "@/components/home/home-empty-state";
 import { Button } from "@/components/ui/button";
 import {
@@ -271,9 +270,8 @@ export function ProjectPicker() {
     <div className="relative flex h-full flex-col overflow-hidden bg-background text-foreground">
       <header
         data-testid="app-chrome-header"
-        className="relative z-10 flex min-h-[calc(40px+var(--titlebar-height))] shrink-0 flex-wrap items-center justify-between gap-2 px-4 pt-[var(--titlebar-height)] pb-1"
+        className="relative z-10 flex min-h-[calc(40px+var(--titlebar-height))] shrink-0 flex-wrap items-center justify-end gap-2 px-4 pt-[var(--titlebar-height)] pb-1"
       >
-        <AppStatusCluster version={appVersion} />
         <div className="flex shrink-0 items-center gap-2">
           <Button variant="ghost" size="icon" className="size-8" asChild>
             <a
@@ -320,7 +318,6 @@ export function ProjectPicker() {
           </Button>
         </div>
       </header>
-      <UpdatePrompt />
 
       <main className="relative z-10 min-h-0 flex-1 overflow-auto">
         {activeSection === "settings" ? (
@@ -553,6 +550,7 @@ export function ProjectPicker() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <AppStatusBar className="relative z-10 shrink-0 border-border bg-background" />
     </div>
   );
 }

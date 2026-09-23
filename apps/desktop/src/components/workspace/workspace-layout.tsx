@@ -24,11 +24,6 @@ import {
   initialTourWorkspaceChrome,
   type ProductTourCue,
 } from "@/lib/product-tour";
-import {
-  AppStatusCluster,
-  useAppVersion,
-} from "@/components/app-status-cluster";
-import { UpdatePrompt } from "@/components/update-prompt";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/lib/use-i18n";
 import { useRuntimeEvents } from "@/hooks/use-runtime-events";
@@ -67,7 +62,6 @@ function WorkspaceResizeHandle({ testId }: { testId?: string }) {
 
 export function WorkspaceLayout() {
   const { t } = useI18n();
-  const appVersion = useAppVersion();
   useRuntimeEvents();
   const initialized = useDocumentStore((s) => s.initialized);
   const previewVisible = usePreviewStore((s) => s.visible);
@@ -323,9 +317,8 @@ export function WorkspaceLayout() {
     <div className="flex h-full min-h-0 flex-col bg-background text-foreground">
       <header
         data-testid="app-chrome-header"
-        className="flex shrink-0 items-center justify-between gap-2 border-b px-3 pt-[var(--titlebar-height)] pb-1"
+        className="flex shrink-0 items-center justify-end gap-2 border-b px-3 pt-[var(--titlebar-height)] pb-1"
       >
-        <AppStatusCluster version={appVersion} />
         <Button
           type="button"
           variant="ghost"
@@ -338,7 +331,6 @@ export function WorkspaceLayout() {
           {t("chrome.settings")}
         </Button>
       </header>
-      <UpdatePrompt />
       <div
         ref={workspaceRef}
         className="relative min-h-0 flex-1"

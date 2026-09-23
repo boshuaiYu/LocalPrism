@@ -6,8 +6,9 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { open } from "@tauri-apps/plugin-shell";
 import { check } from "@tauri-apps/plugin-updater";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { UpdatePrompt, UpdateSettings } from "@/components/update-prompt";
+import { AppStatusBar } from "@/components/app-status-cluster";
 import { translate } from "@/lib/i18n";
+import { useSettingsStore } from "@/stores/settings-store";
 import { resetUpdateStoreForTests } from "@/stores/update-store";
 
 vi.mock("@tauri-apps/api/app", () => ({
@@ -35,7 +36,7 @@ function updateFixture(overrides?: { failInstall?: boolean }) {
   };
 }
 
-describe("UpdatePrompt", () => {
+describe("AppStatusBar updates", () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -48,7 +49,7 @@ describe("UpdatePrompt", () => {
     vi.mocked(getVersion).mockResolvedValue("1.0.0");
     vi.mocked(invoke).mockImplementation(async (command) => {
       if (command === "update_install_channel") return "native";
-      if (command === "download_manifest_update") return "1.0.8-1";
+      if (command === "download_manifest_update") return "1.0.8beta3";
       if (command === "clear_prepared_update") return undefined;
       return undefined;
     });
@@ -74,36 +75,34 @@ describe("UpdatePrompt", () => {
     vi.unstubAllGlobals();
   });
 
-  async function renderPrompt() {
+  async function renderBar() {
     await act(async () => {
-      root.render(<UpdatePrompt />);
+      root.render(<AppStatusBar />);
     });
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
   }
 
-  it("downloads in the background and waits for restart", async () => {
+  it("downloads a stable update from Latest and flashes restart text", async () => {
     const update = updateFixture();
     vi.mocked(check).mockResolvedValue(update as never);
 
-    await renderPrompt();
+    await renderBar();
     await act(async () => {
       await Promise.resolve();
     });
 
     expect(update.download).toHaveBeenCalledOnce();
     expect(update.install).not.toHaveBeenCalled();
-    expect(container.textContent).toMatch(/Restart to install/i);
-    const banner = container.querySelector("[data-testid='update-prompt']");
-    expect(banner?.className).not.toMatch(/\bfixed\b/);
-    expect(banner?.className).not.toMatch(/\bbottom-4\b/);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(container.querySelector("[data-testid='update-prompt']")).toBeNull();
+    const flash = container.querySelector("[data-testid='update-flash']");
+    expect(flash?.textContent).toMatch(/Restart 9\.9\.9/);
+    expect(flash?.className).toMatch(/lp-update-flash/);
 
-    const restart = Array.from(container.querySelectorAll("button")).find(
-      (button) => button.textContent === "Restart to update",
-    );
     await act(async () => {
-      restart?.click();
+      if (flash instanceof HTMLButtonElement) flash.click();
       await Promise.resolve();
     });
 
@@ -119,92 +118,77 @@ describe("UpdatePrompt", () => {
     });
     vi.mocked(check).mockResolvedValue(update as never);
 
-    await renderPrompt();
+    await renderBar();
     await act(async () => {
       await Promise.resolve();
     });
 
     expect(update.download).not.toHaveBeenCalled();
     expect(update.close).toHaveBeenCalledOnce();
-    expect(container.textContent).toMatch(/deb or \.rpm/i);
+    const flash = container.querySelector("[data-testid='update-flash']");
+    expect(flash?.getAttribute("title")).toMatch(/deb or \.rpm/i);
     expect(container.textContent).not.toMatch(/Restart to update/);
 
-    const releases = Array.from(container.querySelectorAll("button")).find(
-      (button) => button.textContent === "View releases",
-    );
     await act(async () => {
-      releases?.click();
+      if (flash instanceof HTMLButtonElement) flash.click();
     });
     expect(open).toHaveBeenCalledWith(
-      "https://github.com/boshuaiYu/LocalPrism/releases/latest",
+      "https://github.com/boshuaiYu/LocalPrism/releases/tag/v9.9.9",
     );
   });
 
-  it("replaces an empty platform manifest error with a localized explanation", async () => {
+  it("replaces an empty platform manifest error with a short status", async () => {
     const raw =
       'None of the fallback platforms ["windows-x86_64-nsis", "windows-x86_64"] were found in the response platforms object';
     vi.mocked(check).mockRejectedValue(new Error(raw));
 
-    await act(async () => {
-      root.render(<UpdateSettings />);
-    });
-    const checkButton = Array.from(container.querySelectorAll("button")).find(
-      (button) => button.textContent === "Check for updates",
+    await renderBar();
+    const checkButton = container.querySelector(
+      "[data-testid='check-for-updates']",
     );
     await act(async () => {
-      checkButton?.click();
+      if (checkButton instanceof HTMLButtonElement) checkButton.click();
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain(
+    const flash = container.querySelector("[data-testid='update-flash']");
+    expect(flash?.textContent).toBe(translate("en", "updates.flashMissing"));
+    expect(flash?.getAttribute("title")).toBe(
       translate("en", "updates.missingPlatform"),
     );
     expect(container.textContent).not.toContain("fallback platforms");
     expect(container.textContent).not.toContain("were found in the response");
   });
 
-  it("asks before downloading a prerelease from the stable endpoint", async () => {
+  it("hides a prerelease that arrives on the stable endpoint when Beta is off", async () => {
     const update = updateFixture();
-    update.version = "1.0.8-1";
+    update.version = "1.0.8beta2";
     vi.mocked(check).mockResolvedValue(update as never);
 
-    await renderPrompt();
+    await renderBar();
     await act(async () => {
       await Promise.resolve();
     });
 
+    expect(useSettingsStore.getState().joinBetaChannel).toBe(false);
     expect(update.download).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("1.0.8-1");
-    expect(container.textContent).toContain(
-      translate("en", "updates.download"),
-    );
-    expect(translate("zh", "updates.download")).toBe("下载");
-    expect(translate("zh", "updates.later")).toBe("稍后");
-    expect(
-      translate("zh", "updates.betaAvailable", { version: "1.0.8-1" }),
-    ).toContain("1.0.8-1");
-
-    const download = Array.from(container.querySelectorAll("button")).find(
-      (button) => button.textContent === "Download",
-    );
-    await act(async () => {
-      download?.click();
-      await Promise.resolve();
-    });
-
-    expect(update.download).toHaveBeenCalledOnce();
-    expect(update.install).not.toHaveBeenCalled();
+    expect(update.close).toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(container.querySelector("[data-testid='update-flash']")).toBeNull();
+    expect(container.textContent).not.toContain("1.0.8beta2");
   });
 
-  it("does not download a GitHub prerelease until Download is chosen", async () => {
+  it("discovers v1.0.8beta3 from the tag manifest when Beta is on", async () => {
+    useSettingsStore.setState({ joinBetaChannel: true });
     vi.mocked(check).mockResolvedValue(null);
+    vi.mocked(getVersion).mockResolvedValue("1.0.8");
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
         ok: true,
         json: async () => [
           {
-            tag_name: "v1.0.8-1",
+            tag_name: "v1.0.8beta3",
             prerelease: true,
             draft: false,
             body: "preview",
@@ -220,42 +204,40 @@ describe("UpdatePrompt", () => {
       })),
     );
 
-    await renderPrompt();
+    await renderBar();
     await act(async () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain("1.0.8-1");
+    expect(fetch).toHaveBeenCalled();
+    const flash = container.querySelector("[data-testid='update-flash']");
+    expect(flash?.textContent).toContain("1.0.8beta3");
+    expect(flash?.className).toMatch(/lp-update-flash/);
+    expect(container.querySelector("[data-testid='update-prompt']")).toBeNull();
     expect(invoke).not.toHaveBeenCalledWith(
       "download_manifest_update",
       expect.anything(),
     );
 
-    const download = container.querySelector("[data-testid='update-download']");
     await act(async () => {
-      if (download instanceof HTMLButtonElement) download.click();
+      if (flash instanceof HTMLButtonElement) flash.click();
       await Promise.resolve();
     });
 
     expect(invoke).toHaveBeenCalledWith("download_manifest_update", {
       manifestUrl:
-        "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8-1/latest.json",
+        "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8beta3/latest.json",
     });
-    expect(container.textContent).toMatch(/Restart to install/i);
+    expect(container.textContent).toMatch(/Restart 1\.0\.8beta3/);
   });
 
-  it("hides the beta banner when the user chooses Later", async () => {
-    const update = updateFixture();
-    update.version = "1.0.8-1";
-    vi.mocked(check).mockResolvedValue(update as never);
-
-    await renderPrompt();
-    const later = container.querySelector("[data-testid='update-later']");
-    await act(async () => {
-      if (later instanceof HTMLButtonElement) later.click();
-    });
-
-    expect(container.querySelector("[data-testid='update-prompt']")).toBeNull();
-    expect(update.download).not.toHaveBeenCalled();
+  it("persists Join prerelease / Beta locally and defaults off", () => {
+    expect(useSettingsStore.getState().joinBetaChannel).toBe(false);
+    useSettingsStore.getState().setJoinBetaChannel(true);
+    expect(useSettingsStore.getState().joinBetaChannel).toBe(true);
+    const raw = localStorage.getItem("claude-prism-settings");
+    expect(raw).toContain('"joinBetaChannel":true');
+    expect(translate("zh", "updates.betaJoin")).toBe("加入预发布 / Beta");
+    expect(translate("en", "updates.betaJoin")).toBe("Join prerelease / Beta");
   });
 });

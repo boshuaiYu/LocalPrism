@@ -664,6 +664,26 @@
   color: var(--destructive-foreground);
 }
 
+@keyframes lp-update-flash {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.2;
+  }
+}
+
+.lp-update-flash {
+  animation: lp-update-flash 1.15s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lp-update-flash {
+    animation: none;
+  }
+}
+
 .lp-panel {
   background: var(--card);
   color: var(--card-foreground);

@@ -13,12 +13,13 @@ import {
   betaCandidatesFromGithub,
   chooseUpdateOffer,
   GITHUB_RELEASES_API,
-  RELEASES_URL,
+  releasePageUrl,
   updateApplyMode,
   type ReleaseCandidate,
   type UpdateApplyMode,
   type UpdateOffer,
 } from "@/lib/update-policy";
+import { useSettingsStore } from "@/stores/settings-store";
 
 export type UpdateStatus =
   | { state: "idle" }
@@ -189,28 +190,48 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
   bannerDismissed: false,
   dismissBanner: () => set({ bannerDismissed: true }),
   openReleases: async () => {
-    await open(RELEASES_URL);
+    const status = get().status;
+    const version = "version" in status ? status.version : undefined;
+    await open(releasePageUrl(version));
   },
   checkForUpdate: async (options) => {
     const explicit = options?.explicit ?? false;
     const current = get().status.state;
+    if (current === "downloading" || current === "installing") return;
     if (
       !explicit &&
-      (current === "downloading" ||
-        current === "ready" ||
-        current === "manual" ||
-        current === "installing" ||
-        current === "confirm")
+      (current === "ready" || current === "manual" || current === "confirm")
     ) {
       return;
     }
-    if (checkLock) return checkLock;
+    if (checkLock) {
+      const running = checkLock;
+      if (!explicit) return running;
+      await running.catch(() => undefined);
+      if (checkLock) return checkLock;
+      const settled = get().status.state;
+      if (
+        settled === "ready" ||
+        settled === "downloading" ||
+        settled === "installing"
+      ) {
+        return;
+      }
+    }
+
+    let releaseLock = () => {};
+    const lock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    checkLock = lock;
 
     const run = (async () => {
       set({ status: { state: "checking", explicit } });
       await closePending();
       clearPreparedManifest();
       try {
+        const allowPrerelease =
+          useSettingsStore.getState().joinBetaChannel === true;
         let channel: string | null = "native";
         try {
           channel = await invoke<string>("update_install_channel");
@@ -222,7 +243,7 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
           check()
             .then((value) => ({ ok: true as const, value }))
             .catch((error: unknown) => ({ ok: false as const, error })),
-          loadBetaCandidates(),
+          allowPrerelease ? loadBetaCandidates() : Promise.resolve([]),
         ]);
 
         if (!stableResult.ok && betas.length === 0) {
@@ -240,6 +261,7 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
               }
             : null,
           betas,
+          allowPrerelease,
         });
 
         if (offer.action === "none") {
@@ -300,10 +322,11 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
       }
     })();
 
-    checkLock = run.finally(() => {
-      checkLock = null;
+    void run.finally(() => {
+      if (checkLock === lock) checkLock = null;
+      releaseLock();
     });
-    return checkLock;
+    return run;
   },
   confirmDownload: async () => {
     const status = get().status;
@@ -398,6 +421,7 @@ export function resetUpdateStoreForTests() {
   preparedManifest = false;
   stopProgress = null;
   checkLock = null;
+  useSettingsStore.setState({ joinBetaChannel: false });
   useUpdateStore.setState({
     status: { state: "idle" },
     bannerDismissed: false,

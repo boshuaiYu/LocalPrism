@@ -62,7 +62,9 @@ describe("beta update detection", () => {
     expect(isPrereleaseVersion("1.0.8-1")).toBe(true);
     expect(isPrereleaseVersion("v1.0.8-beta.1")).toBe(true);
     expect(isPrereleaseVersion("1.0.8")).toBe(false);
-    expect(isPrereleaseVersion("1.0.8beta1")).toBe(false);
+    expect(isPrereleaseVersion("1.0.8beta1")).toBe(true);
+    expect(isPrereleaseVersion("v1.0.8beta3")).toBe(true);
+    expect(isPrereleaseVersion("1.0.8beta")).toBe(false);
     const beta = parseSemver("1.0.8-1");
     const stable = parseSemver("1.0.8");
     const olderBeta = parseSemver("1.0.8-1");
@@ -79,12 +81,30 @@ describe("beta update detection", () => {
     ) {
       throw new Error("semver fixtures failed to parse");
     }
-    expect(compareSemver(stable, beta)).toBeGreaterThan(0);
+    expect(compareSemver(beta, stable)).toBeGreaterThan(0);
     expect(compareSemver(newerBeta, olderBeta)).toBeGreaterThan(0);
     expect(compareSemver(betaWordNext, betaWord)).toBeGreaterThan(0);
+    expect(compareSemver(stable, betaWord)).toBeGreaterThan(0);
     expect(
       compareSemver(parseSemver("1.0.8-1")!, parseSemver("1.0.7")!),
     ).toBeGreaterThan(0);
+    const compactOlder = parseSemver("1.0.8beta2");
+    const compactNewer = parseSemver("v1.0.8beta3");
+    if (!compactOlder || !compactNewer) {
+      throw new Error("compact beta fixtures failed to parse");
+    }
+    expect(compareSemver(compactNewer, compactOlder)).toBeGreaterThan(0);
+    expect(compareSemver(compactOlder, stable)).toBeGreaterThan(0);
+    expect(compareSemver(compactOlder, newerBeta)).toBe(0);
+    expect(compareSemver(parseSemver("1.0.8beta1")!, newerBeta)).toBeLessThan(
+      0,
+    );
+    expect(compareSemver(compactNewer, newerBeta)).toBeGreaterThan(0);
+    expect(compareSemver(newerBeta, stable)).toBeGreaterThan(0);
+    expect(compareSemver(stable, newerBeta)).toBeLessThan(0);
+    expect(compareSemver(parseSemver("1.0.9")!, compactNewer)).toBeGreaterThan(
+      0,
+    );
   });
 
   it("does not use releases/latest as a beta manifest", () => {
@@ -131,6 +151,7 @@ describe("beta update detection", () => {
         currentVersion: "1.0.7",
         stable: null,
         betas,
+        allowPrerelease: true,
       }),
     ).toMatchObject({
       action: "confirm",
@@ -144,18 +165,33 @@ describe("beta update detection", () => {
         currentVersion: "1.0.7",
         stable: { version: "1.0.8" },
         betas: betas.filter((beta) => beta.version === "1.0.8-1"),
-      }).action,
-    ).toBe("download");
+        allowPrerelease: true,
+      }),
+    ).toMatchObject({
+      action: "confirm",
+      version: "1.0.8-1",
+    });
+
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.7",
+        stable: { version: "1.0.9" },
+        betas: betas.filter((beta) => beta.version === "1.0.8-1"),
+        allowPrerelease: true,
+      }),
+    ).toMatchObject({ action: "download", version: "1.0.9" });
 
     expect(
       chooseUpdateOffer({
         currentVersion: "1.0.7",
         stable: { version: "1.0.8-1" },
         betas: [],
+        allowPrerelease: true,
       }),
     ).toMatchObject({
       action: "confirm",
-      manifestUrl: null,
+      manifestUrl:
+        "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8-1/latest.json",
       version: "1.0.8-1",
     });
 
@@ -164,8 +200,94 @@ describe("beta update detection", () => {
         currentVersion: "1.0.8-1",
         stable: null,
         betas,
+        allowPrerelease: true,
       }).action,
     ).toBe("confirm");
+  });
+
+  it("keeps prereleases off the stable channel until Beta is joined", () => {
+    const betas = betaCandidatesFromGithub([
+      { tag_name: "v1.0.8beta2", prerelease: true, draft: false },
+      { tag_name: "v1.0.8beta3", prerelease: false, draft: false },
+    ]);
+    expect(betas.map((beta) => beta.version)).toEqual([
+      "1.0.8beta2",
+      "1.0.8beta3",
+    ]);
+    expect(betas[1]?.manifestUrl).toBe(
+      "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8beta3/latest.json",
+    );
+
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.8",
+        stable: { version: "1.0.8" },
+        betas,
+        allowPrerelease: false,
+      }).action,
+    ).toBe("none");
+
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.7",
+        stable: { version: "1.0.8beta3" },
+        betas,
+        allowPrerelease: false,
+      }).action,
+    ).toBe("none");
+
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.7",
+        stable: { version: "1.0.8" },
+        betas,
+        allowPrerelease: false,
+      }),
+    ).toMatchObject({ action: "download", version: "1.0.8" });
+
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.8-2",
+        stable: { version: "1.0.8" },
+        betas: [],
+        allowPrerelease: false,
+      }).action,
+    ).toBe("none");
+
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.8-2",
+        stable: { version: "1.0.8" },
+        betas,
+        allowPrerelease: true,
+      }),
+    ).toMatchObject({
+      action: "confirm",
+      version: "1.0.8beta3",
+    });
+
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.8-2",
+        stable: null,
+        betas: betas.filter((beta) => beta.version === "1.0.8beta2"),
+        allowPrerelease: true,
+      }).action,
+    ).toBe("none");
+
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.8",
+        stable: { version: "1.0.8" },
+        betas,
+        allowPrerelease: true,
+      }),
+    ).toMatchObject({
+      action: "confirm",
+      version: "1.0.8beta3",
+      manifestUrl:
+        "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8beta3/latest.json",
+    });
   });
 
   it("ignores drafts and github prerelease flags that are not newer", () => {
@@ -179,6 +301,7 @@ describe("beta update detection", () => {
         currentVersion: "1.0.7",
         stable: { version: "1.0.7" },
         betas,
+        allowPrerelease: true,
       }).action,
     ).toBe("none");
   });
