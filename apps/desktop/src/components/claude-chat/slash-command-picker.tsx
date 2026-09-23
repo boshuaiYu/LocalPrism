@@ -30,6 +30,7 @@ import {
   type CatalogSkillCategory,
 } from "@/lib/skill-categories";
 import { SKILLS_LIST_UPDATED_EVENT } from "@/lib/skills-refresh";
+import { useI18n } from "@/lib/use-i18n";
 import { useSkillCategoryStore } from "@/stores/skill-category-store";
 
 export interface SlashCommand {
@@ -378,6 +379,8 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>(
     {},
   );
+  const { t } = useI18n();
+  const slashListEpoch = useRef(0);
   const userCategories = useSkillCategoryStore((state) => state.categories);
   const categoryAssignments = useSkillCategoryStore(
     (state) => state.assignments,
@@ -407,9 +410,11 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
   }, [anchorRef]);
 
   // Load commands on mount and again after a skill install.
+  // A slower in-flight list must not overwrite a newer SKILLS_LIST_UPDATED result.
   useEffect(() => {
     let cancelled = false;
     const load = (showLoading: boolean) => {
+      const epoch = ++slashListEpoch.current;
       if (showLoading) setIsLoading(true);
       void Promise.resolve(
         invoke<SlashCommand[]>("slash_commands_list", {
@@ -417,12 +422,12 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
         }),
       )
         .then((cmds) => {
-          if (cancelled) return;
+          if (cancelled || epoch !== slashListEpoch.current) return;
           setCommands(Array.isArray(cmds) ? cmds : []);
           setIsLoading(false);
         })
         .catch(() => {
-          if (cancelled) return;
+          if (cancelled || epoch !== slashListEpoch.current) return;
           setCommands([]);
           setIsLoading(false);
         });
@@ -766,7 +771,11 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
                       ) : (
                         <ChevronRightIcon className="size-3" />
                       )}
-                      <span className="truncate">{group.name}</span>
+                      <span className="truncate">
+                        {group.id === "imported"
+                          ? t("skills.uncategorized")
+                          : group.name}
+                      </span>
                       <span className="ml-auto tabular-nums">
                         {group.items.length}
                       </span>

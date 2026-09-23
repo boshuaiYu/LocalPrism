@@ -19,6 +19,22 @@ describe("shouldRefreshSkillsAfterTool", () => {
         command: "cp -R ./writer ~/claude-home/skills/writer",
       }),
     ).toBe(true);
+    expect(
+      shouldRefreshSkillsAfterTool("Write", {
+        file_path: "D:\\LocalPrism\\claude-home\\skills\\writer\\SKILL.md",
+      }),
+    ).toBe(true);
+    expect(
+      shouldRefreshSkillsAfterTool("Bash", {
+        command:
+          "Copy-Item -Recurse .\\writer D:\\LocalPrism\\claude-home\\skills\\writer",
+      }),
+    ).toBe(true);
+    expect(
+      shouldRefreshSkillsAfterTool("PowerShell", {
+        command: "Copy-Item -Recurse .\\writer .\\.localprism\\skills\\writer",
+      }),
+    ).toBe(true);
   });
 
   it("ignores ordinary file edits and reads", () => {
@@ -33,5 +49,35 @@ describe("shouldRefreshSkillsAfterTool", () => {
       }),
     ).toBe(false);
     expect(shouldRefreshSkillsAfterTool("Bash", { command: "ls" })).toBe(false);
+    expect(
+      shouldRefreshSkillsAfterTool("Write", {
+        file_path: "/papers/demo/skills/foo.md",
+      }),
+    ).toBe(false);
+    expect(
+      shouldRefreshSkillsAfterTool("Write", {
+        file_path: "/tmp/skills/readme",
+      }),
+    ).toBe(false);
+    expect(
+      shouldRefreshSkillsAfterTool("Write", {
+        file_path: "/tmp/foo/skill.md",
+      }),
+    ).toBe(false);
+    expect(
+      shouldRefreshSkillsAfterTool("Bash", {
+        command: "cp notes.txt /tmp/skills/notes.txt",
+      }),
+    ).toBe(false);
+    expect(
+      shouldRefreshSkillsAfterTool("Bash", {
+        command: "npm install skill-foo",
+      }),
+    ).toBe(false);
+    expect(
+      shouldRefreshSkillsAfterTool("Bash", {
+        command: "ls ~/claude-home/skills",
+      }),
+    ).toBe(false);
   });
 });

@@ -5,6 +5,7 @@ import {
   skillMatchesAssignmentId,
 } from "@/lib/compatible-skills";
 import { groupItemsBySkillCategory } from "@/lib/skill-categories";
+import { useI18n } from "@/lib/use-i18n";
 import { Input } from "@/components/ui/input";
 
 export function isSkillAssigned(
@@ -37,6 +38,7 @@ export function AgentSkillPicker({
   selectedIds: readonly string[];
   onToggle: (skillId: string, enabled: boolean) => void;
 }) {
+  const { t } = useI18n();
   const [query, setQuery] = useState("");
   const needle = query.trim().toLowerCase();
 
@@ -94,7 +96,9 @@ export function AgentSkillPicker({
         {groups.map((group) => (
           <SkillGroup
             key={group.id}
-            title={group.name}
+            title={
+              group.id === "imported" ? t("skills.uncategorized") : group.name
+            }
             skills={group.items}
             selectedIds={selectedIds}
             onToggle={onToggle}

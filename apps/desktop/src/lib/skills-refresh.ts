@@ -21,25 +21,20 @@ function stringField(record: Record<string, unknown>, key: string): string {
   return typeof value === "string" ? value : "";
 }
 
+/** User, project, and legacy Claude skill roots — not an arbitrary `/skills/` folder. */
+const SKILL_INSTALL_DIR =
+  /(?:^|[/~\s"'`])(?:claude-home\/skills|\.localprism\/skills|\.claude\/skills)(?:\/|$|[\s"'`])/;
+
 export function pathLooksLikeSkillInstall(path: string): boolean {
   const normalized = path.replace(/\\/g, "/").toLowerCase();
-  if (!normalized.includes("skill")) return false;
-  return (
-    normalized.endsWith("/skill.md") ||
-    normalized.includes("/claude-home/skills/") ||
-    normalized.includes("/.localprism/skills/") ||
-    normalized.includes("/skills/")
-  );
+  return SKILL_INSTALL_DIR.test(normalized);
 }
 
 function commandInstallsSkill(command: string): boolean {
-  const text = command.toLowerCase();
-  if (!text.includes("skill")) return false;
-  return (
-    text.includes("claude-home/skills") ||
-    text.includes(".localprism/skills") ||
-    text.includes("skill.md") ||
-    /\b(git clone|cp |copy |mkdir |mv |install)\b/.test(text)
+  const text = command.replace(/\\/g, "/").toLowerCase();
+  if (!SKILL_INSTALL_DIR.test(text)) return false;
+  return /\b(?:git\s+clone|copy-item|move-item|copy|cp|mkdir|mv|install)\b/.test(
+    text,
   );
 }
 

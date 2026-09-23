@@ -205,14 +205,28 @@ pub fn category_from_parent_folder(skill_dir: &Path, root: &Path) -> Option<Stri
     let mut current = skill_dir.parent()?;
     while current.starts_with(root) && current != root {
         if let Some(name) = current.file_name().and_then(|value| value.to_str()) {
-            let key = sanitize_skill_folder_name(name);
-            if !key.is_empty() && !is_generic_skill_container(&key) {
-                return normalize_category_label(name);
+            if let Some(label) = category_label_from_folder_name(name) {
+                return Some(label);
             }
         }
         current = current.parent()?;
     }
     None
+}
+
+/// Folder names like `写作` are categories. `sanitize_skill_folder_name` keeps only
+/// ASCII, so a CJK name becomes empty and must not be treated as "no category".
+fn category_label_from_folder_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let slug = sanitize_skill_folder_name(trimmed);
+    let generic = !slug.is_empty() && is_generic_skill_container(&slug);
+    if generic {
+        return None;
+    }
+    normalize_category_label(trimmed)
 }
 
 fn skill_display_category(
@@ -1086,6 +1100,11 @@ mod tests {
         assert!(category_from_parent_folder(&flat, &root).is_none());
         let packed = root.join("scientific-skills").join("scanpy");
         assert!(category_from_parent_folder(&packed, &root).is_none());
+        let cjk = root.join("写作").join("my-skill");
+        assert_eq!(
+            category_from_parent_folder(&cjk, &root).as_deref(),
+            Some("写作")
+        );
     }
 
     #[test]
