@@ -44,11 +44,7 @@ function stripRewindPrefix(value: string): string {
 }
 
 export function rewindTextsMatch(left: string, right: string): boolean {
-  if (!left || !right) return false;
-  if (left === right) return true;
-  const [shorter, longer] =
-    left.length <= right.length ? [left, right] : [right, left];
-  return [...shorter].length >= 12 && longer.includes(shorter);
+  return left.length > 0 && left === right;
 }
 
 function contentBlocks(message: ClaudeStreamMessage) {
@@ -59,7 +55,9 @@ function contentBlocks(message: ClaudeStreamMessage) {
 export function isToolResultOnly(message: ClaudeStreamMessage): boolean {
   if (message.type !== "user") return false;
   const blocks = contentBlocks(message);
-  return blocks.length > 0 && blocks.every((block) => block.type === "tool_result");
+  return (
+    blocks.length > 0 && blocks.every((block) => block.type === "tool_result")
+  );
 }
 
 export function isUserPrompt(message: ClaudeStreamMessage): boolean {
@@ -134,7 +132,8 @@ export function rewindAnchor(
   let ordinal = 0;
   for (let cursor = 0; cursor <= index; cursor += 1) {
     const message = messages[cursor];
-    if (!message || message.type !== role || isToolResultOnly(message)) continue;
+    if (!message || message.type !== role || isToolResultOnly(message))
+      continue;
     const candidate = rewindMatchText(messagePlainText(message));
     if (rewindTextsMatch(candidate, text)) ordinal += 1;
   }

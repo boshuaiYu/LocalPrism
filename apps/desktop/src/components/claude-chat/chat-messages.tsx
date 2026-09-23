@@ -48,7 +48,9 @@ const MessageActions: FC<{
   const rewindToMessage = useClaudeChatStore((state) => state.rewindToMessage);
   const rewindReady = useClaudeChatStore((state) => {
     if (state.isStreaming || rewindIndex == null) return false;
-    const tab = state.tabs.find((candidate) => candidate.id === state.activeTabId);
+    const tab = state.tabs.find(
+      (candidate) => candidate.id === state.activeTabId,
+    );
     const messages = tab?.messages ?? state.messages;
     return (
       canRewindTo(messages, rewindIndex) &&
@@ -79,7 +81,7 @@ const MessageActions: FC<{
           <button
             type="button"
             data-testid="rewind-confirm"
-            className="rounded-md px-2 py-1 text-xs text-foreground hover:bg-muted"
+            className="rounded-md px-2 py-1 text-foreground text-xs hover:bg-muted"
             onClick={() => {
               if (rewindIndex == null) return;
               setConfirmingRewind(false);
@@ -197,38 +199,38 @@ export const ChatMessages: FC = () => {
           msg.rewindIndex == null ? { ...msg, rewindIndex: index } : msg,
         )
         .filter((msg) => {
-        if (msg.subtype === "context-summary") return true;
-        if (msg.type === "system" && msg.subtype === "init") return false;
-        if (
-          msg.type !== "user" &&
-          msg.type !== "assistant" &&
-          msg.type !== "result"
-        )
-          return false;
-        if (msg.type === "user" && msg.message?.content) {
-          if (Array.isArray(msg.message.content)) {
-            const hasOnlyToolResults = msg.message.content.every(
-              (b: any) => b.type === "tool_result",
-            );
-            if (hasOnlyToolResults) return false;
-            const text = msg.message.content
-              .filter((block) => block.type === "text" && block.text)
-              .map((block) => block.text)
-              .join("\n");
-            if (text && isSkillInstructionDump(text)) return false;
-          } else if (
-            typeof msg.message.content === "string" &&
-            isSkillInstructionDump(msg.message.content)
-          ) {
+          if (msg.subtype === "context-summary") return true;
+          if (msg.type === "system" && msg.subtype === "init") return false;
+          if (
+            msg.type !== "user" &&
+            msg.type !== "assistant" &&
+            msg.type !== "result"
+          )
             return false;
+          if (msg.type === "user" && msg.message?.content) {
+            if (Array.isArray(msg.message.content)) {
+              const hasOnlyToolResults = msg.message.content.every(
+                (b: any) => b.type === "tool_result",
+              );
+              if (hasOnlyToolResults) return false;
+              const text = msg.message.content
+                .filter((block) => block.type === "text" && block.text)
+                .map((block) => block.text)
+                .join("\n");
+              if (text && isSkillInstructionDump(text)) return false;
+            } else if (
+              typeof msg.message.content === "string" &&
+              isSkillInstructionDump(msg.message.content)
+            ) {
+              return false;
+            }
           }
-        }
-        if (msg.type === "result" && msg.result) {
-          if (assistantTexts.has(msg.result.trim())) return false;
-          if (isSkillInstructionDump(msg.result)) return false;
-        }
-        return true;
-      }),
+          if (msg.type === "result" && msg.result) {
+            if (assistantTexts.has(msg.result.trim())) return false;
+            if (isSkillInstructionDump(msg.result)) return false;
+          }
+          return true;
+        }),
     );
   }, [messages]);
 

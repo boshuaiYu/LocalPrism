@@ -4552,7 +4552,7 @@ pub async fn list_claude_sessions(
             .unwrap_or("")
             .to_string();
 
-        if session_id.is_empty() {
+        if session_id.is_empty() || session_id.ends_with(".pre-rewind") {
             continue;
         }
 
@@ -4754,7 +4754,8 @@ pub(crate) struct SessionRewindAnchor {
 }
 
 /// Shorten a Claude session transcript so the next resume continues from the
-/// anchor. The original file is copied once to `*.pre-rewind.jsonl`.
+/// anchor. The original file is copied once to `{sessionId}.jsonl.pre-rewind`,
+/// which is not a `.jsonl` session and is omitted from the session list.
 pub(crate) fn rewind_claude_session_file(
     project_path: &str,
     session_id: &str,
@@ -4775,7 +4776,7 @@ pub(crate) fn rewind_claude_session_file(
         .map_err(|error| format!("Failed to read session file: {error}"))?;
     let lines: Vec<String> = original.lines().map(str::to_owned).collect();
     let kept = truncate_session_lines(&lines, anchor)?;
-    let backup = sessions_dir.join(format!("{session_id}.pre-rewind.jsonl"));
+    let backup = sessions_dir.join(format!("{session_id}.jsonl.pre-rewind"));
     if !backup.exists() {
         std::fs::write(&backup, &original)
             .map_err(|error| format!("Failed to back up session file: {error}"))?;
@@ -4787,10 +4788,54 @@ pub(crate) fn rewind_claude_session_file(
     let temporary = sessions_dir.join(format!("{session_id}.jsonl.rewind-tmp"));
     std::fs::write(&temporary, body)
         .map_err(|error| format!("Failed to write rewound session: {error}"))?;
-    std::fs::rename(&temporary, &session_path).map_err(|error| {
+    replace_existing_file(&temporary, &session_path).map_err(|error| {
+        let _ = std::fs::remove_file(&temporary);
         format!("Failed to replace session file: {error}")
     })?;
     Ok(())
+}
+
+/// Replace `destination` with `source`. Windows `rename` fails when the
+/// destination already exists, so use the same `MOVEFILE_REPLACE_EXISTING`
+/// replace used for agent files.
+#[cfg(windows)]
+fn replace_existing_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    fn wide(path: &Path) -> std::io::Result<Vec<u16>> {
+        let mut value = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if value.contains(&0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path contains an interior NUL",
+            ));
+        }
+        value.push(0);
+        Ok(value)
+    }
+
+    let source = wide(source)?;
+    let destination = wide(destination)?;
+    let result = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_existing_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::rename(source, destination)
 }
 
 fn truncate_session_lines(
@@ -4863,18 +4908,7 @@ fn strip_rewind_prefix(value: &str) -> String {
 }
 
 fn rewind_texts_match(left: &str, right: &str) -> bool {
-    if left.is_empty() || right.is_empty() {
-        return false;
-    }
-    if left == right {
-        return true;
-    }
-    let (shorter, longer) = if left.chars().count() <= right.chars().count() {
-        (left, right)
-    } else {
-        (right, left)
-    };
-    shorter.chars().count() >= 12 && longer.contains(shorter)
+    !left.is_empty() && left == right
 }
 
 fn conversational_rewind_text(line: &str) -> Option<(String, String)> {
@@ -6545,6 +6579,79 @@ mod tests {
         .unwrap();
         assert_eq!(user_cut.len(), 1);
         assert!(user_cut[0].contains("Rewrite the abstract"));
+    }
+
+    #[test]
+    fn rewind_does_not_match_a_longer_prompt_by_shared_prefix() {
+        let lines = vec![
+            r#"{"type":"user","message":{"content":"Rewrite the abstract carefully"}}"#.to_string(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done"}]}}"#
+                .to_string(),
+            r#"{"type":"user","message":{"content":"Rewrite the abstract carefully now"}}"#
+                .to_string(),
+        ];
+        let kept = truncate_session_lines(
+            &lines,
+            &SessionRewindAnchor {
+                role: "user".into(),
+                text: "Rewrite the abstract carefully now".into(),
+                ordinal: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(kept.len(), 3);
+        assert!(kept[2].contains("carefully now"));
+    }
+
+    #[test]
+    fn rewind_replaces_existing_session_and_stores_a_hidden_backup() {
+        let project = format!(
+            "rewind-replace-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        );
+        let dir = get_sessions_dir(&project).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let session_id = "550e8400-e29b-41d4-a716-446655440000";
+        let session_path = dir.join(format!("{session_id}.jsonl"));
+        let original = "\
+{\"type\":\"user\",\"message\":{\"content\":\"Rewrite the abstract\"}}\n\
+{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Done\"}]}}\n\
+{\"type\":\"user\",\"message\":{\"content\":\"Second question\"}}\n";
+        std::fs::write(&session_path, original).unwrap();
+        let anchor = SessionRewindAnchor {
+            role: "user".into(),
+            text: "Rewrite the abstract".into(),
+            ordinal: 1,
+        };
+        rewind_claude_session_file(&project, session_id, &anchor).unwrap();
+        rewind_claude_session_file(&project, session_id, &anchor).unwrap();
+
+        let backup = dir.join(format!("{session_id}.jsonl.pre-rewind"));
+        assert!(backup.is_file());
+        assert!(!dir.join(format!("{session_id}.pre-rewind.jsonl")).exists());
+        let kept = std::fs::read_to_string(&session_path).unwrap();
+        assert!(kept.contains("Rewrite the abstract"));
+        assert!(!kept.contains("Second question"));
+        let backup_body = std::fs::read_to_string(&backup).unwrap();
+        assert!(backup_body.contains("Second question"));
+        let listed_jsonl = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                let path = entry.path();
+                let stem = path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("");
+                path.extension().and_then(|value| value.to_str()) == Some("jsonl")
+                    && !stem.ends_with(".pre-rewind")
+            })
+            .count();
+        assert_eq!(listed_jsonl, 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

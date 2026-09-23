@@ -188,7 +188,8 @@ export function lastTurnUsage(
   // `result.usage` is cumulative across tool steps and, on a resumed Claude
   // session, earlier spend. Context occupancy is the latest root request.
   const requestUsage = collectLastTurnUsage(messages, "requests");
-  if (requestUsage && snapshotHasPromptTokens(requestUsage)) return requestUsage;
+  if (requestUsage && snapshotHasPromptTokens(requestUsage))
+    return requestUsage;
   return (
     collectLastTurnUsage(messages, "results") ??
     collectLastTurnUsage(messages, "any")

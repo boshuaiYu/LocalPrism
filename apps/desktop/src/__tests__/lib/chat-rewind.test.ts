@@ -37,6 +37,12 @@ describe("chat rewind", () => {
         ),
       ),
     ).toBe(true);
+    expect(
+      rewindTextsMatch(
+        "Rewrite the abstract carefully",
+        "Rewrite the abstract carefully now",
+      ),
+    ).toBe(false);
   });
 
   it("keeps the selected user message and drops the later reply", () => {
@@ -71,7 +77,9 @@ describe("chat rewind", () => {
       {
         type: "user",
         message: {
-          content: [{ type: "tool_result", tool_use_id: "tool-1", content: "ok" }],
+          content: [
+            { type: "tool_result", tool_use_id: "tool-1", content: "ok" },
+          ],
         },
       },
       user("Thanks"),

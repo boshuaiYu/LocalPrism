@@ -32,11 +32,7 @@ import {
   prependCompressionCarryover,
   summarizeTranscriptLocally,
 } from "@/lib/chat-compression";
-import {
-  canRewindTo,
-  rewindAnchor,
-  rewindKeepEnd,
-} from "@/lib/chat-rewind";
+import { canRewindTo, rewindAnchor, rewindKeepEnd } from "@/lib/chat-rewind";
 import { uiText } from "@/lib/use-i18n";
 import { sameProjectPath } from "./chat-persistence";
 import { useSettingsStore } from "./settings-store";
@@ -1093,9 +1089,7 @@ interface ClaudeChatState {
     force?: boolean;
     summarize?: (transcript: string) => Promise<string> | string;
   }) => Promise<"compressed" | "skipped" | "failed">;
-  rewindToMessage: (
-    index: number,
-  ) => Promise<"rewound" | "skipped" | "failed">;
+  rewindToMessage: (index: number) => Promise<"rewound" | "skipped" | "failed">;
   resetForProject: (projectPath: string | null) => ProjectChatResetResult;
   resumeConversation: (
     reference: ConversationRef,
@@ -1254,6 +1248,14 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     useChatLayoutStore.getState().reveal();
     let state = get();
     let activeTabId = options?.tabId ?? state.activeTabId;
+    if (rewindInFlight.has(activeTabId)) {
+      set((current) =>
+        applyTabUpdate(current, activeTabId, {
+          error: uiText("errors.rewindInProgress"),
+        }),
+      );
+      return;
+    }
     let activeTab = state.tabs.find((t) => t.id === activeTabId);
     const directTemporaryFilePaths = [
       ...(contextOverride?.temporaryFilePaths ?? []),
@@ -2457,12 +2459,35 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       }
 
       const currentTab = get().tabs.find((candidate) => candidate.id === tabId);
-      if (
-        !currentTab ||
-        currentTab.isStreaming ||
-        currentTab.messages.length !== snapshotLength
-      ) {
-        return "skipped";
+      const keptPrefix = tab.messages.slice(0, end + 1);
+      const prefixIntact =
+        !!currentTab &&
+        currentTab.messages.length >= keptPrefix.length &&
+        keptPrefix.every(
+          (message, messageIndex) =>
+            currentTab.messages[messageIndex] === message,
+        );
+      if (!currentTab || !prefixIntact) {
+        set((current) => {
+          const latest = current.tabs.find(
+            (candidate) => candidate.id === tabId,
+          );
+          if (!latest) return {};
+          return applyTabUpdate(current, tabId, {
+            error: uiText("errors.rewindFailed", {
+              detail: "The chat changed while it was being rewound.",
+            }),
+          });
+        });
+        return "failed";
+      }
+      if (currentTab.isStreaming && currentTab.activeAttemptId) {
+        void interruptRuntimeTurn(
+          currentTab.runtime,
+          tabId,
+          currentTab.activeAttemptId,
+          "interrupt",
+        );
       }
       const messages = currentTab.messages.slice(0, end + 1);
       const totals = usageTotalsForMessages(messages);
@@ -2473,6 +2498,14 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         applyTabUpdate(current, tabId, {
           messages,
           ...(nextReference ? { sessionRef: nextReference } : {}),
+          ...(currentTab.isStreaming
+            ? {
+                isStreaming: false,
+                streamingStartedAt: null,
+                activeAttemptId: null,
+                preflightAttemptEpoch: null,
+              }
+            : {}),
           totalInputTokens: totals.inputTokens,
           totalOutputTokens: totals.outputTokens,
           lastTurnUsage: lastTurnUsageFromMessages(messages),
@@ -3094,7 +3127,10 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         ? mergeTokenUsageSnapshots(tab.lastTurnUsage, incomingUsage)
         : undefined;
 
-      if (stamped.type === "assistant" && stamped.subtype === "streaming_delta") {
+      if (
+        stamped.type === "assistant" &&
+        stamped.subtype === "streaming_delta"
+      ) {
         const last = tab.messages[tab.messages.length - 1];
         if (last?.type === "assistant" && last.subtype === "streaming_delta") {
           const existing = last.message?.content ?? [];
@@ -3117,7 +3153,10 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         }
       }
 
-      if (stamped.type === "assistant" && stamped.subtype === "streaming_final") {
+      if (
+        stamped.type === "assistant" &&
+        stamped.subtype === "streaming_final"
+      ) {
         const last = tab.messages[tab.messages.length - 1];
         if (last?.type === "assistant" && last.subtype === "streaming_delta") {
           const finalized: ClaudeStreamMessage = {

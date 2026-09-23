@@ -25,7 +25,10 @@ describe("chat rewind control", () => {
     HTMLElement.prototype.scrollTo = () => undefined;
     useClaudeChatStore.getState().resetForProject("/project-a");
     const tab = useClaudeChatStore.getState().tabs[0];
-    const messages = [user("Rewrite the abstract"), user("Check the citations")];
+    const messages = [
+      user("Rewrite the abstract"),
+      user("Check the citations"),
+    ];
     useClaudeChatStore.setState({
       tabs: [
         {
@@ -88,9 +91,9 @@ describe("chat rewind control", () => {
       ).click();
     });
     expect(
-      useClaudeChatStore.getState().messages.map((message) =>
-        message.message?.content?.[0]?.text,
-      ),
+      useClaudeChatStore
+        .getState()
+        .messages.map((message) => message.message?.content?.[0]?.text),
     ).toEqual(["Rewrite the abstract"]);
   });
 });

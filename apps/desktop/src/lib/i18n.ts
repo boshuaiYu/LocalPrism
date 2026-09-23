@@ -223,6 +223,7 @@ const en = {
     "Couldn't compress earlier messages (HTTP 400). {{detail}} Earlier messages were kept.",
   "errors.rewindFailed":
     "Couldn't rewind this chat. {{detail}} The conversation was kept.",
+  "errors.rewindInProgress": "Wait until rewind finishes before sending.",
 
   "chat.newChat": "New Chat",
   "chat.newTab": "New tab",
@@ -453,6 +454,7 @@ const zh: Record<MessageKey, string> = {
   "errors.compressFailed400":
     "无法压缩更早的消息（HTTP 400）。{{detail}} 原始消息已保留。",
   "errors.rewindFailed": "无法回溯这段对话。{{detail}} 对话已保留。",
+  "errors.rewindInProgress": "回溯完成前无法发送。",
 
   "chat.newChat": "新对话",
   "chat.newTab": "新标签",
