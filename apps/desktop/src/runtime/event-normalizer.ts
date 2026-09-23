@@ -267,6 +267,10 @@ function normalizeRuntimeEvent(
             typeof value.cacheReadTokens === "number"
               ? value.cacheReadTokens
               : 0,
+          contextWindow:
+            typeof value.contextWindow === "number" && value.contextWindow > 0
+              ? value.contextWindow
+              : null,
         },
       };
     case "approvalRequested": {

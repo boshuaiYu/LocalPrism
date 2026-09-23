@@ -419,6 +419,33 @@ impl ThreadReadParams {
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct ThreadForkParams {
+    thread_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_turn_id: Option<String>,
+}
+
+impl ThreadForkParams {
+    pub(crate) fn new(thread_id: String, last_turn_id: Option<String>) -> Self {
+        Self {
+            thread_id,
+            last_turn_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct ThreadForkResponse {
+    pub(crate) thread: ForkedThread,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct ForkedThread {
+    pub(crate) id: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadArchiveParams {
     thread_id: String,
 }

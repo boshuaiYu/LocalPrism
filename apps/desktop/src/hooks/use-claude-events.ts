@@ -972,6 +972,9 @@ export function useClaudeEvents() {
           deltaBatcher.flush(tabId);
           chatStore._setSessionId(tabId, event.sessionId);
           break;
+        case "turnStarted":
+          if (event.turnId) chatStore._tagCodexTurn(tabId, event.turnId);
+          break;
         case "assistantDelta":
           chatStore._setStreamingStatus(tabId, null);
           deltaBatcher.enqueue(tabId, "text", event.delta);
@@ -1025,6 +1028,7 @@ export function useClaudeEvents() {
           deltaBatcher.flush(tabId);
           chatStore._addUsage(tabId, event.inputTokens, event.outputTokens, {
             cacheReadTokens: event.cacheReadTokens,
+            contextWindow: event.contextWindow,
           });
           break;
         case "warning": {

@@ -221,6 +221,9 @@ const en = {
     "Couldn't compress earlier messages. {{detail}} Earlier messages were kept.",
   "errors.compressFailed400":
     "Couldn't compress earlier messages (HTTP 400). {{detail}} Earlier messages were kept.",
+  "errors.rewindFailed":
+    "Couldn't rewind this chat. {{detail}} The conversation was kept.",
+  "errors.rewindInProgress": "Wait until rewind finishes before sending.",
 
   "chat.newChat": "New Chat",
   "chat.newTab": "New tab",
@@ -239,6 +242,11 @@ const en = {
   "chat.hideOriginals": "Hide original messages",
   "chat.copied": "Copied",
   "chat.copy": "Copy",
+  "chat.rewind": "Rewind to here",
+  "chat.rewindConfirm": "Remove later messages",
+  "chat.rewindCancel": "Cancel",
+  "chat.rewindHint":
+    "Later messages in this chat are removed. Project files stay.",
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -445,6 +453,8 @@ const zh: Record<MessageKey, string> = {
   "errors.compressFailed": "无法压缩更早的消息。{{detail}} 原始消息已保留。",
   "errors.compressFailed400":
     "无法压缩更早的消息（HTTP 400）。{{detail}} 原始消息已保留。",
+  "errors.rewindFailed": "无法回溯这段对话。{{detail}} 对话已保留。",
+  "errors.rewindInProgress": "回溯完成前无法发送。",
 
   "chat.newChat": "新对话",
   "chat.newTab": "新标签",
@@ -463,6 +473,10 @@ const zh: Record<MessageKey, string> = {
   "chat.hideOriginals": "收起原始消息",
   "chat.copied": "已复制",
   "chat.copy": "复制",
+  "chat.rewind": "回溯到此处",
+  "chat.rewindConfirm": "删除此后消息",
+  "chat.rewindCancel": "取消",
+  "chat.rewindHint": "将删除此对话中此后的消息。项目文件会保留。",
 };
 
 function interpolate(

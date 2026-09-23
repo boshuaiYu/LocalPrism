@@ -4552,7 +4552,7 @@ pub async fn list_claude_sessions(
             .unwrap_or("")
             .to_string();
 
-        if session_id.is_empty() {
+        if session_id.is_empty() || session_id.ends_with(".pre-rewind") {
             continue;
         }
 
@@ -4745,6 +4745,229 @@ pub async fn delete_claude_session(project_path: String, session_id: String) -> 
     let _ = std::fs::remove_file(session_title_cache_path(&canonical_session_path));
 
     Ok(())
+}
+
+pub(crate) struct SessionRewindAnchor {
+    pub role: String,
+    pub text: String,
+    pub ordinal: u32,
+}
+
+/// Shorten a Claude session transcript so the next resume continues from the
+/// anchor. The original file is copied once to `{sessionId}.jsonl.pre-rewind`,
+/// which is not a `.jsonl` session and is omitted from the session list.
+pub(crate) fn rewind_claude_session_file(
+    project_path: &str,
+    session_id: &str,
+    anchor: &SessionRewindAnchor,
+) -> Result<(), String> {
+    if !is_valid_session_id(session_id) {
+        return Err("Invalid session id".to_string());
+    }
+    if anchor.ordinal == 0 {
+        return Err("Rewind anchor is missing".to_string());
+    }
+    let sessions_dir = get_sessions_dir(project_path)?;
+    let session_path = sessions_dir.join(format!("{session_id}.jsonl"));
+    if !session_path.exists() {
+        return Err(format!("Session file not found: {session_id}"));
+    }
+    let original = std::fs::read_to_string(&session_path)
+        .map_err(|error| format!("Failed to read session file: {error}"))?;
+    let lines: Vec<String> = original.lines().map(str::to_owned).collect();
+    let kept = truncate_session_lines(&lines, anchor)?;
+    let backup = sessions_dir.join(format!("{session_id}.jsonl.pre-rewind"));
+    if !backup.exists() {
+        std::fs::write(&backup, &original)
+            .map_err(|error| format!("Failed to back up session file: {error}"))?;
+    }
+    let mut body = kept.join("\n");
+    if !body.is_empty() {
+        body.push('\n');
+    }
+    let temporary = sessions_dir.join(format!("{session_id}.jsonl.rewind-tmp"));
+    std::fs::write(&temporary, body)
+        .map_err(|error| format!("Failed to write rewound session: {error}"))?;
+    replace_existing_file(&temporary, &session_path).map_err(|error| {
+        let _ = std::fs::remove_file(&temporary);
+        format!("Failed to replace session file: {error}")
+    })?;
+    Ok(())
+}
+
+/// Replace `destination` with `source`. Windows `rename` fails when the
+/// destination already exists, so use the same `MOVEFILE_REPLACE_EXISTING`
+/// replace used for agent files.
+#[cfg(windows)]
+fn replace_existing_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    fn wide(path: &Path) -> std::io::Result<Vec<u16>> {
+        let mut value = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if value.contains(&0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path contains an interior NUL",
+            ));
+        }
+        value.push(0);
+        Ok(value)
+    }
+
+    let source = wide(source)?;
+    let destination = wide(destination)?;
+    let result = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_existing_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::rename(source, destination)
+}
+
+fn truncate_session_lines(
+    lines: &[String],
+    anchor: &SessionRewindAnchor,
+) -> Result<Vec<String>, String> {
+    let wanted_role = anchor.role.trim();
+    let wanted_text = normalize_rewind_text(&anchor.text);
+    if wanted_text.is_empty() || (wanted_role != "user" && wanted_role != "assistant") {
+        return Err("Rewind anchor is missing".to_string());
+    }
+    let mut seen = 0u32;
+    let mut anchor_index: Option<usize> = None;
+    for (index, line) in lines.iter().enumerate() {
+        let Some((role, text)) = conversational_rewind_text(line) else {
+            continue;
+        };
+        if role == wanted_role && rewind_texts_match(&text, &wanted_text) {
+            seen += 1;
+            if seen == anchor.ordinal {
+                anchor_index = Some(index);
+                break;
+            }
+        }
+    }
+    let anchor_index = anchor_index.ok_or_else(|| {
+        "Could not find that message in the saved conversation".to_string()
+    })?;
+    let mut end = anchor_index;
+    let mut cursor = anchor_index + 1;
+    while cursor < lines.len() {
+        if session_line_starts_later_turn(&lines[cursor]) {
+            break;
+        }
+        end = cursor;
+        cursor += 1;
+    }
+    Ok(lines[..=end].to_vec())
+}
+
+fn normalize_rewind_text(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut value = collapsed.trim().to_string();
+    let mut previous = String::new();
+    while !value.is_empty() && value != previous {
+        previous = value.clone();
+        value = strip_rewind_prefix(&value);
+    }
+    value.chars().take(280).collect()
+}
+
+fn strip_rewind_prefix(value: &str) -> String {
+    let trimmed = value.trim();
+    for prefix in ["[Currently open file:", "[Selection:", "[File:"] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            if let Some(end) = rest.find(']') {
+                return rest[end + 1..].trim().to_string();
+            }
+        }
+    }
+    if let Some(rest) = trimmed.strip_prefix('@') {
+        if let Some(space) = rest.find(' ') {
+            let head = &rest[..space];
+            if head.contains(':') || head.contains('/') || head.contains('\\') {
+                return rest[space + 1..].trim().to_string();
+            }
+        }
+    }
+    trimmed.to_string()
+}
+
+fn rewind_texts_match(left: &str, right: &str) -> bool {
+    !left.is_empty() && left == right
+}
+
+fn conversational_rewind_text(line: &str) -> Option<(String, String)> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    if value.get("isSidechain").and_then(|flag| flag.as_bool()) == Some(true) {
+        return None;
+    }
+    let role = value.get("type").and_then(|kind| kind.as_str())?;
+    if role != "user" && role != "assistant" {
+        return None;
+    }
+    if role == "user" && user_line_is_tool_result(&value) {
+        return None;
+    }
+    let text = json_message_text(value.get("message")?.get("content")?)?;
+    let normalized = normalize_rewind_text(&text);
+    if normalized.is_empty() {
+        return None;
+    }
+    Some((role.to_string(), normalized))
+}
+
+fn user_line_is_tool_result(value: &serde_json::Value) -> bool {
+    let Some(blocks) = value
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(|content| content.as_array())
+    else {
+        return false;
+    };
+    !blocks.is_empty()
+        && blocks.iter().all(|block| block.get("type").and_then(|kind| kind.as_str()) == Some("tool_result"))
+}
+
+fn json_message_text(content: &serde_json::Value) -> Option<String> {
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+    let blocks = content.as_array()?;
+    let mut parts = Vec::new();
+    for block in blocks {
+        let kind = block.get("type").and_then(|value| value.as_str());
+        if kind == Some("text") {
+            if let Some(text) = block.get("text").and_then(|value| value.as_str()) {
+                if !text.trim().is_empty() {
+                    parts.push(text.trim());
+                }
+            }
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
+fn session_line_starts_later_turn(line: &str) -> bool {
+    conversational_rewind_text(line).is_some()
 }
 
 #[derive(serde::Serialize)]
@@ -6322,6 +6545,113 @@ mod tests {
         let (title, ts) = extract_first_user_message(&pb);
         assert_eq!(title.unwrap(), "Add a new section");
         assert_eq!(ts.unwrap(), "2024-01-02T00:00:00Z");
+    }
+
+    #[test]
+    fn rewind_truncates_after_the_matching_user_prompt_and_keeps_tool_results() {
+        let lines = vec![
+            r#"{"type":"user","message":{"content":"[Currently open file: main.tex]\n\nRewrite the abstract"}}"#.to_string(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done with the abstract"}]}}"#.to_string(),
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#.to_string(),
+            r#"{"type":"user","message":{"content":"Second question"}}"#.to_string(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Second answer"}]}}"#.to_string(),
+        ];
+        let kept = truncate_session_lines(
+            &lines,
+            &SessionRewindAnchor {
+                role: "assistant".into(),
+                text: "Done with the abstract".into(),
+                ordinal: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(kept.len(), 3);
+        assert!(kept[2].contains("tool_result"));
+
+        let user_cut = truncate_session_lines(
+            &lines,
+            &SessionRewindAnchor {
+                role: "user".into(),
+                text: "@main.tex:1:1 Rewrite the abstract".into(),
+                ordinal: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(user_cut.len(), 1);
+        assert!(user_cut[0].contains("Rewrite the abstract"));
+    }
+
+    #[test]
+    fn rewind_does_not_match_a_longer_prompt_by_shared_prefix() {
+        let lines = vec![
+            r#"{"type":"user","message":{"content":"Rewrite the abstract carefully"}}"#.to_string(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done"}]}}"#
+                .to_string(),
+            r#"{"type":"user","message":{"content":"Rewrite the abstract carefully now"}}"#
+                .to_string(),
+        ];
+        let kept = truncate_session_lines(
+            &lines,
+            &SessionRewindAnchor {
+                role: "user".into(),
+                text: "Rewrite the abstract carefully now".into(),
+                ordinal: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(kept.len(), 3);
+        assert!(kept[2].contains("carefully now"));
+    }
+
+    #[test]
+    fn rewind_replaces_existing_session_and_stores_a_hidden_backup() {
+        let project = format!(
+            "rewind-replace-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        );
+        let dir = get_sessions_dir(&project).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let session_id = "550e8400-e29b-41d4-a716-446655440000";
+        let session_path = dir.join(format!("{session_id}.jsonl"));
+        let original = "\
+{\"type\":\"user\",\"message\":{\"content\":\"Rewrite the abstract\"}}\n\
+{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Done\"}]}}\n\
+{\"type\":\"user\",\"message\":{\"content\":\"Second question\"}}\n";
+        std::fs::write(&session_path, original).unwrap();
+        let anchor = SessionRewindAnchor {
+            role: "user".into(),
+            text: "Rewrite the abstract".into(),
+            ordinal: 1,
+        };
+        rewind_claude_session_file(&project, session_id, &anchor).unwrap();
+        rewind_claude_session_file(&project, session_id, &anchor).unwrap();
+
+        let backup = dir.join(format!("{session_id}.jsonl.pre-rewind"));
+        assert!(backup.is_file());
+        assert!(!dir.join(format!("{session_id}.pre-rewind.jsonl")).exists());
+        let kept = std::fs::read_to_string(&session_path).unwrap();
+        assert!(kept.contains("Rewrite the abstract"));
+        assert!(!kept.contains("Second question"));
+        let backup_body = std::fs::read_to_string(&backup).unwrap();
+        assert!(backup_body.contains("Second question"));
+        let listed_jsonl = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                let path = entry.path();
+                let stem = path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("");
+                path.extension().and_then(|value| value.to_str()) == Some("jsonl")
+                    && !stem.ends_with(".pre-rewind")
+            })
+            .count();
+        assert_eq!(listed_jsonl, 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
