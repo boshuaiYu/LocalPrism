@@ -163,7 +163,7 @@ describe("SkillLibrary", () => {
     );
   });
 
-  it("shows frontmatter categories and keeps uncategorized skills expanded", async () => {
+  it("shows frontmatter categories and expands a folder-named category", async () => {
     useSkillStore.setState({
       skills: [
         skill({
@@ -175,11 +175,11 @@ describe("SkillLibrary", () => {
           category: "Methods",
         }),
         skill({
-          id: "claude:user:mystery",
-          name: "Mystery",
-          folder: "mystery",
+          id: "claude:user:editaplot",
+          name: "EditaPlot",
+          folder: "editaplot",
           description: "No category",
-          sourcePath: "C:/skills/mystery",
+          sourcePath: "C:/skills/editaplot",
           category: null,
         }),
       ],
@@ -192,18 +192,20 @@ describe("SkillLibrary", () => {
     const methods = container.querySelector(
       '[data-testid="skill-pack-toggle-category:methods"]',
     );
-    const uncategorized = container.querySelector(
-      '[data-testid="skill-pack-toggle-imported"]',
+    const editaplot = container.querySelector(
+      '[data-testid="skill-pack-toggle-category:editaplot"]',
     );
     expect(methods?.textContent).toContain("Methods");
     expect(methods?.getAttribute("aria-expanded")).toBe("true");
-    expect(uncategorized?.textContent).toContain("Uncategorized");
-    expect(uncategorized?.getAttribute("aria-expanded")).toBe("true");
+    expect(editaplot?.textContent).toContain("editaplot");
+    expect(editaplot?.getAttribute("aria-expanded")).toBe("true");
+    expect(container.textContent).not.toContain("Uncategorized");
     expect(
       container.querySelector('[data-testid="skill-row-methods"]')?.textContent,
     ).toContain("Methods");
     expect(
-      container.querySelector('[data-testid="skill-row-mystery"]')?.textContent,
-    ).toContain("Mystery");
+      container.querySelector('[data-testid="skill-row-editaplot"]')
+        ?.textContent,
+    ).toContain("EditaPlot");
   });
 });

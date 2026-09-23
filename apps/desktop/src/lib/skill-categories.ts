@@ -247,7 +247,21 @@ export function resolveSkillCategory(
   const scientificFolders = new Set(
     [...catalogMap.keys()].map((folder) => folder.toLowerCase()),
   );
-  return packCategory(resolveSkillPackId(input, scientificFolders));
+  const packId = resolveSkillPackId(input, scientificFolders);
+  if (packId !== IMPORTED_SKILL_PACK_ID) {
+    return packCategory(packId);
+  }
+  // Flat `skills/<name>/SKILL.md` installs have no frontmatter or parent folder.
+  // The folder name is the category; built-in packs are already resolved above.
+  const folderLabel = explicitCategoryLabel(input.folder);
+  if (folderLabel) {
+    return {
+      id: `category:${categoryIdFromName(folderLabel)}`,
+      name: folderLabel,
+      source: "custom",
+    };
+  }
+  return packCategory(IMPORTED_SKILL_PACK_ID);
 }
 
 export function groupItemsBySkillCategory<T>(

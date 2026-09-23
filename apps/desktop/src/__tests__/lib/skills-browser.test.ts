@@ -57,7 +57,7 @@ describe("buildSkillsBrowserCategories", () => {
     ]);
     expect(categories.slice(5).map((category) => category.name)).toEqual([
       "Methods",
-      "Uncategorized",
+      "my-writer",
     ]);
     expect(
       categories.slice(0, 5).map((category) => category.sourceUrl),
@@ -74,12 +74,11 @@ describe("buildSkillsBrowserCategories", () => {
         ?.skills.map((skill) => skill.folder),
     ).toEqual(["methods-notes"]);
     expect(
-      categories.find((category) => category.id.endsWith("imported"))?.skills,
+      categories.find((category) => category.name === "my-writer")?.skills,
     ).toEqual([{ name: "Writer", folder: "my-writer", category: undefined }]);
     expect(
-      categories.find((category) => category.name === "Uncategorized")
-        ?.skill_count,
-    ).toBe(1);
+      categories.find((category) => category.name === "Uncategorized"),
+    ).toBeUndefined();
     expect(
       categories.some((category) =>
         ["Writing", "Custom", "testo", "Bioinformatics"].includes(
