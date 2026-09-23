@@ -104,7 +104,7 @@ describe("AgentLibrary presets", () => {
     expect(empty?.textContent).toContain("模板腔");
     expect(empty?.textContent).toContain("毒舌审稿官");
     expect(empty?.textContent).toContain("Review Duo");
-    expect(empty?.textContent).toContain("苛刻审稿人");
+    expect(empty?.textContent).toContain("合理");
     expect(
       container.querySelector("[data-testid='agent-preset-custom']"),
     ).toBeTruthy();
@@ -196,7 +196,7 @@ describe("AgentLibrary presets", () => {
     expect((description as HTMLInputElement).value).toContain("贴回 LaTeX");
     expect(instructions).toBeInstanceOf(HTMLTextAreaElement);
     expect((instructions as HTMLTextAreaElement).value).toContain(
-      "You are an academic editor for LaTeX research papers",
+      "You are an academic line editor for LaTeX research papers",
     );
     expect((instructions as HTMLTextAreaElement).value).toContain(
       "Preserve LaTeX exactly",
@@ -300,7 +300,7 @@ describe("AgentLibrary presets", () => {
     expect(name.value).toBe("毒舌审稿官");
     const instructions = container.querySelector("#agent-instructions");
     expect((instructions as HTMLTextAreaElement).value).toContain(
-      "You are two harsh, independent reviewers plus the editor",
+      "You are two independent reviewers plus the editor",
     );
     await vi.waitFor(() => {
       expect(container.textContent).toContain("0 selected");

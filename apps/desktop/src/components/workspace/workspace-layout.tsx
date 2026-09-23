@@ -16,6 +16,7 @@ import { LatexEditor } from "./editor/latex-editor";
 import { PdfPreview } from "./preview/pdf-preview";
 import { ChatRestoreButton } from "@/components/claude-chat/chat-restore-button";
 import { ClaudeChatDrawer } from "@/components/claude-chat/claude-chat-drawer";
+import { ProductTour } from "@/components/product-tour";
 import { useRuntimeEvents } from "@/hooks/use-runtime-events";
 import { useApprovalStore } from "@/stores/approval-store";
 import { useDocumentStore } from "@/stores/document-store";
@@ -385,12 +386,12 @@ export function WorkspaceLayout() {
             className="min-w-0"
           >
             {!chatVisible && !codeVisible ? (
-              <div className="relative h-full min-w-0" data-tour="tour-compile">
+              <div className="relative h-full min-w-0" data-tour="tour-pdf">
                 <PdfPreview />
                 {chatRestoreButton}
               </div>
             ) : (
-              <div className="h-full min-w-0" data-tour="tour-compile">
+              <div className="h-full min-w-0" data-tour="tour-pdf">
                 <PdfPreview />
               </div>
             )}
@@ -398,6 +399,7 @@ export function WorkspaceLayout() {
         )}
       </PanelGroup>
       {!codeVisible && !previewVisible && chatRestoreButton}
+      <ProductTour />
     </div>
   );
 }

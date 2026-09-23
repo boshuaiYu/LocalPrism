@@ -47,15 +47,17 @@ describe("builtin agent presets", () => {
     expect(polish.description).toContain("贴回 LaTeX");
     expect(polish.instructions).toBe(ACADEMIC_POLISH_INSTRUCTIONS);
     expect(polish.instructions).toContain(
-      "You are an academic editor for LaTeX research papers",
+      "You are an academic line editor for LaTeX research papers",
     );
     expect(polish.instructions).toContain("Preserve LaTeX exactly");
     expect(polish.instructions).toContain("\\cite/\\citet/\\citep");
     expect(polish.instructions).toContain(
       "Do not fabricate citations, data, results, or references.",
     );
-    expect(polish.instructions).toContain("What NOT to do");
-    expect(polish.instructions).toContain("Output format");
+    expect(polish.instructions).toContain(
+      "Never use citation, BibTeX, or Zotero",
+    );
+    expect(polish.instructions).toContain("Paste-ready revised text");
     expect(polish.scope).toBe("user");
     expect(polish.skillIds).toEqual([]);
     expect(polish.runtime).toBe("claude");
@@ -66,29 +68,33 @@ describe("builtin agent presets", () => {
     expect(deAi.description).toContain("模板腔");
     expect(deAi.instructions).toBe(DE_AI_INSTRUCTIONS);
     expect(deAi.instructions).toContain("You humanize academic prose");
-    expect(deAi.instructions).toContain("Do NOT: invent facts");
+    expect(deAi.instructions).toContain("Do not invent facts");
     expect(deAi.instructions).toContain("值得注意的是");
-    expect(deAi.instructions).toContain("detector scores");
+    expect(deAi.instructions).toContain("detector score");
+    expect(deAi.instructions).not.toContain("nature-polishing");
+    expect(BUILTIN_AGENT_SKILL_FOLDERS["de-ai"]).toEqual([]);
     expect(deAi.skillIds).toEqual([]);
 
     const review = buildPresetAgentProfile("peer-review", []);
     expect(review.id).toBe("peer-review");
     expect(review.name).toBe("毒舌审稿官");
-    expect(review.description).toContain("苛刻审稿人");
+    expect(review.description).toContain("合理");
+    expect(review.description).not.toContain("挨顿");
     expect(BUILTIN_AGENT_PRESETS[2]?.titleSecondary).toBe("Review Duo");
     expect(review.instructions).toBe(PEER_REVIEW_INSTRUCTIONS);
     expect(review.instructions).toContain(
-      "You are two harsh, independent reviewers plus the editor",
+      "You are two independent reviewers plus the editor",
     );
     expect(review.instructions).toContain(
-      "Do not rewrite the whole paper unless asked",
+      "Do not rewrite the paper unless asked",
     );
     expect(review.instructions).toContain("Never invent papers or DOIs.");
     expect(review.instructions).toContain(
       "Do not check, add, or repair citations",
     );
-    expect(review.instructions).toContain("What NOT to do");
-    expect(BUILTIN_AGENT_PRESET_SEED_VERSION).toBe(3);
+    expect(review.instructions).toContain("rigorous, fair");
+    expect(review.instructions).not.toMatch(/harsh|fatal|savage|毒舌/);
+    expect(BUILTIN_AGENT_PRESET_SEED_VERSION).toBe(4);
     expect(BUILTIN_AGENT_SKILL_FOLDERS["peer-review"].join(" ")).not.toMatch(
       /citation|zotero|bibtex|bib/,
     );
@@ -174,9 +180,7 @@ describe("builtin agent presets", () => {
     expect(
       buildPresetAgentProfile("academic-polish", installed).skillIds,
     ).toEqual(["nature-polishing", "nature-writing", "academic-paper"]);
-    expect(buildPresetAgentProfile("de-ai", installed).skillIds).toEqual([
-      "nature-polishing",
-    ]);
+    expect(buildPresetAgentProfile("de-ai", installed).skillIds).toEqual([]);
     expect(buildPresetAgentProfile("peer-review", installed).skillIds).toEqual([
       "academic-paper-reviewer",
       "peer-review",

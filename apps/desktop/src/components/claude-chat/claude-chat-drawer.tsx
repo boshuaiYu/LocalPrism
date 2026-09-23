@@ -26,6 +26,7 @@ export function ClaudeChatDrawer() {
   return (
     <section
       data-testid="chat-pane"
+      data-tour="tour-chat"
       className="flex h-full min-h-0 min-w-0 flex-col bg-background"
       aria-label={t("chrome.chat")}
     >

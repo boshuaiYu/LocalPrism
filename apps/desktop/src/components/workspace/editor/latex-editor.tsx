@@ -1151,6 +1151,7 @@ export function LatexEditor() {
     <div
       className="relative flex h-full min-w-0 flex-col bg-background"
       aria-busy={isProjectMutating}
+      data-tour="tour-latex"
     >
       {/* Toolbar — adapts to file type */}
       <EditorToolbar

@@ -12,7 +12,6 @@ import { UpdateSettings } from "@/components/update-prompt";
 import { SkillLibrary } from "@/components/skills/skill-library";
 import { AgentLibrary } from "@/components/agents/agent-library";
 import { useDocumentStore } from "@/stores/document-store";
-import { LanguageSwitch } from "@/components/language-switch";
 import { useI18n } from "@/lib/use-i18n";
 
 export interface SettingsDialogProps {
@@ -40,15 +39,6 @@ export function SettingsDialog({
           <DialogDescription className="text-lp-meta">
             {t("settings.description")}
           </DialogDescription>
-          <div
-            data-testid="settings-language"
-            className="flex items-center justify-between gap-3"
-          >
-            <span className="text-muted-foreground text-xs">
-              {t("language.label")}
-            </span>
-            <LanguageSwitch />
-          </div>
         </DialogHeader>
 
         <Tabs

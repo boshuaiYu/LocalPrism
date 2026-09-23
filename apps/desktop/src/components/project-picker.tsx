@@ -303,7 +303,6 @@ export function ProjectPicker() {
         <Button
           variant={activeSection === "settings" ? "secondary" : "ghost"}
           className="h-8 gap-2 rounded-lg px-2 text-muted-foreground hover:text-foreground"
-          data-tour="tour-agents"
           onClick={() =>
             setActiveSection((section) =>
               section === "settings" ? "projects" : "settings",
@@ -379,7 +378,7 @@ export function ProjectPicker() {
               </p>
             </div>
 
-            <div className="flex gap-2" data-tour="tour-projects">
+            <div className="flex gap-2">
               <Button
                 onClick={() => setShowModeDialog(true)}
                 size="lg"

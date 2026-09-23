@@ -28,7 +28,7 @@ describe("ProductTour", () => {
     return act(async () => {
       root.render(
         <>
-          <div data-tour="tour-projects">Projects</div>
+          <div data-tour="tour-files">Files</div>
           <ProductTour />
         </>,
       );
@@ -40,7 +40,8 @@ describe("ProductTour", () => {
     expect(
       container.querySelector('[data-testid="product-tour"]'),
     ).not.toBeNull();
-    expect(container.textContent).toContain("Project navigation");
+    expect(container.textContent).toContain("Project files");
+    expect(container.textContent).toContain("1 / 6");
 
     const skip = container.querySelector('[data-testid="product-tour-skip"]');
     expect(skip).toBeInstanceOf(HTMLButtonElement);
