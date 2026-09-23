@@ -205,7 +205,7 @@ export function skillPackDisplayName(id: SkillPackGroupId): string {
     case "paper-humanizer-skill":
       return "paper-humanizer-skill";
     case "imported":
-      return "Imported";
+      return "Uncategorized";
   }
 }
 

@@ -42,6 +42,7 @@ import {
   packIdFromBrowserCategoryId,
   type SkillsBrowserCategory,
 } from "@/lib/skills-browser";
+import { SKILLS_LIST_UPDATED_EVENT } from "@/lib/skills-refresh";
 import {
   githubRepoLabel,
   skillGithubUrl,
@@ -153,8 +154,18 @@ export function ScientificSkillsOnboarding({
   }, [checkStatus]);
 
   useEffect(() => {
-    void refreshSkills(projectPath ?? undefined);
+    void refreshSkills(projectPath ?? null);
   }, [projectPath, refreshSkills]);
+
+  useEffect(() => {
+    const onSkillsUpdated = () => {
+      void checkStatus();
+    };
+    window.addEventListener(SKILLS_LIST_UPDATED_EVENT, onSkillsUpdated);
+    return () => {
+      window.removeEventListener(SKILLS_LIST_UPDATED_EVENT, onSkillsUpdated);
+    };
+  }, [checkStatus]);
 
   useEffect(() => {
     if (!installingPackId) return;
@@ -183,6 +194,7 @@ export function ScientificSkillsOnboarding({
           ...installedRuntimeSkills.map((skill) => ({
             name: skill.name,
             folder: skill.folder,
+            category: skill.category,
           })),
           ...installedSkills
             .filter(

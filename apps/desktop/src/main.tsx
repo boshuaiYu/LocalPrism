@@ -6,6 +6,7 @@ import { initializeAppZoom } from "./lib/app-zoom";
 import { createLogger } from "./lib/debug/logger";
 import { APP_VISIBILITY_RESTORED } from "./lib/debug/log-store";
 import "@/stores/runtime-store";
+import "@/stores/skill-store";
 import "./styles/globals.css";
 
 const isDebugWindow = new URLSearchParams(window.location.search).has("debug");

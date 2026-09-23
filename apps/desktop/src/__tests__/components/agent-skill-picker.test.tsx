@@ -93,7 +93,7 @@ describe("AgentSkillPicker", () => {
       }
       return node;
     });
-    expect(container.textContent).toContain("Imported");
+    expect(container.textContent).toContain("Uncategorized");
     expect(container.textContent).toContain("My Reviewer");
     checkbox.click();
     expect(onToggle).toHaveBeenCalledWith("my-reviewer", true);

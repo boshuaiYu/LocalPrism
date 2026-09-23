@@ -19,6 +19,7 @@ pub struct ParsedSkill {
     pub name: String,
     pub description: String,
     pub folder: String,
+    pub category: Option<String>,
     pub compatible_runtimes: Vec<RuntimeKind>,
     pub compatibility_note: Option<String>,
 }
@@ -128,6 +129,114 @@ fn yaml_mapping_string(
         })
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn normalize_category_label(value: &str) -> Option<String> {
+    let label = value
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if label.is_empty() {
+        return None;
+    }
+    let lower = label.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "none" | "n/a" | "na" | "null" | "uncategorized" | "imported"
+    ) {
+        return None;
+    }
+    Some(label.chars().take(80).collect())
+}
+
+fn metadata_category(mapping: &serde_yaml::Mapping) -> Option<String> {
+    let meta = mapping
+        .get(serde_yaml::Value::String("metadata".into()))?
+        .as_mapping()?;
+    yaml_mapping_string(meta, "category").or_else(|| yaml_mapping_string(meta, "group"))
+}
+
+/// Category declared in SKILL.md frontmatter (`category`, `group`, or `metadata.category`).
+pub fn frontmatter_skill_category(content: &str) -> Option<String> {
+    let (frontmatter, _) = split_frontmatter(content);
+    let raw = frontmatter?;
+    let mut category = None;
+    if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&raw) {
+        if let Some(mapping) = value.as_mapping() {
+            category = yaml_mapping_string(mapping, "category")
+                .or_else(|| yaml_mapping_string(mapping, "group"))
+                .or_else(|| metadata_category(mapping));
+        }
+    }
+    if category.is_none() {
+        category = lenient_frontmatter_field(&raw, "category")
+            .or_else(|| lenient_frontmatter_field(&raw, "group"));
+    }
+    category.as_deref().and_then(normalize_category_label)
+}
+
+fn is_generic_skill_container(name: &str) -> bool {
+    matches!(
+        name,
+        "skills"
+            | "skill"
+            | "scientific-skills"
+            | "claude"
+            | "claude-home"
+            | "dist"
+            | "src"
+            | "repo"
+            | "root"
+            | "commands"
+            | "agents"
+            | "localprism"
+            | "main"
+            | "master"
+            | "tmp"
+            | "temp"
+    )
+}
+
+/// Parent directory used as a category when skills live in `root/<category>/<skill>`.
+pub fn category_from_parent_folder(skill_dir: &Path, root: &Path) -> Option<String> {
+    let mut current = skill_dir.parent()?;
+    while current.starts_with(root) && current != root {
+        if let Some(name) = current.file_name().and_then(|value| value.to_str()) {
+            if let Some(label) = category_label_from_folder_name(name) {
+                return Some(label);
+            }
+        }
+        current = current.parent()?;
+    }
+    None
+}
+
+/// Folder names like `写作` are categories. `sanitize_skill_folder_name` keeps only
+/// ASCII, so a CJK name becomes empty and must not be treated as "no category".
+fn category_label_from_folder_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let slug = sanitize_skill_folder_name(trimmed);
+    let generic = !slug.is_empty() && is_generic_skill_container(&slug);
+    if generic {
+        return None;
+    }
+    normalize_category_label(trimmed)
+}
+
+fn skill_display_category(
+    parsed: &ParsedSkill,
+    skill_dir: &Path,
+    root: Option<&Path>,
+) -> Option<String> {
+    parsed.category.clone().or_else(|| {
+        root.and_then(|root| category_from_parent_folder(skill_dir, root))
+    })
 }
 
 fn lenient_frontmatter_field(raw: &str, key: &str) -> Option<String> {
@@ -245,6 +354,7 @@ pub fn validate_skill(content: &str) -> Result<ParsedSkill, ImportError> {
         name: resolved_name,
         description: description.unwrap_or_default(),
         folder,
+        category: frontmatter_skill_category(content),
         compatible_runtimes,
         compatibility_note,
     })
@@ -412,6 +522,7 @@ struct StagedInstall {
     folder: String,
     declared_name: String,
     content_sha256: String,
+    category: Option<String>,
     backup: Option<PathBuf>,
 }
 
@@ -455,6 +566,7 @@ pub fn snapshot_installed_targets(
             compatible_runtimes: parsed.compatible_runtimes.clone(),
             enabled: target.runtime == RuntimeKind::Claude,
             discovery_error: None,
+            category: skill_display_category(&parsed, &destination, Some(&root)),
         });
     }
     snapshots
@@ -526,6 +638,7 @@ pub fn import_skill_to_targets(
                 folder: parsed.folder.clone(),
                 declared_name: parsed.name.clone(),
                 content_sha256: content_sha256.clone(),
+                category: skill_display_category(&parsed, &destination, Some(&root)),
                 backup,
             });
         }
@@ -561,6 +674,7 @@ pub fn import_skill_to_targets(
                 compatible_runtimes: parsed.compatible_runtimes.clone(),
                 enabled: item.target.runtime == RuntimeKind::Claude,
                 discovery_error: None,
+                category: item.category.clone(),
             });
         }
         Ok(())
@@ -625,6 +739,7 @@ pub fn list_runtime_skills(project_path: Option<&Path>) -> Result<Vec<RuntimeSki
                 .unwrap_or_else(|| parsed.folder.clone());
             let id = stable_entry_id(&target, &folder)
                 .map_err(|error| ImportError::from(error.to_string()))?;
+            let category = skill_display_category(&parsed, &skill_dir, Some(&root));
             disk.push(RuntimeSkill {
                 id,
                 name: parsed.name,
@@ -637,6 +752,7 @@ pub fn list_runtime_skills(project_path: Option<&Path>) -> Result<Vec<RuntimeSki
                 compatible_runtimes: parsed.compatible_runtimes,
                 enabled: target.runtime == RuntimeKind::Claude,
                 discovery_error: parsed.compatibility_note,
+                category,
             });
         }
     }
@@ -759,6 +875,7 @@ pub fn auto_import_project_skills(project_path: &Path) -> Result<Vec<RuntimeSkil
             if store.upsert(entry).is_err() {
                 continue;
             }
+            let category = skill_display_category(&parsed, &skill_dir, Some(&root));
             imported.push(RuntimeSkill {
                 id,
                 name: parsed.name,
@@ -771,6 +888,7 @@ pub fn auto_import_project_skills(project_path: &Path) -> Result<Vec<RuntimeSkil
                 compatible_runtimes: parsed.compatible_runtimes,
                 enabled: target.runtime == RuntimeKind::Claude,
                 discovery_error: None,
+                category,
             });
         }
     }
@@ -939,6 +1057,54 @@ mod tests {
         assert_eq!(parsed.name, "paper-humanizer");
         assert!(parsed.description.contains("polish"));
         assert!(parsed.description.contains("says"));
+        assert!(parsed.category.is_none());
+    }
+
+    #[test]
+    fn frontmatter_category_group_and_metadata_are_kept() {
+        let from_category = validate_skill(
+            "---\nname: writer\ndescription: Writes prose\ncategory: Academic Writing\n---\n# Writer\n",
+        )
+        .unwrap();
+        assert_eq!(from_category.category.as_deref(), Some("Academic Writing"));
+
+        let from_group = validate_skill(
+            "---\nname: writer\ndescription: Writes prose\ngroup: Editing\n---\n# Writer\n",
+        )
+        .unwrap();
+        assert_eq!(from_group.category.as_deref(), Some("Editing"));
+
+        let from_metadata = validate_skill(
+            "---\nname: writer\ndescription: Writes prose\nmetadata:\n  category: Methods\n---\n# Writer\n",
+        )
+        .unwrap();
+        assert_eq!(from_metadata.category.as_deref(), Some("Methods"));
+
+        let blank = validate_skill(
+            "---\nname: writer\ndescription: Writes prose\ncategory: uncategorized\n---\n# Writer\n",
+        )
+        .unwrap();
+        assert!(blank.category.is_none());
+    }
+
+    #[test]
+    fn nested_parent_folder_is_a_category_and_skill_roots_are_not() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("skills");
+        let nested = root.join("writing").join("my-skill");
+        let flat = root.join("scanpy");
+        assert_eq!(
+            category_from_parent_folder(&nested, &root).as_deref(),
+            Some("writing")
+        );
+        assert!(category_from_parent_folder(&flat, &root).is_none());
+        let packed = root.join("scientific-skills").join("scanpy");
+        assert!(category_from_parent_folder(&packed, &root).is_none());
+        let cjk = root.join("写作").join("my-skill");
+        assert_eq!(
+            category_from_parent_folder(&cjk, &root).as_deref(),
+            Some("写作")
+        );
     }
 
     #[test]

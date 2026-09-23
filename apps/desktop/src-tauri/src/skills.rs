@@ -1411,9 +1411,13 @@ pub async fn install_scientific_skills_global(
 }
 
 #[tauri::command]
-pub async fn import_skill_from_folder(source_path: String) -> Result<Vec<SkillInfo>, String> {
+pub async fn import_skill_from_folder(
+    app: tauri::AppHandle,
+    source_path: String,
+) -> Result<Vec<SkillInfo>, String> {
     // Backward-compatible adapter: Claude user scope.
     let installed = skill_import(
+        app,
         source_path,
         vec![domain::SkillTarget {
             runtime: crate::runtime::RuntimeKind::Claude,
@@ -1436,6 +1440,7 @@ pub async fn import_skill_from_folder(source_path: String) -> Result<Vec<SkillIn
 
 #[tauri::command]
 pub async fn skill_import(
+    app: tauri::AppHandle,
     source_path: String,
     targets: Vec<domain::SkillTarget>,
     project_path: Option<String>,
@@ -1459,6 +1464,7 @@ pub async fn skill_import(
         false,
     )?;
     let _ = crate::slash_commands::import_user_slash_commands_from_source(&source, true);
+    emit_skills_changed(&app);
     Ok(imported)
 }
 
@@ -1802,6 +1808,9 @@ pub async fn skill_import_url(
     .await;
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
+    if import_result.is_ok() {
+        emit_skills_changed(&app);
+    }
     import_result
 }
 
@@ -1812,16 +1821,28 @@ pub async fn skill_list(project_path: Option<String>) -> Result<Vec<domain::Runt
 }
 
 #[tauri::command]
-pub async fn skill_delete_managed(entry_id: String, confirm_modified: bool) -> Result<(), String> {
-    import::delete_managed_skill(&entry_id, confirm_modified).map_err(|error| error.to_string())
+pub async fn skill_delete_managed(
+    app: tauri::AppHandle,
+    entry_id: String,
+    confirm_modified: bool,
+) -> Result<(), String> {
+    import::delete_managed_skill(&entry_id, confirm_modified).map_err(|error| error.to_string())?;
+    emit_skills_changed(&app);
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn skill_auto_import_project(
+    app: tauri::AppHandle,
     project_path: String,
 ) -> Result<Vec<domain::RuntimeSkill>, String> {
     let path = PathBuf::from(&project_path);
-    import::auto_import_project_skills(&path).map_err(|error| error.to_string())
+    let imported =
+        import::auto_import_project_skills(&path).map_err(|error| error.to_string())?;
+    if !imported.is_empty() {
+        emit_skills_changed(&app);
+    }
+    Ok(imported)
 }
 
 /// Ensure the target directory is creatable and writable.
@@ -1885,6 +1906,13 @@ fn ensure_target_writable(target: &Path) -> Result<(), String> {
             target.display()
         ));
     }
+}
+
+pub const SKILLS_CHANGED_EVENT: &str = "skills-changed";
+
+/// Tell open Skills lists to reload after an install, import, or delete.
+fn emit_skills_changed(app: &tauri::AppHandle) {
+    let _ = app.emit(SKILLS_CHANGED_EVENT, ());
 }
 
 /// Emit a progress log event to the frontend + stderr for terminal debugging.
@@ -1976,6 +2004,7 @@ async fn install_skills_to(
 
         let target_str = target.to_string_lossy().to_string();
 
+        emit_skills_changed(window.app_handle());
         Ok(InstallResult {
             success: true,
             skills_installed: count,
@@ -2041,7 +2070,10 @@ pub async fn list_installed_skills(project_path: Option<String>) -> Result<Vec<S
 }
 
 #[tauri::command]
-pub async fn delete_installed_skill(skill_folder: String) -> Result<(), String> {
+pub async fn delete_installed_skill(
+    app: tauri::AppHandle,
+    skill_folder: String,
+) -> Result<(), String> {
     if skill_folder.trim().is_empty() {
         return Err("Skill folder cannot be empty".into());
     }
@@ -2076,17 +2108,22 @@ pub async fn delete_installed_skill(skill_folder: String) -> Result<(), String> 
     std::fs::remove_dir_all(&skill_canon)
         .map_err(|e| format!("Failed to delete skill {}: {}", skill_folder, e))?;
 
+    emit_skills_changed(&app);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn uninstall_scientific_skills(project_path: Option<String>) -> Result<(), String> {
+pub async fn uninstall_scientific_skills(
+    app: tauri::AppHandle,
+    project_path: Option<String>,
+) -> Result<(), String> {
     let target = skills_dir(project_path.as_deref())?;
 
     if target.exists() {
         std::fs::remove_dir_all(&target).map_err(|e| format!("Failed to remove skills: {}", e))?;
     }
 
+    emit_skills_changed(&app);
     Ok(())
 }
 

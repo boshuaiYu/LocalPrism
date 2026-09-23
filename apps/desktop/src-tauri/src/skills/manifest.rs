@@ -769,6 +769,7 @@ mod tests {
             compatible_runtimes: vec![RuntimeKind::Claude, RuntimeKind::Codex],
             enabled: false,
             discovery_error: None,
+            category: None,
         }
     }
 

@@ -4,11 +4,8 @@ import {
   skillAssignmentId,
   skillMatchesAssignmentId,
 } from "@/lib/compatible-skills";
-import {
-  resolveSkillPackId,
-  skillPackDisplayName,
-  type SkillPackGroupId,
-} from "@/lib/default-skill-packs";
+import { groupItemsBySkillCategory } from "@/lib/skill-categories";
+import { useI18n } from "@/lib/use-i18n";
 import { Input } from "@/components/ui/input";
 
 export function isSkillAssigned(
@@ -21,7 +18,13 @@ export function isSkillAssigned(
 }
 
 function skillSearchText(skill: RuntimeSkill): string {
-  return [skill.name, skill.folder, skill.id, skill.description]
+  return [
+    skill.name,
+    skill.folder,
+    skill.id,
+    skill.description,
+    skill.category ?? "",
+  ]
     .join(" ")
     .toLowerCase();
 }
@@ -35,6 +38,7 @@ export function AgentSkillPicker({
   selectedIds: readonly string[];
   onToggle: (skillId: string, enabled: boolean) => void;
 }) {
+  const { t } = useI18n();
   const [query, setQuery] = useState("");
   const needle = query.trim().toLowerCase();
 
@@ -49,23 +53,20 @@ export function AgentSkillPicker({
   const unselected = visible.filter(
     (skill) => !isSkillAssigned(skill, selectedIds),
   );
-  const groups = useMemo(() => {
-    const buckets = new Map<SkillPackGroupId, RuntimeSkill[]>();
-    for (const skill of unselected) {
-      const packId = resolveSkillPackId({
-        folder: skill.folder,
-        name: skill.name,
-      });
-      const list = buckets.get(packId) ?? [];
-      list.push(skill);
-      buckets.set(packId, list);
-    }
-    return [...buckets.entries()].map(([id, items]) => ({
-      id,
-      name: skillPackDisplayName(id),
-      items,
-    }));
-  }, [unselected]);
+  const groups = useMemo(
+    () =>
+      groupItemsBySkillCategory(
+        unselected,
+        (skill) => ({
+          folder: skill.folder,
+          name: skill.name,
+          category: skill.category,
+        }),
+        { categories: [], assignments: {} },
+        [],
+      ),
+    [unselected],
+  );
 
   return (
     <div
@@ -95,7 +96,9 @@ export function AgentSkillPicker({
         {groups.map((group) => (
           <SkillGroup
             key={group.id}
-            title={group.name}
+            title={
+              group.id === "imported" ? t("skills.uncategorized") : group.name
+            }
             skills={group.items}
             selectedIds={selectedIds}
             onToggle={onToggle}

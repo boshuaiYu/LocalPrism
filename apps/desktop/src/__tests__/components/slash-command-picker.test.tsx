@@ -7,6 +7,7 @@ import {
   SlashCommandPicker,
   type SlashCommand,
 } from "@/components/claude-chat/slash-command-picker";
+import { SKILLS_LIST_UPDATED_EVENT } from "@/lib/skills-refresh";
 
 function command(overrides: Partial<SlashCommand> = {}): SlashCommand {
   return {
@@ -209,5 +210,62 @@ describe("SlashCommandPicker", () => {
         expect.objectContaining({ full_command: "/ars-plan" }),
       );
     });
+  });
+
+  it("keeps the newer skill list when an older slash_commands_list resolves later", async () => {
+    const pending: Array<(value: SlashCommand[]) => void> = [];
+    vi.mocked(invoke).mockImplementation((name: string) => {
+      if (name === "get_skill_categories") return Promise.resolve([]);
+      if (name !== "slash_commands_list") return Promise.resolve([]);
+      return new Promise((resolve) => {
+        pending.push(resolve);
+      });
+    });
+    const anchorRef = createRef<HTMLDivElement>();
+    Object.defineProperty(anchorRef, "current", {
+      value: anchor,
+      writable: true,
+    });
+
+    root.render(
+      <SlashCommandPicker
+        projectPath={null}
+        query=""
+        anchorRef={anchorRef}
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    await vi.waitFor(() => {
+      expect(pending.length).toBe(1);
+    });
+    window.dispatchEvent(new CustomEvent(SKILLS_LIST_UPDATED_EVENT));
+    await vi.waitFor(() => {
+      expect(pending.length).toBe(2);
+    });
+
+    const fresh = command({
+      id: "skill-fresh",
+      name: "fresh-skill",
+      full_command: "/fresh-skill",
+      scope: "skill",
+      description: "Installed just now",
+    });
+    const stale = command({
+      id: "skill-stale",
+      name: "stale-skill",
+      full_command: "/stale-skill",
+      scope: "skill",
+      description: "Older list",
+    });
+    pending[1]?.([fresh]);
+    await vi.waitFor(() => {
+      expect(document.body.textContent).toContain("fresh-skill");
+    });
+    pending[0]?.([stale]);
+    await vi.waitFor(() => {
+      expect(document.body.textContent).toContain("fresh-skill");
+    });
+    expect(document.body.textContent).not.toContain("stale-skill");
   });
 });

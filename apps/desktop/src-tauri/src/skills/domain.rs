@@ -30,6 +30,9 @@ pub struct RuntimeSkill {
     pub compatible_runtimes: Vec<RuntimeKind>,
     pub enabled: bool,
     pub discovery_error: Option<String>,
+    /// Frontmatter `category`/`group`, or the parent folder when a skill is nested under one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
 }
 
 #[cfg(test)]
@@ -66,6 +69,7 @@ mod tests {
             compatible_runtimes: vec![RuntimeKind::Claude, RuntimeKind::Codex],
             enabled: true,
             discovery_error: None,
+            category: None,
         };
 
         let value = serde_json::to_value(skill).unwrap();

@@ -1,18 +1,19 @@
 import {
   DEFAULT_SKILL_PACKS,
   IMPORTED_SKILL_PACK_ID,
-  resolveSkillPackId,
   skillPackDisplayName,
   type SkillPackGroupId,
 } from "@/lib/default-skill-packs";
-import type {
-  CatalogSkillCategory,
-  SkillCategorySnapshot,
+import {
+  resolveSkillCategory,
+  type CatalogSkillCategory,
+  type SkillCategorySnapshot,
 } from "@/lib/skill-categories";
 
 export interface SkillsBrowserSkill {
   name: string;
   folder: string;
+  category?: string | null;
 }
 
 export interface SkillsBrowserCategory {
@@ -66,25 +67,41 @@ export function buildSkillsBrowserCategories(input: {
     }
   >;
 }): SkillsBrowserCategory[] {
-  const scientificFolders = new Set(
-    input.catalog.flatMap((category) =>
-      category.skills.map((skill) => skill.folder.trim().toLowerCase()),
-    ),
-  );
   const buckets = new Map<SkillPackGroupId, SkillsBrowserSkill[]>();
   for (const pack of DEFAULT_SKILL_PACKS) {
     buckets.set(pack.id, []);
   }
+  const custom = new Map<
+    string,
+    { name: string; skills: SkillsBrowserSkill[] }
+  >();
   for (const skill of input.installedSkills) {
-    const packId = resolveSkillPackId(skill, scientificFolders);
-    if (packId === IMPORTED_SKILL_PACK_ID) continue;
-    buckets.get(packId)?.push({
+    const entry = {
       name: skill.name,
       folder: skill.folder,
-    });
+      category: skill.category,
+    };
+    const resolved = resolveSkillCategory(
+      skill,
+      input.snapshot ?? { categories: [], assignments: {} },
+      input.catalog,
+    );
+    if (resolved.source === "custom") {
+      const group = custom.get(resolved.id) ?? {
+        name: resolved.name,
+        skills: [],
+      };
+      group.skills.push(entry);
+      custom.set(resolved.id, group);
+      continue;
+    }
+    const packId = resolved.id as SkillPackGroupId;
+    const list = buckets.get(packId) ?? [];
+    list.push(entry);
+    buckets.set(packId, list);
   }
 
-  return DEFAULT_SKILL_PACKS.map((pack) => {
+  const packCategories = DEFAULT_SKILL_PACKS.map((pack) => {
     const skills = buckets.get(pack.id) ?? [];
     return {
       id: installedBrowserCategoryId(pack.id),
@@ -95,4 +112,27 @@ export function buildSkillsBrowserCategories(input: {
       sourceUrl: pack.docsUrl ?? pack.sourceUrl,
     };
   });
+  const customCategories = [...custom.entries()]
+    .sort((left, right) => left[1].name.localeCompare(right[1].name))
+    .map(([id, group]) => ({
+      id: installedBrowserCategoryId(id),
+      name: group.name,
+      icon: "settings",
+      skill_count: group.skills.length,
+      skills: group.skills,
+    }));
+  const uncategorized = buckets.get(IMPORTED_SKILL_PACK_ID) ?? [];
+  const uncategorizedCategory =
+    uncategorized.length === 0
+      ? []
+      : [
+          {
+            id: installedBrowserCategoryId(IMPORTED_SKILL_PACK_ID),
+            name: skillPackDisplayName(IMPORTED_SKILL_PACK_ID),
+            icon: "settings",
+            skill_count: uncategorized.length,
+            skills: uncategorized,
+          },
+        ];
+  return [...packCategories, ...customCategories, ...uncategorizedCategory];
 }

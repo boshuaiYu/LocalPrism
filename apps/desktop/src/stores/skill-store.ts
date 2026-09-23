@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import type {
   RuntimeKind,
@@ -12,6 +13,10 @@ import {
   type DefaultSkillPackId,
 } from "@/lib/default-skill-packs";
 import { isPaperSpineSkill } from "@/lib/paperspine";
+import {
+  notifySkillsListUpdated,
+  SKILLS_CHANGED_EVENT,
+} from "@/lib/skills-refresh";
 import { useAgentStore } from "@/stores/agent-store";
 import { useSkillCategoryStore } from "@/stores/skill-category-store";
 
@@ -41,8 +46,14 @@ export interface SkillStoreState {
   lastAutoImportCount: number;
   installingPackId: DefaultSkillPackId | null;
   selectedTargets: SkillTarget[];
+  /** Project path used by the last skills list, so external installs reload the same scope. */
+  listedProjectPath: string | null;
   setSelectedTargets: (targets: SkillTarget[]) => void;
-  refresh: (projectPath?: string) => Promise<void>;
+  refresh: (
+    projectPath?: string | null,
+    options?: { silent?: boolean },
+  ) => Promise<void>;
+  refreshListed: () => Promise<void>;
   importFolder: (
     sourcePath: string,
     targets: SkillTarget[],
@@ -68,6 +79,7 @@ export interface SkillStoreState {
 const DEFAULT_TARGETS: SkillTarget[] = [{ runtime: "claude", scope: "user" }];
 
 let defaultPacksInFlight: Promise<DefaultSkillPackResult[]> | null = null;
+let skillListEpoch = 0;
 
 export function resetDefaultSkillPacksForTests() {
   defaultPacksInFlight = null;
@@ -87,6 +99,7 @@ export const useSkillStore = create<SkillStoreState>((set, get) => ({
   lastAutoImportCount: 0,
   installingPackId: null,
   selectedTargets: DEFAULT_TARGETS,
+  listedProjectPath: null,
 
   setSelectedTargets: (targets) => {
     set({
@@ -94,19 +107,34 @@ export const useSkillStore = create<SkillStoreState>((set, get) => ({
     });
   },
 
-  refresh: async (projectPath) => {
-    set({ loading: true, error: null });
+  refresh: async (projectPath, options) => {
+    const path =
+      projectPath === undefined ? get().listedProjectPath : projectPath;
+    const silent = options?.silent === true;
+    const epoch = ++skillListEpoch;
+    set({
+      listedProjectPath: path ?? null,
+      error: null,
+      ...(silent ? {} : { loading: true }),
+    });
     try {
       const skills = await invoke<RuntimeSkill[]>("skill_list", {
-        projectPath: projectPath ?? null,
+        projectPath: path ?? null,
       });
+      if (epoch !== skillListEpoch) return;
       set({ skills: skills ?? [], loading: false });
+      notifySkillsListUpdated();
     } catch (error) {
+      if (epoch !== skillListEpoch) return;
       set({
         loading: false,
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  },
+
+  refreshListed: async () => {
+    await get().refresh(undefined, { silent: true });
   },
 
   importFolder: async (sourcePath, targets, projectPath, categoryId) => {
@@ -168,7 +196,7 @@ export const useSkillStore = create<SkillStoreState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       await invoke("skill_delete_managed", { entryId, confirmModified });
-      await get().refresh();
+      await get().refresh(get().listedProjectPath);
     } catch (error) {
       set({
         loading: false,
@@ -293,3 +321,25 @@ export const useSkillStore = create<SkillStoreState>((set, get) => ({
   updateDefaultSkillPacks: async () =>
     get().ensureDefaultSkillPacks({ force: true }),
 }));
+
+let scheduledSkillsRefresh: ReturnType<typeof setTimeout> | null = null;
+
+/** Reload the skills list after a chat install or a backend skills-changed event. */
+export function scheduleSkillsRefresh() {
+  if (scheduledSkillsRefresh) clearTimeout(scheduledSkillsRefresh);
+  scheduledSkillsRefresh = setTimeout(() => {
+    scheduledSkillsRefresh = null;
+    void useSkillStore.getState().refreshListed();
+  }, 200);
+}
+
+export function resetScheduledSkillsRefreshForTests() {
+  if (scheduledSkillsRefresh) clearTimeout(scheduledSkillsRefresh);
+  scheduledSkillsRefresh = null;
+}
+
+if (typeof window !== "undefined") {
+  void listen(SKILLS_CHANGED_EVENT, () => {
+    scheduleSkillsRefresh();
+  });
+}
