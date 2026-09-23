@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { BUILTIN_AGENT_PRESETS } from "@/lib/agent-presets";
+import { skillPackDisplayName } from "@/lib/default-skill-packs";
 import { translate } from "@/lib/i18n";
 
 describe("translate", () => {
@@ -43,21 +45,41 @@ describe("translate", () => {
       expect(translate("zh", key).length).toBeGreaterThan(4);
       expect(translate("zh", key)).not.toBe(translate("en", key));
     }
-    expect(translate("en", "tour.skillCategories.body")).toContain(
-      "PaperSpine",
-    );
-    expect(translate("zh", "tour.skillCategories.body")).toContain(
-      "PaperSpine",
-    );
+    for (const id of [
+      "paper-spine",
+      "academic-research-skills",
+      "nature-skills",
+      "scientific-agent-skills",
+      "paper-humanizer-skill",
+    ] as const) {
+      const name = skillPackDisplayName(id);
+      expect(translate("en", "tour.skillCategories.body")).toContain(name);
+      expect(translate("zh", "tour.skillCategories.body")).toContain(name);
+    }
+    for (const preset of BUILTIN_AGENT_PRESETS) {
+      expect(translate("en", "tour.agentRoles.body")).toContain(preset.name);
+      expect(translate("zh", "tour.agentRoles.body")).toContain(preset.name);
+      expect(translate("en", "tour.agentRoles.body")).toContain(
+        preset.titleSecondary,
+      );
+      expect(translate("zh", "tour.agentRoles.body")).toContain(
+        preset.titleSecondary,
+      );
+    }
     expect(translate("en", "tour.agentRoles.body").toLowerCase()).toContain(
-      "reviewer",
+      "settings list",
     );
+    expect(translate("zh", "tour.agentRoles.body")).toContain("设置");
     expect(translate("en", "tour.agentSkills.body").toLowerCase()).toContain(
       "context",
     );
     expect(translate("zh", "tour.agentSkills.body")).toContain("上下文");
-    expect(translate("en", "tour.updates.body")).toContain("Beta");
-    expect(translate("zh", "tour.updates.body")).toContain("Beta");
+    expect(translate("en", "tour.updates.body").toLowerCase()).toContain(
+      "checks for updates",
+    );
+    expect(translate("zh", "tour.updates.body")).toContain("检查更新");
+    expect(translate("en", "tour.updates.body")).not.toContain("Beta");
+    expect(translate("zh", "tour.updates.body")).not.toContain("Beta");
     expect(translate("en", "tour.skills.body").toLowerCase()).toContain(
       "callable",
     );

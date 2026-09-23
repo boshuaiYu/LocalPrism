@@ -11,6 +11,7 @@ import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/lib/use-i18n";
 import {
+  PRODUCT_TOUR_CUE_RETRY_MS,
   PRODUCT_TOUR_STEPS,
   dispatchProductTourCue,
   findProductTourElement,
@@ -19,6 +20,8 @@ import {
   productTourAfterNext,
   productTourCardPosition,
   productTourClickAdvances,
+  productTourRetryCues,
+  productTourShieldRects,
   setProductTourOverlayActive,
   shouldAutoShowProductTour,
   subscribeProductTourOverlay,
@@ -84,7 +87,13 @@ export function ProductTour() {
   );
   const [index, setIndex] = useState(0);
   const [rect, setRect] = useState<AnchorRect | null>(null);
+  const [viewport, setViewport] = useState(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }));
+  const rectRef = useRef<AnchorRect | null>(null);
   const scrolledStep = useRef<string | null>(null);
+  const wasVisible = useRef(false);
   const step = PRODUCT_TOUR_STEPS[index] ?? PRODUCT_TOUR_STEPS[0];
   const visible =
     hydrated && shouldAutoShowProductTour(status) && Boolean(step);
@@ -106,7 +115,19 @@ export function ProductTour() {
       node.scrollIntoView?.({ block: "nearest", inline: "nearest" });
     }
     const next = measureStep(step);
-    setRect((current) => (sameRect(current, next) ? current : next));
+    const nextViewport = {
+      width: window.innerWidth,
+      height: window.innerHeight,
+    };
+    setViewport((current) =>
+      current.width === nextViewport.width &&
+      current.height === nextViewport.height
+        ? current
+        : nextViewport,
+    );
+    if (sameRect(rectRef.current, next)) return;
+    rectRef.current = next;
+    setRect(next);
   }, [step]);
 
   useLayoutEffect(() => {
@@ -121,7 +142,10 @@ export function ProductTour() {
 
   useEffect(() => {
     setProductTourOverlayActive(visible);
-    if (!visible) dispatchProductTourCue("close-overlays");
+    if (wasVisible.current && !visible) {
+      dispatchProductTourCue("close-overlays");
+    }
+    wasVisible.current = visible;
     return () => setProductTourOverlayActive(false);
   }, [visible]);
 
@@ -133,12 +157,17 @@ export function ProductTour() {
     if (!visible || !step) return;
     const cues = step.enter ?? [];
     for (const cue of cues) dispatchProductTourCue(cue);
-    if (!cues.includes("open-agent-menu")) return;
-    // Chat may mount on the show-chat cue in this same turn.
-    const frame = requestAnimationFrame(() => {
-      dispatchProductTourCue("open-agent-menu");
-    });
-    return () => cancelAnimationFrame(frame);
+    const retry = productTourRetryCues(step);
+    if (retry.length === 0) return;
+    const timers = PRODUCT_TOUR_CUE_RETRY_MS.map((delay) =>
+      window.setTimeout(() => {
+        if (findProductTourElement(step)) return;
+        for (const cue of retry) dispatchProductTourCue(cue);
+      }, delay),
+    );
+    return () => {
+      for (const timer of timers) window.clearTimeout(timer);
+    };
   }, [step, visible]);
 
   useLayoutEffect(() => {
@@ -151,15 +180,16 @@ export function ProductTour() {
         refreshRect();
       });
     };
-    schedule();
+    refreshRect();
+    const onResize = () => refreshRect();
     const observer = new MutationObserver(schedule);
     observer.observe(document.body, { childList: true, subtree: true });
-    window.addEventListener("resize", schedule);
+    window.addEventListener("resize", onResize);
     window.addEventListener("scroll", schedule, true);
     return () => {
       if (frame) cancelAnimationFrame(frame);
       observer.disconnect();
-      window.removeEventListener("resize", schedule);
+      window.removeEventListener("resize", onResize);
       window.removeEventListener("scroll", schedule, true);
     };
   }, [refreshRect, visible]);
@@ -185,12 +215,9 @@ export function ProductTour() {
   if (!visible || !step) return null;
 
   const last = index >= PRODUCT_TOUR_STEPS.length - 1;
-  const placed = rect
-    ? productTourCardPosition(rect, {
-        width: window.innerWidth,
-        height: window.innerHeight,
-      })
-    : null;
+  const hole = rect && step.advanceOnTargetClick ? rect : null;
+  const shields = hole ? productTourShieldRects(viewport, hole) : null;
+  const placed = rect ? productTourCardPosition(rect, viewport) : null;
   const cardStyle: CSSProperties = placed
     ? { top: placed.top, left: placed.left }
     : {
@@ -204,6 +231,23 @@ export function ProductTour() {
       className="pointer-events-none fixed inset-0 z-[10050]"
       data-testid="product-tour"
     >
+      {shields ? (
+        shields.map((shield) => (
+          <div
+            key={`${shield.top}:${shield.left}:${shield.width}:${shield.height}`}
+            data-testid="product-tour-shield"
+            aria-hidden
+            className="pointer-events-auto absolute z-0"
+            style={shield}
+          />
+        ))
+      ) : (
+        <div
+          data-testid="product-tour-shield"
+          aria-hidden
+          className="pointer-events-auto absolute inset-0 z-0"
+        />
+      )}
       {rect ? (
         <div
           className="pointer-events-none absolute rounded-lg border-2 border-background shadow-[0_0_0_9999px_rgba(0,0,0,0.45)]"

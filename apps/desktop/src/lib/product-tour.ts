@@ -7,7 +7,7 @@ export type ProductTourStatus = "pending" | "completed" | "skipped";
  * shows once more.
  * 1 was the home-screen tour.
  * 2 was the LaTeX workspace tour.
- * 3 adds Skills, Agents, and the update control.
+ * 3 adds Skills, Agents, and the update-check control.
  */
 export const PRODUCT_TOUR_VERSION = 3;
 
@@ -38,11 +38,11 @@ export type ProductTourStepId =
 export interface ProductTourStep {
   id: ProductTourStepId;
   /**
-   * `data-tour` values, first visible match wins.
-   * Extra names stay so a slightly renamed control still lights up.
+   * `data-tour` values on controls this step actually mounts.
+   * First visible match wins.
    */
   anchors: readonly string[];
-  /** Raw CSS selectors tried after `anchors`. */
+  /** Raw CSS selectors tried after `anchors`, only for mounted controls. */
   selectors?: readonly string[];
   titleKey: MessageKey;
   bodyKey: MessageKey;
@@ -90,7 +90,7 @@ export const PRODUCT_TOUR_STEPS: readonly ProductTourStep[] = [
   },
   {
     id: "skills",
-    anchors: ["tour-skills", "tour-agents-skills"],
+    anchors: ["tour-skills"],
     titleKey: "tour.skills.title",
     bodyKey: "tour.skills.body",
     enter: ["close-overlays"],
@@ -98,25 +98,21 @@ export const PRODUCT_TOUR_STEPS: readonly ProductTourStep[] = [
   },
   {
     id: "skill-categories",
-    anchors: ["tour-skill-categories", "tour-skill-packs"],
+    anchors: ["tour-skill-categories"],
     titleKey: "tour.skillCategories.title",
     bodyKey: "tour.skillCategories.body",
     enter: ["open-skills"],
   },
   {
     id: "skill-import",
-    anchors: [
-      "tour-skill-import",
-      "tour-add-skill",
-      "tour-skill-settings-import",
-    ],
+    anchors: ["tour-skill-import"],
     titleKey: "tour.skillImport.title",
     bodyKey: "tour.skillImport.body",
     enter: ["open-skills"],
   },
   {
     id: "agents",
-    anchors: ["tour-agents-open", "tour-agents"],
+    anchors: ["tour-agents-open"],
     titleKey: "tour.agents.title",
     bodyKey: "tour.agents.body",
     enter: ["close-overlays"],
@@ -124,38 +120,107 @@ export const PRODUCT_TOUR_STEPS: readonly ProductTourStep[] = [
   },
   {
     id: "agent-roles",
-    anchors: ["tour-agent-list", "tour-agent-presets"],
+    anchors: ["tour-agent-list"],
     titleKey: "tour.agentRoles.title",
     bodyKey: "tour.agentRoles.body",
     enter: ["open-agents"],
   },
   {
     id: "agent-skills",
-    anchors: ["tour-agent-menu", "tour-agent-switch", "tour-agent-skills"],
+    anchors: ["tour-agent-switch"],
     titleKey: "tour.agentSkills.title",
     bodyKey: "tour.agentSkills.body",
-    enter: ["close-overlays", "show-chat", "open-agent-menu"],
+    enter: ["close-overlays", "show-chat"],
   },
   {
     id: "updates",
-    anchors: [
-      "tour-update-bar",
-      "tour-update-cycle",
-      "tour-updates",
-      "tour-beta",
-    ],
-    selectors: [
-      '[data-testid="update-cycle"]',
-      '[data-testid="beta-updates"]',
-      '[data-testid="updates-beta"]',
-      '[data-testid="beta-channel"]',
-      '[data-testid="check-for-updates"]',
-    ],
+    anchors: ["tour-updates"],
+    selectors: ['[data-testid="check-for-updates"]'],
     titleKey: "tour.updates.title",
     bodyKey: "tour.updates.body",
     enter: ["close-overlays"],
   },
 ];
+
+export type TourSettingsTab = "runtimes" | "skills" | "agents";
+
+/** Panels the tour may open, so finish and skip can put the workspace back. */
+export interface TourWorkspaceChrome {
+  skillsOpen: boolean;
+  settingsOpen: boolean;
+  settingsTab: TourSettingsTab;
+  chatVisible: boolean;
+  /** True only when this tour called show-chat while chat was hidden. */
+  tourOpenedChat: boolean;
+  agentMenuOpen: boolean;
+}
+
+export function initialTourWorkspaceChrome(
+  partial: Partial<TourWorkspaceChrome> = {},
+): TourWorkspaceChrome {
+  return {
+    skillsOpen: false,
+    settingsOpen: false,
+    settingsTab: "runtimes",
+    chatVisible: false,
+    tourOpenedChat: false,
+    agentMenuOpen: false,
+    ...partial,
+  };
+}
+
+export function applyProductTourCue(
+  chrome: TourWorkspaceChrome,
+  cue: ProductTourCue,
+): TourWorkspaceChrome {
+  switch (cue) {
+    case "close-overlays":
+      return {
+        ...chrome,
+        skillsOpen: false,
+        settingsOpen: false,
+        settingsTab: "runtimes",
+        agentMenuOpen: false,
+        chatVisible: chrome.tourOpenedChat ? false : chrome.chatVisible,
+        tourOpenedChat: false,
+      };
+    case "open-skills":
+      return {
+        ...chrome,
+        skillsOpen: true,
+        settingsOpen: false,
+        settingsTab: "runtimes",
+        agentMenuOpen: false,
+      };
+    case "open-agents":
+      return {
+        ...chrome,
+        skillsOpen: false,
+        settingsOpen: true,
+        settingsTab: "agents",
+        agentMenuOpen: false,
+      };
+    case "show-chat":
+      if (chrome.chatVisible) return chrome;
+      return { ...chrome, chatVisible: true, tourOpenedChat: true };
+    case "open-agent-menu":
+      return { ...chrome, agentMenuOpen: true };
+  }
+}
+
+/** Re-dispatch these until a lazy panel or the composer has mounted. */
+export const PRODUCT_TOUR_CUE_RETRY_MS = [50, 150, 400, 800] as const;
+
+const PRODUCT_TOUR_RETRY_CUES = new Set<ProductTourCue>([
+  "open-skills",
+  "open-agents",
+  "show-chat",
+  "open-agent-menu",
+]);
+
+export function productTourRetryCues(step: ProductTourStep): ProductTourCue[] {
+  return (step.enter ?? []).filter((cue) => PRODUCT_TOUR_RETRY_CUES.has(cue));
+}
 
 export function normalizeProductTourStatus(value: unknown): ProductTourStatus {
   return value === "completed" || value === "skipped" ? value : "pending";
@@ -214,8 +279,25 @@ export function productTourSelectors(step: ProductTourStep): string[] {
   return [...anchors, ...(step.selectors ?? [])];
 }
 
+function tourStyleHides(style: CSSStyleDeclaration): boolean {
+  if (
+    style.display === "none" ||
+    style.visibility === "hidden" ||
+    style.visibility === "collapse"
+  ) {
+    return true;
+  }
+  return Number.parseFloat(style.opacity) === 0;
+}
+
 export function isVisibleTourElement(node: Element): node is HTMLElement {
   if (!(node instanceof HTMLElement)) return false;
+  const view = node.ownerDocument.defaultView ?? window;
+  let current: HTMLElement | null = node;
+  while (current) {
+    if (tourStyleHides(view.getComputedStyle(current))) return false;
+    current = current.parentElement;
+  }
   const rect = node.getBoundingClientRect();
   return rect.width >= 2 && rect.height >= 2;
 }
@@ -258,6 +340,44 @@ export function productTourClickAdvances(
     }
   }
   return false;
+}
+
+export interface TourShieldRect {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Blocks the workspace. A hole is left only when the step advances by
+ * clicking its own control; every other step covers the viewport.
+ */
+export function productTourShieldRects(
+  viewport: { width: number; height: number },
+  hole: { top: number; left: number; width: number; height: number } | null,
+): TourShieldRect[] {
+  const width = Math.max(0, viewport.width);
+  const height = Math.max(0, viewport.height);
+  if (width === 0 || height === 0) return [];
+  const full: TourShieldRect = { top: 0, left: 0, width, height };
+  if (!hole) return [full];
+  const top = Math.max(0, Math.min(height, hole.top));
+  const left = Math.max(0, Math.min(width, hole.left));
+  const right = Math.max(left, Math.min(width, hole.left + hole.width));
+  const bottom = Math.max(top, Math.min(height, hole.top + hole.height));
+  if (right - left < 2 || bottom - top < 2) return [full];
+  const rects: TourShieldRect[] = [];
+  if (top > 0) rects.push({ top: 0, left: 0, width, height: top });
+  const band = bottom - top;
+  if (left > 0) rects.push({ top, left: 0, width: left, height: band });
+  if (right < width) {
+    rects.push({ top, left: right, width: width - right, height: band });
+  }
+  if (bottom < height) {
+    rects.push({ top: bottom, left: 0, width, height: height - bottom });
+  }
+  return rects;
 }
 
 const TOUR_CARD_WIDTH = 352;

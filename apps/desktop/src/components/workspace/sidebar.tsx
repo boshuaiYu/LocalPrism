@@ -86,7 +86,12 @@ import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import { ProjectCloseButton } from "@/components/workspace/project-close-button";
 import { UvSetupDialog } from "@/components/uv-setup";
 import { SettingsDialog } from "@/components/settings/settings-dialog";
-import { PRODUCT_TOUR_EVENT, type ProductTourCue } from "@/lib/product-tour";
+import {
+  PRODUCT_TOUR_EVENT,
+  applyProductTourCue,
+  initialTourWorkspaceChrome,
+  type ProductTourCue,
+} from "@/lib/product-tour";
 import { SIDEBAR_SPLIT_AUTOSAVE_ID } from "@/lib/workspace-pane-layout";
 import { createLogger } from "@/lib/debug/logger";
 import { resolveNewProjectFile } from "@/lib/new-project-file";
@@ -956,18 +961,34 @@ export function Sidebar({
   const [newFileKind, setNewFileKind] = useState<"tex" | "markdown">("tex");
   const [newFolderName, setNewFolderName] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<
+    "runtimes" | "skills" | "agents"
+  >("runtimes");
+  const settingsChrome = useRef({
+    open: settingsOpen,
+    tab: settingsTab,
+  });
+  settingsChrome.current = { open: settingsOpen, tab: settingsTab };
   useEffect(() => {
-    const openSettings = () => setSettingsOpen(true);
+    const openSettings = () => {
+      settingsChrome.current = { ...settingsChrome.current, open: true };
+      setSettingsOpen(true);
+    };
     const onTourCue = (event: Event) => {
       const cue = (event as CustomEvent<ProductTourCue>).detail;
-      if (cue === "close-overlays" || cue === "open-skills") {
-        setSettingsOpen(false);
-        return;
-      }
-      if (cue === "open-agents") {
-        setSettingsTab("agents");
-        setSettingsOpen(true);
-      }
+      const next = applyProductTourCue(
+        initialTourWorkspaceChrome({
+          settingsOpen: settingsChrome.current.open,
+          settingsTab: settingsChrome.current.tab,
+        }),
+        cue,
+      );
+      settingsChrome.current = {
+        open: next.settingsOpen,
+        tab: next.settingsTab,
+      };
+      setSettingsOpen(next.settingsOpen);
+      setSettingsTab(next.settingsTab);
     };
     window.addEventListener("localprism-open-settings", openSettings);
     window.addEventListener(PRODUCT_TOUR_EVENT, onTourCue);
@@ -976,9 +997,6 @@ export function Sidebar({
       window.removeEventListener(PRODUCT_TOUR_EVENT, onTourCue);
     };
   }, []);
-  const [settingsTab, setSettingsTab] = useState<
-    "runtimes" | "skills" | "agents"
-  >("runtimes");
 
   // Folder expand/collapse
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(
@@ -1518,6 +1536,7 @@ export function Sidebar({
           <EnvironmentSection
             projectPath={projectRoot}
             onOpenAgents={() => {
+              settingsChrome.current = { open: true, tab: "agents" };
               setSettingsTab("agents");
               setSettingsOpen(true);
             }}
@@ -1576,6 +1595,8 @@ export function Sidebar({
             open={settingsOpen}
             defaultTab={settingsTab}
             onOpenChange={(open) => {
+              const tab = open ? settingsChrome.current.tab : "runtimes";
+              settingsChrome.current = { open, tab };
               setSettingsOpen(open);
               if (!open) setSettingsTab("runtimes");
             }}
@@ -2147,6 +2168,8 @@ function EnvironmentSection({
   // ── Scientific Skills ──
   const [skillsStatus, setSkillsStatus] = useState<SkillsStatus | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const skillsOpenRef = useRef(showOnboarding);
+  skillsOpenRef.current = showOnboarding;
 
   // ── Agents ──
   const agents = useAgentStore((state) => state.agents);
@@ -2177,13 +2200,12 @@ function EnvironmentSection({
   useEffect(() => {
     const onTourCue = (event: Event) => {
       const cue = (event as CustomEvent<ProductTourCue>).detail;
-      if (cue === "open-skills") {
-        setShowOnboarding(true);
-        return;
-      }
-      if (cue === "close-overlays" || cue === "open-agents") {
-        setShowOnboarding(false);
-      }
+      const next = applyProductTourCue(
+        initialTourWorkspaceChrome({ skillsOpen: skillsOpenRef.current }),
+        cue,
+      );
+      skillsOpenRef.current = next.skillsOpen;
+      setShowOnboarding(next.skillsOpen);
     };
     window.addEventListener(PRODUCT_TOUR_EVENT, onTourCue);
     return () => window.removeEventListener(PRODUCT_TOUR_EVENT, onTourCue);

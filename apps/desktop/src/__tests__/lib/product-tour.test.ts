@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   PRODUCT_TOUR_STEPS,
+  applyProductTourCue,
   findProductTourElement,
+  initialTourWorkspaceChrome,
+  isVisibleTourElement,
   productTourAfterBack,
   productTourAfterNext,
   productTourAfterSkip,
   productTourCardPosition,
   productTourClickAdvances,
+  productTourRetryCues,
+  productTourSelectors,
+  productTourShieldRects,
   resolveStoredProductTour,
   shouldAutoShowProductTour,
 } from "@/lib/product-tour";
@@ -62,7 +68,23 @@ describe("product tour persistence", () => {
     ).toEqual(["open-agents"]);
     expect(
       PRODUCT_TOUR_STEPS.find((step) => step.id === "agent-skills")?.enter,
-    ).toEqual(["close-overlays", "show-chat", "open-agent-menu"]);
+    ).toEqual(["close-overlays", "show-chat"]);
+    expect(
+      PRODUCT_TOUR_STEPS.find((step) => step.id === "agent-roles")?.anchors,
+    ).toEqual(["tour-agent-list"]);
+    expect(
+      PRODUCT_TOUR_STEPS.find((step) => step.id === "agent-skills")?.anchors,
+    ).toEqual(["tour-agent-switch"]);
+    expect(
+      productTourRetryCues(
+        PRODUCT_TOUR_STEPS.find((step) => step.id === "skill-categories")!,
+      ),
+    ).toEqual(["open-skills"]);
+    expect(
+      productTourRetryCues(
+        PRODUCT_TOUR_STEPS.find((step) => step.id === "updates")!,
+      ),
+    ).toEqual([]);
     expect(resolveStoredProductTour(1, "skipped")).toBe("pending");
     expect(resolveStoredProductTour(2, "completed")).toBe("pending");
     expect(resolveStoredProductTour(undefined, "completed")).toBe("pending");
@@ -89,30 +111,45 @@ function box(node: HTMLElement, width = 48, height = 24) {
 }
 
 describe("product tour anchors", () => {
-  it("skips a zero-size renamed control and uses the update button", () => {
+  it("targets the mounted check-update control and ignores hidden copies", () => {
     document.body.innerHTML = "";
-    const renamed = document.createElement("div");
-    renamed.dataset.tour = "tour-update-bar";
+    const faded = document.createElement("button");
+    faded.dataset.tour = "tour-updates";
+    faded.style.opacity = "0";
+    const buried = document.createElement("div");
+    buried.style.display = "none";
+    const buriedButton = document.createElement("button");
+    buriedButton.dataset.testid = "check-for-updates";
+    buried.append(buriedButton);
     const check = document.createElement("button");
+    check.dataset.tour = "tour-updates";
     check.dataset.testid = "check-for-updates";
-    document.body.append(renamed, check);
+    document.body.append(faded, buried, check);
+    box(faded);
+    box(buriedButton);
     box(check);
     const step = PRODUCT_TOUR_STEPS.find((item) => item.id === "updates");
-    expect(step).toBeDefined();
+    expect(productTourSelectors(step!)).toEqual([
+      '[data-tour="tour-updates"]',
+      '[data-testid="check-for-updates"]',
+    ]);
+    expect(isVisibleTourElement(faded)).toBe(false);
+    expect(isVisibleTourElement(buriedButton)).toBe(false);
     expect(findProductTourElement(step!)).toBe(check);
   });
 
-  it("prefers a visible bottom-bar anchor over the header check button", () => {
+  it("treats an ancestor with opacity 0 as not visible", () => {
     document.body.innerHTML = "";
-    const bar = document.createElement("div");
-    bar.dataset.tour = "tour-update-bar";
-    const check = document.createElement("button");
-    check.dataset.testid = "check-for-updates";
-    document.body.append(bar, check);
-    box(bar, 120, 28);
-    box(check);
-    const step = PRODUCT_TOUR_STEPS.find((item) => item.id === "updates");
-    expect(findProductTourElement(step!)).toBe(bar);
+    const wrap = document.createElement("div");
+    wrap.style.opacity = "0";
+    const button = document.createElement("button");
+    button.dataset.tour = "tour-skills";
+    wrap.append(button);
+    document.body.append(wrap);
+    box(button);
+    expect(isVisibleTourElement(button)).toBe(false);
+    const step = PRODUCT_TOUR_STEPS.find((item) => item.id === "skills");
+    expect(findProductTourElement(step!)).toBeNull();
   });
 
   it("advances when the skills hotspot is clicked", () => {
@@ -126,6 +163,58 @@ describe("product tour anchors", () => {
     const step = PRODUCT_TOUR_STEPS.find((item) => item.id === "skills");
     expect(productTourClickAdvances(step!, label)).toBe(true);
     expect(productTourClickAdvances(step!, document.body)).toBe(false);
+  });
+
+  it("blocks the viewport and leaves a hole only for a click-through step", () => {
+    expect(productTourShieldRects({ width: 800, height: 600 }, null)).toEqual([
+      { top: 0, left: 0, width: 800, height: 600 },
+    ]);
+    const hole = { top: 100, left: 40, width: 80, height: 28 };
+    const shields = productTourShieldRects({ width: 800, height: 600 }, hole);
+    const covers = (x: number, y: number) =>
+      shields.some(
+        (shield) =>
+          x >= shield.left &&
+          x < shield.left + shield.width &&
+          y >= shield.top &&
+          y < shield.top + shield.height,
+      );
+    expect(covers(10, 10)).toBe(true);
+    expect(covers(80, 114)).toBe(false);
+    expect(covers(790, 590)).toBe(true);
+  });
+
+  it("closes panels the tour opened and keeps a chat the user already had", () => {
+    const opened = applyProductTourCue(
+      initialTourWorkspaceChrome(),
+      "show-chat",
+    );
+    expect(opened.chatVisible).toBe(true);
+    expect(opened.tourOpenedChat).toBe(true);
+    expect(applyProductTourCue(opened, "close-overlays").chatVisible).toBe(
+      false,
+    );
+
+    const already = initialTourWorkspaceChrome({ chatVisible: true });
+    const kept = applyProductTourCue(already, "show-chat");
+    expect(kept.tourOpenedChat).toBe(false);
+    expect(applyProductTourCue(kept, "close-overlays").chatVisible).toBe(true);
+
+    const agents = applyProductTourCue(
+      initialTourWorkspaceChrome({ skillsOpen: true }),
+      "open-agents",
+    );
+    expect(agents).toMatchObject({
+      skillsOpen: false,
+      settingsOpen: true,
+      settingsTab: "agents",
+      agentMenuOpen: false,
+    });
+    expect(applyProductTourCue(agents, "close-overlays")).toMatchObject({
+      settingsOpen: false,
+      settingsTab: "runtimes",
+      skillsOpen: false,
+    });
   });
 
   it("places the card above a hotspot near the bottom edge", () => {

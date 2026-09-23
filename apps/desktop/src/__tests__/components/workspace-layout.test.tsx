@@ -240,4 +240,39 @@ describe("WorkspaceLayout chat pane", () => {
     ).not.toBeNull();
     expect(document.body.textContent).toContain("Project files");
   });
+
+  it("restores chat only when the tour opened it", async () => {
+    await act(async () => root.render(<WorkspaceLayout />));
+    expect(useChatLayoutStore.getState().visible).toBe(true);
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("localprism-product-tour", { detail: "show-chat" }),
+      );
+      window.dispatchEvent(
+        new CustomEvent("localprism-product-tour", {
+          detail: "close-overlays",
+        }),
+      );
+    });
+    expect(useChatLayoutStore.getState().visible).toBe(true);
+
+    await act(async () => {
+      useChatLayoutStore.getState().setVisible(false);
+    });
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("localprism-product-tour", { detail: "show-chat" }),
+      );
+    });
+    expect(useChatLayoutStore.getState().visible).toBe(true);
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("localprism-product-tour", {
+          detail: "close-overlays",
+        }),
+      );
+    });
+    expect(useChatLayoutStore.getState().visible).toBe(false);
+  });
 });

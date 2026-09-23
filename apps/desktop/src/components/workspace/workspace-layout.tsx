@@ -18,7 +18,12 @@ import { PdfPreview } from "./preview/pdf-preview";
 import { ChatRestoreButton } from "@/components/claude-chat/chat-restore-button";
 import { ClaudeChatDrawer } from "@/components/claude-chat/claude-chat-drawer";
 import { ProductTour } from "@/components/product-tour";
-import { PRODUCT_TOUR_EVENT, type ProductTourCue } from "@/lib/product-tour";
+import {
+  PRODUCT_TOUR_EVENT,
+  applyProductTourCue,
+  initialTourWorkspaceChrome,
+  type ProductTourCue,
+} from "@/lib/product-tour";
 import {
   AppStatusCluster,
   useAppVersion,
@@ -231,10 +236,24 @@ export function WorkspaceLayout() {
     return () => window.removeEventListener("keydown", handler);
   }, [previewVisible, setPdfPaneVisible]);
 
+  const tourOpenedChatRef = useRef(false);
+  const chatVisibleRef = useRef(chatVisible);
+  chatVisibleRef.current = chatVisible;
   useEffect(() => {
     const onTourCue = (event: Event) => {
       const cue = (event as CustomEvent<ProductTourCue>).detail;
-      if (cue === "show-chat") setChatPaneVisible(true);
+      const next = applyProductTourCue(
+        initialTourWorkspaceChrome({
+          chatVisible: chatVisibleRef.current,
+          tourOpenedChat: tourOpenedChatRef.current,
+        }),
+        cue,
+      );
+      tourOpenedChatRef.current = next.tourOpenedChat;
+      if (next.chatVisible !== chatVisibleRef.current) {
+        chatVisibleRef.current = next.chatVisible;
+        setChatPaneVisible(next.chatVisible);
+      }
     };
     window.addEventListener(PRODUCT_TOUR_EVENT, onTourCue);
     return () => window.removeEventListener(PRODUCT_TOUR_EVENT, onTourCue);

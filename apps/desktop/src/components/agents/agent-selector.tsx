@@ -2,7 +2,12 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { BotIcon } from "lucide-react";
 import { useAgentStore } from "@/stores/agent-store";
-import { PRODUCT_TOUR_EVENT, type ProductTourCue } from "@/lib/product-tour";
+import {
+  PRODUCT_TOUR_EVENT,
+  applyProductTourCue,
+  initialTourWorkspaceChrome,
+  type ProductTourCue,
+} from "@/lib/product-tour";
 import { useI18n } from "@/lib/use-i18n";
 import { cn } from "@/lib/utils";
 import {
@@ -47,22 +52,19 @@ export function AgentSelector({
 
   const selected = options.find((agent) => agent.id === agentId) ?? null;
   const [open, setOpen] = useState(false);
+  const menuOpenRef = useRef(open);
+  menuOpenRef.current = open;
   const buttonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     const onTourCue = (event: Event) => {
       const cue = (event as CustomEvent<ProductTourCue>).detail;
-      if (cue === "open-agent-menu") {
-        setOpen(true);
-        return;
-      }
-      if (
-        cue === "close-overlays" ||
-        cue === "open-skills" ||
-        cue === "open-agents"
-      ) {
-        setOpen(false);
-      }
+      const next = applyProductTourCue(
+        initialTourWorkspaceChrome({ agentMenuOpen: menuOpenRef.current }),
+        cue,
+      );
+      menuOpenRef.current = next.agentMenuOpen;
+      setOpen(next.agentMenuOpen);
     };
     window.addEventListener(PRODUCT_TOUR_EVENT, onTourCue);
     return () => window.removeEventListener(PRODUCT_TOUR_EVENT, onTourCue);

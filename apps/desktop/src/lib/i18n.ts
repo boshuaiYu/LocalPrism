@@ -82,7 +82,7 @@ const en = {
     "Skills are callable writing tools — open this panel and click one to inspect it; you do not need them all on.",
   "tour.skillCategories.title": "Skill packs",
   "tour.skillCategories.body":
-    "Packs group them, for example PaperSpine, Academic, Nature, Scientific-Agent, and Paper-Humanizer.",
+    "Packs group them: PaperSpine, academic-research-skills, nature-skills, scientific-agent-skills, and paper-humanizer-skill.",
   "tour.skillImport.title": "Add a skill",
   "tour.skillImport.body":
     "Add a skill from a folder here, or from a folder or URL in Settings.",
@@ -90,13 +90,12 @@ const en = {
   "tour.agents.body": "Open Agents to see the built-in writing roles.",
   "tour.agentRoles.title": "Built-in roles",
   "tour.agentRoles.body":
-    "Built-in roles are polish, AI-humanizer, and reviewer — switch the one this chat uses.",
+    "This settings list holds the built-in roles: 论文抛光机 (Polish Lab), AI消除器 (De-AI), and 毒舌审稿官 (Review Duo).",
   "tour.agentSkills.title": "Agent skills",
   "tour.agentSkills.body":
-    "A chat loads only the selected agent's skills, not every skill into context.",
+    "This control chooses the agent for the current chat. The chat loads only that agent's skills into context.",
   "tour.updates.title": "Updates",
-  "tour.updates.body":
-    "The cycle control checks for updates, and the Beta switch beside it stays off unless you turn it on.",
+  "tour.updates.body": "This button checks for updates.",
 
   "onboarding.progress": "Project setup progress",
   "onboarding.step.template": "Template",
@@ -579,7 +578,7 @@ const zh: Record<MessageKey, string> = {
     "技能是可调用的写作工具：打开这个面板，点一个即可查看，不必全部启用。",
   "tour.skillCategories.title": "技能分类",
   "tour.skillCategories.body":
-    "技能按包分组，例如 PaperSpine、Academic、Nature、Scientific-Agent 和 Paper-Humanizer。",
+    "技能按这些包分组：PaperSpine、academic-research-skills、nature-skills、scientific-agent-skills、paper-humanizer-skill。",
   "tour.skillImport.title": "添加技能",
   "tour.skillImport.body":
     "可以在这里从文件夹添加，也可以在设置里用文件夹或网址添加。",
@@ -587,13 +586,12 @@ const zh: Record<MessageKey, string> = {
   "tour.agents.body": "打开智能体，查看内置的写作角色。",
   "tour.agentRoles.title": "内置角色",
   "tour.agentRoles.body":
-    "内置角色是润色、AI 人性化和审稿，可切换当前对话使用的那一个。",
+    "这是设置里的智能体列表，内置角色是论文抛光机（Polish Lab）、AI消除器（De-AI）和毒舌审稿官（Review Duo）。",
   "tour.agentSkills.title": "智能体与技能",
   "tour.agentSkills.body":
-    "对话只会带上所选智能体的技能，不会把全部技能放进上下文。",
+    "这个控件选择当前对话的智能体，对话只会把该智能体的技能放进上下文。",
   "tour.updates.title": "更新",
-  "tour.updates.body":
-    "循环按钮会检查更新，旁边的 Beta 开关默认关闭，需要时再打开。",
+  "tour.updates.body": "这个按钮会检查更新。",
 
   "onboarding.progress": "项目创建进度",
   "onboarding.step.template": "模板",
