@@ -246,6 +246,17 @@ fn split_core(core: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
+/// Compact `1.0.8betaN` and lone numeric `1.0.8-N` are one post-release class.
+fn post_release_build(version: &ReleaseVersion) -> Option<u64> {
+    if let Some(compact) = version.compact {
+        return Some(compact);
+    }
+    if version.other_pre {
+        return None;
+    }
+    version.numeric_pre
+}
+
 fn compare_release(left: &ReleaseVersion, right: &ReleaseVersion) -> i32 {
     if left.major != right.major {
         return (left.major > right.major) as i32 - (left.major < right.major) as i32;
@@ -256,24 +267,18 @@ fn compare_release(left: &ReleaseVersion, right: &ReleaseVersion) -> i32 {
     if left.patch != right.patch {
         return (left.patch > right.patch) as i32 - (left.patch < right.patch) as i32;
     }
-    if left.compact.is_some() || right.compact.is_some() {
-        if let (Some(left_n), Some(right_n)) = (left.compact, right.compact) {
-            return (left_n > right_n) as i32 - (left_n < right_n) as i32;
-        }
-        let left_build = left
-            .compact
-            .or(left.numeric_pre.filter(|_| !left.other_pre));
-        let right_build = right
-            .compact
-            .or(right.numeric_pre.filter(|_| !right.other_pre));
-        if left.compact.is_some() != right.compact.is_some() {
-            if let (Some(left_n), Some(right_n)) = (left_build, right_build) {
-                return (left_n > right_n) as i32 - (left_n < right_n) as i32;
-            }
-        }
-        return if left.compact.is_some() { 1 } else { -1 };
+    // `1.0.8-2` is the same build as `1.0.8beta2` and is newer than plain `1.0.8`.
+    // A word prerelease such as `1.0.8-beta.2` stays older than that plain tag.
+    match (post_release_build(left), post_release_build(right)) {
+        (Some(left_n), Some(right_n)) => (left_n > right_n) as i32 - (left_n < right_n) as i32,
+        (Some(_), None) => 1,
+        (None, Some(_)) => -1,
+        (None, None) => match (left.other_pre, right.other_pre) {
+            (true, false) => -1,
+            (false, true) => 1,
+            _ => 0,
+        },
     }
-    0
 }
 
 fn semver_core(current: &str) -> Result<(u64, u64, u64), String> {
@@ -319,9 +324,8 @@ const LOOPBACK_CERT_DER: &[u8] = include_bytes!("../certs/localhost.der");
 const LOOPBACK_KEY_DER: &[u8] = include_bytes!("../certs/localhost.pkcs8.der");
 const LOOPBACK_CA_PEM: &str = include_str!("../certs/ca.crt");
 
-/// The leaf key only serves `127.0.0.1`. Callers that can add `ca.pem`
-/// as a root keep normal hostname checks. The updater plugin cannot share
-/// that certificate type, so it accepts this loopback certificate only.
+/// The leaf key only serves `127.0.0.1`. Callers merge `ca.crt` into their
+/// trust roots and keep normal hostname checks, including the updater client.
 fn local_identity() -> Result<LocalIdentity, String> {
     let cert_der = CertificateDer::from(LOOPBACK_CERT_DER.to_vec());
     let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(LOOPBACK_KEY_DER.to_vec()));
@@ -454,6 +458,15 @@ mod tests {
             compact_release_is_newer("1.0.8beta3", "1.0.9").ok(),
             Some(false)
         );
+        let plain = super::parse_release("1.0.8").expect("plain");
+        let wix = super::parse_release("1.0.8-2").expect("wix");
+        let compact = super::parse_release("1.0.8beta2").expect("compact");
+        let word = super::parse_release("1.0.8-beta.2").expect("word");
+        assert!(super::compare_release(&wix, &plain) > 0);
+        assert!(super::compare_release(&plain, &wix) < 0);
+        assert_eq!(super::compare_release(&wix, &compact), 0);
+        assert!(super::compare_release(&plain, &word) > 0);
+        assert!(super::compare_release(&wix, &word) > 0);
     }
 
     #[test]

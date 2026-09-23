@@ -547,6 +547,7 @@ async fn download_manifest_update(
     } else {
         None
     };
+    let root_pem = gated.as_ref().map(|item| item.root_pem.clone());
     let check_url = gated
         .as_ref()
         .map(|item| item.url.as_str())
@@ -556,13 +557,15 @@ async fn download_manifest_update(
         .updater_builder()
         .endpoints(vec![parsed])
         .map_err(|err| err.to_string())?;
-    if gated.is_some() {
-        // The plugin's reqwest 0.13 client cannot take a certificate from
-        // this crate's reqwest 0.12. The manifest JSON was already fetched
-        // above with normal TLS. This flag only lets that client read the
-        // loopback copy. The binary URL and signature are unchanged, and
-        // the updater still checks the minisign signature before install.
-        builder = builder.configure_client(|client| client.danger_accept_invalid_certs(true));
+    if let Some(pem) = root_pem {
+        // The updater uses this client for the loopback manifest and for the
+        // GitHub binary. Merge only the loopback CA. Platform roots still
+        // verify GitHub; certificate checks stay on.
+        let certificate = updater_reqwest::Certificate::from_pem(pem.as_bytes())
+            .map_err(|err| format!("Could not load the loopback update certificate: {err}"))?;
+        builder = builder.configure_client(move |client| {
+            client.tls_certs_merge(std::iter::once(certificate.clone()))
+        });
     }
     let updater = builder.build().map_err(|err| err.to_string())?;
     let update = updater
@@ -601,6 +604,7 @@ async fn download_manifest_update(
 struct GatedBetaManifest {
     url: String,
     display_version: String,
+    root_pem: String,
     _server: beta_manifest::LocalManifest,
 }
 
@@ -638,6 +642,7 @@ async fn fetch_gated_beta_manifest(
     Ok(GatedBetaManifest {
         url: server.url.clone(),
         display_version: rewritten.display_version,
+        root_pem: server.root_pem.clone(),
         _server: server,
     })
 }

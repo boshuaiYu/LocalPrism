@@ -209,6 +209,14 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
       if (!explicit) return running;
       await running.catch(() => undefined);
       if (checkLock) return checkLock;
+      const settled = get().status.state;
+      if (
+        settled === "ready" ||
+        settled === "downloading" ||
+        settled === "installing"
+      ) {
+        return;
+      }
     }
 
     let releaseLock = () => {};

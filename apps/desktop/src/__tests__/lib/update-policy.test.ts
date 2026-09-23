@@ -81,9 +81,10 @@ describe("beta update detection", () => {
     ) {
       throw new Error("semver fixtures failed to parse");
     }
-    expect(compareSemver(stable, beta)).toBeGreaterThan(0);
+    expect(compareSemver(beta, stable)).toBeGreaterThan(0);
     expect(compareSemver(newerBeta, olderBeta)).toBeGreaterThan(0);
     expect(compareSemver(betaWordNext, betaWord)).toBeGreaterThan(0);
+    expect(compareSemver(stable, betaWord)).toBeGreaterThan(0);
     expect(
       compareSemver(parseSemver("1.0.8-1")!, parseSemver("1.0.7")!),
     ).toBeGreaterThan(0);
@@ -99,7 +100,8 @@ describe("beta update detection", () => {
       0,
     );
     expect(compareSemver(compactNewer, newerBeta)).toBeGreaterThan(0);
-    expect(compareSemver(stable, newerBeta)).toBeGreaterThan(0);
+    expect(compareSemver(newerBeta, stable)).toBeGreaterThan(0);
+    expect(compareSemver(stable, newerBeta)).toBeLessThan(0);
     expect(compareSemver(parseSemver("1.0.9")!, compactNewer)).toBeGreaterThan(
       0,
     );
@@ -164,8 +166,20 @@ describe("beta update detection", () => {
         stable: { version: "1.0.8" },
         betas: betas.filter((beta) => beta.version === "1.0.8-1"),
         allowPrerelease: true,
-      }).action,
-    ).toBe("download");
+      }),
+    ).toMatchObject({
+      action: "confirm",
+      version: "1.0.8-1",
+    });
+
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.7",
+        stable: { version: "1.0.9" },
+        betas: betas.filter((beta) => beta.version === "1.0.8-1"),
+        allowPrerelease: true,
+      }),
+    ).toMatchObject({ action: "download", version: "1.0.9" });
 
     expect(
       chooseUpdateOffer({
@@ -230,6 +244,15 @@ describe("beta update detection", () => {
         allowPrerelease: false,
       }),
     ).toMatchObject({ action: "download", version: "1.0.8" });
+
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.8-2",
+        stable: { version: "1.0.8" },
+        betas: [],
+        allowPrerelease: false,
+      }).action,
+    ).toBe("none");
 
     expect(
       chooseUpdateOffer({

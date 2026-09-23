@@ -154,21 +154,17 @@ export function compareSemver(left: SemVer, right: SemVer): number {
   if (left.major !== right.major) return left.major - right.major;
   if (left.minor !== right.minor) return left.minor - right.minor;
   if (left.patch !== right.patch) return left.patch - right.patch;
-  if (left.compactBeta !== null || right.compactBeta !== null) {
-    if (left.compactBeta !== null && right.compactBeta !== null) {
-      return left.compactBeta - right.compactBeta;
-    }
-    const leftBuild = msiBuildNumber(left);
-    const rightBuild = msiBuildNumber(right);
-    // The WiX-safe package version of `v1.0.8beta2` is `1.0.8-2`.
-    // Those two strings are the same build. `1.0.8beta3` is newer than
-    // `1.0.8-2`, and `1.0.8beta1` is older.
-    if (leftBuild !== null && rightBuild !== null) {
-      return leftBuild - rightBuild;
-    }
-    // A compact tag is published after the plain release of the same core.
-    return left.compactBeta !== null ? 1 : -1;
+  const leftBuild = msiBuildNumber(left);
+  const rightBuild = msiBuildNumber(right);
+  // `1.0.8beta2` and the WiX package form `1.0.8-2` are the same
+  // post-release build. That class is newer than the plain tag `1.0.8`,
+  // so Latest `1.0.8` must not replace an installed `1.0.8-2`.
+  // A word prerelease such as `1.0.8-beta.2` stays on ordinary semver.
+  if (leftBuild !== null && rightBuild !== null) {
+    return leftBuild - rightBuild;
   }
+  if (leftBuild !== null) return 1;
+  if (rightBuild !== null) return -1;
   if (left.prerelease.length === 0 && right.prerelease.length === 0) return 0;
   if (left.prerelease.length === 0) return 1;
   if (right.prerelease.length === 0) return -1;
@@ -308,8 +304,9 @@ function prereleaseManifestForVersion(version: string): string | null {
  * Stable builds from `releases/latest` may download immediately.
  * Prereleases, including `v1.0.8beta3`, stay hidden unless `allowPrerelease`.
  * A compact beta of the same core is newer than that plain stable tag.
- * `1.0.8beta2` is the same build as `1.0.8-2`. `1.0.8beta3` is newer.
- * `1.0.8` is still newer than hyphenated `1.0.8-1`.
+ * `1.0.8beta2` is the same post-release build as `1.0.8-2`, and both are
+ * newer than plain `1.0.8`. `1.0.8beta3` is newer than `1.0.8-2`.
+ * A word prerelease such as `1.0.8-beta.2` stays older than `1.0.8`.
  * Beta manifests are `releases/download/<tag>/latest.json`, never `releases/latest`.
  */
 export function chooseUpdateOffer(input: {

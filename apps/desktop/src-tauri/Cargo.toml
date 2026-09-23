@@ -24,6 +24,8 @@ serde_yaml = "0.9"
 tokio = { version = "1", features = ["full"] }
 dirs = "5"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "system-proxy", "socks"] }
+# Same crate as tauri-plugin-updater, so the loopback CA type matches that client.
+updater-reqwest = { package = "reqwest", version = "=0.13.4", default-features = false, features = ["rustls-no-provider"] }
 url = "2"
 hmac = "0.12"
 sha1 = "0.10"

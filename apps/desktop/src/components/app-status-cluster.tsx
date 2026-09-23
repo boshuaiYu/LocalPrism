@@ -148,8 +148,9 @@ export function AppStatusBar({
           aria-label={t("updates.betaJoin")}
           title={t("updates.betaJoin")}
           data-testid="beta-channel-toggle"
+          disabled={busy}
           className={cn(
-            "h-6 rounded-md px-1.5 font-medium text-[11px]",
+            "h-6 rounded-md px-1.5 font-medium text-[11px] disabled:cursor-not-allowed disabled:opacity-40",
             joinBeta
               ? "bg-foreground text-background"
               : "text-muted-foreground hover:bg-muted/70 hover:text-foreground",
