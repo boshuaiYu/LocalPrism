@@ -43,11 +43,11 @@ describe("skill categories", () => {
       ["nature-skills", "nature-skills"],
       ["scientific-agent-skills", "scientific-agent-skills"],
       ["paper-humanizer-skill", "paper-humanizer-skill"],
-      ["imported", "Uncategorized"],
+      ["category:mystery", "mystery"],
     ]);
-    expect(groups.find((group) => group.id === "imported")?.items).toEqual([
-      { folder: "mystery", name: "Mystery" },
-    ]);
+    expect(
+      groups.find((group) => group.id === "category:mystery")?.items,
+    ).toEqual([{ folder: "mystery", name: "Mystery" }]);
     expect(
       resolveSkillCategory(
         { folder: "scanpy", name: "Scanpy" },
@@ -75,9 +75,9 @@ describe("skill categories", () => {
         catalog,
       ),
     ).toEqual({
-      id: "imported",
-      name: "Uncategorized",
-      source: "imported",
+      id: "category:writer",
+      name: "writer",
+      source: "custom",
     });
   });
 
@@ -102,11 +102,104 @@ describe("skill categories", () => {
     ).toEqual([
       ["nature-skills", ["nature-polishing"]],
       ["category:bioinformatics", ["scanpy"]],
-      ["imported", ["my-writer"]],
+      ["category:my-writer", ["my-writer"]],
     ]);
     expect(
       groups.find((group) => group.id === "category:bioinformatics")?.name,
     ).toBe("Bioinformatics");
+  });
+
+  it("uses the skill folder only after frontmatter, parent folder, and built-in packs", () => {
+    const snapshot = emptySkillCategorySnapshot();
+
+    expect(
+      resolveSkillCategory(
+        {
+          folder: "editaplot",
+          name: "EditaPlot",
+          category: "Academic Writing",
+        },
+        snapshot,
+        catalog,
+      ),
+    ).toEqual({
+      id: "category:academic-writing",
+      name: "Academic Writing",
+      source: "custom",
+    });
+
+    expect(
+      resolveSkillCategory(
+        { folder: "editaplot", name: "EditaPlot", category: "写作" },
+        snapshot,
+        catalog,
+      ),
+    ).toEqual({
+      id: "category:写作",
+      name: "写作",
+      source: "custom",
+    });
+
+    expect(
+      resolveSkillCategory(
+        { folder: "scanpy", name: "Scanpy", category: "写作" },
+        snapshot,
+        catalog,
+      ).id,
+    ).toBe("category:写作");
+
+    expect(
+      resolveSkillCategory(
+        { folder: "editaplot", name: "EditaPlot", category: null },
+        snapshot,
+        catalog,
+      ),
+    ).toEqual({
+      id: "category:editaplot",
+      name: "editaplot",
+      source: "custom",
+    });
+
+    expect(
+      resolveSkillCategory(
+        { folder: "scanpy", name: "Scanpy" },
+        snapshot,
+        catalog,
+      ).id,
+    ).toBe("scientific-agent-skills");
+    expect(
+      resolveSkillCategory(
+        { folder: "nature-polishing", name: "Nature polishing" },
+        snapshot,
+        catalog,
+      ).id,
+    ).toBe("nature-skills");
+    expect(
+      resolveSkillCategory(
+        { folder: "paper-spine", name: "PaperSpine" },
+        snapshot,
+        catalog,
+      ).id,
+    ).toBe("paper-spine");
+    expect(
+      resolveSkillCategory(
+        { folder: "deep-research", name: "Deep Research" },
+        snapshot,
+        catalog,
+      ).id,
+    ).toBe("academic-research-skills");
+    expect(
+      resolveSkillCategory(
+        { folder: "paper-humanizer", name: "paper-humanizer" },
+        snapshot,
+        catalog,
+      ).id,
+    ).toBe("paper-humanizer-skill");
+
+    expect(
+      resolveSkillCategory({ folder: "  ", name: "Blank" }, snapshot, catalog)
+        .id,
+    ).toBe("imported");
   });
 
   it("reads slash skill folders and ignores corrupt storage", () => {
