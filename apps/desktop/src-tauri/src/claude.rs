@@ -3037,8 +3037,9 @@ fn prism_system_prompt(
          for domain-specific tasks. Use skill-provided LaTeX packages (.sty) and code patterns.\n\
          7. PYTHON: If a .venv/ exists in the project, it is already activated. \
          Use `uv pip install` to add packages and `python` to run scripts.\n\
-         8. READ TOOL: Never pass pages as an empty string. Omit pages for text/markdown/code. \
-         For PDFs only, use a 1-indexed range such as \"1\", \"3\", or \"1-5\"."
+         8. READ TOOL: pages is optional and PDF-only. Omit it for text, markdown, and code. \
+         Never set pages to an empty string. For PDFs, use a 1-indexed range such as \
+         \"1\", \"3\", \"1-5\", or \"10-20\"."
     )
 }
 

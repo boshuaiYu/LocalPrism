@@ -145,6 +145,7 @@ async fn handle_anthropic_passthrough(
     let mut body = serde_json::from_slice::<Value>(&request.body)
         .map_err(|err| format!("Claude Code sent invalid Anthropic JSON: {err}"))?;
     hoist_anthropic_system_messages(&mut body);
+    tools::sanitize_tool_uses_in_messages(&mut body);
     if !credential.model.trim().is_empty() {
         body["model"] = Value::String(credential.model.clone());
     }
@@ -196,17 +197,28 @@ async fn handle_anthropic_passthrough(
             .await
             .map_err(|err| format!("Failed to write Anthropic SSE headers: {err}"))?;
         let mut response = response;
+        let mut filter = tools::AnthropicToolInputSseFilter::default();
         loop {
             match response.chunk().await {
                 Ok(Some(chunk)) => {
-                    stream
-                        .write_all(&chunk)
-                        .await
-                        .map_err(|err| format!("Failed to write Anthropic SSE chunk: {err}"))?;
+                    let rewritten = filter.push_bytes(&chunk);
+                    if !rewritten.is_empty() {
+                        stream
+                            .write_all(&rewritten)
+                            .await
+                            .map_err(|err| format!("Failed to write Anthropic SSE chunk: {err}"))?;
+                    }
                 }
                 Ok(None) => break,
                 Err(err) => return Err(format!("Provider stream error: {err}")),
             }
+        }
+        let tail = filter.finish_bytes();
+        if !tail.is_empty() {
+            stream
+                .write_all(&tail)
+                .await
+                .map_err(|err| format!("Failed to write Anthropic SSE tail: {err}"))?;
         }
         return Ok(());
     }
@@ -215,6 +227,11 @@ async fn handle_anthropic_passthrough(
         .text()
         .await
         .map_err(|err| format!("Failed to read provider response: {err}"))?;
+    let response_text = if status.is_success() {
+        tools::sanitize_anthropic_message_body(&response_text)
+    } else {
+        response_text
+    };
     stream
         .write_all(http_response(status.as_u16(), &content_type, &response_text).as_bytes())
         .await

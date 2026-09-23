@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde_json::{json, Value};
 
 pub(super) fn repaired_tool_arguments_value(arguments: &str) -> Value {
@@ -167,9 +169,8 @@ fn is_valid_read_pages(value: &str) -> bool {
             return false;
         }
         if let Some((start, end)) = part.split_once('-') {
-            return page_index(start).is_some_and(|first| {
-                page_index(end).is_some_and(|last| last >= first)
-            });
+            return page_index(start)
+                .is_some_and(|first| page_index(end).is_some_and(|last| last >= first));
         }
         page_index(part).is_some()
     })
@@ -177,6 +178,323 @@ fn is_valid_read_pages(value: &str) -> bool {
 
 fn page_index(value: &str) -> Option<u32> {
     value.trim().parse::<u32>().ok().filter(|page| *page >= 1)
+}
+
+const READ_PAGES_SCHEMA_NOTE: &str = "Omit for non-PDF files. Never pass an empty string; it is invalid. When set, use a 1-indexed range such as \"1\", \"3\", \"1-5\", or \"10-20\".";
+
+fn is_read_tool_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("read")
+}
+
+/// Tell models that `pages: ""` is not a valid Read argument.
+/// Claude Code rejects that shape before the file is read.
+pub(super) fn prepare_forwarded_tool_description(name: &str, description: &str) -> String {
+    if !is_read_tool_name(name) || description.to_ascii_lowercase().contains("empty string") {
+        return description.to_string();
+    }
+    let note = "For PDFs only, pages must be a 1-indexed range like \"1-5\", \"3\", or \"10-20\". Omit pages for other files; an empty string is invalid.";
+    if description.trim().is_empty() {
+        note.to_string()
+    } else {
+        format!("{description} {note}")
+    }
+}
+
+pub(super) fn prepare_forwarded_tool_schema(name: &str, mut schema: Value) -> Value {
+    if !is_read_tool_name(name) {
+        return schema;
+    }
+    if let Some(root) = schema.as_object_mut() {
+        if let Some(required) = root
+            .get_mut("required")
+            .and_then(|value| value.as_array_mut())
+        {
+            required.retain(|item| item.as_str() != Some("pages"));
+        }
+        if let Some(properties) = root
+            .get_mut("properties")
+            .and_then(|value| value.as_object_mut())
+        {
+            if let Some(pages) = properties
+                .get_mut("pages")
+                .and_then(|value| value.as_object_mut())
+            {
+                if pages.get("default").is_some_and(|value| {
+                    value.is_null() || value.as_str().is_some_and(|text| text.trim().is_empty())
+                }) {
+                    pages.remove("default");
+                }
+                let existing = pages
+                    .get("description")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                if !existing.to_ascii_lowercase().contains("empty string") {
+                    let description = if existing.is_empty() {
+                        READ_PAGES_SCHEMA_NOTE.to_string()
+                    } else {
+                        format!("{existing} {READ_PAGES_SCHEMA_NOTE}")
+                    };
+                    pages.insert("description".into(), Value::String(description));
+                }
+            }
+        }
+    }
+    schema
+}
+
+pub(super) fn sanitize_tool_uses_in_messages(body: &mut Value) {
+    let Some(messages) = body
+        .get_mut("messages")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return;
+    };
+    for message in messages {
+        let _ = sanitize_content_tool_inputs(message.get_mut("content"));
+    }
+}
+
+pub(super) fn sanitize_anthropic_message_body(body: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(body) else {
+        return body.to_string();
+    };
+    if !sanitize_content_tool_inputs(value.get_mut("content")) {
+        return body.to_string();
+    }
+    value.to_string()
+}
+
+fn sanitize_content_tool_inputs(content: Option<&mut Value>) -> bool {
+    let Some(Value::Array(blocks)) = content else {
+        return false;
+    };
+    let mut changed = false;
+    for block in blocks {
+        if block.get("type").and_then(|value| value.as_str()) != Some("tool_use") {
+            continue;
+        }
+        let Some(input) = block.get("input").cloned() else {
+            continue;
+        };
+        let sanitized = sanitize_tool_input(input.clone());
+        if sanitized != input {
+            block["input"] = sanitized;
+            changed = true;
+        }
+    }
+    changed
+}
+
+#[derive(Default)]
+struct PendingToolInput {
+    arguments: String,
+    /// Sanitized `content_block_start.input` already has real fields.
+    /// A delta that repairs to `{}` must not replace that input.
+    start_had_input: bool,
+}
+
+/// Buffers Anthropic `input_json_delta` fragments for tool blocks and emits
+/// one sanitized payload on `content_block_stop`. Claude Code rejects
+/// `Read.pages == ""` as soon as it parses the concatenated input.
+///
+/// Chunks stay as bytes until an SSE record boundary so a multibyte UTF-8
+/// character split across TCP reads is not corrupted.
+#[derive(Default)]
+pub(super) struct AnthropicToolInputSseFilter {
+    buffer: Vec<u8>,
+    pending: HashMap<i64, PendingToolInput>,
+}
+
+impl AnthropicToolInputSseFilter {
+    pub(super) fn push_bytes(&mut self, chunk: &[u8]) -> Vec<u8> {
+        self.buffer.extend_from_slice(chunk);
+        let mut out = Vec::new();
+        while let Some((block, consumed)) = split_sse_block_bytes(&self.buffer) {
+            self.buffer.drain(..consumed);
+            match std::str::from_utf8(&block) {
+                Ok(text) => out.extend_from_slice(self.rewrite_block(text).as_bytes()),
+                Err(_) => {
+                    out.extend_from_slice(&block);
+                    out.extend_from_slice(b"\n\n");
+                }
+            }
+        }
+        out
+    }
+
+    pub(super) fn push(&mut self, chunk: &str) -> String {
+        String::from_utf8_lossy(&self.push_bytes(chunk.as_bytes())).into_owned()
+    }
+
+    pub(super) fn finish_bytes(&mut self) -> Vec<u8> {
+        let mut out = self.push_bytes(&[]);
+        if !self.buffer.is_empty() {
+            let rest = std::mem::take(&mut self.buffer);
+            match std::str::from_utf8(&rest) {
+                Ok(text) => {
+                    let trimmed = text.trim_end_matches(['\r', '\n']);
+                    if !trimmed.trim().is_empty() {
+                        out.extend_from_slice(self.rewrite_block(trimmed).as_bytes());
+                    }
+                }
+                Err(_) => out.extend_from_slice(&rest),
+            }
+        }
+        let indexes = self.pending.keys().copied().collect::<Vec<_>>();
+        for index in indexes {
+            if let Some(pending) = self.pending.remove(&index) {
+                out.extend_from_slice(
+                    tool_arguments_delta(index, &pending.arguments, pending.start_had_input)
+                        .as_bytes(),
+                );
+            }
+        }
+        out
+    }
+
+    pub(super) fn finish(&mut self) -> String {
+        String::from_utf8_lossy(&self.finish_bytes()).into_owned()
+    }
+
+    fn rewrite_block(&mut self, block: &str) -> String {
+        let Some(mut data) = sse_json_data(block) else {
+            return terminate_sse_block(block);
+        };
+        match data
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+        {
+            "content_block_start" => {
+                let is_tool = data
+                    .pointer("/content_block/type")
+                    .and_then(|value| value.as_str())
+                    == Some("tool_use");
+                if !is_tool {
+                    return terminate_sse_block(block);
+                }
+                let index = json_index(&data);
+                let mut start_had_input = false;
+                if let Some(input) = data.pointer_mut("/content_block/input") {
+                    let sanitized = sanitize_tool_input(input.clone());
+                    start_had_input = sanitized.as_object().is_some_and(|map| !map.is_empty());
+                    *input = sanitized;
+                }
+                self.pending.insert(
+                    index,
+                    PendingToolInput {
+                        arguments: String::new(),
+                        start_had_input,
+                    },
+                );
+                sse_event_named(&sse_event_name(block), &data)
+            }
+            "content_block_delta" => {
+                let index = json_index(&data);
+                let is_input = data.pointer("/delta/type").and_then(|value| value.as_str())
+                    == Some("input_json_delta");
+                if is_input && self.pending.contains_key(&index) {
+                    if let Some(partial) = data
+                        .pointer("/delta/partial_json")
+                        .and_then(|value| value.as_str())
+                    {
+                        if let Some(pending) = self.pending.get_mut(&index) {
+                            pending.arguments.push_str(partial);
+                        }
+                    }
+                    return String::new();
+                }
+                terminate_sse_block(block)
+            }
+            "content_block_stop" => {
+                let index = json_index(&data);
+                let Some(pending) = self.pending.remove(&index) else {
+                    return terminate_sse_block(block);
+                };
+                let mut out =
+                    tool_arguments_delta(index, &pending.arguments, pending.start_had_input);
+                out.push_str(&terminate_sse_block(block));
+                out
+            }
+            _ => terminate_sse_block(block),
+        }
+    }
+}
+
+fn tool_arguments_delta(index: i64, arguments: &str, start_had_input: bool) -> String {
+    if arguments.trim().is_empty() {
+        return String::new();
+    }
+    let repaired = repair_tool_arguments(arguments);
+    if repaired == "{}" && start_had_input {
+        return String::new();
+    }
+    sse_event_named(
+        "content_block_delta",
+        &json!({
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {
+                "type": "input_json_delta",
+                "partial_json": repaired,
+            }
+        }),
+    )
+}
+
+fn json_index(data: &Value) -> i64 {
+    data.get("index")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(0)
+}
+
+fn terminate_sse_block(block: &str) -> String {
+    format!("{}\n\n", block.trim_end_matches(['\r', '\n']))
+}
+
+fn sse_event_name(block: &str) -> String {
+    for line in block.lines() {
+        if let Some(value) = line.strip_prefix("event:") {
+            return value.trim().to_string();
+        }
+    }
+    "message".to_string()
+}
+
+fn sse_json_data(block: &str) -> Option<Value> {
+    let mut data = String::new();
+    for line in block.lines() {
+        if let Some(value) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(value.trim());
+        }
+    }
+    if data.is_empty() {
+        return None;
+    }
+    serde_json::from_str(&data).ok()
+}
+
+fn sse_event_named(event: &str, data: &Value) -> String {
+    format!("event: {event}\ndata: {data}\n\n")
+}
+
+fn split_sse_block_bytes(buffer: &[u8]) -> Option<(Vec<u8>, usize)> {
+    if let Some(index) = find_bytes(buffer, b"\r\n\r\n") {
+        return Some((buffer[..index].to_vec(), index + 4));
+    }
+    if let Some(index) = find_bytes(buffer, b"\n\n") {
+        return Some((buffer[..index].to_vec(), index + 2));
+    }
+    None
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn trim_code_fence(value: &str) -> &str {
@@ -656,10 +974,7 @@ mod tests {
             r#"{"file_path":"main.tex","pages":"","limit":2000}"#,
         ))
         .unwrap();
-        assert_eq!(
-            repaired,
-            json!({ "file_path": "main.tex", "limit": 2000 })
-        );
+        assert_eq!(repaired, json!({ "file_path": "main.tex", "limit": 2000 }));
         assert_eq!(
             sanitize_tool_input(json!({ "file_path": "notes.md", "pages": "   " })),
             json!({ "file_path": "notes.md" })
@@ -672,5 +987,165 @@ mod tests {
             sanitize_tool_input(json!({ "file_path": "paper.pdf", "pages": 3 })),
             json!({ "file_path": "paper.pdf", "pages": "3" })
         );
+        assert_eq!(
+            sanitize_tool_input(json!({ "file_path": "notes.md", "pages": Value::Null })),
+            json!({ "file_path": "notes.md" })
+        );
+        assert_eq!(
+            sanitize_tool_input(json!({ "file_path": "notes.md" })),
+            json!({ "file_path": "notes.md" })
+        );
+        assert_eq!(
+            sanitize_tool_input(json!({ "file_path": "paper.pdf", "pages": "  10-20  " })),
+            json!({ "file_path": "paper.pdf", "pages": "10-20" })
+        );
+        assert_eq!(
+            sanitize_tool_input(json!({ "file_path": "paper.pdf", "pages": "0" })),
+            json!({ "file_path": "paper.pdf" })
+        );
+    }
+
+    #[test]
+    fn read_schema_documents_that_empty_pages_is_invalid() {
+        let schema = prepare_forwarded_tool_schema(
+            "Read",
+            json!({
+                "type": "object",
+                "required": ["file_path", "pages"],
+                "properties": {
+                    "file_path": { "type": "string" },
+                    "pages": { "type": "string", "default": "", "description": "Page range" }
+                }
+            }),
+        );
+        assert!(schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item.as_str() != Some("pages")));
+        assert!(schema["properties"]["pages"].get("default").is_none());
+        let description = schema["properties"]["pages"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(description.contains("empty string"));
+        assert!(description.contains("1-5"));
+        assert!(description.contains("10-20"));
+
+        let bash = prepare_forwarded_tool_schema(
+            "Bash",
+            json!({ "type": "object", "properties": { "command": { "type": "string" } } }),
+        );
+        assert!(bash["properties"].get("pages").is_none());
+        let read_description = prepare_forwarded_tool_description("Read", "Read a file");
+        assert!(read_description.contains("empty string"));
+        assert_eq!(
+            prepare_forwarded_tool_description("Bash", "Run a command"),
+            "Run a command"
+        );
+    }
+
+    #[test]
+    fn passthrough_sse_strips_empty_pages_and_keeps_pdf_ranges() {
+        let raw = format!(
+            "event: content_block_start\ndata: {}\n\n\
+             event: content_block_delta\ndata: {}\n\n\
+             event: content_block_delta\ndata: {}\n\n\
+             event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n\
+             event: content_block_start\ndata: {}\n\n\
+             event: content_block_delta\ndata: {}\n\n\
+             event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":1}}\n\n\
+             event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":2,\"delta\":{{\"type\":\"text_delta\",\"text\":\"Hi\"}}}}\n\n",
+            json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_read",
+                    "name": "Read",
+                    "input": { "file_path": "notes.md", "pages": "" }
+                }
+            }),
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": { "type": "input_json_delta", "partial_json": "{\"file_path\":\"notes.md\",\"pa" }
+            }),
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": { "type": "input_json_delta", "partial_json": "ges\":\"\",\"limit\":200}" }
+            }),
+            json!({
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_pdf",
+                    "name": "Read",
+                    "input": {}
+                }
+            }),
+            json!({
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": { "type": "input_json_delta", "partial_json": "{\"file_path\":\"paper.pdf\",\"pages\":\"10-20\"}" }
+            }),
+        );
+
+        let mut filter = AnthropicToolInputSseFilter::default();
+        let mut out = String::new();
+        for chunk in raw.as_bytes().chunks(19) {
+            out.push_str(&filter.push(&String::from_utf8_lossy(chunk)));
+        }
+        out.push_str(&filter.finish());
+
+        let read_block = out.split("toolu_pdf").next().unwrap();
+        assert!(read_block.contains("notes.md"));
+        assert!(!read_block.contains("pages"));
+        assert!(out.contains("10-20"));
+        assert!(out.contains("paper.pdf"));
+        assert!(out.contains("Hi"));
+        assert!(out.contains("content_block_stop"));
+    }
+
+    #[test]
+    fn passthrough_sse_preserves_utf8_split_across_chunks() {
+        let raw = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"读文件\"}}\n\n";
+        let bytes = raw.as_bytes();
+        let split = raw.find('读').expect("character") + 1;
+        let mut filter = AnthropicToolInputSseFilter::default();
+        let mut out = filter.push_bytes(&bytes[..split]);
+        out.extend(filter.push_bytes(&bytes[split..]));
+        out.extend(filter.finish_bytes());
+        let text = String::from_utf8(out).expect("utf-8");
+        assert!(text.contains("读文件"));
+    }
+
+    #[test]
+    fn anthropic_message_body_strips_empty_pages_only() {
+        let raw = json!({
+            "type": "message",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "Read",
+                    "input": { "file_path": "a.md", "pages": "" }
+                },
+                {
+                    "type": "tool_use",
+                    "name": "Read",
+                    "input": { "file_path": "paper.pdf", "pages": "3" }
+                }
+            ]
+        })
+        .to_string();
+        let sanitized: Value =
+            serde_json::from_str(&sanitize_anthropic_message_body(&raw)).unwrap();
+        assert!(sanitized["content"][0]["input"].get("pages").is_none());
+        assert_eq!(sanitized["content"][1]["input"]["pages"], "3");
+
+        let unchanged =
+            json!({ "type": "message", "content": [{ "type": "text", "text": "ok" }] }).to_string();
+        assert_eq!(sanitize_anthropic_message_body(&unchanged), unchanged);
     }
 }
