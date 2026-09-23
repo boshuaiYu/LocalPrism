@@ -4,6 +4,8 @@ import { emptyAgentProfile, useAgentStore } from "@/stores/agent-store";
 import { useSkillStore } from "@/stores/skill-store";
 import { useProviderStore } from "@/stores/provider-store";
 import {
+  isFatalSkillDiscoveryError,
+  retainAssignableSkillIds,
   skillAssignmentAliases,
   skillAssignmentId,
   skillMatchesAssignmentId,
@@ -65,10 +67,27 @@ export function AgentEditor({
 
   const catalogReady = !awaitingSkills && !skillsLoading;
 
-  const compatibleSkills = useMemo(
-    () => skillsCompatibleWith(skills, runtime, profile.scope),
-    [skills, runtime, profile.scope],
-  );
+  const compatibleSkills = useMemo(() => {
+    const sameScope = skillsCompatibleWith(skills, runtime, profile.scope);
+    const seen = new Set(sameScope.map((skill) => skill.id));
+    const selectedElsewhere = skills.filter((skill) => {
+      if (seen.has(skill.id)) return false;
+      if (isFatalSkillDiscoveryError(skill.discoveryError)) return false;
+      if (!skill.targets.some((target) => target.runtime === runtime)) {
+        return false;
+      }
+      const assignmentId = skillAssignmentId(skill);
+      if (
+        sameScope.some((item) => skillMatchesAssignmentId(item, assignmentId))
+      ) {
+        return false;
+      }
+      return profile.skillIds.some((skillId) =>
+        skillMatchesAssignmentId(skill, skillId),
+      );
+    });
+    return [...sameScope, ...selectedElsewhere];
+  }, [profile.scope, profile.skillIds, runtime, skills]);
 
   const modelOptions = useMemo(() => {
     const options = catalogModels.map((model) => ({
@@ -151,11 +170,7 @@ export function AgentEditor({
           ...profile,
           runtime,
           id: profile.id || profile.name,
-          skillIds: profile.skillIds.filter((skillId) =>
-            compatibleSkills.some((skill) =>
-              skillMatchesAssignmentId(skill, skillId),
-            ),
-          ),
+          skillIds: retainAssignableSkillIds(profile.skillIds, skills, runtime),
         },
         projectPath ?? undefined,
         overwrite || Boolean(initial),

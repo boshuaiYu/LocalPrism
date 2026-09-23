@@ -42,6 +42,22 @@ export function skillMatchesAssignmentId(
   );
 }
 
+/** Keep ids that point at an installed Claude skill, including the other scope. */
+export function retainAssignableSkillIds(
+  skillIds: readonly string[],
+  skills: readonly RuntimeSkill[],
+  runtime: RuntimeKind,
+): string[] {
+  return skillIds.filter((skillId) =>
+    skills.some(
+      (skill) =>
+        skillMatchesAssignmentId(skill, skillId) &&
+        !isFatalSkillDiscoveryError(skill.discoveryError) &&
+        skill.targets.some((target) => target.runtime === runtime),
+    ),
+  );
+}
+
 export function skillAssignmentAliases(skill: RuntimeSkill): string[] {
   return [
     ...new Set(

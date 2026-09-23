@@ -189,6 +189,49 @@ describe("useClaudeChatStore.sendPrompt context assembly", () => {
     expect(prompt).toContain("[Currently open file: main.tex]");
   });
 
+  it("adds loaded .bib citekeys when the peer review agent is selected", async () => {
+    setMockDocumentState({
+      files: [
+        {
+          id: "main.tex",
+          name: "main.tex",
+          relativePath: "main.tex",
+          absolutePath: "/project/main.tex",
+          type: "tex",
+          content: "See \\\\cite{smith2020}.",
+          isDirty: false,
+        },
+        {
+          id: "references.bib",
+          name: "references.bib",
+          relativePath: "references.bib",
+          absolutePath: "/project/references.bib",
+          type: "bib",
+          content: "@article{smith2020,\n  title = {Example}\n}\n",
+          isDirty: false,
+        },
+      ],
+    });
+    useClaudeChatStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === "tab-default" ? { ...tab, agentId: "peer-review" } : tab,
+      ),
+    }));
+
+    await useClaudeChatStore.getState().sendPrompt("Review this draft");
+
+    const prompt = (vi.mocked(invoke).mock.calls[0]?.[1] as any)?.request
+      ?.prompt as string;
+    expect(prompt).toContain("Review this draft");
+    expect(prompt).toContain("references.bib");
+    expect(prompt).toContain("smith2020");
+
+    const userText =
+      useClaudeChatStore.getState().messages[0].message?.content?.[0].text;
+    expect(userText).toBe("Review this draft");
+    expect(userText).not.toContain("Project bibliography context");
+  });
+
   it("uses a line-range label and only the selected slice for selection context", async () => {
     const state = setMockDocumentState({
       files: [

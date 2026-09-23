@@ -27,6 +27,7 @@ import { useSettingsStore } from "./settings-store";
 import { useChatLayoutStore } from "./chat-layout-store";
 import { createLogger } from "@/lib/debug/logger";
 import { cleanupTemporaryChatFiles } from "@/lib/chat-temporary-files";
+import { appendPeerReviewBibliography } from "@/lib/preset-agents";
 import {
   interruptRuntimeTurn,
   runtimeReadConversation,
@@ -1501,6 +1502,11 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         }
         prompt = `${ctx}\n\n${userPrompt}`;
       }
+      prompt = appendPeerReviewBibliography(
+        prompt,
+        selectedAgentId,
+        docState.files,
+      );
       log.info("invoking CLI", {
         promptLength: prompt.length,
         mode: resumeSessionId ? "resume" : "new",

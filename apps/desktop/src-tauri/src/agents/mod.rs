@@ -353,17 +353,45 @@ fn is_fatal_skill_discovery_error(error: &str) -> bool {
         .contains("legacy claude skill is missing")
 }
 
+fn skill_id_matches(skill: &crate::skills::domain::RuntimeSkill, skill_id: &str) -> bool {
+    skill.folder == skill_id || skill.id == skill_id || skill.name == skill_id
+}
+
 fn skill_matches_assignment(
     skill: &crate::skills::domain::RuntimeSkill,
     skill_id: &str,
     profile: &AgentProfile,
 ) -> bool {
-    let id_ok =
-        skill.folder == skill_id || skill.id == skill_id || skill.name == skill_id;
-    let target_ok = skill.targets.iter().any(|target| {
-        target.runtime == profile.runtime && target.scope == profile.scope
-    });
-    id_ok && target_ok
+    let target_ok = skill
+        .targets
+        .iter()
+        .any(|target| target.runtime == profile.runtime && target.scope == profile.scope);
+    skill_id_matches(skill, skill_id) && target_ok
+}
+
+fn skill_targets_runtime(
+    skill: &crate::skills::domain::RuntimeSkill,
+    runtime: crate::runtime::RuntimeKind,
+) -> bool {
+    skill.targets.iter().any(|target| target.runtime == runtime)
+}
+
+/// Prefer a skill installed in the agent scope. Fall back to the other scope
+/// so a user agent can still name a project citation skill, and the reverse.
+fn find_assigned_skill<'a>(
+    catalog: &'a [crate::skills::domain::RuntimeSkill],
+    skill_id: &str,
+    profile: &AgentProfile,
+) -> Option<&'a crate::skills::domain::RuntimeSkill> {
+    if let Some(skill) = catalog
+        .iter()
+        .find(|candidate| skill_matches_assignment(candidate, skill_id, profile))
+    {
+        return Some(skill);
+    }
+    catalog.iter().find(|candidate| {
+        skill_id_matches(candidate, skill_id) && skill_targets_runtime(candidate, profile.runtime)
+    })
 }
 
 fn resolve_skill_paths(
@@ -377,12 +405,9 @@ fn resolve_skill_paths(
         list_runtime_skills(project_path).map_err(|error| AgentError::from(error.to_string()))?;
     let mut resolved = Vec::new();
     for skill_id in &profile.skill_ids {
-        let skill = catalog
-            .iter()
-            .find(|candidate| skill_matches_assignment(candidate, skill_id, profile))
-            .ok_or_else(|| {
-                AgentError::from(format!("Assigned skill '{skill_id}' was not found"))
-            })?;
+        let skill = find_assigned_skill(&catalog, skill_id, profile).ok_or_else(|| {
+            AgentError::from(format!("Assigned skill '{skill_id}' was not found"))
+        })?;
         if skill
             .discovery_error
             .as_deref()
@@ -392,14 +417,10 @@ fn resolve_skill_paths(
                 "Assigned skill '{skill_id}' has a discovery error"
             )));
         }
-        let has_target = skill
-            .targets
-            .iter()
-            .any(|target| target.runtime == profile.runtime && target.scope == profile.scope);
-        if !has_target {
+        if !skill_targets_runtime(skill, profile.runtime) {
             return Err(AgentError::from(format!(
-                "Assigned skill '{skill_id}' is not available for {:?} {:?}",
-                profile.runtime, profile.scope
+                "Assigned skill '{skill_id}' is not available for {:?}",
+                profile.runtime
             )));
         }
         let skill_md = find_skill_md(Path::new(&skill.source_path)).ok_or_else(|| {
@@ -602,6 +623,47 @@ mod tests {
             source_path: String::new(),
             unknown_fields: Default::default(),
         }
+    }
+
+    #[test]
+    fn preset_assignment_falls_back_to_the_other_scope() {
+        let catalog = vec![
+            sample_skill(
+                "claude:user:nature-polishing",
+                "nature-polishing",
+                SkillScope::User,
+            ),
+            sample_skill(
+                "claude:project:zotero-cite",
+                "zotero-cite",
+                SkillScope::Project,
+            ),
+        ];
+        let profile = sample_profile(SkillScope::User);
+        assert_eq!(
+            find_assigned_skill(&catalog, "nature-polishing", &profile)
+                .unwrap()
+                .folder,
+            "nature-polishing"
+        );
+        assert_eq!(
+            find_assigned_skill(&catalog, "zotero-cite", &profile)
+                .unwrap()
+                .folder,
+            "zotero-cite"
+        );
+
+        let duplicated = vec![
+            sample_skill("claude:user:writer", "writer", SkillScope::User),
+            sample_skill("claude:project:writer", "writer", SkillScope::Project),
+        ];
+        let project = sample_profile(SkillScope::Project);
+        assert_eq!(
+            find_assigned_skill(&duplicated, "writer", &project)
+                .unwrap()
+                .id,
+            "claude:project:writer"
+        );
     }
 
     #[test]

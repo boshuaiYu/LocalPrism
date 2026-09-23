@@ -9,7 +9,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import { AgentEditor } from "@/components/agents/agent-editor";
 import { useSkillStore } from "@/stores/skill-store";
-import { useAgentStore } from "@/stores/agent-store";
+import { emptyAgentProfile, useAgentStore } from "@/stores/agent-store";
 import { useProviderStore } from "@/stores/provider-store";
 import type { RuntimeSkill } from "@/runtime/types";
 
@@ -148,5 +148,53 @@ describe("AgentEditor skill assignment", () => {
     await vi.waitFor(() => {
       expect(container.textContent).toContain("My Reviewer");
     });
+  });
+
+  it("shows one row when the same folder is installed for user and project", async () => {
+    const duplicated = [
+      skill({
+        id: "claude:user:writer",
+        name: "Writer",
+        folder: "writer",
+        sourcePath: "C:/skills/writer",
+      }),
+      skill({
+        id: "claude:project:writer",
+        name: "Writer",
+        folder: "writer",
+        sourcePath: "/paper/.localprism/skills/writer",
+        targets: [{ runtime: "claude", scope: "project" }],
+      }),
+    ];
+    useSkillStore.setState({
+      skills: duplicated,
+      loading: false,
+      error: null,
+    });
+    invoke.mockImplementation((command: string) => {
+      if (command === "skill_list") return Promise.resolve(duplicated);
+      return Promise.resolve([]);
+    });
+
+    root.render(
+      <AgentEditor
+        projectPath="/paper"
+        initial={{
+          ...emptyAgentProfile("claude", "user"),
+          id: "academic-polish",
+          name: "润色",
+          skillIds: ["writer"],
+        }}
+      />,
+    );
+
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain("1 selected");
+    });
+    const checked = [
+      ...container.querySelectorAll('input[type="checkbox"]'),
+    ].filter((node) => (node as HTMLInputElement).checked);
+    expect(checked).toHaveLength(1);
+    expect(container.textContent?.match(/Writer/g)).toHaveLength(1);
   });
 });
