@@ -448,7 +448,7 @@ async fn fetch_zotero_source(
         .header("Zotero-API-Version", "3")
         .header("Cache-Control", "no-cache, no-store")
         .header("Pragma", "no-cache")
-        .header("User-Agent", "LocalPrism/1.0.8-1");
+        .header("User-Agent", "LocalPrism/1.0.8-2");
 
     for (key, value) in extra_headers {
         if should_skip_forwarded_header(key) {
