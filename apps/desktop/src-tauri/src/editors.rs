@@ -42,17 +42,32 @@ enum EditorLaunch {
     Command { program: PathBuf, goto_flag: bool },
     /// macOS app bundle opened with `/usr/bin/open -a`.
     MacApp { app_path: PathBuf, goto_flag: bool },
-    /// Codex desktop deep link (`codex://threads/new?path=`).
+    /// Codex desktop deep link (`codex://threads/new?path=&mode=codex`).
     ///
     /// `path` is a workspace directory. A selected file is carried in `prompt`,
     /// which the desktop app places in the composer and does not send.
+    /// `mode=codex` selects the coding workspace. Omitting it leaves the
+    /// persisted composer mode, whose default is chat. `mode=work` is ChatGPT
+    /// Work, a different surface from the coding agent.
     CodexDesktop { macos_app: Option<PathBuf> },
-    /// Codex CLI. macOS and Windows accept `codex app <directory>`.
-    /// Linux has no `app` subcommand, so the TUI starts in the workspace.
+    /// Codex CLI. The desktop handoff uses the same deep link as
+    /// `CodexDesktop`, because `codex app <directory>` builds a URL with only
+    /// `path` and therefore opens chat. Linux has no `app` subcommand.
     CodexCli {
         program: PathBuf,
-        app_subcommand: bool,
+        kind: CodexCliKind,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexCliKind {
+    /// `open` the `codex://` URL so the registered Mac app receives `mode`.
+    MacProtocol,
+    /// `Start-Process` the `codex://` URL. One PowerShell `-Command` string,
+    /// so `&mode=` and `&prompt=` are not split into extra statements.
+    WindowsProtocol,
+    /// Interactive TUI in the project directory.
+    LinuxTui,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,9 +210,11 @@ fn locate_codex(env: &EditorEnvironment) -> Option<DetectedEditor> {
         name: "Codex".to_string(),
         launch: EditorLaunch::CodexCli {
             program,
-            // `codex app` exists on macOS and Windows only. It opens the
-            // desktop app on a directory; Linux launches the TUI instead.
-            app_subcommand: matches!(env.os, HostOs::Macos | HostOs::Windows),
+            kind: match env.os {
+                HostOs::Macos => CodexCliKind::MacProtocol,
+                HostOs::Windows => CodexCliKind::WindowsProtocol,
+                HostOs::Linux => CodexCliKind::LinuxTui,
+            },
         },
     })
 }
@@ -571,10 +588,9 @@ fn plan_launch(
         EditorLaunch::CodexDesktop { macos_app } => {
             codex_desktop_launch(macos_app.as_deref(), &project, file_ref, line)
         }
-        EditorLaunch::CodexCli {
-            program,
-            app_subcommand,
-        } => codex_cli_launch(program, *app_subcommand, &project, file_ref),
+        EditorLaunch::CodexCli { program, kind } => {
+            codex_cli_launch(program, *kind, &project, file_ref, line)
+        }
     })
 }
 
@@ -669,43 +685,78 @@ fn codex_desktop_launch(
             hide_console: false,
         }
     } else {
-        // One -Command string. A separate argv would let `&prompt=` split the
-        // PowerShell statement, so the file reference never reaches Start-Process.
-        let literal = url.replace('\'', "''");
-        LaunchCommand {
-            program: PathBuf::from("powershell.exe"),
-            args: vec![
-                "-NoProfile".to_string(),
-                "-Command".to_string(),
-                format!("Start-Process -FilePath '{literal}'"),
-            ],
-            current_dir: None,
-            hide_console: true,
-        }
+        windows_open_url(url)
+    }
+}
+
+fn codex_cli_thread_url(
+    workspace: &Path,
+    project: &Path,
+    file: Option<&Path>,
+    line: Option<u32>,
+) -> String {
+    let prompt = file.map(|path| codex_file_prompt(project, path, line));
+    codex_new_thread_url(workspace, prompt.as_deref())
+}
+
+fn windows_open_url(url: String) -> LaunchCommand {
+    // One -Command string. A separate argv would let `&prompt=` or `&mode=`
+    // split the PowerShell statement, so the file reference never reaches
+    // Start-Process.
+    let literal = url.replace('\'', "''");
+    LaunchCommand {
+        program: PathBuf::from("powershell.exe"),
+        args: vec![
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            format!("Start-Process -FilePath '{literal}'"),
+        ],
+        current_dir: None,
+        hide_console: true,
     }
 }
 
 fn codex_cli_launch(
     program: &Path,
-    app_subcommand: bool,
+    kind: CodexCliKind,
     project: &Path,
     file: Option<&Path>,
+    line: Option<u32>,
 ) -> LaunchCommand {
     let workspace = codex_workspace_dir(project, file);
-    let cwd = if !workspace.as_os_str().is_empty() {
-        Some(workspace.clone())
-    } else {
-        None
-    };
-    // `codex app PATH` is the documented desktop handoff. PATH must be a
-    // directory. The CLI has no file or line argument (openai/codex#22474).
-    let args = if app_subcommand && !workspace.as_os_str().is_empty() {
-        vec!["app".to_string(), path_for_url(&workspace)]
-    } else {
-        Vec::new()
-    };
-    let program = prefer_native_executable(program.to_path_buf());
-    script_launch(&program, args, cwd, false)
+    match kind {
+        // `codex app PATH` only appends `path`. The desktop app then stays on
+        // chat. Opening the URL ourselves carries `mode=codex` and the file
+        // prompt. PATH is still a directory, never the file.
+        CodexCliKind::MacProtocol => LaunchCommand {
+            program: PathBuf::from("/usr/bin/open"),
+            args: vec![codex_cli_thread_url(&workspace, project, file, line)],
+            current_dir: None,
+            hide_console: false,
+        },
+        CodexCliKind::WindowsProtocol => {
+            windows_open_url(codex_cli_thread_url(&workspace, project, file, line))
+        }
+        CodexCliKind::LinuxTui => {
+            let cwd = if !workspace.as_os_str().is_empty() {
+                Some(workspace.clone())
+            } else {
+                None
+            };
+            // No chat/work/codex subcommand. `--sandbox workspace-write` is
+            // the agent workspace policy. A positional prompt would submit a
+            // turn, so the file stays out of argv.
+            let mut args = Vec::new();
+            if !workspace.as_os_str().is_empty() {
+                args.push("-C".to_string());
+                args.push(path_for_url(&workspace));
+            }
+            args.push("--sandbox".to_string());
+            args.push("workspace-write".to_string());
+            let program = prefer_native_executable(program.to_path_buf());
+            script_launch(&program, args, cwd, false)
+        }
+    }
 }
 
 /// Directory Codex will accept as `path`. A file path is rejected by the
@@ -779,8 +830,10 @@ fn goto_parameter(file: &Path, line: Option<u32>) -> String {
 }
 
 fn codex_new_thread_url(workspace: &Path, prompt: Option<&str>) -> String {
+    // Desktop accepts `mode=chat|work|codex`. `codex` is the coding workspace
+    // (command-step agent). `work` switches to ChatGPT Work instead.
     let mut url = format!(
-        "codex://threads/new?path={}",
+        "codex://threads/new?path={}&mode=codex",
         encode_query_component(&path_for_url(workspace))
     );
     if let Some(prompt) = prompt.filter(|value| !value.is_empty()) {
@@ -1238,6 +1291,7 @@ mod tests {
             ]
         );
         assert!(url.contains("path=C%3A%5Cwork%5Cpaper"));
+        assert!(url.contains("mode=codex"));
         assert!(!url.split("prompt=").next().unwrap().contains("main.tex"));
         assert!(url.contains("prompt=%40main.tex%3A8"));
     }
@@ -1282,17 +1336,26 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "codex");
         let command = plan_launch(&found[0], r"C:\work", Some("main.tex"), Some(3)).unwrap();
-        assert_eq!(command.program, PathBuf::from("cmd.exe"));
+        assert_ne!(command.program, cursor);
+        let project = PathBuf::from(r"C:\work");
+        let file = project.join("main.tex");
+        let url = codex_new_thread_url(
+            &project,
+            Some(&super::codex_file_prompt(&project, &file, Some(3))),
+        );
+        assert!(url.contains("mode=codex"));
+        assert!(url.contains("prompt=%40main.tex%3A3"));
+        assert!(!url.split("prompt=").next().unwrap().contains("main.tex"));
+        assert_eq!(command.program, PathBuf::from("powershell.exe"));
+        assert!(command.hide_console);
         assert_eq!(
             command.args,
             vec![
-                "/C".to_string(),
-                shim.display().to_string(),
-                "app".to_string(),
-                r"C:\work".to_string(),
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                format!("Start-Process -FilePath '{url}'"),
             ]
         );
-        assert_eq!(command.current_dir, Some(PathBuf::from(r"C:\work")));
     }
 
     #[test]
@@ -1375,10 +1438,40 @@ mod tests {
         let editor = detect_installed_editors(&env).remove(0);
         let command = plan_launch(&editor, "/work/paper", Some("main.tex"), Some(3)).unwrap();
         assert_eq!(command.program, cli);
-        // Linux `codex` has no `app` subcommand and no file/line flag.
-        // A positional prompt would submit a turn, so the file stays out of argv.
-        assert!(command.args.is_empty());
+        // Linux `codex` has no `app` subcommand and no chat/work mode flag.
+        // `--sandbox workspace-write` is the agent workspace policy. A
+        // positional prompt would submit a turn, so the file stays out of argv.
+        assert_eq!(
+            command.args,
+            vec![
+                "-C".to_string(),
+                "/work/paper".to_string(),
+                "--sandbox".to_string(),
+                "workspace-write".to_string(),
+            ]
+        );
+        assert!(command.args.iter().all(|arg| !arg.contains("main.tex")));
         assert_eq!(command.current_dir, Some(PathBuf::from("/work/paper")));
+    }
+
+    #[test]
+    fn macos_cli_opens_codex_workspace_mode_with_the_file_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = dir.path().join("prefix/bin/codex");
+        touch(&cli);
+        let env = env_at(dir.path(), HostOs::Macos);
+        let editor = detect_installed_editors(&env).remove(0);
+        let command = plan_launch(&editor, "/work/paper", Some("main.tex"), Some(12)).unwrap();
+        assert_eq!(editor.id, "codex");
+        assert_ne!(command.program, cli);
+        assert_eq!(command.program, PathBuf::from("/usr/bin/open"));
+        assert_eq!(
+            command.args,
+            vec![
+                "codex://threads/new?path=%2Fwork%2Fpaper&mode=codex&prompt=%40main.tex%3A12"
+                    .to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -1387,7 +1480,7 @@ mod tests {
         let url = codex_new_thread_url(&project, Some("@main.tex:12"));
         assert_eq!(
             url,
-            "codex://threads/new?path=%2Fwork%2Fpaper&prompt=%40main.tex%3A12"
+            "codex://threads/new?path=%2Fwork%2Fpaper&mode=codex&prompt=%40main.tex%3A12"
         );
     }
 
