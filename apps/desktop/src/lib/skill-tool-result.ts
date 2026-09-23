@@ -63,9 +63,16 @@ function skillInvocationSignature(block: ContentBlock): string {
   return `${skillToolDisplayName(block.input)}\n${skillToolArgs(block.input)}`;
 }
 
+function userTurnContent(
+  message: ClaudeStreamMessage,
+): string | ContentBlock[] | undefined {
+  // Stored Claude transcripts keep some user turns as a plain string.
+  return message.message?.content as string | ContentBlock[] | undefined;
+}
+
 function userProseResetsSkillTurn(message: ClaudeStreamMessage): boolean {
   if (message.type !== "user") return false;
-  const content = message.message?.content;
+  const content = userTurnContent(message);
   if (Array.isArray(content)) {
     if (
       content.length > 0 &&
