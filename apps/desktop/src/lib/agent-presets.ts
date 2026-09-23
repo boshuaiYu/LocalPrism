@@ -78,6 +78,8 @@ export const BUILTIN_AGENT_PRESETS: readonly BuiltinAgentPreset[] = [
 const CITATION_TOKENS = new Set([
   "bib",
   "bibtex",
+  "cite",
+  "citing",
   "citation",
   "citations",
   "zotero",
@@ -101,25 +103,31 @@ function isCitationBibOrZoteroSkill(skill: RuntimeSkill): boolean {
   return identityTokens(skill).some((token) => CITATION_TOKENS.has(token));
 }
 
+function hasBoundedPhrase(text: string, phrase: string): boolean {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`).test(text);
+}
+
 function matchesWritingOrPolish(skill: RuntimeSkill): boolean {
   if (isCitationBibOrZoteroSkill(skill)) return false;
   const text = normalizedIdentity(skill);
+  const tokens = identityTokens(skill);
   return (
-    text.includes("polish") ||
-    text.includes("latex-guard") ||
-    identityTokens(skill).includes("writing")
+    tokens.some((token) => token.startsWith("polish")) ||
+    hasBoundedPhrase(text, "latex-guard") ||
+    tokens.includes("writing")
   );
 }
 
 function matchesHumanizerOrDeAi(skill: RuntimeSkill): boolean {
   if (isCitationBibOrZoteroSkill(skill)) return false;
   const text = normalizedIdentity(skill);
+  const tokens = identityTokens(skill);
   return (
-    text.includes("humanizer") ||
-    text.includes("humanize") ||
-    text.includes("reduce-ai") ||
-    text.includes("de-ai") ||
-    /(^|[^a-z])deai([^a-z]|$)/.test(text)
+    tokens.some((token) => token.startsWith("humaniz")) ||
+    hasBoundedPhrase(text, "reduce-ai") ||
+    hasBoundedPhrase(text, "de-ai") ||
+    tokens.some((token) => token === "deai" || token.startsWith("deai"))
   );
 }
 

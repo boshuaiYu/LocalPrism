@@ -77,6 +77,9 @@ describe("builtin agent presets", () => {
       "Do not rewrite the whole paper unless asked",
     );
     expect(review.instructions).toContain("Never invent papers or DOIs.");
+    expect(review.instructions).not.toContain(
+      "flag missing/unused/inconsistent citations",
+    );
     expect(review.skillIds).toEqual([]);
   });
 
@@ -89,6 +92,7 @@ describe("builtin agent presets", () => {
         skill("writing-clarity", "user", { name: "Writing Clarity" }),
         skill("nature-writing", "user", { name: "Nature Writing" }),
         skill("humanizer-academic", "user"),
+        skill("cite-writing", "user", { name: "Cite Writing" }),
         skill("citation-writing", "user", { name: "Citation Writing" }),
         skill("zotero-cite", "user"),
         skill("bibtex-check", "user"),
@@ -124,6 +128,18 @@ describe("builtin agent presets", () => {
       "de-ai-prose",
       "deai-pass",
     ]);
+  });
+
+  it("does not treat lookalike names as de-ai skills", () => {
+    const profile = buildPresetAgentProfile("de-ai", [
+      skill("code-ai", "user"),
+      skill("guide-ai", "user"),
+      skill("upgrade-ai", "user"),
+      skill("dehumanize", "user"),
+      skill("de-ai-prose", "user"),
+    ]);
+
+    expect(profile.skillIds).toEqual(["de-ai-prose"]);
   });
 
   it("keeps peer review critique-only and does not bind citation or writing skills", () => {
