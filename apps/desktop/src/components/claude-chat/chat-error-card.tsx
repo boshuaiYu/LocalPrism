@@ -25,18 +25,19 @@ export function ChatErrorCard({
       data-testid="chat-error-card"
       className="mx-2 mt-2 rounded-lg border border-destructive/40 bg-destructive/10 p-2 text-destructive"
     >
-      <p className="text-sm leading-5">{summary.text}</p>
+      <p className="font-medium text-sm">This turn didn't finish</p>
+      <p className="mt-1 text-sm leading-5">{summary.text}</p>
       <div className="mt-2 flex flex-wrap gap-2">
-        {retryPrompt && (
-          <button
-            type="button"
-            className="lp-focus h-8 rounded-lg bg-destructive px-3 font-medium text-white text-xs disabled:opacity-50"
-            disabled={busy}
-            onClick={() => onRetry(retryPrompt)}
-          >
-            Retry
-          </button>
-        )}
+        <button
+          type="button"
+          className="lp-focus h-8 rounded-lg bg-destructive px-3 font-medium text-white text-xs disabled:opacity-50"
+          disabled={busy || !retryPrompt}
+          onClick={() => {
+            if (retryPrompt) onRetry(retryPrompt);
+          }}
+        >
+          Retry
+        </button>
         {summary.canExpand && (
           <button
             type="button"

@@ -165,9 +165,9 @@ const MARKDOWN_COMPONENTS = {
     node?: unknown;
   }) {
     return (
-      <div className="my-3 w-full overflow-x-auto rounded-lg border border-border">
+      <div className="chat-markdown-table my-3 w-full max-w-full overflow-x-auto rounded-lg border border-border">
         <table
-          className="m-0 w-full border-collapse text-left text-sm"
+          className="m-0 w-max min-w-full border-collapse text-left text-sm"
           {...props}
         >
           {children}
@@ -243,7 +243,7 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = memo(
         rehypePlugins={REHYPE_PLUGINS}
         urlTransform={transformChatUrl}
         className={cn(
-          "min-w-0 max-w-full break-words [overflow-wrap:anywhere] [&_*]:max-w-full",
+          "chat-markdown min-w-0 max-w-full",
           className ?? "prose prose-sm dark:prose-invert max-w-none",
         )}
         components={
@@ -334,8 +334,8 @@ const CodeBlock: FC<{ language: string; code: string; preview?: boolean }> = ({
   }, []);
 
   return (
-    <div className="not-prose group relative my-2">
-      <pre className="overflow-x-auto rounded bg-muted p-3 text-sm">
+    <div className="not-prose group relative my-2 min-w-0 max-w-full">
+      <pre className="chat-markdown-pre max-w-full overflow-x-auto rounded bg-muted p-3 text-sm">
         <code>{code}</code>
       </pre>
 

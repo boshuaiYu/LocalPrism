@@ -109,6 +109,40 @@ describe("MarkdownRenderer links", () => {
     );
   });
 
+  it("scrolls code fences, tables, and display math inside the chat pane", async () => {
+    root.render(
+      <MarkdownRenderer
+        content={[
+          "```python",
+          "print('a very long line that should stay on one row')",
+          "```",
+          "",
+          "| Column | Value |",
+          "| --- | --- |",
+          "| alpha | beta |",
+          "",
+          "$$",
+          "E = mc^2",
+          "$$",
+        ].join("\n")}
+      />,
+    );
+
+    const pre = await vi.waitFor(() => {
+      const node = container.querySelector("pre");
+      if (!(node instanceof HTMLElement)) throw new Error("code fence missing");
+      return node;
+    });
+    expect(container.querySelector(".chat-markdown")).not.toBeNull();
+    expect(pre.className).toMatch(/overflow-x-auto/);
+    expect(pre.className).not.toMatch(/\[&_\*\]:max-w-full/);
+    const tableWrap = container.querySelector(".chat-markdown-table");
+    expect(tableWrap).toBeInstanceOf(HTMLElement);
+    expect(tableWrap?.className).toMatch(/overflow-x-auto/);
+    expect(container.querySelector(".katex-display")).not.toBeNull();
+    expect(container.querySelector(".md-document")).toBeNull();
+  });
+
   it("strips unsafe javascript hrefs", async () => {
     root.render(
       <MarkdownRenderer content="See [x](javascript:alert(1)) and [y](java\tscript:alert(1))." />,

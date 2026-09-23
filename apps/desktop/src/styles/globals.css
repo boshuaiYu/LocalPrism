@@ -525,6 +525,55 @@
   background: color-mix(in oklch, var(--accent) 70%, transparent);
 }
 
+/* Chat markdown in a narrow sidebar: scroll code, tables, and math
+   inside the pane. Project markdown preview keeps .md-document. */
+.chat-markdown {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.chat-markdown .chat-markdown-pre,
+.chat-markdown pre {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.chat-markdown .chat-markdown-pre code,
+.chat-markdown pre code {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+  overflow-wrap: normal;
+  word-break: normal;
+  white-space: pre;
+}
+
+.chat-markdown .chat-markdown-table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.chat-markdown img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.chat-markdown .katex-display {
+  max-width: 100%;
+  margin: 0.75em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.chat-markdown .katex {
+  font-size: 1em;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
 .lp-title {
   font-size: 1.5rem;
   line-height: 2rem;

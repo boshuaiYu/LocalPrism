@@ -60,7 +60,8 @@ export function GettingStartedDialog({
           </li>
           <li>
             Drag the pane splitters to resize the file tree, editor, chat, and
-            PDF. Reset layout restores the default widths.
+            PDF. Use Reset in the sidebar header, or Layout → Reset layout, to
+            restore the default widths.
           </li>
         </ol>
         {leavesProject && (

@@ -84,14 +84,25 @@ export function WorkspaceLayout() {
     pdf: previewVisible,
   };
   const paneSizes = paneSizeMap(paneVisibility, localStorage);
+  const suppressPersistRef = useRef(false);
   const resetLayout = useCallback(() => {
+    suppressPersistRef.current = true;
     clearPaneLayouts(localStorage);
     expandedSidebarSizeRef.current = SIDEBAR_DEFAULT_SIZE;
     setSidebarCollapsed(false);
     setLayoutEpoch((epoch) => epoch + 1);
   }, []);
+  useEffect(() => {
+    if (!suppressPersistRef.current) return;
+    const timer = window.setTimeout(() => {
+      clearPaneLayouts(localStorage);
+      suppressPersistRef.current = false;
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [layoutEpoch]);
   const persistLayout = useCallback(
     (sizes: number[]) => {
+      if (suppressPersistRef.current) return;
       const visibility = {
         code: codeVisible,
         chat: chatVisible,

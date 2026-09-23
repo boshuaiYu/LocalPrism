@@ -17,6 +17,7 @@ import {
   HashIcon,
   GithubIcon,
   PanelLeftIcon,
+  RotateCcwIcon,
   ChevronRightIcon,
   ChevronDownIcon,
   FileCodeIcon,
@@ -72,11 +73,6 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
-import {
-  HoverCard,
-  HoverCardContent,
-  HoverCardTrigger,
-} from "@/components/ui/hover-card";
 import { Input } from "@/components/ui/input";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -303,7 +299,7 @@ function LayoutPaneSwitcher({
         "transition-transform duration-300 ease-in-out hover:scale-105",
         buttonClassName,
       )}
-      onClick={onQuickToggleSidebar}
+      onClick={controls ? undefined : onQuickToggleSidebar}
       title="Layout"
       aria-label="Layout"
     >
@@ -319,13 +315,13 @@ function LayoutPaneSwitcher({
   if (!controls) return trigger;
 
   return (
-    <HoverCard openDelay={80} closeDelay={140}>
-      <HoverCardTrigger asChild>{trigger}</HoverCardTrigger>
-      <HoverCardContent
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
+      <DropdownMenuContent
         side={side}
         align={align}
         sideOffset={8}
-        className="w-44 rounded-2xl border-border/70 bg-popover/95 p-1.5 shadow-2xl backdrop-blur"
+        className="w-52 rounded-2xl border-border/70 bg-popover/95 p-1.5 shadow-2xl backdrop-blur"
       >
         <div className="space-y-1">
           <LayoutToggleRow
@@ -352,16 +348,34 @@ function LayoutPaneSwitcher({
             checked={controls.sidebarVisible}
             onCheckedChange={controls.setSidebarVisible}
           />
-          <button
-            type="button"
-            className="lp-focus flex h-10 w-full items-center rounded-lg px-2 text-left font-medium text-sm hover:bg-accent/70"
-            onClick={controls.onResetLayout}
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            className="h-10 rounded-lg px-2 font-medium text-sm"
+            onSelect={() => controls.onResetLayout()}
           >
+            <RotateCcwIcon className="size-3.5" />
             Reset layout
-          </button>
+          </DropdownMenuItem>
         </div>
-      </HoverCardContent>
-    </HoverCard>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function ResetLayoutButton({ onResetLayout }: { onResetLayout: () => void }) {
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      className="h-6 gap-1 px-1.5 text-xs transition-transform duration-300 ease-in-out hover:scale-105"
+      data-testid="reset-workspace-layout"
+      title="Restore the default pane widths"
+      aria-label="Reset layout"
+      onClick={onResetLayout}
+    >
+      <RotateCcwIcon className="size-3.5" />
+      <span className="@[12rem]/sb:inline hidden">Reset</span>
+    </Button>
   );
 }
 
@@ -1273,7 +1287,7 @@ export function Sidebar({
       </div>
       <div
         className={cn(
-          "h-full w-full min-w-0 transition-[opacity,transform] duration-300 ease-in-out",
+          "@container/sb h-full w-full min-w-0 transition-[opacity,transform] duration-300 ease-in-out",
           collapsed
             ? "pointer-events-none -translate-x-2 opacity-0"
             : "translate-x-0 opacity-100",
@@ -1282,7 +1296,7 @@ export function Sidebar({
       >
         <div className="flex h-full flex-col bg-sidebar text-sidebar-foreground">
           {/* Header — padded top for macOS overlay titlebar */}
-          <div className="grid h-[calc(var(--workspace-topbar-height)+var(--titlebar-height))] grid-cols-[2rem_minmax(0,1fr)_2rem] items-center gap-2 border-sidebar-border border-b px-3">
+          <div className="grid h-[calc(var(--workspace-topbar-height)+var(--titlebar-height))] grid-cols-[2rem_minmax(0,1fr)_auto] items-center gap-2 border-sidebar-border border-b px-3">
             <div className="flex items-center justify-start">
               <ProjectCloseButton
                 className="size-6 transition-all duration-150 ease-out hover:scale-105"
@@ -1305,7 +1319,12 @@ export function Sidebar({
             >
               <span className="block truncate">{projectName}</span>
             </button>
-            <div className="flex items-center justify-end">
+            <div className="flex items-center justify-end gap-0.5">
+              {layoutControls && (
+                <ResetLayoutButton
+                  onResetLayout={layoutControls.onResetLayout}
+                />
+              )}
               <LayoutPaneSwitcher
                 controls={layoutControls}
                 collapsed={collapsed}

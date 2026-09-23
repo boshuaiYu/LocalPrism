@@ -13,6 +13,8 @@ import {
 } from "@/stores/claude-chat-store";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
+import { lastUserPrompt } from "@/lib/chat-error-card";
+import { ChatErrorCard } from "./chat-error-card";
 import { MarkdownRenderer } from "./markdown-renderer";
 import { StreamingIndicator } from "./streaming-indicator";
 import { ThinkingWidget, ToolWidget } from "./tool-widgets";
@@ -74,8 +76,42 @@ const MessageActions: FC<{
 
 // ─── Chat Messages (main component) ───
 
+function messagePlainText(message: ClaudeStreamMessage): string {
+  if (message.type === "result") return message.result?.trim() ?? "";
+  const content = message.message?.content as
+    | string
+    | { type?: string; text?: string }[]
+    | undefined;
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((block) => block.type === "text" && block.text)
+    .map((block) => block.text?.trim() ?? "")
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function echoesActiveError(
+  message: ClaudeStreamMessage,
+  error: string | null,
+): boolean {
+  const active = error?.trim();
+  if (!active || message.subtype === "cancelled") return false;
+  if (message.type === "result") {
+    return !!message.is_error && message.result?.trim() === active;
+  }
+  if (message.type !== "assistant") return false;
+  const content = message.message?.content;
+  if (!Array.isArray(content) || content.length === 0) return false;
+  if (content.some((block) => block.type !== "text")) return false;
+  return messagePlainText(message) === active;
+}
+
 export const ChatMessages: FC = () => {
   const messages = useClaudeChatStore((s) => s.messages) ?? [];
+  const activeTabId = useClaudeChatStore((s) => s.activeTabId);
+  const activeError = useClaudeChatStore((s) => s.error);
   const isStreaming = useClaudeChatStore((s) => s.isStreaming);
   const streamingStartedAt = useClaudeChatStore((s) => s.streamingStartedAt);
   const streamingStatus = useClaudeChatStore((s) => s.streamingStatus);
@@ -205,7 +241,7 @@ export const ChatMessages: FC = () => {
     <div
       ref={viewportRef}
       onScroll={handleScroll}
-      className="absolute inset-0 overflow-y-auto scroll-smooth px-5 pt-5 pb-2"
+      className="absolute inset-0 min-w-0 overflow-y-auto overflow-x-hidden scroll-smooth px-5 pt-5 pb-2"
     >
       {settledMessages.length === 0 &&
         pendingGuidance.length === 0 &&
@@ -216,11 +252,15 @@ export const ChatMessages: FC = () => {
         )}
 
       {settledMessages.map((msg, idx) => (
-        <div key={idx} className={cn("mx-auto w-full", THREAD_MAX_WIDTH)}>
+        <div
+          key={`${activeTabId}:${idx}`}
+          className={cn("mx-auto w-full min-w-0", THREAD_MAX_WIDTH)}
+        >
           <MessageBubble
             message={msg}
             toolResultMap={toolResultMap}
             live={isStreaming && idx > openTurnStart}
+            hideErrorEcho={echoesActiveError(msg, activeError)}
           />
         </div>
       ))}
@@ -261,8 +301,10 @@ const MessageBubble: FC<{
   message: ClaudeStreamMessage;
   toolResultMap: Map<string, ContentBlock>;
   live?: boolean;
+  hideErrorEcho?: boolean;
 }> = memo(
-  ({ message, toolResultMap, live = false }) => {
+  ({ message, toolResultMap, live = false, hideErrorEcho = false }) => {
+    if (hideErrorEcho) return null;
     if (message.type === "user") {
       return <UserMessage message={message} />;
     }
@@ -281,6 +323,7 @@ const MessageBubble: FC<{
     return null;
   },
   (prev, next) => {
+    if (prev.hideErrorEcho !== next.hideErrorEcho) return false;
     if (prev.live !== next.live) return false;
     if (prev.message !== next.message) return false;
     if (prev.message.type !== "assistant") return true;
@@ -335,9 +378,9 @@ const UserMessage: FC<{ message: ClaudeStreamMessage }> = ({ message }) => {
     errors: { message: string; location?: string }[],
     prompt: string,
   ) => (
-    <div className="fade-in slide-in-from-bottom-1 grid w-full animate-in auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 py-4 duration-150 [&:where(>*)]:col-start-2">
+    <div className="fade-in slide-in-from-bottom-1 grid w-full animate-in auto-rows-auto grid-cols-[minmax(0,1fr)_auto] content-start gap-y-2 px-2 py-4 duration-150 [&:where(>*)]:col-start-2">
       <div className="relative col-start-2 min-w-0">
-        <div className="wrap-break-word rounded-2xl bg-muted px-4 py-2.5 text-foreground text-sm leading-relaxed empty:hidden">
+        <div className="wrap-break-word min-w-0 max-w-full rounded-2xl bg-muted px-4 py-2.5 text-foreground text-sm leading-relaxed empty:hidden">
           <div className="mb-2 rounded-lg border border-red-500/20 bg-red-500/10 px-2.5 py-2">
             <div className="mb-1.5 font-medium text-red-400 text-xs">
               {title}
@@ -406,9 +449,9 @@ const UserMessage: FC<{ message: ClaudeStreamMessage }> = ({ message }) => {
   }
 
   return (
-    <div className="fade-in slide-in-from-bottom-1 grid w-full animate-in auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 py-4 duration-150 [&:where(>*)]:col-start-2">
+    <div className="fade-in slide-in-from-bottom-1 grid w-full animate-in auto-rows-auto grid-cols-[minmax(0,1fr)_auto] content-start gap-y-2 px-2 py-4 duration-150 [&:where(>*)]:col-start-2">
       <div className="relative col-start-2 min-w-0">
-        <div className="wrap-break-word rounded-2xl bg-muted px-4 py-2.5 text-foreground text-sm leading-relaxed empty:hidden">
+        <div className="wrap-break-word min-w-0 max-w-full rounded-2xl bg-muted px-4 py-2.5 text-foreground text-sm leading-relaxed empty:hidden">
           {contextLabel && (
             <span className="mb-1 inline-flex items-center rounded-md bg-background/60 px-1.5 py-0.5 font-mono text-muted-foreground text-xs">
               {contextLabel}
@@ -440,9 +483,9 @@ const PendingGuidanceMessage: FC<{ guidance: QueuedGuidance }> = ({
     : visiblePrompt;
 
   return (
-    <div className="fade-in slide-in-from-bottom-1 grid w-full animate-in auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 py-4 duration-150 [&:where(>*)]:col-start-2">
+    <div className="fade-in slide-in-from-bottom-1 grid w-full animate-in auto-rows-auto grid-cols-[minmax(0,1fr)_auto] content-start gap-y-2 px-2 py-4 duration-150 [&:where(>*)]:col-start-2">
       <div className="relative col-start-2 min-w-0">
-        <div className="wrap-break-word rounded-2xl bg-muted px-4 py-2.5 text-foreground text-sm leading-relaxed empty:hidden">
+        <div className="wrap-break-word min-w-0 max-w-full rounded-2xl bg-muted px-4 py-2.5 text-foreground text-sm leading-relaxed empty:hidden">
           {contextLabel && (
             <span className="mb-1 inline-flex items-center rounded-md bg-background/60 px-1.5 py-0.5 font-mono text-muted-foreground text-xs">
               {contextLabel}
@@ -519,7 +562,7 @@ const AssistantMessage: FC<{
       data-turn-state={turnState}
       className="fade-in slide-in-from-bottom-1 relative mx-auto w-full animate-in py-4 duration-150"
     >
-      <div className="wrap-break-word px-2 text-foreground text-sm leading-7">
+      <div className="wrap-break-word min-w-0 px-2 text-foreground text-sm leading-7">
         {visibleContent.map((block, idx) => {
           if (block.type === "text" && block.text) {
             if (isHiddenSkillText(block.text)) {
@@ -566,9 +609,42 @@ const AssistantMessage: FC<{
 
 // ─── Result Message ───
 
+function FailedTurnCard({ message }: { message: ClaudeStreamMessage }) {
+  const [hidden, setHidden] = useState(false);
+  const messages = useClaudeChatStore((s) => s.messages) ?? [];
+  const isStreaming = useClaudeChatStore((s) => s.isStreaming);
+  const sendPrompt = useClaudeChatStore((s) => s.sendPrompt);
+  const clearMessages = useClaudeChatStore((s) => s.clearMessages);
+  const activeTabId = useClaudeChatStore((s) => s.activeTabId);
+  const activeError = useClaudeChatStore((s) => s.error);
+  const setError = useClaudeChatStore((s) => s._setError);
+  const errorText = message.result?.trim() ?? "";
+  const index = messages.indexOf(message);
+  const retryPrompt = lastUserPrompt(
+    index >= 0 ? messages.slice(0, index) : [],
+  );
+  if (hidden || !errorText) return null;
+  return (
+    <ChatErrorCard
+      error={errorText}
+      retryPrompt={retryPrompt}
+      busy={isStreaming}
+      onRetry={(prompt) => void sendPrompt(prompt)}
+      onClearConversation={clearMessages}
+      onDismiss={() => {
+        if (activeError?.trim() === errorText.trim()) {
+          setError(activeTabId, null);
+        }
+        setHidden(true);
+      }}
+    />
+  );
+}
+
 const ResultMessage: FC<{ message: ClaudeStreamMessage }> = ({ message }) => {
   const isError = message.is_error || message.subtype === "error";
   const resultText = message.result;
+  const cancelled = message.subtype === "cancelled";
 
   if (
     !resultText ||
@@ -578,12 +654,23 @@ const ResultMessage: FC<{ message: ClaudeStreamMessage }> = ({ message }) => {
     return null;
   }
 
+  if (isError && !cancelled) {
+    return (
+      <div
+        data-turn-state={chatTerminalState({ live: false, error: true })}
+        className="fade-in slide-in-from-bottom-1 relative mx-auto w-full min-w-0 animate-in py-2 duration-150"
+      >
+        <FailedTurnCard message={message} />
+      </div>
+    );
+  }
+
   return (
     <div
       data-turn-state={chatTerminalState({ live: false, error: !!isError })}
       className="fade-in slide-in-from-bottom-1 relative mx-auto w-full animate-in py-4 duration-150"
     >
-      <div className="wrap-break-word px-2 text-foreground text-sm leading-7">
+      <div className="wrap-break-word min-w-0 px-2 text-foreground text-sm leading-7">
         {isError ? (
           <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-destructive text-sm">
             {resultText}

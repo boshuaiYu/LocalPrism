@@ -3,6 +3,11 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceLayout } from "@/components/workspace/workspace-layout";
 import {
+  PANE_LAYOUT_STORAGE_KEY,
+  SIDEBAR_SPLIT_AUTOSAVE_ID,
+  paneSizeMap,
+} from "@/lib/workspace-pane-layout";
+import {
   resetChatLayoutStoreForTests,
   useChatLayoutStore,
 } from "@/stores/chat-layout-store";
@@ -15,7 +20,21 @@ vi.mock("@/hooks/use-runtime-events", () => ({
 }));
 
 vi.mock("@/components/workspace/sidebar", () => ({
-  Sidebar: () => <div data-testid="sidebar" />,
+  Sidebar: ({
+    layoutControls,
+  }: {
+    layoutControls?: { onResetLayout: () => void };
+  }) => (
+    <div data-testid="sidebar">
+      <button
+        type="button"
+        data-testid="reset-workspace-layout"
+        onClick={layoutControls?.onResetLayout}
+      >
+        Reset layout
+      </button>
+    </div>
+  ),
 }));
 
 vi.mock("@/components/workspace/editor/latex-editor", () => ({
@@ -202,6 +221,38 @@ describe("WorkspaceLayout chat pane", () => {
     expect(
       container.querySelector('[data-testid="open-ai-assistant-attention"]'),
     ).not.toBeNull();
+  });
+
+  it("clears stored pane widths from Reset layout", async () => {
+    const visibility = { code: true, chat: true, pdf: true };
+    localStorage.setItem(
+      PANE_LAYOUT_STORAGE_KEY,
+      JSON.stringify({ "sidebar+code+chat+pdf": [20, 30, 20, 30] }),
+    );
+    localStorage.setItem(
+      `react-resizable-panels:${SIDEBAR_SPLIT_AUTOSAVE_ID}`,
+      "{}",
+    );
+    await act(async () => root.render(<WorkspaceLayout />));
+
+    const reset = container.querySelector(
+      '[data-testid="reset-workspace-layout"]',
+    );
+    expect(reset).toBeInstanceOf(HTMLButtonElement);
+    await act(async () => (reset as HTMLButtonElement).click());
+
+    expect(localStorage.getItem(PANE_LAYOUT_STORAGE_KEY)).toBeNull();
+    expect(
+      localStorage.getItem(
+        `react-resizable-panels:${SIDEBAR_SPLIT_AUTOSAVE_ID}`,
+      ),
+    ).toBeNull();
+    expect(paneSizeMap(visibility, localStorage)).toEqual({
+      sidebar: 15,
+      code: 33,
+      chat: 24,
+      pdf: 28,
+    });
   });
 
   it("reopens chat when a turn starts streaming", async () => {

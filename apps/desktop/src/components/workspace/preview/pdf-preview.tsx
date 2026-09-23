@@ -70,7 +70,7 @@ import {
 import { resolveTexRoot, type ProjectFile } from "@/stores/document-store";
 import { MarkdownPreviewPane } from "@/components/workspace/preview/markdown-preview-pane";
 import { createLogger } from "@/lib/debug/logger";
-import { pdfChromeCompactStatus, pdfZoomLabel } from "@/lib/pdf-chrome-status";
+import { pdfChromeCompactStatus } from "@/lib/pdf-chrome-status";
 import {
   PDF_PREVIEW_DEFAULT_FIT_MODE,
   fitPreviewScale,
@@ -937,8 +937,9 @@ export function PdfPreview() {
     hasError: Boolean(compileError),
     currentPage,
     numPages,
-    zoomLabel: pdfZoomLabel({ fitMode, scale }),
   });
+  const pdfStatusIsPageCount =
+    !isSaving && !isCompiling && !compileError && numPages > 0;
 
   return (
     <div
@@ -946,7 +947,11 @@ export function PdfPreview() {
       className="@container/pv relative flex h-full flex-col bg-muted/50"
     >
       <div className="flex min-h-[calc(var(--workspace-topbar-height)+var(--titlebar-height))] shrink-0 flex-wrap items-center gap-x-1 gap-y-1 border-border border-b bg-background px-2 py-1">
-        <span className="lp-meta max-w-40 truncate px-1 font-medium tabular-nums">
+        <span
+          className={`lp-meta max-w-40 truncate px-1 font-normal tabular-nums ${
+            pdfStatusIsPageCount ? "@[22rem]/pv:hidden" : ""
+          }`}
+        >
           {pdfStatus}
         </span>
         <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
