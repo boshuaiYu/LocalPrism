@@ -1,8 +1,27 @@
+import { useEffect, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { RefreshCwIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { LanguageSwitch } from "@/components/language-switch";
 import { useI18n } from "@/lib/use-i18n";
 import { useUpdateStore } from "@/stores/update-store";
+
+let cachedAppVersion = "";
+
+export function useAppVersion(): string {
+  const [version, setVersion] = useState(cachedAppVersion);
+  useEffect(() => {
+    if (version) return;
+    void getVersion()
+      .then((next) => {
+        if (typeof next !== "string" || !next.trim()) return;
+        cachedAppVersion = next;
+        setVersion(next);
+      })
+      .catch(() => undefined);
+  }, [version]);
+  return version;
+}
 
 export function AppStatusCluster({
   version,

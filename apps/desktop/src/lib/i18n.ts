@@ -36,6 +36,26 @@ const en = {
   "updates.missingPlatform":
     "This release has no installer for this computer. The update list is empty or does not include your system. Download a build from GitHub Releases. Nothing was corrupted.",
   "updates.viewReleases": "View releases",
+  "updates.download": "Download",
+  "updates.later": "Later",
+  "updates.restart": "Restart to update",
+  "updates.bannerLabel": "Application update",
+  "updates.betaAvailable":
+    "Beta {{version}} is available. Download only if you want this prerelease.",
+  "updates.checking": "Checking for updates…",
+  "updates.upToDate": "You're on the latest version.",
+  "updates.idle":
+    "Stable updates download in the background. Beta releases wait until you choose Download.",
+  "updates.downloading":
+    "Downloading {{version}} in the background. LocalPrism asks before restarting.",
+  "updates.downloadingPercent":
+    "Downloading {{version}} ({{percent}}%). LocalPrism asks before restarting.",
+  "updates.ready": "{{version}} is downloaded. Restart to install it.",
+  "updates.manual":
+    "{{version}} is available. This Linux install is a .deb or .rpm, so LocalPrism will not replace it with the AppImage. Download the new package from Releases.",
+  "updates.installing": "Installing {{version}} and restarting…",
+  "updates.settingsBody":
+    "In-app install applies to the AppImage, macOS, and Windows. Debian and RPM installs stay on the package from Releases. Stable updates download in the background and restart only after you confirm. A beta is a GitHub prerelease or a version such as 1.0.8-1. Betas are read from that release's latest.json, not from releases/latest, and LocalPrism asks before downloading. Downloads are checked with the existing updater signature.",
 
   "tour.back": "Back",
   "tour.next": "Next",
@@ -490,6 +510,25 @@ const zh: Record<MessageKey, string> = {
   "updates.missingPlatform":
     "这次发布没有当前电脑可用的安装包。更新清单是空的，或没有你的系统。请到 GitHub Releases 下载。安装包没有损坏。",
   "updates.viewReleases": "查看发布页",
+  "updates.download": "下载",
+  "updates.later": "稍后",
+  "updates.restart": "重启以更新",
+  "updates.bannerLabel": "应用更新",
+  "updates.betaAvailable":
+    "测试版 {{version}} 可用。只有在你想试用这个预发布版本时才下载。",
+  "updates.checking": "正在检查更新…",
+  "updates.upToDate": "当前已是最新版本。",
+  "updates.idle": "稳定版会在后台下载。测试版会等你选择下载。",
+  "updates.downloading":
+    "正在后台下载 {{version}}。重启前 LocalPrism 会再询问一次。",
+  "updates.downloadingPercent":
+    "正在下载 {{version}}（{{percent}}%）。重启前 LocalPrism 会再询问一次。",
+  "updates.ready": "{{version}} 已下载。重启后会安装。",
+  "updates.manual":
+    "{{version}} 可用。当前 Linux 安装包是 .deb 或 .rpm，LocalPrism 不会用 AppImage 替换它。请到发布页下载新的安装包。",
+  "updates.installing": "正在安装 {{version}} 并重启…",
+  "updates.settingsBody":
+    "应用内安装适用于 AppImage、macOS 和 Windows。Debian 与 RPM 仍使用发布页上的安装包。稳定版在后台下载，只有在你确认后才会重启。测试版是 GitHub prerelease，或 1.0.8-1 这类带预发布号的版本。测试版读取该发布标签上的 latest.json，不会占用 releases/latest，下载前会先询问。下载仍使用现有的更新签名校验。",
 
   "tour.back": "上一步",
   "tour.next": "下一步",

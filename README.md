@@ -181,7 +181,9 @@ The AppImage is built to carry its own WebKit. If it still exits immediately, ru
 
 Ubuntu 22.04 and Debian 12 are the oldest releases that ship WebKitGTK 4.1. Ubuntu 20.04 and Debian 11 do not.
 
-Installed AppImages, macOS builds, and Windows builds check for updates on launch, download in the background, and wait for **Restart to update**. Signature checks stay on the updater key already in the app. Nothing is replaced until you confirm.
+Installed AppImages, macOS builds, and Windows builds check for updates on launch, download stable builds in the background, and wait for **Restart to update**. Signature checks stay on the updater key already in the app. Nothing is replaced until you confirm.
+
+The stable updater endpoint is `releases/latest/download/latest.json`. GitHub only points that URL at the newest non-prerelease, so a beta must stay a GitHub prerelease (or any semver prerelease such as `1.0.8-1`) and must not be published as Latest. The app finds betas from the GitHub releases list and downloads `releases/download/<tag>/latest.json` only after you choose **Download**. A newer stable build still downloads in the background. `1.0.8` is newer than `1.0.8-1`.
 
 ## Contributing
 

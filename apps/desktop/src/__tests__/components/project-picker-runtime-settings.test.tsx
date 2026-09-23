@@ -1,8 +1,10 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
+import { check } from "@tauri-apps/plugin-updater";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProjectPicker } from "@/components/project-picker";
+import { resetUpdateStoreForTests } from "@/stores/update-store";
 import type { RuntimeAccount, RuntimeKind } from "@/runtime/types";
 import { useClaudeSetupStore } from "@/stores/claude-setup-store";
 import {
@@ -103,6 +105,16 @@ describe("ProjectPicker runtime settings", () => {
       .fn<ReturnType<typeof useClaudeSetupStore.getState>["checkStatus"]>()
       .mockResolvedValue(undefined);
     useClaudeSetupStore.setState({ checkStatus: checkClaudeStatus });
+    resetUpdateStoreForTests();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => [],
+      })),
+    );
+    vi.mocked(check).mockReset();
+    vi.mocked(check).mockResolvedValue(null);
     vi.mocked(invoke).mockImplementation(async (command) => {
       if (command === "list_default_projects") return [];
       if (command === "list_openai_compatible_credentials") return [];
@@ -135,6 +147,8 @@ describe("ProjectPicker runtime settings", () => {
     container.remove();
     resetRuntimeStoreForTests();
     resetProviderStoreForTests();
+    resetUpdateStoreForTests();
+    vi.unstubAllGlobals();
   });
 
   it("shows provider readiness separately from legacy runtime accounts", async () => {
@@ -172,5 +186,43 @@ describe("ProjectPicker runtime settings", () => {
     expect(container.textContent).toContain("Python / Skills");
     expect(container.textContent).not.toContain("AI Runtimes");
     expect(checkClaudeStatus).not.toHaveBeenCalled();
+  });
+
+  it("places a beta download banner directly under the top header", async () => {
+    const download = vi.fn();
+    vi.mocked(check).mockResolvedValue({
+      version: "1.0.9-1",
+      body: "beta",
+      currentVersion: "1.0.8-1",
+      download,
+      install: vi.fn(),
+      close: vi.fn(async () => undefined),
+    } as never);
+
+    await act(async () => {
+      root.render(<ProjectPicker />);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+
+    const header = container.querySelector("[data-testid='app-chrome-header']");
+    expect(header?.textContent).toContain("LocalPrism");
+    expect(header?.textContent).toContain("v1.0.8-1");
+    expect(
+      header?.querySelector("[data-testid='language-switch']"),
+    ).toBeTruthy();
+    expect(
+      header?.querySelector("[data-testid='check-for-updates']"),
+    ).toBeTruthy();
+    expect(header?.textContent).toContain("Settings");
+    expect(header?.nextElementSibling?.getAttribute("data-testid")).toBe(
+      "update-prompt",
+    );
+    expect(container.textContent).toContain("Download");
+    expect(container.textContent).toContain("Later");
+    expect(download).not.toHaveBeenCalled();
+    expect(container.querySelector("[role='dialog']")).toBeNull();
   });
 });

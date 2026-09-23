@@ -1,5 +1,4 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
-import { getVersion } from "@tauri-apps/api/app";
 import {
   FileTextIcon,
   FolderIcon,
@@ -87,7 +86,6 @@ import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import { ProjectCloseButton } from "@/components/workspace/project-close-button";
 import { UvSetupDialog } from "@/components/uv-setup";
 import { SettingsDialog } from "@/components/settings/settings-dialog";
-import { AppStatusCluster } from "@/components/app-status-cluster";
 import { SIDEBAR_SPLIT_AUTOSAVE_ID } from "@/lib/workspace-pane-layout";
 import { createLogger } from "@/lib/debug/logger";
 import { resolveNewProjectFile } from "@/lib/new-project-file";
@@ -265,20 +263,6 @@ function getFileIcon(file: ProjectFile) {
   return <FileTextIcon className="size-4 shrink-0" />;
 }
 
-// ─── App Version (resolved once from Tauri) ───
-
-let _appVersion = "";
-getVersion().then((v) => {
-  _appVersion = v;
-});
-function useAppVersion() {
-  const [version, setVersion] = useState(_appVersion);
-  useEffect(() => {
-    if (!version) getVersion().then(setVersion);
-  }, [version]);
-  return version || "…";
-}
-
 // ─── Sidebar ───
 
 function LayoutPaneSwitcher({
@@ -426,7 +410,6 @@ export function Sidebar({
   layoutControls,
 }: SidebarProps) {
   const { t } = useI18n();
-  const appVersion = useAppVersion();
   const files = useDocumentStore((s) => s.files);
   const activeFileId = useDocumentStore((s) => s.activeFileId);
   const setActiveFile = useDocumentStore((s) => s.setActiveFile);
@@ -972,6 +955,12 @@ export function Sidebar({
   const [newFileKind, setNewFileKind] = useState<"tex" | "markdown">("tex");
   const [newFolderName, setNewFolderName] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  useEffect(() => {
+    const openSettings = () => setSettingsOpen(true);
+    window.addEventListener("localprism-open-settings", openSettings);
+    return () =>
+      window.removeEventListener("localprism-open-settings", openSettings);
+  }, []);
   const [settingsTab, setSettingsTab] = useState<
     "runtimes" | "skills" | "agents"
   >("runtimes");
@@ -1520,55 +1509,52 @@ export function Sidebar({
           />
 
           {/* Footer */}
-          <div className="flex min-h-9 items-center justify-between gap-1 border-sidebar-border border-t px-2 py-1 text-muted-foreground text-xs">
-            <AppStatusCluster version={appVersion} compact />
-            <div className="flex shrink-0 items-center gap-0.5">
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-6"
-                onClick={() => setSettingsOpen(true)}
-                title={t("chrome.settings")}
-                aria-label={t("chrome.openSettings")}
+          <div className="flex min-h-9 items-center justify-end gap-0.5 border-sidebar-border border-t px-2 py-1 text-muted-foreground text-xs">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-6"
+              onClick={() => setSettingsOpen(true)}
+              title={t("chrome.settings")}
+              aria-label={t("chrome.openSettings")}
+            >
+              <SettingsIcon className="size-3.5" />
+            </Button>
+            <Button variant="ghost" size="icon" className="size-6" asChild>
+              <a
+                href="https://github.com/boshuaiYu/LocalPrism"
+                target="_blank"
+                rel="noopener noreferrer"
+                title="GitHub"
               >
-                <SettingsIcon className="size-3.5" />
-              </Button>
-              <Button variant="ghost" size="icon" className="size-6" asChild>
-                <a
-                  href="https://github.com/boshuaiYu/LocalPrism"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  title="GitHub"
-                >
-                  <GithubIcon className="size-3.5" />
-                </a>
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-6"
-                onClick={() => {
-                  if (theme === "system") setTheme("light");
-                  else if (theme === "light") setTheme("dark");
-                  else setTheme("system");
-                }}
-                title={
-                  theme === "system"
-                    ? "System theme"
-                    : theme === "light"
-                      ? "Light mode"
-                      : "Dark mode"
-                }
-              >
-                {theme === "system" ? (
-                  <MonitorIcon className="size-3.5" />
-                ) : theme === "light" ? (
-                  <SunIcon className="size-3.5" />
-                ) : (
-                  <MoonIcon className="size-3.5" />
-                )}
-              </Button>
-            </div>
+                <GithubIcon className="size-3.5" />
+              </a>
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-6"
+              onClick={() => {
+                if (theme === "system") setTheme("light");
+                else if (theme === "light") setTheme("dark");
+                else setTheme("system");
+              }}
+              title={
+                theme === "system"
+                  ? "System theme"
+                  : theme === "light"
+                    ? "Light mode"
+                    : "Dark mode"
+              }
+            >
+              {theme === "system" ? (
+                <MonitorIcon className="size-3.5" />
+              ) : theme === "light" ? (
+                <SunIcon className="size-3.5" />
+              ) : (
+                <MoonIcon className="size-3.5" />
+              )}
+            </Button>
           </div>
 
           <SettingsDialog
