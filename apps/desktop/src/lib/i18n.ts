@@ -155,6 +155,7 @@ const en = {
   "skills.enabled": "enabled",
   "skills.disabled": "disabled",
   "skills.importTitle": "Select skill folder",
+  "skills.uncategorized": "Uncategorized",
 
   "agents.storage":
     "Custom subagents are stored in claude-home/agents next to the LocalPrism install folder, not ~/.claude.",
@@ -395,6 +396,7 @@ const zh: Record<MessageKey, string> = {
   "skills.enabled": "已启用",
   "skills.disabled": "已停用",
   "skills.importTitle": "选择技能文件夹",
+  "skills.uncategorized": "未分类",
 
   "agents.storage":
     "自定义子智能体保存在 LocalPrism 安装目录旁的 claude-home/agents，而不是 ~/.claude。",

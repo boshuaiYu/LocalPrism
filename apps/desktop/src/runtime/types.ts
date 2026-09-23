@@ -49,6 +49,8 @@ export interface RuntimeSkill {
   compatibleRuntimes: RuntimeKind[];
   enabled: boolean;
   discoveryError: string | null;
+  /** Frontmatter category/group, or the parent folder when the skill is nested. */
+  category?: string | null;
 }
 
 export interface AgentProfile {

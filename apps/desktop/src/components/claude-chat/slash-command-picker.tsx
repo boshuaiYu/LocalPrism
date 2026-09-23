@@ -29,6 +29,7 @@ import {
   skillFolderFromSlashCommand,
   type CatalogSkillCategory,
 } from "@/lib/skill-categories";
+import { SKILLS_LIST_UPDATED_EVENT } from "@/lib/skills-refresh";
 import { useSkillCategoryStore } from "@/stores/skill-category-store";
 
 export interface SlashCommand {
@@ -44,6 +45,7 @@ export interface SlashCommand {
   has_bash_commands: boolean;
   has_file_references: boolean;
   accepts_arguments: boolean;
+  category?: string | null;
 }
 
 interface SlashCommandPickerProps {
@@ -404,20 +406,34 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
     });
   }, [anchorRef]);
 
-  // Load commands on mount
+  // Load commands on mount and again after a skill install.
   useEffect(() => {
-    setIsLoading(true);
-    invoke<SlashCommand[]>("slash_commands_list", {
-      projectPath: projectPath ?? undefined,
-    })
-      .then((cmds) => {
-        setCommands(cmds);
-        setIsLoading(false);
-      })
-      .catch(() => {
-        setCommands([]);
-        setIsLoading(false);
-      });
+    let cancelled = false;
+    const load = (showLoading: boolean) => {
+      if (showLoading) setIsLoading(true);
+      void Promise.resolve(
+        invoke<SlashCommand[]>("slash_commands_list", {
+          projectPath: projectPath ?? undefined,
+        }),
+      )
+        .then((cmds) => {
+          if (cancelled) return;
+          setCommands(Array.isArray(cmds) ? cmds : []);
+          setIsLoading(false);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setCommands([]);
+          setIsLoading(false);
+        });
+    };
+    load(true);
+    const onSkillsUpdated = () => load(false);
+    window.addEventListener(SKILLS_LIST_UPDATED_EVENT, onSkillsUpdated);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(SKILLS_LIST_UPDATED_EVENT, onSkillsUpdated);
+    };
   }, [projectPath]);
 
   useEffect(() => {
@@ -454,6 +470,7 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
       (cmd) => ({
         folder: skillFolderFromSlashCommand(cmd.full_command),
         name: cmd.name,
+        category: cmd.category,
       }),
       categorySnapshot,
       catalog,

@@ -17,6 +17,9 @@ pub struct SlashCommand {
     pub has_bash_commands: bool,
     pub has_file_references: bool,
     pub accepts_arguments: bool,
+    /// Skill category from frontmatter or a parent folder such as `skills/<category>/<skill>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,6 +163,7 @@ fn load_command_from_file(file_path: &Path, base_path: &Path, scope: &str) -> Op
         has_bash_commands,
         has_file_references,
         accepts_arguments,
+        category: None,
     })
 }
 
@@ -223,6 +227,8 @@ fn load_skills_from_dir(dir: &Path, scope: &str) -> Vec<SlashCommand> {
         };
 
         let (frontmatter, body) = parse_markdown_with_frontmatter(&content);
+        let category = crate::skills::import::frontmatter_skill_category(&content)
+            .or_else(|| crate::skills::import::category_from_parent_folder(&path, dir));
 
         // Name: frontmatter name > first # heading > folder name
         let name = frontmatter
@@ -259,6 +265,7 @@ fn load_skills_from_dir(dir: &Path, scope: &str) -> Vec<SlashCommand> {
             has_bash_commands: false,
             has_file_references: false,
             accepts_arguments: true,
+            category,
         });
     }
 
@@ -342,6 +349,7 @@ fn builtin_slash_command(
         has_bash_commands: false,
         has_file_references: false,
         accepts_arguments: content.contains("$ARGUMENTS"),
+        category: None,
     }
 }
 

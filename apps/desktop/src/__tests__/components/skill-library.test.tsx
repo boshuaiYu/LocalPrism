@@ -162,4 +162,48 @@ describe("SkillLibrary", () => {
       false,
     );
   });
+
+  it("shows frontmatter categories and keeps uncategorized skills expanded", async () => {
+    useSkillStore.setState({
+      skills: [
+        skill({
+          id: "claude:user:methods",
+          name: "Methods",
+          folder: "methods",
+          description: "Method notes",
+          sourcePath: "C:/skills/methods",
+          category: "Methods",
+        }),
+        skill({
+          id: "claude:user:mystery",
+          name: "Mystery",
+          folder: "mystery",
+          description: "No category",
+          sourcePath: "C:/skills/mystery",
+          category: null,
+        }),
+      ],
+    });
+
+    await act(async () => {
+      root.render(<SkillLibrary projectPath="/papers/demo" />);
+    });
+
+    const methods = container.querySelector(
+      '[data-testid="skill-pack-toggle-category:methods"]',
+    );
+    const uncategorized = container.querySelector(
+      '[data-testid="skill-pack-toggle-imported"]',
+    );
+    expect(methods?.textContent).toContain("Methods");
+    expect(methods?.getAttribute("aria-expanded")).toBe("true");
+    expect(uncategorized?.textContent).toContain("Uncategorized");
+    expect(uncategorized?.getAttribute("aria-expanded")).toBe("true");
+    expect(
+      container.querySelector('[data-testid="skill-row-methods"]')?.textContent,
+    ).toContain("Methods");
+    expect(
+      container.querySelector('[data-testid="skill-row-mystery"]')?.textContent,
+    ).toContain("Mystery");
+  });
 });

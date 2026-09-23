@@ -6,9 +6,11 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invoke(...args),
 }));
 
+import { emitMockTauriEvent } from "@/__tests__/mocks/tauri";
 import {
   defaultSkillTargets,
   resetDefaultSkillPacksForTests,
+  resetScheduledSkillsRefreshForTests,
   useSkillStore,
 } from "@/stores/skill-store";
 import { emptyAgentProfile, useAgentStore } from "@/stores/agent-store";
@@ -41,6 +43,7 @@ describe("skill-store", () => {
   beforeEach(() => {
     invoke.mockReset();
     resetDefaultSkillPacksForTests();
+    resetScheduledSkillsRefreshForTests();
     useSkillStore.setState({
       skills: [],
       loading: false,
@@ -48,6 +51,7 @@ describe("skill-store", () => {
       lastAutoImportCount: 0,
       installingPackId: null,
       selectedTargets: defaultSkillTargets(),
+      listedProjectPath: null,
     });
     useSkillCategoryStore.getState().resetForTests();
     useAgentStore.setState({
@@ -75,6 +79,25 @@ describe("skill-store", () => {
     expect(useSkillStore.getState().selectedTargets).toEqual(
       defaultSkillTargets(),
     );
+  });
+
+  it("reloads the current project list when skills change", async () => {
+    useSkillStore.setState({ listedProjectPath: "/paper" });
+    invoke.mockResolvedValueOnce([
+      skill({ folder: "new-skill", name: "New skill", category: "Editing" }),
+    ]);
+
+    emitMockTauriEvent("skills-changed", null);
+
+    await vi.waitFor(() => {
+      expect(
+        useSkillStore.getState().skills.map((item) => item.folder),
+      ).toEqual(["new-skill"]);
+    });
+    expect(invoke).toHaveBeenCalledWith("skill_list", {
+      projectPath: "/paper",
+    });
+    expect(useSkillStore.getState().loading).toBe(false);
   });
 
   it("imports a folder to the selected targets then refreshes", async () => {

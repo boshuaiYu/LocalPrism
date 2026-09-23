@@ -15,6 +15,11 @@ describe("buildSkillsBrowserCategories", () => {
         { folder: "nature-polishing", name: "Nature polishing" },
         { folder: "scanpy", name: "Scanpy" },
         { folder: "my-writer", name: "Writer" },
+        {
+          folder: "methods-notes",
+          name: "Methods notes",
+          category: "Methods",
+        },
       ],
       snapshot: {
         ...emptySkillCategorySnapshot(),
@@ -36,21 +41,27 @@ describe("buildSkillsBrowserCategories", () => {
       ],
     });
 
-    expect(categories.map((category) => category.id)).toEqual([
+    expect(categories.slice(0, 5).map((category) => category.id)).toEqual([
       installedBrowserCategoryId("paper-spine"),
       installedBrowserCategoryId("academic-research-skills"),
       installedBrowserCategoryId("nature-skills"),
       installedBrowserCategoryId("scientific-agent-skills"),
       installedBrowserCategoryId("paper-humanizer-skill"),
     ]);
-    expect(categories.map((category) => category.name)).toEqual([
+    expect(categories.slice(0, 5).map((category) => category.name)).toEqual([
       "PaperSpine",
       "academic-research-skills",
       "nature-skills",
       "scientific-agent-skills",
       "paper-humanizer-skill",
     ]);
-    expect(categories.map((category) => category.sourceUrl)).toEqual([
+    expect(categories.slice(5).map((category) => category.name)).toEqual([
+      "Methods",
+      "Uncategorized",
+    ]);
+    expect(
+      categories.slice(0, 5).map((category) => category.sourceUrl),
+    ).toEqual([
       "https://github.com/WUBING2023/PaperSpine/tree/main/dist/claude/skills",
       "https://github.com/Imbad0202/academic-research-skills",
       "https://github.com/Yuan1z0825/nature-skills/tree/main/skills",
@@ -58,13 +69,17 @@ describe("buildSkillsBrowserCategories", () => {
       "https://github.com/crabin/paper-humanizer-skill",
     ]);
     expect(
-      categories.some((category) => category.id.endsWith("imported")),
-    ).toBe(false);
+      categories
+        .find((category) => category.name === "Methods")
+        ?.skills.map((skill) => skill.folder),
+    ).toEqual(["methods-notes"]);
     expect(
-      categories.flatMap((category) =>
-        category.skills.map((skill) => skill.folder),
-      ),
-    ).not.toContain("my-writer");
+      categories.find((category) => category.id.endsWith("imported"))?.skills,
+    ).toEqual([{ name: "Writer", folder: "my-writer", category: undefined }]);
+    expect(
+      categories.find((category) => category.name === "Uncategorized")
+        ?.skill_count,
+    ).toBe(1);
     expect(
       categories.some((category) =>
         ["Writing", "Custom", "testo", "Bioinformatics"].includes(

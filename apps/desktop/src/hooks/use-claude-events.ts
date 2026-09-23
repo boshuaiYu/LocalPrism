@@ -28,6 +28,8 @@ import {
   formatUnexpectedClaudeExit,
 } from "@/lib/claude-exit-error";
 import { createStreamDeltaBatcher } from "@/hooks/stream-delta-batch";
+import { shouldRefreshSkillsAfterTool } from "@/lib/skills-refresh";
+import { scheduleSkillsRefresh } from "@/stores/skill-store";
 
 function streamingAttemptSignature(tabs: readonly TabState[]): string {
   return tabs
@@ -130,6 +132,9 @@ export function useClaudeEvents() {
   // always read the latest values without needing to be re-created.
   const pendingToolUsesRef = useRef(
     new Map<string, Map<string, { name: string; input: any }>>(),
+  );
+  const codexToolInputsRef = useRef(
+    new Map<string, { name: string; input: unknown }>(),
   );
   const hasTexChangesRef = useRef(new Map<string, boolean>());
   const cancelledForAskRef = useRef(new Map<string, boolean>());
@@ -525,6 +530,13 @@ export function useClaudeEvents() {
         for (const block of msg.message.content) {
           if (block.type === "tool_result" && block.tool_use_id) {
             const toolUse = tabToolUses.get(block.tool_use_id);
+            if (
+              toolUse &&
+              !block.is_error &&
+              shouldRefreshSkillsAfterTool(toolUse.name, toolUse.input)
+            ) {
+              scheduleSkillsRefresh();
+            }
             if (
               toolUse &&
               !block.is_error &&
@@ -994,6 +1006,10 @@ export function useClaudeEvents() {
           break;
         case "toolStarted":
           deltaBatcher.flush(tabId);
+          codexToolInputsRef.current.set(event.itemId, {
+            name: event.name,
+            input: event.input,
+          });
           chatStore._appendMessage(tabId, {
             type: "assistant",
             message: {
@@ -1010,6 +1026,16 @@ export function useClaudeEvents() {
           break;
         case "toolCompleted":
           deltaBatcher.flush(tabId);
+          {
+            const started = codexToolInputsRef.current.get(event.itemId);
+            if (
+              event.success &&
+              started &&
+              shouldRefreshSkillsAfterTool(started.name, started.input)
+            ) {
+              scheduleSkillsRefresh();
+            }
+          }
           chatStore._appendMessage(tabId, {
             type: "user",
             message: {
@@ -1023,6 +1049,13 @@ export function useClaudeEvents() {
               ],
             },
           });
+          break;
+        case "fileChange":
+          if (
+            shouldRefreshSkillsAfterTool("Write", { file_path: event.path })
+          ) {
+            scheduleSkillsRefresh();
+          }
           break;
         case "usage":
           deltaBatcher.flush(tabId);

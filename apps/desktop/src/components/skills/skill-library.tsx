@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { ChevronDownIcon, ChevronRightIcon } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SkillTargetPicker } from "@/components/skills/skill-target-picker";
 import { useSkillStore } from "@/stores/skill-store";
 import { skillCatalogDescription } from "@/lib/default-skill-packs";
-import { groupItemsBySkillCategory } from "@/lib/skill-categories";
+import {
+  groupItemsBySkillCategory,
+  type CatalogSkillCategory,
+} from "@/lib/skill-categories";
 import type { RuntimeSkill, SkillTarget } from "@/runtime/types";
 import { useI18n } from "@/lib/use-i18n";
 
@@ -29,21 +33,40 @@ export function SkillLibrary({ projectPath = null }: SkillLibraryProps) {
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>(
     {},
   );
+  const [catalog, setCatalog] = useState<CatalogSkillCategory[]>([]);
   const { t } = useI18n();
 
   useEffect(() => {
-    void refresh(projectPath ?? undefined);
+    void refresh(projectPath ?? null);
   }, [projectPath, refresh]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.resolve(invoke<CatalogSkillCategory[]>("get_skill_categories"))
+      .then((categories) => {
+        if (!cancelled && Array.isArray(categories)) setCatalog(categories);
+      })
+      .catch(() => {
+        if (!cancelled) setCatalog([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const grouped = useMemo(
     () =>
       groupItemsBySkillCategory(
         skills,
-        (skill) => ({ folder: skill.folder, name: skill.name }),
+        (skill) => ({
+          folder: skill.folder,
+          name: skill.name,
+          category: skill.category,
+        }),
         { categories: [], assignments: {} },
-        [],
+        catalog,
       ),
-    [skills],
+    [catalog, skills],
   );
 
   const onImport = async () => {
@@ -132,7 +155,11 @@ export function SkillLibrary({ projectPath = null }: SkillLibraryProps) {
 
       <div className="space-y-2">
         {grouped.map((group) => {
-          const open = expandedGroups[group.id] === true;
+          const open =
+            expandedGroups[group.id] ??
+            (group.source === "imported" || group.source === "custom");
+          const label =
+            group.id === "imported" ? t("skills.uncategorized") : group.name;
           return (
             <div key={group.id} data-testid={`skill-pack-${group.id}`}>
               <button
@@ -152,7 +179,7 @@ export function SkillLibrary({ projectPath = null }: SkillLibraryProps) {
                 ) : (
                   <ChevronRightIcon className="size-3.5 shrink-0" />
                 )}
-                <span className="min-w-0 truncate">{group.name}</span>
+                <span className="min-w-0 truncate">{label}</span>
                 <span className="font-normal normal-case">
                   · {group.items.length}
                 </span>

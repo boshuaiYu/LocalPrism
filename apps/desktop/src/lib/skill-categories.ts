@@ -24,7 +24,7 @@ export interface CatalogSkillCategory {
   skills: Array<{ folder: string }>;
 }
 
-export type SkillCategorySource = SkillPackGroupId;
+export type SkillCategorySource = SkillPackGroupId | "custom";
 
 export interface ResolvedSkillCategory {
   id: string;
@@ -185,19 +185,36 @@ export function catalogFolderMap(
   return map;
 }
 
-export function resolveSkillCategory(
-  input: {
-    folder: string;
-    name?: string;
-  },
-  _snapshot: SkillCategorySnapshot,
-  catalog: CatalogSkillCategory[],
-  catalogMap = catalogFolderMap(catalog),
-): ResolvedSkillCategory {
-  const scientificFolders = new Set(
-    [...catalogMap.keys()].map((folder) => folder.toLowerCase()),
+function explicitCategoryLabel(category?: string | null): string | null {
+  const label = category?.trim().replace(/\s+/g, " ") ?? "";
+  if (!label) return null;
+  const lower = label.toLowerCase();
+  if (
+    lower === "none" ||
+    lower === "n/a" ||
+    lower === "na" ||
+    lower === "null" ||
+    lower === "uncategorized" ||
+    lower === "imported"
+  ) {
+    return null;
+  }
+  return label.slice(0, 80);
+}
+
+function packIdFromCategoryLabel(label: string): SkillPackGroupId | null {
+  const key = label.trim().toLowerCase();
+  if (key === IMPORTED_SKILL_PACK_ID || key === "uncategorized") {
+    return IMPORTED_SKILL_PACK_ID;
+  }
+  const pack = DEFAULT_SKILL_PACKS.find(
+    (item) =>
+      item.id === key || skillPackDisplayName(item.id).toLowerCase() === key,
   );
-  const packId = resolveSkillPackId(input, scientificFolders);
+  return pack?.id ?? null;
+}
+
+function packCategory(packId: SkillPackGroupId): ResolvedSkillCategory {
   return {
     id: packId,
     name: skillPackDisplayName(packId),
@@ -205,9 +222,41 @@ export function resolveSkillCategory(
   };
 }
 
+export function resolveSkillCategory(
+  input: {
+    folder: string;
+    name?: string;
+    category?: string | null;
+  },
+  _snapshot: SkillCategorySnapshot,
+  catalog: CatalogSkillCategory[],
+  catalogMap = catalogFolderMap(catalog),
+): ResolvedSkillCategory {
+  const explicit = explicitCategoryLabel(input.category);
+  if (explicit) {
+    const packId = packIdFromCategoryLabel(explicit);
+    if (packId && packId !== IMPORTED_SKILL_PACK_ID) {
+      return packCategory(packId);
+    }
+    return {
+      id: `category:${categoryIdFromName(explicit)}`,
+      name: explicit,
+      source: "custom",
+    };
+  }
+  const scientificFolders = new Set(
+    [...catalogMap.keys()].map((folder) => folder.toLowerCase()),
+  );
+  return packCategory(resolveSkillPackId(input, scientificFolders));
+}
+
 export function groupItemsBySkillCategory<T>(
   items: T[],
-  getSkill: (item: T) => { folder: string; name: string },
+  getSkill: (item: T) => {
+    folder: string;
+    name: string;
+    category?: string | null;
+  },
   snapshot: SkillCategorySnapshot,
   catalog: CatalogSkillCategory[],
 ): SkillCategoryGroup<T>[] {
@@ -221,7 +270,7 @@ export function groupItemsBySkillCategory<T>(
       id: resolved.id,
       name: resolved.name,
       source: resolved.source,
-      defaultExpanded: resolved.source !== "imported",
+      defaultExpanded: true,
       items: [],
     };
     groups.set(resolved.id, created);
@@ -236,16 +285,15 @@ export function groupItemsBySkillCategory<T>(
 
   const sourceOrder: SkillCategorySource[] = [
     ...DEFAULT_SKILL_PACKS.map((pack) => pack.id),
+    "custom",
     "imported",
   ];
-  return [...groups.values()]
-    .filter((group) => group.source !== "imported")
-    .sort((left, right) => {
-      const sourceDelta =
-        sourceOrder.indexOf(left.source) - sourceOrder.indexOf(right.source);
-      if (sourceDelta !== 0) return sourceDelta;
-      return left.name.localeCompare(right.name);
-    });
+  return [...groups.values()].sort((left, right) => {
+    const sourceDelta =
+      sourceOrder.indexOf(left.source) - sourceOrder.indexOf(right.source);
+    if (sourceDelta !== 0) return sourceDelta;
+    return left.name.localeCompare(right.name);
+  });
 }
 
 export function skillFolderFromSlashCommand(fullCommand: string): string {

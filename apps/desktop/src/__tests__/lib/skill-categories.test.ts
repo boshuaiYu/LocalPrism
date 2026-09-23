@@ -43,8 +43,11 @@ describe("skill categories", () => {
       ["nature-skills", "nature-skills"],
       ["scientific-agent-skills", "scientific-agent-skills"],
       ["paper-humanizer-skill", "paper-humanizer-skill"],
+      ["imported", "Uncategorized"],
     ]);
-    expect(groups.some((group) => group.id === "imported")).toBe(false);
+    expect(groups.find((group) => group.id === "imported")?.items).toEqual([
+      { folder: "mystery", name: "Mystery" },
+    ]);
     expect(
       resolveSkillCategory(
         { folder: "scanpy", name: "Scanpy" },
@@ -73,9 +76,37 @@ describe("skill categories", () => {
       ),
     ).toEqual({
       id: "imported",
-      name: "Imported",
+      name: "Uncategorized",
       source: "imported",
     });
+  });
+
+  it("groups frontmatter and folder categories, and keeps unknown skills visible", () => {
+    const groups = groupItemsBySkillCategory(
+      [
+        { folder: "scanpy", name: "Scanpy", category: "Bioinformatics" },
+        {
+          folder: "nature-polishing",
+          name: "Polish",
+          category: "nature-skills",
+        },
+        { folder: "my-writer", name: "Writer", category: null },
+      ],
+      (item) => item,
+      emptySkillCategorySnapshot(),
+      catalog,
+    );
+
+    expect(
+      groups.map((group) => [group.id, group.items.map((item) => item.folder)]),
+    ).toEqual([
+      ["nature-skills", ["nature-polishing"]],
+      ["category:bioinformatics", ["scanpy"]],
+      ["imported", ["my-writer"]],
+    ]);
+    expect(
+      groups.find((group) => group.id === "category:bioinformatics")?.name,
+    ).toBe("Bioinformatics");
   });
 
   it("reads slash skill folders and ignores corrupt storage", () => {
