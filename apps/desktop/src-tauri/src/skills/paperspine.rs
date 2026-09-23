@@ -60,10 +60,19 @@ fn first_paperspine_dir(root: &Path) -> Option<PathBuf> {
     matches.into_iter().next()
 }
 
-fn user_intent_from_prompt(prompt: &str) -> &str {
-    if prompt.starts_with("[Currently open file:") {
-        if let Some(idx) = prompt.rfind("\n\n") {
-            return &prompt[idx + 2..];
+/// User text after a LocalPrism file-context prefix.
+///
+/// Compression carryover can precede the prefix, and the user text can contain
+/// later paragraphs. The slash command is the start of that user text, not the
+/// tail after the last blank line.
+pub(crate) fn user_intent_from_prompt(prompt: &str) -> &str {
+    let marker = prompt
+        .rfind("[Currently open file:")
+        .or_else(|| prompt.rfind("[File:"));
+    if let Some(marker) = marker {
+        let after = &prompt[marker..];
+        if let Some(close) = after.rfind("]\n\n") {
+            return &after[close + 3..];
         }
     }
     prompt
@@ -178,6 +187,24 @@ mod tests {
         assert!(with_context.starts_with("[Currently open file: main.tex]"));
         assert!(with_context.contains("write the intro"));
         assert!(!with_context
+            .lines()
+            .any(|line| line.trim().starts_with("/paper-spine")));
+
+        let with_notes = adapt_host_bound_skill_prompt(
+            "[Currently open file: main.tex]\n\n/paper-spine outline\n\nKeep the citations.",
+        );
+        assert!(with_notes.contains("outline"));
+        assert!(with_notes.contains("Keep the citations."));
+        assert!(!with_notes
+            .lines()
+            .any(|line| line.trim().starts_with("/paper-spine")));
+
+        let with_carryover = adapt_host_bound_skill_prompt(
+            "Summary:\nEarlier draft.\n\n[Currently open file: main.tex]\n\n/paper-spine revise",
+        );
+        assert!(with_carryover.contains("Summary:"));
+        assert!(with_carryover.contains("revise"));
+        assert!(!with_carryover
             .lines()
             .any(|line| line.trim().starts_with("/paper-spine")));
     }
