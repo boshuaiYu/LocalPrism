@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Sidebar } from "@/components/workspace/sidebar";
 
 vi.mock("@tauri-apps/api/app", () => ({
-  getVersion: vi.fn().mockResolvedValue("1.0.6"),
+  getVersion: vi.fn().mockResolvedValue("1.0.7"),
 }));
 
 vi.mock("next-themes", () => ({
