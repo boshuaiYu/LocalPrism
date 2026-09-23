@@ -56,13 +56,15 @@ const en = {
   "onboarding.close": "Close",
   "onboarding.openGuide": "Open setup guide",
   "onboarding.envBody":
-    "Paste an API key from DeepSeek, Kimi, Qwen, or another provider. Official Claude or ChatGPT browser sign-in is optional. You can skip model setup and configure this later in Settings.",
+    "Paste a DeepSeek API key to start. Other providers and official Claude or ChatGPT login are optional, under Advanced. You can skip model setup and configure this later in Settings.",
   "onboarding.done": "Done",
   "onboarding.skipModel": "Skip model setup",
 
   "providers.useApiKey": "Use an API key",
   "providers.apiKeyHelp":
-    "Pick a preset and paste a key. Official Claude or ChatGPT sign-in is not required.",
+    "{{name}} is enough to start. Official Claude or ChatGPT sign-in is not required.",
+  "providers.advanced": "Advanced",
+  "providers.advancedHelp": "Other providers. API key setup stays the same.",
   "providers.apiKey": "API key",
   "providers.model": "Model",
   "providers.name": "Name",
@@ -262,13 +264,15 @@ const zh: Record<MessageKey, string> = {
   "onboarding.close": "关闭",
   "onboarding.openGuide": "打开设置引导",
   "onboarding.envBody":
-    "粘贴 DeepSeek、Kimi、Qwen 或其他服务商的 API 密钥。Claude 或 ChatGPT 官方浏览器登录是可选的。也可以先跳过模型设置，之后在设置里配置。",
+    "先粘贴一个 DeepSeek API 密钥即可开始。其他服务商以及官方 Claude 或 ChatGPT 登录是可选项，在“高级”里。也可以先跳过模型设置，之后在设置里配置。",
   "onboarding.done": "完成",
   "onboarding.skipModel": "跳过模型设置",
 
   "providers.useApiKey": "使用 API 密钥",
   "providers.apiKeyHelp":
-    "选择一个预设并粘贴密钥。不需要登录官方 Claude 或 ChatGPT。",
+    "{{name}} 就足够开始。不需要登录官方 Claude 或 ChatGPT。",
+  "providers.advanced": "高级",
+  "providers.advancedHelp": "其他服务商。API 密钥的设置方式相同。",
   "providers.apiKey": "API 密钥",
   "providers.model": "模型",
   "providers.name": "名称",

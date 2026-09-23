@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RuntimeSettings } from "@/components/runtime/runtime-settings";
+import { UpdateSettings } from "@/components/update-prompt";
 import { SkillLibrary } from "@/components/skills/skill-library";
 import { AgentLibrary } from "@/components/agents/agent-library";
 import { useDocumentStore } from "@/stores/document-store";
@@ -36,7 +37,9 @@ export function SettingsDialog({
             <SettingsIcon className="size-4" />
             {t("settings.title")}
           </DialogTitle>
-          <DialogDescription>{t("settings.description")}</DialogDescription>
+          <DialogDescription className="text-lp-meta">
+            {t("settings.description")}
+          </DialogDescription>
           <LanguageSwitch />
         </DialogHeader>
 
@@ -74,6 +77,7 @@ export function SettingsDialog({
             <AgentLibrary projectPath={projectPath} />
           </TabsContent>
         </Tabs>
+        <UpdateSettings />
       </DialogContent>
     </Dialog>
   );

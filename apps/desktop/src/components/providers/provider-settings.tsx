@@ -122,7 +122,7 @@ export function ProviderSettings({
   return (
     <div className="space-y-5 p-5">
       {showEngine && !engineInstalled && (
-        <section className="rounded-xl border border-border/70 p-4">
+        <section className="lp-panel rounded-xl border p-4">
           <p className="text-sm">
             {missingGit
               ? t("providers.gitRequired")
@@ -150,7 +150,7 @@ export function ProviderSettings({
         onSave={(provider) => void upsertThirdParty(provider, true)}
       />
 
-      <section className="rounded-xl border border-border/70">
+      <section className="lp-panel rounded-xl border">
         <button
           type="button"
           className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
@@ -160,7 +160,7 @@ export function ProviderSettings({
             <span className="block font-medium text-sm">
               {t("providers.officialTitle")}
             </span>
-            <span className="mt-0.5 block text-muted-foreground text-xs">
+            <span className="mt-0.5 block text-lp-meta text-xs">
               {t("providers.officialHelp")}
             </span>
           </span>
@@ -203,7 +203,7 @@ export function ProviderSettings({
       </section>
 
       {error && <p className="text-destructive text-sm">{error}</p>}
-      <p className="text-muted-foreground text-xs">
+      <p className="text-lp-meta text-xs">
         {t("providers.apiKeyEnough", {
           badge: localizedBadge(readinessBadge, t),
         })}
@@ -298,8 +298,11 @@ function ThirdPartySection({
   }) => void;
 }) {
   const { t } = useI18n();
-  const defaultPreset = THIRD_PARTY_PRESETS[0];
+  const defaultPreset =
+    THIRD_PARTY_PRESETS.find((item) => item.id === "deepseek") ??
+    THIRD_PARTY_PRESETS[0];
   const [presetId, setPresetId] = useState<string | null>(defaultPreset.id);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [name, setName] = useState(defaultPreset.name);
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState(defaultPreset.baseUrl);
@@ -316,42 +319,11 @@ function ThirdPartySection({
   };
 
   return (
-    <section className="rounded-xl border border-border/70 p-4">
+    <section className="lp-panel rounded-xl border p-4">
       <h3 className="font-medium text-sm">{t("providers.useApiKey")}</h3>
-      <p className="mt-1 text-muted-foreground text-sm">
-        {t("providers.apiKeyHelp")}
+      <p className="mt-1 text-lp-meta text-sm">
+        {t("providers.apiKeyHelp", { name: defaultPreset.name })}
       </p>
-      <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
-        {THIRD_PARTY_PRESETS.map((item) => {
-          const icon = getProviderIconSrc({
-            label: item.name,
-            baseUrl: item.baseUrl,
-          });
-          const selected = presetId === item.id;
-          return (
-            <button
-              key={item.id}
-              type="button"
-              className={cn(
-                "flex items-center gap-2 rounded-xl border px-3 py-2.5 text-left transition-colors",
-                selected
-                  ? "border-foreground bg-muted/60"
-                  : "border-border/70 hover:bg-muted/40",
-              )}
-              onClick={() => applyPreset(item)}
-            >
-              {icon ? (
-                <img src={icon} alt="" className="size-5 shrink-0" />
-              ) : (
-                <span className="flex size-5 shrink-0 items-center justify-center rounded bg-muted font-medium text-[10px]">
-                  {item.name.slice(0, 1)}
-                </span>
-              )}
-              <span className="truncate text-sm">{item.name}</span>
-            </button>
-          );
-        })}
-      </div>
 
       {preset && (
         <div className="mt-3 space-y-2">
@@ -384,9 +356,7 @@ function ThirdPartySection({
               onChange={(event) => setModel(event.target.value)}
             />
           </div>
-          {preset.note && (
-            <p className="text-muted-foreground text-xs">{preset.note}</p>
-          )}
+          {preset.note && <p className="text-lp-meta text-xs">{preset.note}</p>}
           <Button
             size="sm"
             disabled={
@@ -408,6 +378,60 @@ function ThirdPartySection({
         </div>
       )}
 
+      <button
+        type="button"
+        data-testid="provider-advanced"
+        className="mt-3 flex w-full items-center justify-between gap-3 rounded-lg px-1 py-2 text-left"
+        onClick={() => setAdvancedOpen((open) => !open)}
+      >
+        <span>
+          <span className="block font-medium text-sm">
+            {t("providers.advanced")}
+          </span>
+          <span className="mt-0.5 block text-lp-meta text-xs">
+            {t("providers.advancedHelp")}
+          </span>
+        </span>
+        <span className="text-lp-meta text-xs">
+          {advancedOpen ? t("providers.hide") : t("providers.show")}
+        </span>
+      </button>
+      {advancedOpen && (
+        <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
+          {THIRD_PARTY_PRESETS.filter(
+            (item) => item.id !== defaultPreset.id,
+          ).map((item) => {
+            const icon = getProviderIconSrc({
+              label: item.name,
+              baseUrl: item.baseUrl,
+            });
+            const selected = presetId === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                className={cn(
+                  "flex items-center gap-2 rounded-xl border px-3 py-2.5 text-left transition-colors",
+                  selected
+                    ? "border-foreground bg-muted/60"
+                    : "border-border hover:bg-muted/40",
+                )}
+                onClick={() => applyPreset(item)}
+              >
+                {icon ? (
+                  <img src={icon} alt="" className="size-5 shrink-0" />
+                ) : (
+                  <span className="flex size-5 shrink-0 items-center justify-center rounded bg-muted font-medium text-[10px]">
+                    {item.name.slice(0, 1)}
+                  </span>
+                )}
+                <span className="truncate text-sm">{item.name}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       <ul className="mt-4 space-y-2">
         {cards.map((card) => (
           <li
@@ -416,7 +440,7 @@ function ThirdPartySection({
           >
             <div>
               <p className="text-sm">{card.name}</p>
-              <p className="text-muted-foreground text-xs">
+              <p className="text-lp-meta text-xs">
                 {localizedDetail(
                   providerStatusDetail(card, models),
                   providerCardStatusLabel(card, models),

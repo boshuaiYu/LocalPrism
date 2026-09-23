@@ -1,0 +1,9 @@
+[Desktop Entry]
+Categories={{categories}}
+Comment=Local LaTeX writing workspace
+Exec=localprism-launch {{exec}}
+Icon={{icon}}
+Name={{name}}
+StartupWMClass={{exec}}
+Terminal=false
+Type=Application

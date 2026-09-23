@@ -153,6 +153,36 @@ Download the latest build from [GitHub Releases](https://github.com/boshuaiYu/Lo
 
 macOS and Linux installers are produced by GitHub Actions; Windows can also be built locally with `pnpm build:desktop`.
 
+### Linux
+
+Releases include an AppImage, a `.deb`, and an `.rpm`. The window needs WebKitGTK 4.1.
+
+| File | Install | Updates |
+|---|---|---|
+| `LocalPrism-Linux.AppImage` | `chmod +x LocalPrism-Linux.AppImage` | In-app: downloads in the background, then asks you to restart. This is the file the updater installs. |
+| `LocalPrism-Linux.deb` | `sudo apt install ./LocalPrism-Linux.deb` | Download the next `.deb` from Releases. The in-app updater does not replace a deb with the AppImage. |
+| `LocalPrism-Linux.rpm` | `sudo dnf install ./LocalPrism-Linux.rpm` | Same as the deb: install the next `.rpm` yourself. |
+
+`dpkg -i` does not install dependencies. The app is unpacked, then exits before any window appears because `libwebkit2gtk-4.1.so.0` is missing. Use `apt install` on the `.deb` instead. The package depends on:
+
+- `libwebkit2gtk-4.1-0`
+- `libgtk-3-0`, or `libgtk-3-0t64` on Ubuntu 24.04 and Debian 13 when `libgtk-3-0` is not available
+- `libayatana-appindicator3-1` or `libappindicator3-1`
+
+The deb desktop entry starts `localprism-launch`. If WebKit is still missing, that script shows the install command instead of failing with no window. You can also install the libraries directly:
+
+```bash
+sudo apt install libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1
+```
+
+The rpm requires `webkit2gtk4.1` and `gtk3` (Fedora). openSUSE's library names are `libwebkit2gtk-4_1-0` and `gtk3` if you install them by hand.
+
+The AppImage is built to carry its own WebKit. If it still exits immediately, run it in a terminal. A missing `libwebkit2gtk-4.1.so.0` means the host needs the apt packages above.
+
+Ubuntu 22.04 and Debian 12 are the oldest releases that ship WebKitGTK 4.1. Ubuntu 20.04 and Debian 11 do not.
+
+Installed AppImages, macOS builds, and Windows builds check for updates on launch, download in the background, and wait for **Restart to update**. Signature checks stay on the updater key already in the app. Nothing is replaced until you confirm.
+
 ## Contributing
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for setup, tests, and the desktop build.

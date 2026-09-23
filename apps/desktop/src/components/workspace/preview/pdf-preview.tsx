@@ -724,7 +724,7 @@ export function PdfPreview() {
                 {errors.length} {errors.length === 1 ? "error" : "errors"}
               </span>
             </div>
-            <div className="rounded-lg border border-destructive/20 bg-background">
+            <div className="lp-error-card rounded-lg">
               <div className="max-h-60 divide-y divide-border overflow-y-auto">
                 {errors.map((error, i) => (
                   <div key={i} className="flex items-start gap-2.5 px-3 py-2.5">
@@ -772,12 +772,12 @@ export function PdfPreview() {
     }
     if (!pdfData) {
       return (
-        <div className="flex flex-1 flex-col items-center justify-center bg-muted/30 p-8">
-          <FileTextIcon className="mb-4 size-16 text-muted-foreground/50" />
-          <h2 className="mb-2 font-medium text-lg text-muted-foreground">
+        <div className="lp-empty flex flex-1 flex-col items-center justify-center p-8">
+          <FileTextIcon className="mb-4 size-16 text-lp-meta" />
+          <h2 className="lp-empty-title mb-2 font-medium text-lg">
             PDF Preview
           </h2>
-          <p className="mb-4 text-center text-muted-foreground text-sm">
+          <p className="lp-empty-body mb-4 text-center text-sm">
             {autoCompile
               ? "Preview updates as you type, or press Cmd+Enter to compile now"
               : "Press Cmd+Enter to compile your document"}
@@ -888,7 +888,7 @@ export function PdfPreview() {
         })}
         {compileError && (
           <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 p-3">
-            <div className="pointer-events-auto mx-auto max-w-lg rounded-lg border border-destructive/30 bg-background/95 shadow-lg backdrop-blur-sm">
+            <div className="lp-error-card pointer-events-auto mx-auto max-w-lg rounded-lg shadow-lg backdrop-blur-sm">
               <div className="flex items-center gap-2 px-3 pt-2.5 text-destructive">
                 <AlertCircleIcon className="size-4" />
                 <h2 className="font-semibold text-sm">Compilation Failed</h2>
@@ -944,7 +944,7 @@ export function PdfPreview() {
       ref={previewContainerRef}
       className="@container/pv relative flex h-full flex-col bg-muted/50"
     >
-      <div className="flex min-h-[calc(var(--workspace-topbar-height)+var(--titlebar-height))] shrink-0 flex-wrap items-center gap-x-1 gap-y-1 border-border border-b bg-background px-2 py-1">
+      <div className="lp-chrome flex min-h-[calc(var(--workspace-topbar-height)+var(--titlebar-height))] shrink-0 flex-wrap items-center gap-x-1 gap-y-1 border-b px-2 py-1">
         <span
           data-testid="pdf-chrome-status"
           className={`lp-meta max-w-24 truncate px-1 tabular-nums ${
@@ -1101,7 +1101,7 @@ export function PdfPreview() {
                   />
                 ) : (
                   <button
-                    className="flex h-6 w-7 shrink-0 items-center justify-center rounded text-muted-foreground text-xs tabular-nums hover:bg-muted"
+                    className="lp-meta flex h-6 w-7 shrink-0 items-center justify-center rounded tabular-nums hover:bg-muted hover:text-foreground"
                     onClick={() => {
                       setIsEditingPage(true);
                       setPageInputValue(String(currentPage));
@@ -1112,10 +1112,8 @@ export function PdfPreview() {
                     {currentPage}
                   </button>
                 )}
-                <span className="shrink-0 text-muted-foreground/80 text-xs tabular-nums">
-                  /
-                </span>
-                <span className="flex h-6 w-7 shrink-0 items-center justify-center text-muted-foreground text-xs tabular-nums">
+                <span className="lp-meta shrink-0 tabular-nums">/</span>
+                <span className="lp-meta flex h-6 w-7 shrink-0 items-center justify-center tabular-nums">
                   {numPages}
                 </span>
                 <Button

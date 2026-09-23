@@ -153,6 +153,16 @@ AI 利用時はプロンプトとモデルが読んだファイルが API に送
 
 macOS / Linux は GitHub Actions、Windows は `pnpm build:desktop` でも構築できます。
 
+### Linux
+
+AppImage、`.deb`、`.rpm` があります。ウィンドウには WebKitGTK 4.1 が必要です。
+
+- AppImage: `chmod +x LocalPrism-Linux.AppImage`。アプリ内更新はこのファイルをバックグラウンドで取得し、再起動を確認してから適用します。
+- deb: `sudo apt install ./LocalPrism-Linux.deb`。`dpkg -i` は依存関係を入れないため、ウィンドウが出る前に終了します。依存パッケージは `libwebkit2gtk-4.1-0`、`libgtk-3-0`（Ubuntu 24.04 / Debian 13 で無い場合は `libgtk-3-0t64`）、`libayatana-appindicator3-1` または `libappindicator3-1`。
+- rpm: `sudo dnf install ./LocalPrism-Linux.rpm`（`webkit2gtk4.1` と `gtk3`）。deb / rpm はアプリ内更新で AppImage に置き換えません。次のパッケージを Releases から入れてください。
+
+デスクトップ項目は `localprism-launch` 経由です。WebKit が無いときはインストールコマンドを表示します。
+
 ## コントリビュート
 
 セットアップとテストは [CONTRIBUTING.md](./CONTRIBUTING.md) を参照してください。

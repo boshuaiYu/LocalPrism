@@ -25,14 +25,14 @@ export function ChatErrorCard({
     <div
       role="alert"
       data-testid="chat-error-card"
-      className="mx-2 mt-2 rounded-lg border border-destructive/40 bg-destructive/10 p-2 text-destructive"
+      className="lp-error-card mx-2 mt-2 rounded-lg p-2"
     >
       <p className="text-sm leading-5">{summary.text}</p>
       <div className="mt-2 flex flex-wrap gap-2">
         {retryPrompt && (
           <button
             type="button"
-            className="lp-focus h-8 rounded-lg bg-destructive px-3 font-medium text-white text-xs disabled:opacity-50"
+            className="lp-error-action lp-focus h-8 rounded-lg px-3 font-medium text-xs disabled:opacity-50"
             disabled={busy}
             onClick={() => onRetry(retryPrompt)}
           >
@@ -42,7 +42,7 @@ export function ChatErrorCard({
         {summary.canExpand && (
           <button
             type="button"
-            className="lp-focus h-8 rounded-lg border border-destructive/40 px-3 font-medium text-xs"
+            className="lp-focus h-8 rounded-lg border border-destructive/45 px-3 font-medium text-xs"
             onClick={() => setExpanded((open) => !open)}
           >
             {expanded ? t("errors.hideDetails") : t("errors.details")}
@@ -50,7 +50,7 @@ export function ChatErrorCard({
         )}
         <button
           type="button"
-          className="lp-focus h-8 rounded-lg border border-destructive/40 px-3 font-medium text-xs"
+          className="lp-focus h-8 rounded-lg border border-destructive/45 px-3 font-medium text-xs"
           onClick={onClearConversation}
         >
           {t("errors.clearConversation")}

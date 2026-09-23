@@ -584,6 +584,26 @@ struct SystemInfo {
     app_version: String,
 }
 
+/// How the running binary should apply a GitHub update.
+/// The published Linux manifest is the AppImage. deb/rpm must not install it.
+pub fn classify_update_install_channel(linux: bool, appimage: bool) -> String {
+    if !linux {
+        return "native".to_string();
+    }
+    if appimage {
+        return "appimage".to_string();
+    }
+    "linux-package".to_string()
+}
+
+#[tauri::command]
+fn update_install_channel() -> String {
+    classify_update_install_channel(
+        cfg!(target_os = "linux"),
+        std::env::var_os("APPIMAGE").is_some(),
+    )
+}
+
 #[tauri::command]
 fn get_system_info(app: tauri::AppHandle) -> SystemInfo {
     // Get OS version from uname on unix, or fallback to "unknown"
@@ -794,6 +814,7 @@ pub fn run() {
             uv::uv_add_packages,
             uv::uv_run_command,
             get_system_info,
+            update_install_channel,
             open_debug_window,
         ])
         .build(tauri::generate_context!())
@@ -944,5 +965,21 @@ mod exit_cleanup_tests {
         )));
         assert!(!super::requires_synchronous_exit_cleanup(Some(0)));
         assert!(!super::requires_synchronous_exit_cleanup(None));
+    }
+}
+
+#[cfg(test)]
+mod update_channel_tests {
+    use super::classify_update_install_channel;
+
+    #[test]
+    fn linux_packages_are_not_replaced_by_the_appimage_updater() {
+        assert_eq!(
+            classify_update_install_channel(true, false),
+            "linux-package"
+        );
+        assert_eq!(classify_update_install_channel(true, true), "appimage");
+        assert_eq!(classify_update_install_channel(false, false), "native");
+        assert_eq!(classify_update_install_channel(false, true), "native");
     }
 }

@@ -24,10 +24,12 @@ export function HomeEmptyState({
   return (
     <div
       data-testid={variant === "empty" ? "home-empty-state" : "home-no-results"}
-      className="mt-8 rounded-lg border border-border/70 bg-card px-4 py-6 text-center"
+      className="lp-empty mt-8 rounded-lg border px-4 py-6 text-center"
     >
-      <h2 className="lp-heading">{title}</h2>
-      <p className="lp-body mx-auto mt-2 max-w-sm text-pretty">{body}</p>
+      <h2 className="lp-empty-title lp-heading">{title}</h2>
+      <p className="lp-empty-body mx-auto mt-2 max-w-sm text-pretty text-sm leading-6">
+        {body}
+      </p>
       <div className="mt-4 flex flex-wrap justify-center gap-2">
         <Button
           type="button"

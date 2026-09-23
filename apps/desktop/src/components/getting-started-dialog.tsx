@@ -8,6 +8,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { LinuxRuntimeNote } from "@/components/linux-runtime-note";
 import { requestWelcomeGuide } from "@/lib/welcome";
 import { useI18n } from "@/lib/use-i18n";
 
@@ -55,6 +56,7 @@ export function GettingStartedDialog({
             {t("onboarding.gettingStartedBody")}
           </DialogDescription>
         </DialogHeader>
+        <LinuxRuntimeNote />
         <ol className="space-y-2 text-sm">
           <li>{t("onboarding.stepCreate")}</li>
           <li>{t("onboarding.stepSettings")}</li>

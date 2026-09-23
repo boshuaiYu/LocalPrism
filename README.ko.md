@@ -153,6 +153,16 @@ AI를 쓰면 프롬프트와 모델이 읽은 파일은 API로 갑니다. 원고
 
 macOS / Linux는 GitHub Actions, Windows는 `pnpm build:desktop`으로도 빌드할 수 있습니다.
 
+### Linux
+
+AppImage, `.deb`, `.rpm`이 있습니다. 창에는 WebKitGTK 4.1이 필요합니다.
+
+- AppImage: `chmod +x LocalPrism-Linux.AppImage`. 앱 안 업데이트는 이 파일을 백그라운드로 받은 뒤 재시작을 확인한 다음 적용합니다.
+- deb: `sudo apt install ./LocalPrism-Linux.deb`. `dpkg -i`는 의존성을 설치하지 않아 창이 뜨기 전에 종료됩니다. 패키지는 `libwebkit2gtk-4.1-0`, `libgtk-3-0`(Ubuntu 24.04 / Debian 13에서 없으면 `libgtk-3-0t64`), `libayatana-appindicator3-1` 또는 `libappindicator3-1`입니다.
+- rpm: `sudo dnf install ./LocalPrism-Linux.rpm` (`webkit2gtk4.1`, `gtk3`). deb/rpm은 앱 안 업데이트가 AppImage로 바꾸지 않습니다. 다음 패키지는 Releases에서 설치하세요.
+
+데스크톱 항목은 `localprism-launch`를 거칩니다. WebKit이 없으면 설치 명령을 보여 줍니다.
+
 ## 기여
 
 설정과 테스트는 [CONTRIBUTING.md](./CONTRIBUTING.md)를 보세요.
