@@ -72,7 +72,10 @@ describe("builtin agent presets", () => {
     expect(deAi.instructions).toContain("值得注意的是");
     expect(deAi.instructions).toContain("detector score");
     expect(deAi.instructions).not.toContain("nature-polishing");
-    expect(BUILTIN_AGENT_SKILL_FOLDERS["de-ai"]).toEqual([]);
+    expect(BUILTIN_AGENT_SKILL_FOLDERS["de-ai"]).toEqual([
+      "paper-humanizer",
+      "paper-humanizer-skill",
+    ]);
     expect(deAi.skillIds).toEqual([]);
 
     const review = buildPresetAgentProfile("peer-review", []);
@@ -94,7 +97,7 @@ describe("builtin agent presets", () => {
     );
     expect(review.instructions).toContain("rigorous, fair");
     expect(review.instructions).not.toMatch(/harsh|fatal|savage|毒舌/);
-    expect(BUILTIN_AGENT_PRESET_SEED_VERSION).toBe(4);
+    expect(BUILTIN_AGENT_PRESET_SEED_VERSION).toBe(5);
     expect(BUILTIN_AGENT_SKILL_FOLDERS["peer-review"].join(" ")).not.toMatch(
       /citation|zotero|bibtex|bib/,
     );
@@ -163,6 +166,27 @@ describe("builtin agent presets", () => {
     expect(profile.skillIds).toEqual(["de-ai-prose"]);
   });
 
+  it("attaches paper-humanizer to AI消除器 and not to polish or peer review", () => {
+    const installed = [
+      skill("paper-humanizer", "user"),
+      skill("paper-humanizer-skill", "user", { name: "paper-humanizer-skill" }),
+      skill("nature-polishing", "user"),
+      skill("nature-citation", "user"),
+      skill("zotero-cite", "user"),
+    ];
+
+    expect(buildPresetAgentProfile("de-ai", installed).skillIds).toEqual([
+      "paper-humanizer",
+      "paper-humanizer-skill",
+    ]);
+    expect(
+      buildPresetAgentProfile("academic-polish", installed).skillIds,
+    ).toEqual(["nature-polishing"]);
+    expect(buildPresetAgentProfile("peer-review", installed).skillIds).toEqual(
+      [],
+    );
+  });
+
   it("attaches shipped writing, polish, and review skills without citation tools", () => {
     const installed = [
       skill("nature-polishing", "user"),
@@ -171,6 +195,8 @@ describe("builtin agent presets", () => {
       skill("academic-paper-reviewer", "user"),
       skill("peer-review", "user"),
       skill("nature-reader", "user"),
+      skill("paper-humanizer", "user"),
+      skill("paper-humanizer-skill", "user"),
       skill("nature-citation", "user"),
       skill("reference-checker", "user"),
       skill("zotero-cite", "user"),
@@ -180,7 +206,10 @@ describe("builtin agent presets", () => {
     expect(
       buildPresetAgentProfile("academic-polish", installed).skillIds,
     ).toEqual(["nature-polishing", "nature-writing", "academic-paper"]);
-    expect(buildPresetAgentProfile("de-ai", installed).skillIds).toEqual([]);
+    expect(buildPresetAgentProfile("de-ai", installed).skillIds).toEqual([
+      "paper-humanizer",
+      "paper-humanizer-skill",
+    ]);
     expect(buildPresetAgentProfile("peer-review", installed).skillIds).toEqual([
       "academic-paper-reviewer",
       "peer-review",

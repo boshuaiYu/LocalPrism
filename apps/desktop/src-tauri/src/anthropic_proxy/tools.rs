@@ -13,6 +13,39 @@ pub(super) fn normalized_tool_call_id(id: Option<&str>) -> String {
     }
 }
 
+/// Identical Skill/LoadSkill calls in one model response become one tool_use.
+/// Returns true when this call should be dropped.
+pub(super) fn duplicate_skill_tool_call(
+    seen: &mut std::collections::HashSet<String>,
+    name: &str,
+    input: &Value,
+) -> bool {
+    let normalized = name.trim().to_ascii_lowercase();
+    if normalized != "skill" && normalized != "loadskill" {
+        return false;
+    }
+    let skill_name = skill_argument_name(input);
+    let args = input
+        .get("args")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    !seen.insert(format!("{skill_name}\n{args}"))
+}
+
+fn skill_argument_name(input: &Value) -> String {
+    for key in ["skill", "skill_name", "name", "command"] {
+        if let Some(value) = input.get(key).and_then(|item| item.as_str()) {
+            let trimmed = value.trim().trim_start_matches('/');
+            if !trimmed.is_empty() {
+                return trimmed.to_ascii_lowercase();
+            }
+        }
+    }
+    "skill".to_string()
+}
+
 pub(super) fn repair_tool_arguments(arguments: &str) -> String {
     let trimmed = trim_code_fence(arguments.trim());
     if trimmed.is_empty() || trimmed == "{}" {

@@ -41,18 +41,21 @@ describe("buildSkillsBrowserCategories", () => {
       installedBrowserCategoryId("academic-research-skills"),
       installedBrowserCategoryId("nature-skills"),
       installedBrowserCategoryId("scientific-agent-skills"),
+      installedBrowserCategoryId("paper-humanizer-skill"),
     ]);
     expect(categories.map((category) => category.name)).toEqual([
       "PaperSpine",
       "academic-research-skills",
       "nature-skills",
       "scientific-agent-skills",
+      "paper-humanizer-skill",
     ]);
     expect(categories.map((category) => category.sourceUrl)).toEqual([
       "https://github.com/WUBING2023/PaperSpine/tree/main/dist/claude/skills",
       "https://github.com/Imbad0202/academic-research-skills",
       "https://github.com/Yuan1z0825/nature-skills/tree/main/skills",
       "https://github.com/K-Dense-AI/scientific-agent-skills/tree/main/skills",
+      "https://github.com/crabin/paper-humanizer-skill",
     ]);
     expect(
       categories.some((category) => category.id.endsWith("imported")),

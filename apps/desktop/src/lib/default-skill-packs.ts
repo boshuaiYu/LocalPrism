@@ -6,7 +6,8 @@ export type DefaultSkillPackId =
   | "paper-spine"
   | "academic-research-skills"
   | "nature-skills"
-  | "scientific-agent-skills";
+  | "scientific-agent-skills"
+  | "paper-humanizer-skill";
 
 export type SkillPackGroupId = DefaultSkillPackId | "imported";
 
@@ -34,6 +35,12 @@ export const NATURE_SKILLS_URL =
 
 export const SCIENTIFIC_AGENT_SKILLS_URL =
   "https://github.com/K-Dense-AI/scientific-agent-skills";
+
+export const PAPER_HUMANIZER_SKILLS_URL =
+  "https://github.com/crabin/paper-humanizer-skill";
+
+export const PAPER_HUMANIZER_SKILL_SUMMARY =
+  "中英文学术文本润色与人性化 skill，用于去除 AI 生成的痕迹，同时严格保持事实准确性。";
 
 export const DEFAULT_SKILL_PACKS: DefaultSkillPack[] = [
   {
@@ -73,6 +80,11 @@ export const DEFAULT_SKILL_PACKS: DefaultSkillPack[] = [
     markerFolders: ["scanpy", "biopython", "rdkit"],
     docsUrl:
       "https://github.com/K-Dense-AI/scientific-agent-skills/tree/main/skills",
+  },
+  {
+    id: "paper-humanizer-skill",
+    sourceUrl: PAPER_HUMANIZER_SKILLS_URL,
+    markerFolders: ["paper-humanizer", "paper-humanizer-skill"],
   },
 ];
 
@@ -190,9 +202,23 @@ export function skillPackDisplayName(id: SkillPackGroupId): string {
       return "nature-skills";
     case "scientific-agent-skills":
       return "scientific-agent-skills";
+    case "paper-humanizer-skill":
+      return "paper-humanizer-skill";
     case "imported":
       return "Imported";
   }
+}
+
+export function skillCatalogDescription(folder: string): string | null {
+  const key = folder.trim().toLowerCase();
+  if (
+    key === "paper-humanizer" ||
+    key === "paper-humanizer-skill" ||
+    key.startsWith("paper-humanizer-")
+  ) {
+    return PAPER_HUMANIZER_SKILL_SUMMARY;
+  }
+  return null;
 }
 
 function folderMatchesPack(folder: string, pack: DefaultSkillPack): boolean {
@@ -205,6 +231,9 @@ function folderMatchesPack(folder: string, pack: DefaultSkillPack): boolean {
   }
   if (pack.id === "nature-skills") {
     return key.startsWith("nature-") || key.startsWith("nature_");
+  }
+  if (pack.id === "paper-humanizer-skill") {
+    return key === "paper-humanizer" || key.startsWith("paper-humanizer");
   }
   return false;
 }
@@ -231,11 +260,17 @@ export function resolveSkillPackId(
   const scientific = DEFAULT_SKILL_PACKS.find(
     (pack) => pack.id === "scientific-agent-skills",
   );
+  const humanizer = DEFAULT_SKILL_PACKS.find(
+    (pack) => pack.id === "paper-humanizer-skill",
+  );
   if (academic && folderMatchesPack(folder, academic)) {
     return "academic-research-skills";
   }
   if (nature && folderMatchesPack(folder, nature)) {
     return "nature-skills";
+  }
+  if (humanizer && folderMatchesPack(folder, humanizer)) {
+    return "paper-humanizer-skill";
   }
   if (
     (scientific && folderMatchesPack(folder, scientific)) ||

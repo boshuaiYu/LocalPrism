@@ -23,6 +23,7 @@ import {
   reasoningStrengthWireValue,
 } from "@/lib/reasoning-strength";
 import { settleChatMessages } from "@/lib/chat-turn-settlement";
+import { collapseRepeatedSkillToolMessages } from "@/lib/skill-tool-result";
 import {
   applyCompression,
   buildCompressionCarryover,
@@ -800,7 +801,9 @@ function settleStoppedTurn(
 ): Partial<TabState> {
   if (updates.isStreaming !== false) return updates;
   const source = updates.messages ?? tab.messages;
-  const messages = settleChatMessages(source);
+  const messages = collapseRepeatedSkillToolMessages(
+    settleChatMessages(source),
+  );
   if (messages === source) return updates;
   return { ...updates, messages };
 }
@@ -3052,7 +3055,9 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     set((state) => {
       const tab = state.tabs.find((t) => t.id === tabId);
       const messages =
-        !streaming && tab ? settleChatMessages(tab.messages) : tab?.messages;
+        !streaming && tab
+          ? collapseRepeatedSkillToolMessages(settleChatMessages(tab.messages))
+          : tab?.messages;
       return applyTabUpdate(state, tabId, {
         isStreaming: streaming,
         streamingStartedAt: streaming

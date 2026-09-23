@@ -11,6 +11,7 @@ describe("skillPaperWorkflowGuidance", () => {
     expect(text).toContain(skillPackDisplayName("academic-research-skills"));
     expect(text).toContain(skillPackDisplayName("nature-skills"));
     expect(text).toContain(skillPackDisplayName("scientific-agent-skills"));
+    expect(text).toContain(skillPackDisplayName("paper-humanizer-skill"));
     expect(text).toMatch(/PaperSpine/);
   });
 });

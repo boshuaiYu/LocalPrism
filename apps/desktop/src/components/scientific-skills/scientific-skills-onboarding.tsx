@@ -467,10 +467,11 @@ export function ScientificSkillsOnboarding({
                 <DialogTitle className="text-sm">Skills</DialogTitle>
                 <DialogDescription className="mt-0.5 text-xs">
                   Skills stay in claude-home/skills, grouped by pack:
-                  PaperSpine, academic-research-skills, nature-skills, and
-                  scientific-agent-skills. Update refreshes those default packs
-                  without overwriting unrelated imports. {totalSkills} skills
-                  across {displayCategories.length} packs.
+                  PaperSpine, academic-research-skills, nature-skills,
+                  scientific-agent-skills, and paper-humanizer-skill. Update
+                  refreshes those default packs without overwriting unrelated
+                  imports. {totalSkills} skills across{" "}
+                  {displayCategories.length} packs.
                 </DialogDescription>
               </div>
               <div className="flex shrink-0 items-center gap-2">

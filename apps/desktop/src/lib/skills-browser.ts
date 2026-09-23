@@ -51,6 +51,7 @@ function iconForPack(id: SkillPackGroupId): string {
   if (id === "academic-research-skills") return "book-open";
   if (id === "nature-skills") return "flask-conical";
   if (id === "scientific-agent-skills") return "flask-conical";
+  if (id === "paper-humanizer-skill") return "pen-line";
   return "settings";
 }
 

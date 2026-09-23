@@ -234,7 +234,7 @@ describe("agent-store", () => {
     expect(useSettingsStore.getState().builtinAgentPresetsSeedVersion).toBe(
       BUILTIN_AGENT_PRESET_SEED_VERSION,
     );
-    expect(BUILTIN_AGENT_PRESET_SEED_VERSION).toBe(4);
+    expect(BUILTIN_AGENT_PRESET_SEED_VERSION).toBe(5);
     expect(useSettingsStore.getState().builtinAgentPresetsSeeded).toBe(true);
 
     invoke.mockClear();

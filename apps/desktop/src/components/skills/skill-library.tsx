@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SkillTargetPicker } from "@/components/skills/skill-target-picker";
 import { useSkillStore } from "@/stores/skill-store";
+import { skillCatalogDescription } from "@/lib/default-skill-packs";
 import { groupItemsBySkillCategory } from "@/lib/skill-categories";
 import type { RuntimeSkill, SkillTarget } from "@/runtime/types";
 import { useI18n } from "@/lib/use-i18n";
@@ -209,7 +210,9 @@ function SkillRow({
 }) {
   const { t } = useI18n();
   const [showPath, setShowPath] = useState(false);
-  const description = skill.description.trim();
+  const description = (
+    skillCatalogDescription(skill.folder) ?? skill.description
+  ).trim();
   const notes = skillExceptionNotes(skill, selectedTargets, {
     project: t("skills.projectTarget"),
     disabled: t("skills.disabled"),

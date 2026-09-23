@@ -1,4 +1,8 @@
-use super::tools::{normalized_tool_call_id, repair_tool_arguments, repaired_tool_arguments_value};
+use super::tools::{
+    duplicate_skill_tool_call, normalized_tool_call_id, repair_tool_arguments,
+    repaired_tool_arguments_value,
+};
+use std::collections::HashSet;
 use super::transformers::ProxyTransformerChain;
 use super::OpenAiProxyCredential;
 use serde_json::{json, Value};
@@ -140,6 +144,7 @@ pub(super) fn openai_to_anthropic_message(
     }
 
     if let Some(tool_calls) = message.get("tool_calls").and_then(|value| value.as_array()) {
+        let mut seen_skill_calls = HashSet::new();
         for call in tool_calls {
             let function = call.get("function").unwrap_or(&Value::Null);
             let name = function
@@ -157,6 +162,9 @@ pub(super) fn openai_to_anthropic_message(
                 continue;
             }
             let input = repaired_tool_arguments_value(arguments);
+            if duplicate_skill_tool_call(&mut seen_skill_calls, name, &input) {
+                continue;
+            }
             let id = normalized_tool_call_id(call.get("id").and_then(|value| value.as_str()));
             content.push(json!({
                 "type": "tool_use",
@@ -1151,5 +1159,61 @@ mod tests {
         assert_eq!(converted["usage"]["input_tokens"], 66121);
         assert_eq!(converted["usage"]["output_tokens"], 7011);
         assert_eq!(converted["usage"]["cache_read_input_tokens"], 53760);
+    }
+
+    #[test]
+    fn collapses_identical_skill_tool_calls() {
+        let request = json!({ "model": "gpt-6-luna" });
+        let response = json!({
+            "id": "chatcmpl_1",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": { "name": "Skill", "arguments": "{\"skill\":\"init\"}" }
+                        },
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": { "name": "Skill", "arguments": "{\"command\":\"/init\"}" }
+                        },
+                        {
+                            "id": "call_3",
+                            "type": "function",
+                            "function": { "name": "Skill", "arguments": "{\"skill\":\"init\"}" }
+                        },
+                        {
+                            "id": "call_4",
+                            "type": "function",
+                            "function": { "name": "Skill", "arguments": "{\"skill\":\"init\"}" }
+                        },
+                        {
+                            "id": "call_5",
+                            "type": "function",
+                            "function": { "name": "Skill", "arguments": "{\"skill\":\"init\"}" }
+                        },
+                        {
+                            "id": "call_read",
+                            "type": "function",
+                            "function": { "name": "Read", "arguments": "{\"file_path\":\"main.tex\"}" }
+                        }
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let converted = openai_to_anthropic_message(&request, &response, &credential()).unwrap();
+        let content = converted["content"].as_array().unwrap();
+        let names: Vec<_> = content
+            .iter()
+            .filter(|block| block["type"] == "tool_use")
+            .map(|block| block["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["Skill", "Read"]);
+        assert_eq!(content[0]["input"]["skill"], "init");
     }
 }

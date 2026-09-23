@@ -162,6 +162,12 @@ describe("default skill packs", () => {
     expect(resolveSkillPackId({ folder: "scanpy" }, new Set(["scanpy"]))).toBe(
       "scientific-agent-skills",
     );
+    expect(resolveSkillPackId({ folder: "paper-humanizer" })).toBe(
+      "paper-humanizer-skill",
+    );
+    expect(resolveSkillPackId({ folder: "paper-humanizer-skill" })).toBe(
+      "paper-humanizer-skill",
+    );
     expect(resolveSkillPackId({ folder: "my-writer" })).toBe("imported");
     expect(isDefaultPackSkill({ folder: "my-writer" })).toBe(false);
     expect(isDefaultPackSkill({ folder: "scanpy" }, new Set(["scanpy"]))).toBe(
@@ -175,6 +181,7 @@ describe("default skill packs", () => {
           { folder: "deep-research" },
           { folder: "nature-polishing" },
           { folder: "scanpy" },
+          { folder: "paper-humanizer" },
         ],
         [],
       ),

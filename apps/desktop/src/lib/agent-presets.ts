@@ -51,22 +51,24 @@ Output:
 /**
  * Bump when builtin display copy, instructions, or skill attachments should
  * be written onto the three preset files once.
+ * 5 = AI消除器 attaches paper-humanizer.
  * 4 = shorter prompts; de-ai attaches only humanizer/de-ai skills.
  */
-export const BUILTIN_AGENT_PRESET_SEED_VERSION = 4;
+export const BUILTIN_AGENT_PRESET_SEED_VERSION = 5;
 
 /**
  * Shipped skill folders from the default packs (nature-skills,
- * academic-research-skills). Citation folders are intentionally absent.
- * AI消除器 ships with none: only a dynamic humanizer/de-ai match.
- * 毒舌审稿官 stays critique-only: review skills, never cite/BibTeX/Zotero.
+ * academic-research-skills, paper-humanizer-skill). Citation folders are
+ * intentionally absent. AI消除器 attaches paper-humanizer, plus a dynamic
+ * humanizer/de-ai match. 毒舌审稿官 stays critique-only: review skills, never
+ * cite/BibTeX/Zotero. nature-polishing stays on 论文抛光机.
  */
 export const BUILTIN_AGENT_SKILL_FOLDERS: Record<
   BuiltinAgentPresetId,
   readonly string[]
 > = {
   "academic-polish": ["nature-polishing", "nature-writing", "academic-paper"],
-  "de-ai": [],
+  "de-ai": ["paper-humanizer", "paper-humanizer-skill"],
   "peer-review": ["academic-paper-reviewer", "peer-review", "nature-reader"],
 };
 

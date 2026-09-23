@@ -29,6 +29,7 @@ describe("skill categories", () => {
         { folder: "scanpy", name: "Scanpy" },
         { folder: "deep-research", name: "Deep Research" },
         { folder: "nature-polishing", name: "Nature polishing" },
+        { folder: "paper-humanizer", name: "paper-humanizer" },
         { folder: "mystery", name: "Mystery" },
       ],
       (item) => item,
@@ -41,6 +42,7 @@ describe("skill categories", () => {
       ["academic-research-skills", "academic-research-skills"],
       ["nature-skills", "nature-skills"],
       ["scientific-agent-skills", "scientific-agent-skills"],
+      ["paper-humanizer-skill", "paper-humanizer-skill"],
     ]);
     expect(groups.some((group) => group.id === "imported")).toBe(false);
     expect(
