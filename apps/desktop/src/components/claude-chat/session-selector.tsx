@@ -26,6 +26,11 @@ import {
 } from "@/components/ui/dialog";
 import { createLogger } from "@/lib/debug/logger";
 import {
+  loadDismissedForeignSessionKeys,
+  rememberDismissedForeignSession,
+} from "@/lib/dismissed-foreign-sessions";
+import { tabOpenedUnderOtherAccount } from "@/lib/provider-account";
+import {
   runtimeArchiveConversation,
   runtimeListConversations,
 } from "@/runtime/commands";
@@ -171,6 +176,17 @@ function sameConversation(
   return !!left && !!right && conversationKey(left) === conversationKey(right);
 }
 
+function conversationOpenedUnderOtherAccount(
+  reference: ConversationRef,
+): boolean {
+  const state = useClaudeChatStore.getState();
+  return state.tabs.some(
+    (tab) =>
+      sameConversation(tabConversationReference(tab), reference) &&
+      tabOpenedUnderOtherAccount(tab, state),
+  );
+}
+
 function tabConversationReference(tab: TabState | undefined) {
   if (!tab) return null;
   if (tab.sessionRef) return tab.sessionRef;
@@ -267,15 +283,28 @@ export function SessionSelector() {
   );
   const listRequestRef = useRef(0);
   const deleteRequestRef = useRef(0);
-  const archivedReferencesRef = useRef(new Set<string>());
+  const archivedReferencesRef = useRef(
+    new Set<string>(loadDismissedForeignSessionKeys()),
+  );
   contextRef.current = projectPath ? { projectPath } : null;
 
   const deletingKey = deletingReference
     ? conversationKey(deletingReference)
     : null;
+  const activeAccountKey = useClaudeChatStore((state) =>
+    needsLiveTabs ? state.activeAccountKey : null,
+  );
+  const accountObserved = useClaudeChatStore((state) =>
+    needsLiveTabs ? state.accountObserved : false,
+  );
+  const accountScope = useMemo(
+    () => ({ accountObserved, activeAccountKey }),
+    [accountObserved, activeAccountKey],
+  );
   const busyConversationKeys = useMemo(() => {
     const result = new Set<string>();
     for (const tab of tabs) {
+      if (tabOpenedUnderOtherAccount(tab, accountScope)) continue;
       if (!tab.isStreaming && (tab.cancelledAttempts?.length ?? 0) === 0) {
         continue;
       }
@@ -283,7 +312,7 @@ export function SessionSelector() {
       if (reference) result.add(conversationKey(reference));
     }
     return result;
-  }, [tabs]);
+  }, [accountScope, tabs]);
 
   useEffect(() => {
     listRequestRef.current += 1;
@@ -387,6 +416,35 @@ export function SessionSelector() {
     [deletingKey, resumeConversation],
   );
 
+  const dismissForeignConversation = useCallback(
+    (reference: ConversationRef) => {
+      const key = conversationKey(reference);
+      archivedReferencesRef.current.add(key);
+      rememberDismissedForeignSession(key);
+      setDeleteError(null);
+      if (contextMatches(reference.projectPath)) {
+        setConversations((current) =>
+          current.filter(
+            (candidate) => !sameConversation(candidate.reference, reference),
+          ),
+        );
+      }
+      setDeleteTarget((current) =>
+        sameConversation(current?.reference, reference) ? null : current,
+      );
+      const tabIds = useClaudeChatStore
+        .getState()
+        .tabs.filter((tab) =>
+          sameConversation(tabConversationReference(tab), reference),
+        )
+        .map((tab) => tab.id);
+      for (const tabId of tabIds) {
+        useClaudeChatStore.getState().closeTab(tabId);
+      }
+    },
+    [],
+  );
+
   const handleArchiveConversation = useCallback(
     async (conversation: RuntimeConversation) => {
       const reference = conversation.reference;
@@ -439,6 +497,10 @@ export function SessionSelector() {
         );
       } catch (error) {
         if (!stillOwnsRequest()) return;
+        if (conversationOpenedUnderOtherAccount(reference)) {
+          dismissForeignConversation(reference);
+          return;
+        }
         log.error("Failed to archive conversation", {
           reference,
           error: String(error),
@@ -452,7 +514,7 @@ export function SessionSelector() {
         }
       }
     },
-    [busyConversationKeys, deletingReference],
+    [busyConversationKeys, deletingReference, dismissForeignConversation],
   );
 
   const targetIsCodex = deleteTarget?.reference.runtime === "codex";

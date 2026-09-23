@@ -63,6 +63,8 @@ export interface PersistedChatTab {
   runtimeModel: string | null;
   reasoningEffort: string | null;
   agentId: string | null;
+  /** Workspace account that opened the tab. Null until an account is observed. */
+  openedUnderAccountKey: string | null;
 }
 
 export interface PersistedChatDocument {
@@ -154,6 +156,7 @@ function defaultDocument(): HydratedChatDocument {
     runtimeModel: null,
     reasoningEffort: null,
     agentId: null,
+    openedUnderAccountKey: null,
   });
   return { version: 2, activeTabId: tab.id, tabs: [tab] };
 }
@@ -217,6 +220,7 @@ function migrateV2Tab(
     runtimeModel: nullableString(value.runtimeModel),
     reasoningEffort: nullableString(value.reasoningEffort),
     agentId: nullableString(value.agentId),
+    openedUnderAccountKey: nullableString(value.openedUnderAccountKey),
   });
 }
 
@@ -245,6 +249,7 @@ function migrateV1Tab(
       runtimeModel: null,
       reasoningEffort: null,
       agentId: null,
+      openedUnderAccountKey: null,
     },
     sessionId,
   );
@@ -292,6 +297,7 @@ export interface PersistableTabLike {
   runtimeModel?: string | null;
   reasoningEffort?: string | null;
   agentId?: string | null;
+  openedUnderAccountKey?: string | null;
 }
 
 function sameSessionRef(
@@ -329,6 +335,8 @@ export function samePersistableTab(
     nullableString(left.reasoningEffort) ===
       nullableString(right.reasoningEffort) &&
     nullableString(left.agentId) === nullableString(right.agentId) &&
+    nullableString(left.openedUnderAccountKey) ===
+      nullableString(right.openedUnderAccountKey) &&
     sameSessionRef(left.sessionRef, right.sessionRef)
   );
 }
@@ -366,6 +374,7 @@ export function projectPersistedChat(input: unknown): PersistedChatDocument {
       runtimeModel: tab.runtimeModel,
       reasoningEffort: tab.reasoningEffort,
       agentId: tab.agentId,
+      openedUnderAccountKey: tab.openedUnderAccountKey,
     })),
   };
 }

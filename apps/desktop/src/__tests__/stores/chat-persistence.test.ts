@@ -300,6 +300,19 @@ describe("chat persistence I/O", () => {
     });
   });
 
+  it("keeps the account that opened a tab", () => {
+    const accountKey = "official-claude\0a@example.com";
+    const projected = projectPersistedChat({
+      activeTabId: "tab-persisted",
+      tabs: [persistedTab({ openedUnderAccountKey: accountKey })],
+    });
+
+    expect(projected.tabs[0]?.openedUnderAccountKey).toBe(accountKey);
+    expect(migratePersistedChat(projected).tabs[0]?.openedUnderAccountKey).toBe(
+      accountKey,
+    );
+  });
+
   it("safely projects null input to a default Claude document", () => {
     expect(() => projectPersistedChat(null as never)).not.toThrow();
     expect(projectPersistedChat(null as never).tabs[0].runtime).toBe("claude");
@@ -322,6 +335,16 @@ describe("chat persistence I/O", () => {
     expect(samePersistableTab(left, persistedTab({ title: "Renamed" }))).toBe(
       false,
     );
+    expect(
+      samePersistableTab(
+        persistedTab({
+          openedUnderAccountKey: "official-claude\0a@example.com",
+        }),
+        persistedTab({
+          openedUnderAccountKey: "official-chatgpt\0b@example.com",
+        }),
+      ),
+    ).toBe(false);
     expect(
       samePersistableTab(
         left,
@@ -377,6 +400,7 @@ describe("chat persistence I/O", () => {
         "projectPath",
         "providerKey",
         "reasoningEffort",
+        "openedUnderAccountKey",
         "runtime",
         "runtimeModel",
         "sessionProviderKey",

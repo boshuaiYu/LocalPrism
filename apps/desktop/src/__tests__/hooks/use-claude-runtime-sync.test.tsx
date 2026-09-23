@@ -54,6 +54,10 @@ describe("useClaudeRuntimeSync", () => {
     container.remove();
     resetRuntimeStoreForTests();
     resetProviderStoreForTests();
+    useClaudeChatStore.setState({
+      activeAccountKey: null,
+      accountObserved: false,
+    });
   });
 
   async function renderProbe() {
@@ -182,6 +186,72 @@ describe("useClaudeRuntimeSync", () => {
     expect(useClaudeChatStore.getState().tabs[0]?.runtimeModel).toBe(
       "gpt-5.6-terra",
     );
+  });
+
+  it("settles a live session when the signed-in account changes", async () => {
+    const tabId = useClaudeChatStore.getState().activeTabId;
+    useClaudeChatStore.setState((state) => ({
+      activeAccountKey: null,
+      accountObserved: false,
+      isStreaming: true,
+      tabs: state.tabs.map((tab) =>
+        tab.id === tabId
+          ? {
+              ...tab,
+              isStreaming: true,
+              streamingStartedAt: 1,
+              activeAttemptId: "attempt-live",
+              cancelledAttempts: [],
+              openedUnderAccountKey: undefined,
+            }
+          : tab,
+      ),
+    }));
+    await renderProbe();
+
+    const account = (
+      label: string,
+    ): {
+      id: string;
+      kind: "official-claude";
+      name: string;
+      authenticated: true;
+      isActive: true;
+      accountLabel: string;
+    } => ({
+      id: "official-claude",
+      kind: "official-claude",
+      name: "Claude",
+      authenticated: true,
+      isActive: true,
+      accountLabel: label,
+    });
+
+    await act(async () => {
+      useProviderStore.setState({
+        activeId: "official-claude",
+        activeAuthenticated: true,
+        cards: [account("a@example.com")],
+      });
+    });
+    expect(useClaudeChatStore.getState().tabs[0]?.openedUnderAccountKey).toBe(
+      "official-claude\0a@example.com",
+    );
+    expect(useClaudeChatStore.getState().tabs[0]?.isStreaming).toBe(true);
+
+    await act(async () => {
+      useProviderStore.setState({
+        cards: [account("b@example.com")],
+      });
+    });
+    expect(useClaudeChatStore.getState().tabs[0]?.openedUnderAccountKey).toBe(
+      "official-claude\0a@example.com",
+    );
+    expect(useClaudeChatStore.getState().isStreaming).toBe(false);
+    useClaudeChatStore.getState().closeTab(tabId);
+    expect(
+      useClaudeChatStore.getState().tabs.some((tab) => tab.id === tabId),
+    ).toBe(false);
   });
 
   it("unsubscribes on unmount", async () => {

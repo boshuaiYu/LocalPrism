@@ -145,6 +145,44 @@ describe("ChatTabBar runtime badges", () => {
     expect(useClaudeChatStore.getState().activeTabId).toBe("tab-claude");
   });
 
+  it("can close a streaming tab that was opened under another account", async () => {
+    useClaudeChatStore.setState({
+      accountObserved: true,
+      activeAccountKey: "account-b",
+    });
+    await renderTabs([
+      {
+        ...makeTab("tab-foreign", "Other account", "claude", true),
+        openedUnderAccountKey: "account-a",
+      },
+      {
+        ...makeTab("tab-current", "Current account", "claude", true),
+        openedUnderAccountKey: "account-b",
+      },
+    ]);
+
+    const foreignTab = tabButton(container, "tab-foreign");
+    const currentTab = tabButton(container, "tab-current");
+    expect(
+      foreignTab.querySelector('[role="button"][aria-label="Close tab"]'),
+    ).toBeInstanceOf(HTMLSpanElement);
+    expect(
+      currentTab.querySelector('[role="button"][aria-label="Close tab"]'),
+    ).toBeNull();
+
+    await act(async () => {
+      (
+        foreignTab.querySelector(
+          '[role="button"][aria-label="Close tab"]',
+        ) as HTMLSpanElement
+      ).click();
+    });
+
+    expect(useClaudeChatStore.getState().tabs.map((tab) => tab.id)).toEqual([
+      "tab-current",
+    ]);
+  });
+
   it("keeps tab switching, creation, and closing keyboard shortcuts", async () => {
     await renderTabs([
       makeTab("tab-claude", "Claude work", "claude"),

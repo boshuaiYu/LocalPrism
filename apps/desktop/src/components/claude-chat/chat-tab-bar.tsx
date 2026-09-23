@@ -8,6 +8,7 @@ import {
 } from "@/stores/approval-store";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import { tabsForProject } from "@/stores/chat-persistence";
+import { tabOpenedUnderOtherAccount } from "@/lib/provider-account";
 import { useI18n } from "@/lib/use-i18n";
 import { SessionSelector } from "./session-selector";
 import { WorkspaceAccountButton } from "./workspace-account-button";
@@ -17,6 +18,7 @@ type TabBarItem = {
   title: string;
   isStreaming: boolean;
   isStopping: boolean;
+  closableWhileBusy: boolean;
 };
 
 function sameTabBarItems(left: TabBarItem[], right: TabBarItem[]): boolean {
@@ -27,7 +29,8 @@ function sameTabBarItems(left: TabBarItem[], right: TabBarItem[]): boolean {
         item.id === right[index].id &&
         item.title === right[index].title &&
         item.isStreaming === right[index].isStreaming &&
-        item.isStopping === right[index].isStopping,
+        item.isStopping === right[index].isStopping &&
+        item.closableWhileBusy === right[index].closableWhileBusy,
     )
   );
 }
@@ -42,6 +45,7 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
         title: tab.title,
         isStreaming: tab.isStreaming,
         isStopping: (tab.cancelledAttempts?.length ?? 0) > 0,
+        closableWhileBusy: tabOpenedUnderOtherAccount(tab, s),
       })),
     sameTabBarItems,
   );
@@ -139,6 +143,7 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
             isActive={tab.id === activeTabId}
             isStreaming={tab.isStreaming}
             isStopping={tab.isStopping}
+            closableWhileBusy={tab.closableWhileBusy}
             hasPendingApproval={pendingTabIds.has(tab.id)}
             onClick={() => setActiveTab(tab.id)}
             onClose={(e) => handleClose(e, tab.id)}
@@ -167,6 +172,7 @@ function TabButton({
   isActive,
   isStreaming,
   isStopping,
+  closableWhileBusy,
   hasPendingApproval,
   onClick,
   onClose,
@@ -176,6 +182,7 @@ function TabButton({
   isActive: boolean;
   isStreaming: boolean;
   isStopping: boolean;
+  closableWhileBusy: boolean;
   hasPendingApproval: boolean;
   onClick: () => void;
   onClose: (e: React.MouseEvent) => void;
@@ -220,8 +227,8 @@ function TabButton({
         </span>
       )}
       <span className="truncate">{title}</span>
-      {/* Close button — hidden while this tab is streaming or stopping */}
-      {!isStreaming && !isStopping && (
+      {/* Close stays available for a session opened under another account. */}
+      {(closableWhileBusy || (!isStreaming && !isStopping)) && (
         <span
           role="button"
           tabIndex={-1}

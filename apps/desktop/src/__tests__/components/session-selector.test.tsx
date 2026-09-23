@@ -82,7 +82,9 @@ vi.mock("@/components/ui/dialog", () => ({
   DialogTitle: ({ children }: { children: ReactNode }) => <div>{children}</div>,
 }));
 
+import { invoke } from "@tauri-apps/api/core";
 import { SessionSelector } from "@/components/claude-chat/session-selector";
+import { DISMISSED_FOREIGN_SESSIONS_KEY } from "@/lib/dismissed-foreign-sessions";
 import { type TabState, useClaudeChatStore } from "@/stores/claude-chat-store";
 import { useDocumentStore } from "@/stores/document-store";
 
@@ -205,7 +207,10 @@ describe("SessionSelector runtime conversation ownership", () => {
     useClaudeChatStore.setState({
       newSession: originalNewSession,
       resumeConversation: originalResumeConversation,
+      activeAccountKey: null,
+      accountObserved: false,
     });
+    localStorage.clear();
   });
 
   async function renderAndOpen() {
@@ -669,5 +674,89 @@ describe("SessionSelector runtime conversation ownership", () => {
     expect(document.body.textContent).toContain("Older");
     expect(document.body.textContent).toContain("Today session");
     expect(document.body.textContent).toContain("Old session");
+  });
+
+  it("still shows a delete error for a session owned by the signed-in account", async () => {
+    const target = reference("claude", "/project-a", "locked-session");
+    runtimeListConversations.mockResolvedValue([
+      conversation(target, "Locked session"),
+    ]);
+    runtimeArchiveConversation.mockRejectedValue(new Error("file locked"));
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    useClaudeChatStore.setState({
+      accountObserved: true,
+      activeAccountKey: "account-a",
+    });
+    await renderAndOpen();
+
+    await act(async () => findButton("Delete Locked session").click());
+    await act(async () => {
+      findDialogButton("Delete").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(document.body.textContent).toContain("file locked");
+    expect(document.body.textContent).toContain("Locked session");
+    expect(localStorage.getItem(DISMISSED_FOREIGN_SESSIONS_KEY)).toBeNull();
+  });
+
+  it("closes another account's session when the archive command fails", async () => {
+    const target = reference("claude", "/project-a", "foreign-session");
+    const baseTab = useClaudeChatStore.getState().tabs[0];
+    useClaudeChatStore.setState({
+      accountObserved: true,
+      activeAccountKey: "account-b",
+      tabs: [
+        {
+          ...baseTab,
+          id: "tab-foreign",
+          title: "Other account",
+          projectPath: target.projectPath,
+          runtime: target.runtime,
+          sessionId: target.sessionId,
+          sessionRef: target,
+          openedUnderAccountKey: "account-a",
+          isStreaming: true,
+          streamingStartedAt: 1,
+          activeAttemptId: "foreign-attempt",
+          cancelledAttempts: [],
+        },
+      ],
+      activeTabId: "tab-foreign",
+      activeProjectPath: target.projectPath,
+      isStreaming: true,
+    });
+    runtimeListConversations.mockResolvedValue([
+      conversation(target, "Other account"),
+    ]);
+    runtimeArchiveConversation.mockRejectedValue(new Error("not your thread"));
+    await renderAndOpen();
+
+    const deleteButton = findButton("Delete Other account");
+    expect(deleteButton.disabled).toBe(false);
+
+    await act(async () => deleteButton.click());
+    await act(async () => {
+      findDialogButton("Delete").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(document.body.textContent).not.toContain("not your thread");
+    expect(document.body.textContent).not.toContain("Other account");
+    expect(
+      useClaudeChatStore
+        .getState()
+        .tabs.some((tab) => tab.id === "tab-foreign"),
+    ).toBe(false);
+    expect(localStorage.getItem(DISMISSED_FOREIGN_SESSIONS_KEY)).toContain(
+      "foreign-session",
+    );
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await renderAndOpen();
+    expect(document.body.textContent).not.toContain("Other account");
   });
 });
