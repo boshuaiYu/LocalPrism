@@ -4,16 +4,19 @@ import {
   onboardingStepIndex,
   type OnboardingStepId,
 } from "@/lib/onboarding-flow";
+import type { MessageKey } from "@/lib/i18n";
+import { useI18n } from "@/lib/use-i18n";
 import { cn } from "@/lib/utils";
 
 export function OnboardingStepper({ active }: { active: OnboardingStepId }) {
+  const { t } = useI18n();
   const activeIndex = onboardingStepIndex(active);
 
   return (
     <ol
       data-testid="onboarding-stepper"
       className="flex items-center gap-2"
-      aria-label="Project setup progress"
+      aria-label={t("onboarding.progress")}
     >
       {ONBOARDING_STEPS.map((step, index) => {
         const complete = index < activeIndex;
@@ -44,7 +47,7 @@ export function OnboardingStepper({ active }: { active: OnboardingStepId }) {
                   current ? "font-semibold" : "font-medium",
                 )}
               >
-                {step.label}
+                {t(`onboarding.step.${step.id}` as MessageKey)}
               </span>
             </span>
           </li>

@@ -33,6 +33,9 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { LanguageSwitch } from "@/components/language-switch";
+import { LatexOutline } from "@/components/workspace/latex-outline";
+import { useI18n } from "@/lib/use-i18n";
 import {
   DndContext,
   DragOverlay,
@@ -296,6 +299,7 @@ function LayoutPaneSwitcher({
   align?: "start" | "center" | "end";
   buttonClassName?: string;
 }) {
+  const { t } = useI18n();
   const trigger = (
     <Button
       variant="ghost"
@@ -305,8 +309,8 @@ function LayoutPaneSwitcher({
         buttonClassName,
       )}
       onClick={onQuickToggleSidebar}
-      title="Layout"
-      aria-label="Layout"
+      title={t("chrome.layout")}
+      aria-label={t("chrome.layout")}
     >
       <PanelLeftIcon
         className={cn(
@@ -331,25 +335,25 @@ function LayoutPaneSwitcher({
         <div className="space-y-1">
           <LayoutToggleRow
             icon={FileCodeIcon}
-            label="Code"
+            label={t("chrome.code")}
             checked={controls.codeVisible}
             onCheckedChange={controls.setCodeVisible}
           />
           <LayoutToggleRow
             icon={MessageCircleIcon}
-            label="Chat"
+            label={t("chrome.chat")}
             checked={controls.chatVisible}
             onCheckedChange={controls.setChatVisible}
           />
           <LayoutToggleRow
             icon={FileTextIcon}
-            label="PDF"
+            label={t("chrome.pdf")}
             checked={controls.pdfVisible}
             onCheckedChange={controls.setPdfVisible}
           />
           <LayoutToggleRow
             icon={PanelLeftIcon}
-            label="Sidebar"
+            label={t("chrome.sidebar")}
             checked={controls.sidebarVisible}
             onCheckedChange={controls.setSidebarVisible}
           />
@@ -358,7 +362,7 @@ function LayoutPaneSwitcher({
             className="lp-focus flex h-10 w-full items-center rounded-lg px-2 text-left font-medium text-sm hover:bg-accent/70"
             onClick={controls.onResetLayout}
           >
-            Reset layout
+            {t("chrome.resetLayout")}
           </button>
         </div>
       </HoverCardContent>
@@ -433,6 +437,7 @@ export function Sidebar({
   onToggleCollapsed,
   layoutControls,
 }: SidebarProps) {
+  const { t } = useI18n();
   const appVersion = useAppVersion();
   const files = useDocumentStore((s) => s.files);
   const activeFileId = useDocumentStore((s) => s.activeFileId);
@@ -1259,8 +1264,8 @@ export function Sidebar({
           size="icon"
           className="size-7"
           onClick={() => setGuideOpen(true)}
-          title="Getting Started"
-          aria-label="Getting Started"
+          title={t("chrome.gettingStarted")}
+          aria-label={t("chrome.gettingStarted")}
         >
           <CircleHelpIcon className="size-3.5" />
         </Button>
@@ -1297,7 +1302,7 @@ export function Sidebar({
       >
         <div className="flex h-full flex-col bg-sidebar text-sidebar-foreground">
           {/* Header — padded top for macOS overlay titlebar */}
-          <div className="grid h-[calc(var(--workspace-topbar-height)+var(--titlebar-height))] grid-cols-[2rem_minmax(0,1fr)_2rem] items-center gap-2 border-sidebar-border border-b px-3">
+          <div className="grid h-[calc(var(--workspace-topbar-height)+var(--titlebar-height))] grid-cols-[2rem_minmax(0,1fr)_auto] items-center gap-2 border-sidebar-border border-b px-3">
             <div className="flex items-center justify-start">
               <ProjectCloseButton
                 className="size-6 transition-all duration-150 ease-out hover:scale-105"
@@ -1315,12 +1320,13 @@ export function Sidebar({
               )}
               onClick={openProjectRenameDialog}
               disabled={!projectRoot}
-              title={projectRoot ? "Rename project folder" : undefined}
-              aria-label="Rename project folder"
+              title={projectRoot ? t("chrome.renameProject") : undefined}
+              aria-label={t("chrome.renameProject")}
             >
               <span className="block truncate">{projectName}</span>
             </button>
-            <div className="flex items-center justify-end">
+            <div className="flex items-center justify-end gap-1">
+              <LanguageSwitch compact />
               <LayoutPaneSwitcher
                 controls={layoutControls}
                 collapsed={collapsed}
@@ -1349,14 +1355,16 @@ export function Sidebar({
                 <div className="flex h-8 shrink-0 items-center justify-between gap-2 border-sidebar-border border-b px-3">
                   <div className="flex min-w-0 items-center gap-2">
                     <FolderIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                    <span className="truncate font-medium text-xs">Files</span>
+                    <span className="truncate font-medium text-xs">
+                      {t("chrome.files")}
+                    </span>
                   </div>
                   <div className="flex shrink-0 items-center gap-0.5">
                     <Button
                       variant="ghost"
                       size="icon"
                       className="size-5"
-                      title="Refresh"
+                      title={t("chrome.refresh")}
                       disabled={isRefreshingFiles}
                       onClick={() => void runRefreshFiles()}
                     >
@@ -1373,7 +1381,7 @@ export function Sidebar({
                           variant="ghost"
                           size="icon"
                           className="size-5"
-                          title="Add"
+                          title={t("chrome.add")}
                         >
                           <PlusIcon className="size-3" />
                         </Button>
@@ -1381,21 +1389,29 @@ export function Sidebar({
                       <DropdownMenuContent align="end">
                         <DropdownMenuItem onClick={() => openNewFileDialog()}>
                           <FileTextIcon className="mr-2 size-4" />
-                          New LaTeX File
+                          {t("chrome.newLatexFile")}
                         </DropdownMenuItem>
                         <DropdownMenuItem onClick={() => openNewFolderDialog()}>
                           <FolderPlusIcon className="mr-2 size-4" />
-                          New Folder
+                          {t("chrome.newFolder")}
                         </DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem onClick={() => handleImport()}>
                           <UploadIcon className="mr-2 size-4" />
-                          Import File
+                          {t("chrome.importFile")}
                         </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </div>
                 </div>
+                <LatexOutline
+                  files={files}
+                  activeFileId={activeFileId}
+                  onSelectFile={(id) => {
+                    setPasteTargetFolder(parentFolderOfPath(id));
+                    setActiveFile(id);
+                  }}
+                />
                 <DndContext
                   sensors={sensors}
                   onDragStart={handleDragStart}

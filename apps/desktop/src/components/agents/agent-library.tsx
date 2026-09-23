@@ -9,6 +9,7 @@ import {
 import { useAgentStore } from "@/stores/agent-store";
 import { useSkillStore } from "@/stores/skill-store";
 import type { AgentProfile } from "@/runtime/types";
+import { useI18n } from "@/lib/use-i18n";
 
 export interface AgentLibraryProps {
   projectPath?: string | null;
@@ -26,6 +27,7 @@ export function AgentLibrary({ projectPath = null }: AgentLibraryProps) {
   const [seed, setSeed] = useState<AgentProfile | null>(null);
   const [preparingPreset, setPreparingPreset] = useState(false);
   const presetRequest = useRef(0);
+  const { t } = useI18n();
 
   useEffect(() => {
     void refresh("claude", projectPath ?? undefined);
@@ -56,10 +58,7 @@ export function AgentLibrary({ projectPath = null }: AgentLibraryProps) {
 
   return (
     <div className="space-y-4" data-testid="agent-library">
-      <p className="text-muted-foreground text-xs">
-        Custom subagents are stored in claude-home/agents next to the LocalPrism
-        install folder, not ~/.claude.
-      </p>
+      <p className="text-muted-foreground text-xs">{t("agents.storage")}</p>
       <div className="flex flex-wrap items-center gap-2">
         <Button
           type="button"
@@ -67,13 +66,13 @@ export function AgentLibrary({ projectPath = null }: AgentLibraryProps) {
           className="ml-auto"
           onClick={startCustom}
         >
-          New agent
+          {t("agents.new")}
         </Button>
       </div>
 
       {error && <p className="text-destructive text-sm">{error}</p>}
       {loading && (
-        <p className="text-muted-foreground text-sm">Loading agents…</p>
+        <p className="text-muted-foreground text-sm">{t("agents.loading")}</p>
       )}
 
       {(creating || editing) && (
@@ -133,7 +132,7 @@ export function AgentLibrary({ projectPath = null }: AgentLibraryProps) {
                     setCreating(false);
                   }}
                 >
-                  Edit
+                  {t("agents.edit")}
                 </Button>
                 <Button
                   type="button"
@@ -141,7 +140,7 @@ export function AgentLibrary({ projectPath = null }: AgentLibraryProps) {
                   variant="ghost"
                   onClick={() => void remove(agent, projectPath ?? undefined)}
                 >
-                  Delete
+                  {t("agents.delete")}
                 </Button>
               </div>
             </div>
@@ -150,9 +149,9 @@ export function AgentLibrary({ projectPath = null }: AgentLibraryProps) {
         {!loading && agents.length === 0 && !creating && !editing && (
           <li data-testid="agent-preset-empty" className="space-y-3">
             <div>
-              <p className="font-medium text-sm">No custom agents yet.</p>
+              <p className="font-medium text-sm">{t("agents.empty")}</p>
               <p className="mt-1 text-muted-foreground text-xs">
-                Start from a writing preset, or create a custom agent.
+                {t("agents.emptyHint")}
               </p>
             </div>
             <div className="grid gap-2">
@@ -183,12 +182,12 @@ export function AgentLibrary({ projectPath = null }: AgentLibraryProps) {
                 disabled={preparingPreset}
                 onClick={startCustom}
               >
-                自定义 · Create custom agent
+                {t("agents.custom")}
               </Button>
             </div>
             {preparingPreset && (
               <p className="text-muted-foreground text-xs">
-                Checking installed skills…
+                {t("agents.checkingSkills")}
               </p>
             )}
           </li>

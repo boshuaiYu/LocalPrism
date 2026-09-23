@@ -45,6 +45,13 @@ describe("formatUnexpectedClaudeExit", () => {
     ).not.toMatch(/Check the Claude login/i);
   });
 
+  it("surfaces an HTTP 400 instead of returning nothing", () => {
+    expect(classifyClaudeProcessStderr("Error: 400 Bad Request")).toMatch(
+      /HTTP 400/,
+    );
+    expect(classifyClaudeProcessStderr("Error: 1400 tokens left")).toBeNull();
+  });
+
   it("classifies an actual rate limit from stderr", () => {
     expect(
       classifyClaudeProcessStderr("API Error: 429 too many requests"),

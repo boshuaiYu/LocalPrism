@@ -28,6 +28,8 @@ import {
   lastUserTextMessageIndex,
   settleChatMessages,
 } from "@/lib/chat-turn-settlement";
+import { canOfferCompression } from "@/lib/chat-compression";
+import { useI18n } from "@/lib/use-i18n";
 
 const EMPTY_PENDING_GUIDANCE: QueuedGuidance[] = [];
 const THREAD_MAX_WIDTH = "max-w-[44rem]";
@@ -36,6 +38,7 @@ const MessageActions: FC<{
   text: string;
   align?: "left" | "right";
 }> = ({ text, align = "left" }) => {
+  const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const canCopy = text.trim().length > 0;
 
@@ -56,7 +59,7 @@ const MessageActions: FC<{
       )}
     >
       <TooltipIconButton
-        tooltip={copied ? "Copied" : "Copy"}
+        tooltip={copied ? t("chat.copied") : t("chat.copy")}
         side="top"
         variant="ghost"
         size="icon"
@@ -76,7 +79,11 @@ const MessageActions: FC<{
 // ─── Chat Messages (main component) ───
 
 export const ChatMessages: FC = () => {
+  const { t } = useI18n();
   const messages = useClaudeChatStore((s) => s.messages) ?? [];
+  const compressEarlierMessages = useClaudeChatStore(
+    (s) => s.compressEarlierMessages,
+  );
   const isStreaming = useClaudeChatStore((s) => s.isStreaming);
   const streamingStartedAt = useClaudeChatStore((s) => s.streamingStartedAt);
   const streamingStatus = useClaudeChatStore((s) => s.streamingStatus);
@@ -98,7 +105,10 @@ export const ChatMessages: FC = () => {
   // Build a map of tool_use_id → tool_result for inline display
   const toolResultMap = useMemo(() => {
     const map = new Map<string, ContentBlock>();
-    for (const msg of messages) {
+    const visit = (msg: ClaudeStreamMessage) => {
+      for (const original of msg.contextSummary?.originals ?? []) {
+        visit(original);
+      }
       if (msg.type === "user" && Array.isArray(msg.message?.content)) {
         for (const block of msg.message.content) {
           if (block.type === "tool_result" && block.tool_use_id) {
@@ -106,7 +116,8 @@ export const ChatMessages: FC = () => {
           }
         }
       }
-    }
+    };
+    for (const msg of messages) visit(msg);
     return map;
   }, [messages]);
 
@@ -125,6 +136,7 @@ export const ChatMessages: FC = () => {
     }
 
     return messages.filter((msg) => {
+      if (msg.subtype === "context-summary") return true;
       if (msg.type === "system" && msg.subtype === "init") return false;
       if (
         msg.type !== "user" &&
@@ -188,6 +200,8 @@ export const ChatMessages: FC = () => {
     }
   }, [isStreaming]);
 
+  const offerCompression = canOfferCompression(messages);
+
   const handleScroll = () => {
     if (!viewportRef.current) return;
     const el = viewportRef.current;
@@ -212,9 +226,28 @@ export const ChatMessages: FC = () => {
         pendingGuidance.length === 0 &&
         !isStreaming && (
           <div className="flex h-full items-center justify-center px-6 text-center text-muted-foreground text-sm leading-relaxed">
-            Ask about this paper
+            {t("chat.ask")}
           </div>
         )}
+
+      {offerCompression && (
+        <div
+          className={cn(
+            "sticky top-0 z-10 mx-auto mb-3 flex w-full justify-center",
+            THREAD_MAX_WIDTH,
+          )}
+        >
+          <button
+            type="button"
+            data-testid="compress-earlier"
+            className="rounded-full border border-border bg-background/95 px-3 py-1 text-xs shadow-sm hover:bg-muted disabled:opacity-50"
+            disabled={isStreaming}
+            onClick={() => void compressEarlierMessages({ force: true })}
+          >
+            {t("chat.compress")}
+          </button>
+        </div>
+      )}
 
       {settledMessages.map((msg, idx) => (
         <div
@@ -267,6 +300,9 @@ const MessageBubble: FC<{
   live?: boolean;
 }> = memo(
   ({ message, toolResultMap, live = false }) => {
+    if (message.subtype === "context-summary") {
+      return <SummaryMessage message={message} toolResultMap={toolResultMap} />;
+    }
     if (message.type === "user") {
       return <UserMessage message={message} />;
     }
@@ -293,6 +329,51 @@ const MessageBubble: FC<{
     );
   },
 );
+
+function SummaryMessage({
+  message,
+  toolResultMap,
+}: {
+  message: ClaudeStreamMessage;
+  toolResultMap: Map<string, ContentBlock>;
+}) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const summary = message.contextSummary?.text ?? message.result ?? "";
+  const originals = message.contextSummary?.originals ?? [];
+  const count = message.contextSummary?.coveredCount ?? originals.length;
+
+  return (
+    <div className="mb-4 rounded-lg border border-border/70 bg-muted/40 px-3 py-2">
+      <p className="font-medium text-xs">{t("chat.summaryTitle")}</p>
+      <p className="mt-1 whitespace-pre-wrap text-sm leading-5">{summary}</p>
+      <p className="mt-1 text-muted-foreground text-xs">
+        {t("chat.summaryMeta", { count })}
+      </p>
+      {originals.length > 0 && (
+        <button
+          type="button"
+          className="mt-2 text-xs underline-offset-2 hover:underline"
+          aria-expanded={open}
+          onClick={() => setOpen((current) => !current)}
+        >
+          {open ? t("chat.hideOriginals") : t("chat.showOriginals")}
+        </button>
+      )}
+      {open && (
+        <div className="mt-3 border-border/70 border-t pt-2">
+          {originals.map((original, index) => (
+            <MessageBubble
+              key={index}
+              message={original}
+              toolResultMap={toolResultMap}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ─── User Message ───
 

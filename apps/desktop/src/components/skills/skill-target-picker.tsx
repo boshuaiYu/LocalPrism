@@ -1,13 +1,15 @@
 import { Button } from "@/components/ui/button";
+import type { MessageKey } from "@/lib/i18n";
+import { useI18n } from "@/lib/use-i18n";
 import type { RuntimeKind, SkillScope, SkillTarget } from "@/runtime/types";
 
 const OPTIONS: Array<{
   runtime: RuntimeKind;
   scope: SkillScope;
-  label: string;
+  labelKey: MessageKey;
 }> = [
-  { runtime: "claude", scope: "user", label: "LocalPrism / user" },
-  { runtime: "claude", scope: "project", label: "LocalPrism / project" },
+  { runtime: "claude", scope: "user", labelKey: "skills.userTarget" },
+  { runtime: "claude", scope: "project", labelKey: "skills.projectTarget" },
 ];
 
 export interface SkillTargetPickerProps {
@@ -21,6 +23,7 @@ export function SkillTargetPicker({
   projectPath = null,
   onChange,
 }: SkillTargetPickerProps) {
+  const { t } = useI18n();
   return (
     <div className="flex flex-wrap gap-2" data-testid="skill-target-picker">
       {OPTIONS.map((option) => {
@@ -39,7 +42,7 @@ export function SkillTargetPicker({
             title={
               disabled
                 ? "Open a project to use project-scoped skills"
-                : option.label
+                : t(option.labelKey)
             }
             onClick={() => {
               if (active) {
@@ -60,7 +63,7 @@ export function SkillTargetPicker({
               ]);
             }}
           >
-            {option.label}
+            {t(option.labelKey)}
           </Button>
         );
       })}

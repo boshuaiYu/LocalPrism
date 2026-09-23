@@ -13,6 +13,7 @@ import { useClaudeSetupStore } from "@/stores/claude-setup-store";
 import { useDocumentStore } from "@/stores/document-store";
 import { useProviderStore } from "@/stores/provider-store";
 import { useSkillStore } from "@/stores/skill-store";
+import { useI18n } from "@/lib/use-i18n";
 
 type ProviderRefresh = ReturnType<typeof useProviderStore.getState>["refresh"];
 type ClaudeStatusCheck = ReturnType<
@@ -52,6 +53,7 @@ function initialCheckFor(
 }
 
 export function EnvironmentOnboarding() {
+  const { t } = useI18n();
   const [initialCheckComplete, setInitialCheckComplete] = useState(false);
   const [hasOpenedForSetup, setHasOpenedForSetup] = useState(false);
   const [completedDismissed, setCompletedDismissed] = useState(false);
@@ -122,9 +124,7 @@ export function EnvironmentOnboarding() {
               LocalPrism
             </DialogTitle>
             <DialogDescription className="max-w-xl text-sm leading-relaxed">
-              Paste an API key from DeepSeek, Kimi, Qwen, or another provider.
-              Official Claude or ChatGPT browser sign-in is optional. You can
-              skip model setup and configure this later in Settings.
+              {t("onboarding.envBody")}
             </DialogDescription>
           </DialogHeader>
         </div>
@@ -137,7 +137,7 @@ export function EnvironmentOnboarding() {
             variant={setupComplete ? "default" : "outline"}
             onClick={handleDone}
           >
-            {setupComplete ? "Done" : "Skip model setup"}
+            {setupComplete ? t("onboarding.done") : t("onboarding.skipModel")}
           </Button>
         </div>
       </DialogContent>

@@ -9,6 +9,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { requestWelcomeGuide } from "@/lib/welcome";
+import { useI18n } from "@/lib/use-i18n";
 
 export function GettingStartedDialog({
   open,
@@ -21,13 +22,14 @@ export function GettingStartedDialog({
   beforeOpenGuide?: () => boolean | Promise<boolean>;
   leavesProject?: boolean;
 }) {
+  const { t } = useI18n();
   const [note, setNote] = useState<string | null>(null);
 
   const openGuide = async () => {
     if (beforeOpenGuide) {
       const ready = await beforeOpenGuide();
       if (!ready) {
-        setNote("Stop the current chat turn before opening the setup guide.");
+        setNote(t("onboarding.stopFirst"));
         return;
       }
     }
@@ -46,27 +48,20 @@ export function GettingStartedDialog({
     >
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle className="lp-heading">Getting Started</DialogTitle>
+          <DialogTitle className="lp-heading">
+            {t("onboarding.gettingStartedTitle")}
+          </DialogTitle>
           <DialogDescription className="lp-body">
-            A short map of the workspace. You can open the setup guide again any
-            time.
+            {t("onboarding.gettingStartedBody")}
           </DialogDescription>
         </DialogHeader>
         <ol className="space-y-2 text-sm">
-          <li>Create a project from a template, or open an existing folder.</li>
-          <li>
-            In Settings, an API key is the recommended way to chat. Official
-            login is optional.
-          </li>
-          <li>
-            Drag the pane splitters to resize the file tree, editor, chat, and
-            PDF. Reset layout restores the default widths.
-          </li>
+          <li>{t("onboarding.stepCreate")}</li>
+          <li>{t("onboarding.stepSettings")}</li>
+          <li>{t("onboarding.stepPanes")}</li>
         </ol>
         {leavesProject && (
-          <p className="lp-meta">
-            Open setup guide closes this project and returns to the home screen.
-          </p>
+          <p className="lp-meta">{t("onboarding.leavesProject")}</p>
         )}
         {note && <p className="text-destructive text-sm">{note}</p>}
         <DialogFooter>
@@ -76,14 +71,14 @@ export function GettingStartedDialog({
             className="h-10 rounded-lg"
             onClick={() => onOpenChange(false)}
           >
-            Close
+            {t("onboarding.close")}
           </Button>
           <Button
             type="button"
             className="lp-primary-cta h-10 rounded-lg"
             onClick={() => void openGuide()}
           >
-            Open setup guide
+            {t("onboarding.openGuide")}
           </Button>
         </DialogFooter>
       </DialogContent>

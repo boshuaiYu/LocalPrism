@@ -31,6 +31,7 @@ import {
 } from "@/runtime/commands";
 import type { ConversationRef, RuntimeConversation } from "@/runtime/types";
 import { type TabState, useClaudeChatStore } from "@/stores/claude-chat-store";
+import { useI18n } from "@/lib/use-i18n";
 
 const log = createLogger("session-selector");
 const IDLE_TABS: TabState[] = [];
@@ -225,6 +226,7 @@ function mergeConversations(
 }
 
 export function SessionSelector() {
+  const { t } = useI18n();
   const [conversations, setConversations] = useState<RuntimeConversation[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -483,7 +485,9 @@ export function SessionSelector() {
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="truncate text-sm leading-snug">{title}</span>
           {isCodex ? (
-            <span className="text-muted-foreground text-xs">Read-only</span>
+            <span className="text-muted-foreground text-xs">
+              {t("chat.readOnly")}
+            </span>
           ) : null}
           <span className="text-muted-foreground text-xs">
             {formatRelativeTime(conversation.updatedAt)}
@@ -570,7 +574,7 @@ export function SessionSelector() {
           <button
             type="button"
             className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            aria-label="Session history"
+            aria-label={t("chat.sessionHistory")}
             onMouseDown={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
           >
@@ -590,8 +594,8 @@ export function SessionSelector() {
               <input
                 ref={searchRef}
                 type="search"
-                aria-label="Search chats"
-                placeholder="Search chats"
+                aria-label={t("chat.search")}
+                placeholder={t("chat.search")}
                 value={searchQuery}
                 onChange={(event) => setSearchQuery(event.target.value)}
                 onPointerDown={(event) => event.stopPropagation()}
@@ -618,7 +622,7 @@ export function SessionSelector() {
               className="min-h-10 gap-2 px-2.5"
             >
               <PlusIcon className="size-4" />
-              <span>New Chat</span>
+              <span>{t("chat.newChat")}</span>
             </DropdownMenuItem>
             <DropdownMenuSeparator />
 
@@ -628,11 +632,11 @@ export function SessionSelector() {
               </div>
             ) : conversations.length === 0 ? (
               <div className="px-2 py-6 text-center text-muted-foreground text-sm">
-                No previous sessions
+                {t("chat.noSessions")}
               </div>
             ) : visibleConversations.length === 0 ? (
               <div className="px-2 py-6 text-center text-muted-foreground text-sm">
-                No matching chats
+                {t("chat.noMatches")}
               </div>
             ) : (
               (() => {
@@ -651,7 +655,7 @@ export function SessionSelector() {
                       <>
                         {writable.length > 0 ? <DropdownMenuSeparator /> : null}
                         <DropdownMenuLabel className="px-2.5 py-1.5">
-                          Read-only
+                          {t("chat.readOnly")}
                         </DropdownMenuLabel>
                         {renderGrouped(readOnly)}
                       </>

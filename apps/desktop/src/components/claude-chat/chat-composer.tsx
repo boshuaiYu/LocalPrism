@@ -67,6 +67,7 @@ import { PermissionModePicker } from "@/components/runtime/permission-mode-picke
 import { AgentSelector } from "@/components/agents/agent-selector";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/lib/use-i18n";
 import { useRuntimeStore } from "@/stores/runtime-store";
 import {
   resolveProviderRequestModel,
@@ -256,6 +257,7 @@ function ComposerModelChip({
 }
 
 export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
+  const { t } = useI18n();
   const sendPrompt = useClaudeChatStore((s) => s.sendPrompt);
   const setChatError = useClaudeChatStore((s) => s._setError);
   const queueGuidance = useClaudeChatStore((s) => s.queueGuidance);
@@ -1401,15 +1403,14 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
       {archivedCodex ? (
         <div className="flex flex-col items-start gap-3 rounded-xl border border-border/60 bg-muted/30 px-4 py-3">
           <p className="text-muted-foreground text-sm">
-            This conversation is read-only. Start a new chat with the active
-            provider.
+            {t("errors.readOnly")}
           </p>
           <button
             type="button"
             onClick={() => ensureWritableTab()}
             className="inline-flex h-8 items-center rounded-full bg-primary px-3 font-medium text-primary-foreground text-xs"
           >
-            Start a new chat
+            {t("chat.startNew")}
           </button>
         </div>
       ) : (

@@ -15,6 +15,49 @@ import {
   providerStatusDetail,
 } from "@/lib/provider-readiness";
 import { cn } from "@/lib/utils";
+import type { MessageKey } from "@/lib/i18n";
+import { useI18n } from "@/lib/use-i18n";
+
+const STATUS_KEYS: Record<string, MessageKey> = {
+  "Not connected": "providers.status.notConnected",
+  Connected: "providers.status.connected",
+  Active: "providers.status.active",
+  "Active · no model": "providers.status.activeNoModel",
+};
+
+function localizedStatus(
+  status: string,
+  t: (key: MessageKey, vars?: Record<string, string | number>) => string,
+): string {
+  const key = STATUS_KEYS[status];
+  return key ? t(key) : status;
+}
+
+function localizedDetail(
+  detail: string,
+  status: string,
+  t: (key: MessageKey, vars?: Record<string, string | number>) => string,
+): string {
+  if (!detail.endsWith(status)) return detail;
+  return `${detail.slice(0, detail.length - status.length)}${localizedStatus(status, t)}`;
+}
+
+function localizedBadge(
+  badge: string,
+  t: (key: MessageKey, vars?: Record<string, string | number>) => string,
+): string {
+  return badge
+    .split("Engine on")
+    .join(t("providers.engineOn"))
+    .split("Engine off")
+    .join(t("providers.engineOff"))
+    .split("Model set")
+    .join(t("providers.modelSet"))
+    .split("No model")
+    .join(t("providers.noModel"))
+    .split("connected")
+    .join(t("providers.connectedWord"));
+}
 
 export interface ProviderSettingsProps {
   refreshOnMount?: boolean;
@@ -27,6 +70,7 @@ export function ProviderSettings({
   showEngine = true,
   officialOpenDefault = false,
 }: ProviderSettingsProps) {
+  const { t } = useI18n();
   const refresh = useProviderStore((state) => state.refresh);
   const cards = useProviderStore((state) => state.cards);
   const engineInstalled = useProviderStore((state) => state.engineInstalled);
@@ -46,7 +90,7 @@ export function ProviderSettings({
     models,
   });
   const activeName =
-    cards.find((card) => card.isActive)?.name ?? "the active provider";
+    cards.find((card) => card.isActive)?.name ?? t("providers.activeFallback");
   const installEngine = useClaudeSetupStore((state) => state.install);
   const ensureEngine = useClaudeSetupStore((state) => state.ensureEngine);
   const isInstalling = useClaudeSetupStore((state) => state.isInstalling);
@@ -81,17 +125,19 @@ export function ProviderSettings({
         <section className="rounded-xl border border-border/70 p-4">
           <p className="text-sm">
             {missingGit
-              ? "Git for Windows is required before installing Claude Code CLI."
+              ? t("providers.gitRequired")
               : isInstalling
-                ? "Installing Claude Code CLI…"
-                : "Claude Code CLI is needed before a provider can send chat."}
+                ? t("providers.installingCli")
+                : t("providers.cliNeeded")}
           </p>
           <Button
             className="mt-3"
             disabled={isInstalling || missingGit}
             onClick={() => void installEngine()}
           >
-            {isInstalling ? "Installing…" : "Install Claude Code CLI"}
+            {isInstalling
+              ? t("providers.installing")
+              : t("providers.installCli")}
           </Button>
         </section>
       )}
@@ -112,14 +158,14 @@ export function ProviderSettings({
         >
           <span>
             <span className="block font-medium text-sm">
-              Official Claude / ChatGPT login
+              {t("providers.officialTitle")}
             </span>
             <span className="mt-0.5 block text-muted-foreground text-xs">
-              Optional browser sign-in. An API key is enough.
+              {t("providers.officialHelp")}
             </span>
           </span>
           <span className="text-muted-foreground text-xs">
-            {officialOpen ? "Hide" : "Show"}
+            {officialOpen ? t("providers.hide") : t("providers.show")}
           </span>
         </button>
         {officialOpen && (
@@ -158,9 +204,11 @@ export function ProviderSettings({
 
       {error && <p className="text-destructive text-sm">{error}</p>}
       <p className="text-muted-foreground text-xs">
-        {readinessBadge}. An API key is enough.
+        {t("providers.apiKeyEnough", {
+          badge: localizedBadge(readinessBadge, t),
+        })}
         {models.length > 0
-          ? ` ${models.length} models from ${activeName}.`
+          ? ` ${t("providers.modelCount", { count: models.length, name: activeName })}`
           : ""}
       </p>
     </div>
@@ -184,6 +232,8 @@ function OfficialCard({
   onLogout: () => void;
   onActivate: () => void;
 }) {
+  const { t } = useI18n();
+  const status = providerCardStatusLabel(card, models);
   return (
     <section className="rounded-lg bg-muted/30 p-3">
       <div className="flex items-start justify-between gap-3">
@@ -191,12 +241,12 @@ function OfficialCard({
           <h3 className="font-medium text-sm">{card.name}</h3>
           <p className="mt-1 text-muted-foreground text-sm">
             {card.authenticated
-              ? card.accountLabel || "Signed in"
-              : "Browser sign-in. Tokens stay in LocalPrism."}
+              ? card.accountLabel || t("providers.signedIn")
+              : t("providers.browserSignIn")}
           </p>
         </div>
         <span className="text-muted-foreground text-xs">
-          {providerCardStatusLabel(card, models)}
+          {localizedStatus(status, t)}
         </span>
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
@@ -204,22 +254,24 @@ function OfficialCard({
           <>
             {!card.isActive && (
               <Button size="sm" onClick={onActivate}>
-                Set as default
+                {t("providers.setAsDefault")}
               </Button>
             )}
             <Button size="sm" variant="outline" onClick={onLogout}>
-              Sign out
+              {t("providers.signOut")}
             </Button>
           </>
         ) : (
           <Button size="sm" disabled={busy} onClick={onLogin}>
-            {busy ? "Waiting for browser…" : `Sign in to ${card.name}`}
+            {busy
+              ? t("providers.waitingBrowser")
+              : t("providers.signInTo", { name: card.name })}
           </Button>
         )}
       </div>
       {oauthUrl && (
         <p className="mt-2 break-all text-muted-foreground text-xs">
-          If the browser did not open, copy this authorization link: {oauthUrl}
+          {t("providers.oauthFallback", { url: oauthUrl })}
         </p>
       )}
     </section>
@@ -245,6 +297,7 @@ function ThirdPartySection({
     models: { main: string };
   }) => void;
 }) {
+  const { t } = useI18n();
   const defaultPreset = THIRD_PARTY_PRESETS[0];
   const [presetId, setPresetId] = useState<string | null>(defaultPreset.id);
   const [name, setName] = useState(defaultPreset.name);
@@ -264,10 +317,9 @@ function ThirdPartySection({
 
   return (
     <section className="rounded-xl border border-border/70 p-4">
-      <h3 className="font-medium text-sm">Use an API key</h3>
+      <h3 className="font-medium text-sm">{t("providers.useApiKey")}</h3>
       <p className="mt-1 text-muted-foreground text-sm">
-        Pick a preset and paste a key. Official Claude or ChatGPT sign-in is not
-        required.
+        {t("providers.apiKeyHelp")}
       </p>
       <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
         {THIRD_PARTY_PRESETS.map((item) => {
@@ -307,13 +359,13 @@ function ThirdPartySection({
             <div className="grid gap-2 sm:grid-cols-2">
               {isCustom && (
                 <Input
-                  placeholder="Name"
+                  placeholder={t("providers.name")}
                   value={name}
                   onChange={(event) => setName(event.target.value)}
                 />
               )}
               <Input
-                placeholder="Base URL"
+                placeholder={t("providers.baseUrl")}
                 value={baseUrl}
                 onChange={(event) => setBaseUrl(event.target.value)}
               />
@@ -321,13 +373,13 @@ function ThirdPartySection({
           )}
           <div className="grid gap-2 sm:grid-cols-2">
             <Input
-              placeholder="API key"
+              placeholder={t("providers.apiKey")}
               type="password"
               value={apiKey}
               onChange={(event) => setApiKey(event.target.value)}
             />
             <Input
-              placeholder="Model"
+              placeholder={t("providers.model")}
               value={model}
               onChange={(event) => setModel(event.target.value)}
             />
@@ -351,7 +403,7 @@ function ThirdPartySection({
               setApiKey("");
             }}
           >
-            Save and set default
+            {t("providers.saveDefault")}
           </Button>
         </div>
       )}
@@ -365,7 +417,11 @@ function ThirdPartySection({
             <div>
               <p className="text-sm">{card.name}</p>
               <p className="text-muted-foreground text-xs">
-                {providerStatusDetail(card, models)}
+                {localizedDetail(
+                  providerStatusDetail(card, models),
+                  providerCardStatusLabel(card, models),
+                  t,
+                )}
               </p>
             </div>
             <div className="flex gap-2">
@@ -375,7 +431,7 @@ function ThirdPartySection({
                   variant="outline"
                   onClick={() => onActivate(card.id)}
                 >
-                  Set default
+                  {t("providers.setDefault")}
                 </Button>
               )}
               <Button
@@ -383,7 +439,7 @@ function ThirdPartySection({
                 variant="ghost"
                 onClick={() => onDelete(card.id)}
               >
-                Delete
+                {t("providers.delete")}
               </Button>
             </div>
           </li>

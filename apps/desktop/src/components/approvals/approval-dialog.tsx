@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useApprovalStore, firstPendingForTab } from "@/stores/approval-store";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import type { RuntimeRequest } from "@/runtime/types";
+import { useI18n } from "@/lib/use-i18n";
 
 export function ApprovalDialog() {
   const activeTabId = useClaudeChatStore((state) => state.activeTabId);
@@ -11,6 +12,7 @@ export function ApprovalDialog() {
     () => firstPendingForTab(pending, activeTabId),
     [pending, activeTabId],
   );
+  const { t } = useI18n();
   const [answers, setAnswers] = useState<Record<string, string>>({});
 
   useEffect(() => {
@@ -34,7 +36,7 @@ export function ApprovalDialog() {
       className="pointer-events-auto absolute inset-0 z-20 flex items-end justify-center bg-black/30 p-4"
       role="dialog"
       aria-modal="true"
-      aria-label="Runtime approval"
+      aria-label={t("approvals.label")}
       data-testid="approval-dialog"
       data-tab-id={request.tabId}
       onKeyDown={(event) => {
@@ -46,7 +48,7 @@ export function ApprovalDialog() {
     >
       <div className="w-full max-w-lg rounded-xl border border-border bg-background p-4 shadow-2xl">
         <div className="mb-2 text-muted-foreground text-xs uppercase tracking-wide">
-          {request.runtime} approval
+          {t("approvals.kind", { runtime: request.runtime })}
         </div>
         <h3 className="mb-2 font-semibold text-foreground text-sm">
           {request.title}
@@ -74,7 +76,7 @@ export function ApprovalDialog() {
                       }))
                     }
                   >
-                    <option value="">Select…</option>
+                    <option value="">{t("approvals.select")}</option>
                     {question.options.map((option) => (
                       <option key={option} value={option}>
                         {option}
@@ -104,7 +106,7 @@ export function ApprovalDialog() {
             className="rounded-md border border-border px-3 py-1.5 text-xs"
             onClick={closeAsDeny}
           >
-            Deny
+            {t("approvals.deny")}
           </button>
           <button
             type="button"
@@ -117,7 +119,7 @@ export function ApprovalDialog() {
               })
             }
           >
-            Cancel turn
+            {t("approvals.cancelTurn")}
           </button>
           {!isUserInput && (
             <button
@@ -131,7 +133,7 @@ export function ApprovalDialog() {
                 })
               }
             >
-              Allow for session
+              {t("approvals.allowSession")}
             </button>
           )}
           <button
@@ -158,7 +160,7 @@ export function ApprovalDialog() {
               });
             }}
           >
-            Allow once
+            {t("approvals.allowOnce")}
           </button>
         </div>
       </div>
@@ -167,9 +169,12 @@ export function ApprovalDialog() {
 }
 
 function RequestDetails({ request }: { request: RuntimeRequest }) {
+  const { t } = useI18n();
   return (
     <div className="space-y-1 text-muted-foreground text-xs">
-      {request.threadId && <div>Thread: {request.threadId}</div>}
+      {request.threadId && (
+        <div>{t("approvals.thread", { id: request.threadId })}</div>
+      )}
       {request.agentRunId && <div>Agent: {request.agentRunId}</div>}
       {request.command && (
         <pre className="overflow-auto rounded-md bg-muted p-2 text-[11px] text-foreground">
