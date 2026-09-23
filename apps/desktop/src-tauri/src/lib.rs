@@ -5,6 +5,7 @@ mod anthropic_proxy;
 mod claude;
 mod claude_permissions;
 mod claude_process;
+mod editors;
 mod history;
 mod latex;
 mod providers;
@@ -124,138 +125,6 @@ fn spawn_exit_cleanup(
 /// (font cache, etc.) is cleaned up on exit, preventing assertion failures on retry.
 pub fn tectonic_compile_subprocess(work_dir: &Path, main_file: &str) -> Result<(), String> {
     latex::compile_with_tectonic(work_dir, main_file)
-}
-
-// --- External editor detection & opening ---
-
-#[derive(serde::Serialize, Clone)]
-struct EditorInfo {
-    id: String,
-    name: String,
-}
-
-struct EditorDef {
-    id: &'static str,
-    name: &'static str,
-    cli: &'static str,
-}
-
-const KNOWN_EDITORS: &[EditorDef] = &[
-    EditorDef {
-        id: "cursor",
-        name: "Cursor",
-        cli: "cursor",
-    },
-    EditorDef {
-        id: "vscode",
-        name: "VS Code",
-        cli: "code",
-    },
-    EditorDef {
-        id: "zed",
-        name: "Zed",
-        cli: "zed",
-    },
-    EditorDef {
-        id: "sublime",
-        name: "Sublime Text",
-        cli: "subl",
-    },
-];
-
-#[cfg(target_os = "macos")]
-const MACOS_APP_PATHS: &[(&str, &str)] = &[
-    ("cursor", "/Applications/Cursor.app"),
-    ("vscode", "/Applications/Visual Studio Code.app"),
-    ("zed", "/Applications/Zed.app"),
-    ("sublime", "/Applications/Sublime Text.app"),
-];
-
-#[tauri::command]
-fn detect_editors() -> Vec<EditorInfo> {
-    KNOWN_EDITORS
-        .iter()
-        .filter(|e| is_editor_installed(e))
-        .map(|e| EditorInfo {
-            id: e.id.to_string(),
-            name: e.name.to_string(),
-        })
-        .collect()
-}
-
-fn is_editor_installed(editor: &EditorDef) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        if let Some((_, app_path)) = MACOS_APP_PATHS.iter().find(|(id, _)| *id == editor.id) {
-            return Path::new(app_path).exists();
-        }
-    }
-    // Fallback / Windows / Linux: check if CLI is on PATH
-    which::which(editor.cli).is_ok()
-}
-
-#[tauri::command]
-fn open_in_editor(
-    editor_id: String,
-    project_path: String,
-    file_path: Option<String>,
-    line: Option<u32>,
-) -> Result<(), String> {
-    let editor = KNOWN_EDITORS
-        .iter()
-        .find(|e| e.id == editor_id)
-        .ok_or_else(|| format!("Unknown editor: {}", editor_id))?;
-
-    // On macOS, GUI apps don't inherit the shell's PATH, so CLI tools like
-    // "code", "cursor", etc. won't be found. Use the login shell to resolve them.
-    let cli_path = resolve_editor_cli(editor.cli)?;
-
-    let mut cmd = std::process::Command::new(&cli_path);
-
-    // Open the project folder
-    cmd.arg(&project_path);
-
-    // If a specific file is given, open it (with optional line number via -g)
-    if let Some(ref fp) = file_path {
-        let full_path = Path::new(&project_path).join(fp);
-        if let Some(ln) = line {
-            cmd.arg("-g");
-            cmd.arg(format!("{}:{}", full_path.display(), ln));
-        } else {
-            cmd.arg(full_path);
-        }
-    }
-
-    cmd.spawn()
-        .map_err(|e| format!("Failed to open {}: {}", editor.name, e))?;
-    Ok(())
-}
-
-/// Resolve an editor CLI command to its full path.
-/// On macOS, GUI apps lack the user's shell PATH, so we ask the login shell.
-fn resolve_editor_cli(cli: &str) -> Result<String, String> {
-    // First try the inherited PATH (works when launched from terminal)
-    if let Ok(path) = which::which(cli) {
-        return Ok(path.to_string_lossy().into_owned());
-    }
-
-    // On macOS, ask the login shell for the full PATH
-    #[cfg(target_os = "macos")]
-    {
-        let output = std::process::Command::new("/bin/zsh")
-            .args(["-l", "-c", &format!("which {}", cli)])
-            .output()
-            .map_err(|e| format!("Failed to resolve {}: {}", cli, e))?;
-        if output.status.success() {
-            let resolved = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !resolved.is_empty() && Path::new(&resolved).exists() {
-                return Ok(resolved);
-            }
-        }
-    }
-
-    // Fallback: return bare name and hope for the best
-    Ok(cli.to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -722,8 +591,8 @@ pub fn run() {
             set_native_window_theme,
             allow_project_directory,
             list_default_projects,
-            detect_editors,
-            open_in_editor,
+            editors::detect_editors,
+            editors::open_in_editor,
             js_log,
             read_clipboard_file_paths,
             latex::compile_latex,

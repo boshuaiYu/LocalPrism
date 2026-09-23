@@ -54,26 +54,60 @@ const ZOOM_OPTIONS = [
   { value: "4", label: "400%" },
 ];
 
-function OpenEditorIcon({ editor }: { editor: EditorInfo }) {
-  if (editor.id === "vscode") {
-    return (
+function EditorMenuLabel({ editor }: { editor: EditorInfo }) {
+  if (editor.id !== "vscode") return editor.name;
+  return (
+    <span className="flex items-center gap-2">
       <img
         src={vscodeIcon}
         alt=""
         aria-hidden="true"
         draggable={false}
-        className="size-5"
+        className="size-4"
       />
-    );
-  }
-
-  return <ExternalLinkIcon className="size-4" />;
+      {editor.name}
+    </span>
+  );
 }
 
-function getOpenEditorButtonClassName(editor: EditorInfo) {
-  return editor.id === "vscode"
-    ? "h-7 w-7 border border-border/70 bg-muted/30 p-1 hover:bg-muted/50"
-    : undefined;
+function OpenInEditorMenu({
+  editors,
+  onOpen,
+  onRefresh,
+}: {
+  editors: EditorInfo[];
+  onOpen: (editorId: string) => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <DropdownMenu
+      onOpenChange={(open) => {
+        if (open) onRefresh();
+      }}
+    >
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-6 p-1"
+          title="Open in Editor"
+        >
+          <ExternalLinkIcon className="size-4" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        {editors.length === 0 ? (
+          <DropdownMenuItem disabled>No editors found</DropdownMenuItem>
+        ) : (
+          editors.map((editor) => (
+            <DropdownMenuItem key={editor.id} onClick={() => onOpen(editor.id)}>
+              <EditorMenuLabel editor={editor} />
+            </DropdownMenuItem>
+          ))
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
 }
 
 interface EditorToolbarProps {
@@ -110,11 +144,23 @@ export function EditorToolbar({
   const [citationPickerOpen, setCitationPickerOpen] = useState(false);
   const [editingCite, setEditingCite] = useState<CiteAtCursor | null>(null);
 
-  useEffect(() => {
+  const refreshEditors = useCallback(() => {
     invoke<EditorInfo[]>("detect_editors")
-      .then(setEditors)
-      .catch(() => {});
+      .then((found) => {
+        setEditors(
+          Array.isArray(found)
+            ? found.filter((editor) => editor.id && editor.name)
+            : [],
+        );
+      })
+      .catch((err: unknown) => {
+        console.error("detect_editors failed:", err);
+      });
   }, []);
+
+  useEffect(() => {
+    refreshEditors();
+  }, [refreshEditors]);
 
   const openInEditor = useCallback(
     (editorId: string) => {
@@ -248,39 +294,11 @@ export function EditorToolbar({
               </Button>
             </>
           )}
-          {editors.length === 1 && (
-            <TooltipIconButton
-              tooltip={`Open in ${editors[0].name}`}
-              onClick={() => openInEditor(editors[0].id)}
-              className={getOpenEditorButtonClassName(editors[0])}
-            >
-              <OpenEditorIcon editor={editors[0]} />
-            </TooltipIconButton>
-          )}
-          {editors.length > 1 && (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="size-6 p-1"
-                  title="Open in Editor"
-                >
-                  <ExternalLinkIcon className="size-4" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                {editors.map((editor) => (
-                  <DropdownMenuItem
-                    key={editor.id}
-                    onClick={() => openInEditor(editor.id)}
-                  >
-                    {editor.name}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
+          <OpenInEditorMenu
+            editors={editors}
+            onOpen={openInEditor}
+            onRefresh={refreshEditors}
+          />
         </div>
       </div>
     );
@@ -366,39 +384,11 @@ export function EditorToolbar({
         VIM
       </Button>
       <div data-tauri-drag-region className="flex-1 self-stretch" />
-      {editors.length === 1 && (
-        <TooltipIconButton
-          tooltip={`Open in ${editors[0].name}`}
-          onClick={() => openInEditor(editors[0].id)}
-          className={getOpenEditorButtonClassName(editors[0])}
-        >
-          <OpenEditorIcon editor={editors[0]} />
-        </TooltipIconButton>
-      )}
-      {editors.length > 1 && (
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-6 p-1"
-              title="Open in Editor"
-            >
-              <ExternalLinkIcon className="size-4" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            {editors.map((editor) => (
-              <DropdownMenuItem
-                key={editor.id}
-                onClick={() => openInEditor(editor.id)}
-              >
-                {editor.name}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      )}
+      <OpenInEditorMenu
+        editors={editors}
+        onOpen={openInEditor}
+        onRefresh={refreshEditors}
+      />
       <CitationPickerDialog
         open={citationPickerOpen}
         onOpenChange={(open) => {
