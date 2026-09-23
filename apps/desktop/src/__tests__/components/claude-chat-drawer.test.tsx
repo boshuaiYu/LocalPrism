@@ -6,6 +6,7 @@ import {
   resetChatLayoutStoreForTests,
   useChatLayoutStore,
 } from "@/stores/chat-layout-store";
+import { useClaudeChatStore } from "@/stores/claude-chat-store";
 
 vi.mock("@/components/approvals/approval-dialog", () => ({
   ApprovalDialog: () => null,
@@ -32,8 +33,10 @@ vi.mock("@/components/claude-chat/chat-tab-bar", () => ({
 describe("ClaudeChatDrawer", () => {
   let container: HTMLDivElement;
   let root: Root;
+  let chatSnapshot: ReturnType<typeof useClaudeChatStore.getState>;
 
   beforeEach(() => {
+    chatSnapshot = useClaudeChatStore.getState();
     resetChatLayoutStoreForTests();
     container = document.createElement("div");
     document.body.append(container);
@@ -47,6 +50,7 @@ describe("ClaudeChatDrawer", () => {
     await act(async () => root.unmount());
     container.remove();
     resetChatLayoutStoreForTests();
+    useClaudeChatStore.setState(chatSnapshot, true);
   });
 
   it("docks as a pane instead of a fullscreen overlay", async () => {
@@ -78,5 +82,41 @@ describe("ClaudeChatDrawer", () => {
     await act(async () => (hide as HTMLButtonElement).click());
 
     expect(useChatLayoutStore.getState().visible).toBe(false);
+  });
+
+  it("exposes retry and details for a failed turn", async () => {
+    const sendPrompt = vi.fn();
+    const detail = `provider failed\n${"x".repeat(180)}`;
+    useClaudeChatStore.setState({
+      error: detail,
+      isStreaming: false,
+      messages: [
+        {
+          type: "user",
+          message: { content: "please retry" },
+        },
+      ] as never,
+      sendPrompt,
+    });
+
+    await act(async () => root.render(<ClaudeChatDrawer />));
+
+    const card = container.querySelector('[data-testid="chat-error-card"]');
+    expect(card).not.toBeNull();
+    const retry = Array.from(card?.querySelectorAll("button") ?? []).find(
+      (button) => button.textContent === "Retry",
+    );
+    const details = Array.from(card?.querySelectorAll("button") ?? []).find(
+      (button) => button.textContent === "Details",
+    );
+    expect(retry).toBeInstanceOf(HTMLButtonElement);
+    expect(details).toBeInstanceOf(HTMLButtonElement);
+    expect(retry?.hasAttribute("disabled")).toBe(false);
+
+    await act(async () => (details as HTMLButtonElement).click());
+    expect(card?.textContent).toContain(detail);
+
+    await act(async () => (retry as HTMLButtonElement).click());
+    expect(sendPrompt).toHaveBeenCalledWith("please retry");
   });
 });

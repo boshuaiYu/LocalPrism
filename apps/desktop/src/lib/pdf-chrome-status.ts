@@ -4,13 +4,12 @@ export function pdfChromeCompactStatus(input: {
   hasError: boolean;
   currentPage: number;
   numPages: number;
-  zoomLabel: string;
 }): string {
   if (input.isSaving) return "Saving";
   if (input.isCompiling) return "Compiling";
   if (input.hasError) return "Compile failed";
   if (input.numPages > 0) {
-    return `Page ${input.currentPage}/${input.numPages} · ${input.zoomLabel}`;
+    return `${input.currentPage}/${input.numPages}`;
   }
   return "No PDF yet";
 }

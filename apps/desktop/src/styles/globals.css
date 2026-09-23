@@ -495,6 +495,64 @@
   color: inherit;
 }
 
+/* Chat transcript only. Project markdown preview keeps .md-document. */
+.chat-markdown {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chat-markdown img {
+  max-width: 100%;
+  height: auto;
+}
+
+.chat-markdown pre,
+.chat-markdown .katex,
+.chat-markdown .katex * {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.chat-markdown pre,
+.chat-markdown .chat-markdown-code {
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.chat-markdown .katex {
+  font-size: 1.02em;
+}
+
+.chat-markdown :not(.katex-display) > .katex {
+  max-width: 100%;
+  overflow-x: auto;
+  vertical-align: middle;
+}
+
+.chat-markdown .katex-display {
+  max-width: 100%;
+  margin: 0.75em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 0.25rem;
+}
+
+.chat-markdown .chat-markdown-table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.chat-markdown .chat-markdown-table table {
+  width: max-content;
+  min-width: 100%;
+}
+
+.chat-markdown .chat-markdown-table th,
+.chat-markdown .chat-markdown-table td {
+  white-space: nowrap;
+}
+
 .md-document .footnotes {
   margin-top: 2.4em;
   padding-top: 0.85em;

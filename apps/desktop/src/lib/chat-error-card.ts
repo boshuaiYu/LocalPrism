@@ -1,19 +1,32 @@
+export interface ChatErrorContentBlock {
+  type?: string;
+  text?: string;
+  content?: unknown;
+}
+
 export interface ChatErrorMessage {
   type: string;
   message?: {
-    content?: { type?: string; text?: string }[];
+    content?: string | ChatErrorContentBlock[];
   };
+}
+
+function textFromUserMessage(message: ChatErrorMessage): string {
+  const content = message.message?.content;
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) => (block?.type === "text" ? (block.text ?? "").trim() : ""))
+    .filter(Boolean)
+    .join("\n")
+    .trim();
 }
 
 export function lastUserPrompt(messages: ChatErrorMessage[]): string | null {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (message?.type !== "user") continue;
-    const text = (message.message?.content ?? [])
-      .map((block) => (block.type === "text" ? (block.text ?? "").trim() : ""))
-      .filter(Boolean)
-      .join("\n")
-      .trim();
+    const text = textFromUserMessage(message);
     if (text) return text;
   }
   return null;

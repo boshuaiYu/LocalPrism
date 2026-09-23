@@ -10,6 +10,7 @@ import {
   PencilIcon,
   UploadIcon,
   RefreshCwIcon,
+  RotateCcwIcon,
   SunIcon,
   MoonIcon,
   MonitorIcon,
@@ -1223,6 +1224,20 @@ export function Sidebar({
             variant="ghost"
             size="icon"
             className="size-7 transition-transform duration-300 ease-in-out hover:scale-105"
+            onClick={layoutControls.onResetLayout}
+            data-testid="reset-workspace-layout"
+            title="Reset layout"
+            aria-label="Reset layout"
+          >
+            <RotateCcwIcon className="size-3.5" />
+            <span className="sr-only">Reset layout</span>
+          </Button>
+        )}
+        {layoutControls && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7 transition-transform duration-300 ease-in-out hover:scale-105"
             onClick={() =>
               layoutControls.setChatVisible(!layoutControls.chatVisible)
             }
@@ -1517,6 +1532,19 @@ export function Sidebar({
               setSettingsOpen(true);
             }}
           />
+
+          {layoutControls && (
+            <button
+              type="button"
+              data-testid="reset-workspace-layout"
+              className="lp-focus flex h-8 w-full shrink-0 items-center justify-center border-sidebar-border border-t px-3 font-medium text-foreground text-xs hover:bg-sidebar-accent"
+              title="Restore default pane widths"
+              aria-label="Reset layout"
+              onClick={layoutControls.onResetLayout}
+            >
+              Reset layout
+            </button>
+          )}
 
           {/* Footer */}
           <div className="flex h-9 items-center justify-between border-sidebar-border border-t px-3 text-muted-foreground text-xs">

@@ -937,8 +937,8 @@ export function PdfPreview() {
     hasError: Boolean(compileError),
     currentPage,
     numPages,
-    zoomLabel: pdfZoomLabel({ fitMode, scale }),
   });
+  const pdfStatusIsPage = /^\d+\/\d+$/.test(pdfStatus);
 
   return (
     <div
@@ -946,7 +946,14 @@ export function PdfPreview() {
       className="@container/pv relative flex h-full flex-col bg-muted/50"
     >
       <div className="flex min-h-[calc(var(--workspace-topbar-height)+var(--titlebar-height))] shrink-0 flex-wrap items-center gap-x-1 gap-y-1 border-border border-b bg-background px-2 py-1">
-        <span className="lp-meta max-w-40 truncate px-1 font-medium tabular-nums">
+        <span
+          data-testid="pdf-chrome-status"
+          className={`lp-meta max-w-24 truncate px-1 tabular-nums ${
+            pdfStatusIsPage
+              ? "font-normal text-muted-foreground/70"
+              : "font-medium"
+          }`}
+        >
           {pdfStatus}
         </span>
         <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
@@ -1145,11 +1152,7 @@ export function PdfPreview() {
                     className="h-7! @[48rem]/pv:w-[7.5rem] w-[4.5rem] text-xs"
                   >
                     <SelectValue>
-                      {fitMode === "fit-width"
-                        ? "Fit width"
-                        : fitMode === "fit-height"
-                          ? "Fit height"
-                          : `${Math.round(scale * 100)}%`}
+                      {pdfZoomLabel({ fitMode, scale })}
                     </SelectValue>
                   </SelectTrigger>
                   <SelectContent position="popper" align="end">

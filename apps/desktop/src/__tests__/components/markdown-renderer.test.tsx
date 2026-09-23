@@ -1,3 +1,4 @@
+import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
@@ -119,5 +120,45 @@ describe("MarkdownRenderer links", () => {
     });
     expect(container.querySelector('a[href^="javascript"]')).toBeNull();
     expect(container.querySelector('a[href*="script:"]')).toBeNull();
+  });
+
+  it("keeps math, code, and tables inside a narrow chat column", async () => {
+    await act(async () => {
+      root.render(
+        <MarkdownRenderer
+          content={[
+            "Inline $E=mc^2$ and",
+            "",
+            "$$",
+            "\\frac{a}{b+c}",
+            "$$",
+            "",
+            "```python",
+            "print('a-very-long-token-that-should-scroll-inside-the-chat-column')",
+            "```",
+            "",
+            "| Method | Score | Notes |",
+            "| --- | --- | --- |",
+            "| Spectral | 0.91 | narrow sidebar |",
+          ].join("\n")}
+        />,
+      );
+    });
+
+    const markdown = container.querySelector(".chat-markdown");
+    if (!(markdown instanceof HTMLElement)) {
+      throw new Error("chat markdown root missing");
+    }
+
+    expect(markdown.className).not.toContain("[&_*]:max-w-full");
+    expect(markdown.querySelector(".katex")).toBeTruthy();
+    expect(markdown.querySelector(".katex-display")).toBeTruthy();
+    const code = markdown.querySelector("pre");
+    expect(code?.className).toMatch(/overflow-x-auto/);
+    expect(code?.className).toMatch(/chat-markdown-code/);
+    const table = markdown.querySelector(".chat-markdown-table");
+    expect(table).toBeTruthy();
+    expect(table?.className).toMatch(/overflow-x-auto/);
+    expect(table?.querySelector("table")).toBeTruthy();
   });
 });
