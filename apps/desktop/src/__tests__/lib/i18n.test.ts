@@ -7,6 +7,8 @@ describe("translate", () => {
     expect(translate("zh", "settings.title")).toBe("设置");
     expect(translate("zh", "settings.providers")).toBe("服务商");
     expect(translate("zh", "chat.compress")).toBe("压缩更早的消息");
+    expect(translate("en", "chat.scrollToBottom")).toBe("Scroll to latest");
+    expect(translate("zh", "chat.scrollToBottom")).toBe("跳到最新");
     expect(translate("en", "onboarding.skip")).toBe("Skip");
     expect(translate("en", "onboarding.getStarted")).toBe("Get started");
   });

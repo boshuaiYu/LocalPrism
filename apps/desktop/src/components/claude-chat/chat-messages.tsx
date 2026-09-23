@@ -1,6 +1,7 @@
 import { type FC, memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircleIcon,
+  ArrowDownIcon,
   CheckIcon,
   CopyIcon,
   CornerDownRightIcon,
@@ -31,6 +32,7 @@ import {
   settleChatMessages,
 } from "@/lib/chat-turn-settlement";
 import { canOfferCompression } from "@/lib/chat-compression";
+import { transcriptHasContentBelow } from "@/lib/chat-scroll";
 import { canRewindTo, rewindAnchor } from "@/lib/chat-rewind";
 import { useI18n } from "@/lib/use-i18n";
 
@@ -159,6 +161,12 @@ export const ChatMessages: FC = () => {
   const viewportRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
   const userHasScrolledRef = useRef(false);
+  // Programmatic scrolls also emit scroll events. Keep those from looking
+  // like the reader left the latest messages.
+  const followScrollRef = useRef(false);
+  const anchorScrollTopRef = useRef(0);
+  const wasStreamingRef = useRef(false);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
 
   // Build a map of tool_use_id → tool_result for inline display
   const toolResultMap = useMemo(() => {
@@ -240,111 +248,189 @@ export const ChatMessages: FC = () => {
   );
   const openTurnStart = lastUserTextMessageIndex(settledMessages);
 
+  const contentBelow = (el: HTMLElement) =>
+    transcriptHasContentBelow({
+      scrollHeight: el.scrollHeight,
+      scrollTop: el.scrollTop,
+      clientHeight: el.clientHeight,
+    });
+
   // Auto-scroll to bottom (only if user hasn't scrolled up).
-  // Instant + rAF while streaming — CSS/JS smooth scroll on every token janks.
+  // Instant while streaming — CSS scroll-smooth would jank on every token.
+  // Re-read the ref inside the frame so a scroll-up that lands between the
+  // token and the paint wins. Re-arm follow only after that check, and only
+  // when the turn has just ended, so the reset cannot scroll this frame.
   useEffect(() => {
-    if (!shouldAutoScrollRef.current || !viewportRef.current) return;
-    const instant = isStreaming;
+    const streamingNow = isStreaming;
+    const streamingJustEnded = wasStreamingRef.current && !streamingNow;
+    wasStreamingRef.current = streamingNow;
     const frame = window.requestAnimationFrame(() => {
       const el = viewportRef.current;
-      if (!el || !shouldAutoScrollRef.current) return;
-      el.scrollTo({
-        top: el.scrollHeight,
-        behavior: instant ? "auto" : "smooth",
-      });
+      if (!el) return;
+      if (shouldAutoScrollRef.current) {
+        followScrollRef.current = true;
+        anchorScrollTopRef.current = el.scrollTop;
+        el.scrollTo({
+          top: el.scrollHeight,
+          behavior: streamingNow ? "instant" : "smooth",
+        });
+        if (el.scrollTop > anchorScrollTopRef.current) {
+          anchorScrollTopRef.current = el.scrollTop;
+        }
+      }
+      setShowScrollToBottom(contentBelow(el) && !shouldAutoScrollRef.current);
+      if (streamingJustEnded) {
+        shouldAutoScrollRef.current = true;
+        userHasScrolledRef.current = false;
+      }
     });
     return () => window.cancelAnimationFrame(frame);
   }, [settledMessages, pendingGuidance, isStreaming]);
 
-  // Reset auto-scroll when streaming stops
-  useEffect(() => {
-    if (!isStreaming) {
-      shouldAutoScrollRef.current = true;
-      userHasScrolledRef.current = false;
-    }
-  }, [isStreaming]);
-
   const offerCompression = canOfferCompression(messages);
 
   const handleScroll = () => {
-    if (!viewportRef.current) return;
     const el = viewportRef.current;
-    const isAtBottom =
-      Math.abs(el.scrollHeight - el.scrollTop - el.clientHeight) < 50;
-    if (!isAtBottom) {
+    if (!el) return;
+    const away = contentBelow(el);
+    if (followScrollRef.current) {
+      if (el.scrollTop + 1 < anchorScrollTopRef.current) {
+        followScrollRef.current = false;
+        userHasScrolledRef.current = true;
+        shouldAutoScrollRef.current = false;
+        anchorScrollTopRef.current = el.scrollTop;
+        setShowScrollToBottom(away);
+        return;
+      }
+      if (el.scrollTop > anchorScrollTopRef.current) {
+        anchorScrollTopRef.current = el.scrollTop;
+      }
+      if (!away) {
+        followScrollRef.current = false;
+        shouldAutoScrollRef.current = true;
+        userHasScrolledRef.current = false;
+      }
+      setShowScrollToBottom(false);
+      return;
+    }
+    if (away) {
       userHasScrolledRef.current = true;
       shouldAutoScrollRef.current = false;
     } else if (userHasScrolledRef.current) {
       shouldAutoScrollRef.current = true;
       userHasScrolledRef.current = false;
     }
+    anchorScrollTopRef.current = el.scrollTop;
+    setShowScrollToBottom(away);
   };
 
+  const jumpToLatest = () => {
+    const el = viewportRef.current;
+    if (!el) return;
+    shouldAutoScrollRef.current = true;
+    userHasScrolledRef.current = false;
+    followScrollRef.current = true;
+    anchorScrollTopRef.current = el.scrollTop;
+    el.scrollTo({ top: el.scrollHeight, behavior: "instant" });
+    if (el.scrollTop > anchorScrollTopRef.current) {
+      anchorScrollTopRef.current = el.scrollTop;
+    }
+    const away = contentBelow(el);
+    if (away) {
+      followScrollRef.current = false;
+      shouldAutoScrollRef.current = false;
+      userHasScrolledRef.current = true;
+    } else {
+      followScrollRef.current = false;
+    }
+    setShowScrollToBottom(away);
+  };
+
+  const scrollToBottomLabel = t("chat.scrollToBottom");
+
   return (
-    <div
-      ref={viewportRef}
-      onScroll={handleScroll}
-      className="absolute inset-0 min-w-0 overflow-y-auto overflow-x-hidden scroll-smooth px-5 pt-5 pb-2"
-    >
-      {settledMessages.length === 0 &&
-        pendingGuidance.length === 0 &&
-        !isStreaming && (
-          <div className="flex h-full items-center justify-center px-6 text-center text-muted-foreground text-sm leading-relaxed">
-            {t("chat.ask")}
+    <>
+      <div
+        ref={viewportRef}
+        onScroll={handleScroll}
+        data-testid="chat-transcript"
+        className="absolute inset-0 min-w-0 overflow-y-auto overflow-x-hidden scroll-smooth px-5 pt-5 pb-2"
+      >
+        {settledMessages.length === 0 &&
+          pendingGuidance.length === 0 &&
+          !isStreaming && (
+            <div className="flex h-full items-center justify-center px-6 text-center text-muted-foreground text-sm leading-relaxed">
+              {t("chat.ask")}
+            </div>
+          )}
+
+        {offerCompression && (
+          <div
+            className={cn(
+              "pointer-events-none sticky top-0 z-10 mx-auto mb-1 flex w-full justify-end",
+              THREAD_MAX_WIDTH,
+            )}
+          >
+            <button
+              type="button"
+              data-testid="compress-earlier"
+              className="pointer-events-auto px-1 py-1 text-muted-foreground text-xs underline-offset-2 hover:text-foreground hover:underline disabled:opacity-50"
+              disabled={isStreaming}
+              onClick={() => void compressEarlierMessages({ force: true })}
+            >
+              {t("chat.compress")}
+            </button>
           </div>
         )}
 
-      {offerCompression && (
-        <div
-          className={cn(
-            "sticky top-0 z-10 mx-auto mb-3 flex w-full justify-center",
-            THREAD_MAX_WIDTH,
-          )}
-        >
-          <button
-            type="button"
-            data-testid="compress-earlier"
-            className="rounded-full border border-border bg-background/95 px-3 py-1 text-xs shadow-sm hover:bg-muted disabled:opacity-50"
-            disabled={isStreaming}
-            onClick={() => void compressEarlierMessages({ force: true })}
+        {settledMessages.map((msg, idx) => (
+          <div
+            key={idx}
+            className={cn("mx-auto w-full min-w-0", THREAD_MAX_WIDTH)}
           >
-            {t("chat.compress")}
-          </button>
-        </div>
-      )}
+            <MessageBubble
+              message={msg}
+              toolResultMap={toolResultMap}
+              live={isStreaming && idx > openTurnStart}
+            />
+          </div>
+        ))}
 
-      {settledMessages.map((msg, idx) => (
-        <div
-          key={idx}
-          className={cn("mx-auto w-full min-w-0", THREAD_MAX_WIDTH)}
+        {isStreaming && (
+          <div className={cn("mx-auto w-full min-w-0 px-2", THREAD_MAX_WIDTH)}>
+            <StreamingIndicator
+              startedAt={streamingStartedAt}
+              status={streamingStatus}
+              runtime={streamingRuntime === "codex" ? "codex" : "claude"}
+            />
+          </div>
+        )}
+
+        {pendingGuidance.map((guidance) => (
+          <div
+            key={guidance.id}
+            className={cn("mx-auto w-full min-w-0", THREAD_MAX_WIDTH)}
+          >
+            <PendingGuidanceMessage guidance={guidance} />
+          </div>
+        ))}
+      </div>
+      {showScrollToBottom && (
+        <TooltipIconButton
+          tooltip={scrollToBottomLabel}
+          aria-label={scrollToBottomLabel}
+          side="top"
+          variant="outline"
+          size="icon"
+          type="button"
+          data-testid="scroll-to-bottom"
+          className="absolute bottom-3 left-1/2 z-10 size-9 -translate-x-1/2 rounded-full bg-background/95 shadow-sm"
+          onClick={jumpToLatest}
         >
-          <MessageBubble
-            message={msg}
-            toolResultMap={toolResultMap}
-            live={isStreaming && idx > openTurnStart}
-          />
-        </div>
-      ))}
-
-      {isStreaming && (
-        <div className={cn("mx-auto w-full min-w-0 px-2", THREAD_MAX_WIDTH)}>
-          <StreamingIndicator
-            startedAt={streamingStartedAt}
-            status={streamingStatus}
-            runtime={streamingRuntime === "codex" ? "codex" : "claude"}
-          />
-        </div>
+          <ArrowDownIcon className="size-4" />
+        </TooltipIconButton>
       )}
-
-      {pendingGuidance.map((guidance) => (
-        <div
-          key={guidance.id}
-          className={cn("mx-auto w-full min-w-0", THREAD_MAX_WIDTH)}
-        >
-          <PendingGuidanceMessage guidance={guidance} />
-        </div>
-      ))}
-    </div>
+    </>
   );
 };
 
