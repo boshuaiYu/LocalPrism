@@ -17,7 +17,7 @@ import {
 } from "@/stores/runtime-store";
 
 vi.mock("@tauri-apps/api/app", () => ({
-  getVersion: vi.fn().mockResolvedValue("1.0.8-2"),
+  getVersion: vi.fn().mockResolvedValue("1.0.8-3"),
 }));
 
 vi.mock("next-themes", () => ({
@@ -202,7 +202,7 @@ describe("ProjectPicker runtime settings", () => {
     vi.mocked(check).mockResolvedValue({
       version: "1.0.9-1",
       body: "beta",
-      currentVersion: "1.0.8-2",
+      currentVersion: "1.0.8-3",
       download,
       install: vi.fn(),
       close: vi.fn(async () => undefined),
@@ -217,7 +217,7 @@ describe("ProjectPicker runtime settings", () => {
     });
 
     const header = container.querySelector("[data-testid='app-chrome-header']");
-    expect(header?.textContent).not.toContain("v1.0.8-2");
+    expect(header?.textContent).not.toContain("v1.0.8-3");
     expect(header?.querySelector("[data-testid='language-switch']")).toBeNull();
     expect(
       header?.querySelector("[data-testid='check-for-updates']"),
@@ -228,7 +228,7 @@ describe("ProjectPicker runtime settings", () => {
     expect(container.textContent).not.toContain("1.0.9-1");
 
     const bar = container.querySelector("[data-testid='app-status-bar']");
-    expect(bar?.textContent).toContain("v1.0.8-2");
+    expect(bar?.textContent).toContain("v1.0.8-3");
     expect(
       bar?.querySelector("[data-testid='check-for-updates']"),
     ).toBeTruthy();
