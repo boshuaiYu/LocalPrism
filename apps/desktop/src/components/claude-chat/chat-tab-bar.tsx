@@ -180,11 +180,14 @@ function TabButton({
   onClick: () => void;
   onClose: (e: React.MouseEvent) => void;
 }) {
+  const { t } = useI18n();
   return (
     <button
       type="button"
       data-tab-id={tabId}
-      aria-label={hasPendingApproval ? `${title} (needs approval)` : title}
+      aria-label={
+        hasPendingApproval ? t("chat.needsApproval", { title }) : title
+      }
       onClick={onClick}
       className={cn(
         "group relative flex h-full min-w-0 max-w-[11rem] items-center gap-1.5 border-b-2 px-3.5 text-xs transition-colors",
@@ -222,7 +225,7 @@ function TabButton({
         <span
           role="button"
           tabIndex={-1}
-          aria-label="Close tab"
+          aria-label={t("chat.closeTab")}
           onClick={onClose}
           className="ml-auto shrink-0 rounded-sm p-0.5 opacity-0 transition-opacity hover:bg-muted-foreground/20 group-hover:opacity-100"
         >

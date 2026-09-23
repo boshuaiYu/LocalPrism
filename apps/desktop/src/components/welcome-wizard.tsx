@@ -88,6 +88,7 @@ export function WelcomeWizard({ onComplete }: { onComplete?: () => void }) {
 }
 
 function SetupStep() {
+  const { t } = useI18n();
   const uvStatus = useUvSetupStore((state) => state.status);
   const uvVersion = useUvSetupStore((state) => state.version);
   const uvInstalling = useUvSetupStore((state) => state.isInstalling);
@@ -176,11 +177,10 @@ function SetupStep() {
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 py-2">
       <div className="text-center">
         <h1 className="font-semibold text-2xl tracking-tight">
-          Install your writing environment
+          {t("env.installTitle")}
         </h1>
         <p className="mx-auto mt-2 max-w-xl text-muted-foreground text-sm leading-relaxed">
-          Python and skill packs can wait. Start with one DeepSeek API key.
-          Other providers and official login stay under Advanced.
+          {t("env.installLead")}
         </p>
         <p className="mx-auto mt-2 max-w-xl text-muted-foreground text-xs leading-relaxed">
           {skillPaperWorkflowGuidance()}
@@ -191,44 +191,44 @@ function SetupStep() {
         <SetupRow
           ok={uvStatus === "ready"}
           busy={uvInstalling || uvStatus === "checking"}
-          label="Python (uv)"
+          label={t("env.pythonUv")}
           detail={
             uvInstalling
-              ? "Installing…"
+              ? t("env.installing")
               : uvStatus === "ready"
-                ? (uvVersion ?? "Installed")
+                ? (uvVersion ?? t("env.installed"))
                 : uvStatus === "checking"
-                  ? "Checking…"
-                  : (uvError ?? "Not installed")
+                  ? t("env.checking")
+                  : (uvError ?? t("env.notInstalled"))
           }
           action={
             uvStatus === "not-installed" && !uvInstalling
-              ? { label: "Install", onClick: () => void installUv() }
+              ? { label: t("env.install"), onClick: () => void installUv() }
               : uvInstalling
-                ? { label: "Installing…", loading: true }
+                ? { label: t("env.installing"), loading: true }
                 : undefined
           }
         />
         <SetupRow
           ok={paperSpineReady}
           busy={paperSpineInstalling || skillLoading}
-          label="PaperSpine + default skills"
+          label={t("env.paperSpine")}
           detail={
             paperSpineInstalling || skillLoading
               ? installingPackId
-                ? `Installing ${installingPackId}…`
-                : "Installing PaperSpine, academic-research, nature, and scientific skills…"
+                ? t("env.installingNamed", { name: installingPackId })
+                : t("env.installingPacks")
               : paperSpineReady
-                ? "PaperSpine and default skill packs installed"
-                : (skillError ?? "Not installed")
+                ? t("env.packsInstalled")
+                : (skillError ?? t("env.notInstalled"))
           }
           action={
             paperSpineInstalling || skillLoading
-              ? { label: "Installing…", loading: true }
+              ? { label: t("env.installing"), loading: true }
               : paperSpineReady
                 ? undefined
                 : {
-                    label: "Install",
+                    label: t("env.install"),
                     onClick: () => {
                       setPaperSpineInstalling(true);
                       void ensurePaperSpineSkills().finally(() =>
@@ -241,46 +241,47 @@ function SetupStep() {
         <SetupRow
           ok={engineInstalled}
           busy={engineInstalling || engineStatus === "checking"}
-          label="Writing engine"
+          label={t("env.writingEngine")}
           detail={
             engineInstalling
-              ? "Installing Claude Code CLI…"
+              ? t("providers.installingCli")
               : engineInstalled
-                ? (engineVersion ?? "Installed")
+                ? (engineVersion ?? t("env.installed"))
                 : engineStatus === "missing-git"
-                  ? "Git for Windows is required"
+                  ? t("env.gitRequired")
                   : engineStatus === "checking"
-                    ? "Checking…"
-                    : (engineError ?? "Not installed")
+                    ? t("env.checking")
+                    : (engineError ?? t("env.notInstalled"))
           }
           action={
             engineInstalling
-              ? { label: "Installing…", loading: true }
+              ? { label: t("env.installing"), loading: true }
               : engineStatus === "not-installed"
-                ? { label: "Install", onClick: () => void ensureEngine() }
+                ? {
+                    label: t("env.install"),
+                    onClick: () => void ensureEngine(),
+                  }
                 : undefined
           }
         />
         <SetupRow
           ok={!!skillsStatus?.installed}
-          label="Scientific skills"
+          label={t("env.scientificSkills")}
           detail={
             skillsStatus?.installed
-              ? `${skillsStatus.skill_count} skills`
-              : "Optional domain packs"
+              ? t("env.skillCount", { count: skillsStatus.skill_count })
+              : t("env.optionalPacks")
           }
           action={{
-            label: skillsStatus?.installed ? "Manage" : "Install",
+            label: skillsStatus?.installed ? t("env.manage") : t("env.install"),
             icon: skillsStatus?.installed ? "settings" : "download",
             onClick: () => setShowSkillsOnboarding(true),
           }}
         />
         <SetupRow
           ok={runtimeReady}
-          label="Model / provider"
-          detail={
-            runtimeReady ? "Ready" : "API key or optional official sign-in"
-          }
+          label={t("env.modelProvider")}
+          detail={runtimeReady ? t("env.ready") : t("env.apiOrOfficial")}
         />
       </section>
 
@@ -288,11 +289,8 @@ function SetupStep() {
 
       <section className="overflow-hidden rounded-2xl border border-border/70 bg-background/80 shadow-sm">
         <div className="border-border/60 border-b px-5 py-3">
-          <h2 className="font-medium text-sm">Add an API key</h2>
-          <p className="mt-1 text-lp-meta text-xs">
-            DeepSeek is enough to start. You can skip this and open Advanced
-            later in Settings.
-          </p>
+          <h2 className="font-medium text-sm">{t("env.addApiKey")}</h2>
+          <p className="mt-1 text-lp-meta text-xs">{t("env.addApiKeyHelp")}</p>
         </div>
         <RuntimeSettings refreshOnMount showEngine={false} />
       </section>

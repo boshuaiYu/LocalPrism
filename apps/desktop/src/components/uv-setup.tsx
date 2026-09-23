@@ -18,6 +18,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
 import { useDocumentStore } from "@/stores/document-store";
+import { useI18n } from "@/lib/use-i18n";
 import { cn } from "@/lib/utils";
 
 interface UvSetupDialogProps {
@@ -26,6 +27,7 @@ interface UvSetupDialogProps {
 }
 
 export function UvSetupDialog({ open, onClose }: UvSetupDialogProps) {
+  const { t } = useI18n();
   const status = useUvSetupStore((s) => s.status);
   const isInstalling = useUvSetupStore((s) => s.isInstalling);
   const error = useUvSetupStore((s) => s.error);
@@ -75,11 +77,11 @@ export function UvSetupDialog({ open, onClose }: UvSetupDialogProps) {
         <DialogHeader>
           <DialogTitle className="flex min-w-0 items-center gap-2 pr-8">
             <TerminalIcon className="size-5 shrink-0" />
-            <span className="min-w-0 truncate">Python Environment (uv)</span>
+            <span className="min-w-0 truncate">
+              {t("env.pythonEnvironment")}
+            </span>
           </DialogTitle>
-          <DialogDescription>
-            Manage the Python virtual environment for this project.
-          </DialogDescription>
+          <DialogDescription>{t("env.manageVenv")}</DialogDescription>
         </DialogHeader>
 
         <div className="min-w-0 space-y-4 py-2">
@@ -89,12 +91,12 @@ export function UvSetupDialog({ open, onClose }: UvSetupDialogProps) {
             <div className="min-w-0 flex-1 overflow-hidden">
               <div className="font-medium text-sm">
                 {status === "checking"
-                  ? "Checking uv..."
+                  ? t("env.checkingUv")
                   : status === "not-installed"
-                    ? "uv not installed"
+                    ? t("env.uvMissing")
                     : status === "ready"
-                      ? "uv installed"
-                      : "Error"}
+                      ? t("env.uvReady")
+                      : t("env.error")}
               </div>
               {version && (
                 <div className="truncate text-muted-foreground text-xs">
@@ -110,13 +112,13 @@ export function UvSetupDialog({ open, onClose }: UvSetupDialogProps) {
             {status === "not-installed" && !isInstalling && (
               <Button size="sm" onClick={install}>
                 <DownloadIcon className="mr-1.5 size-3.5" />
-                Install
+                {t("env.install")}
               </Button>
             )}
             {isInstalling && (
               <Button size="sm" disabled>
                 <Loader2Icon className="mr-1.5 size-3.5 animate-spin" />
-                Installing...
+                {t("env.installing")}
               </Button>
             )}
           </div>
@@ -136,9 +138,7 @@ export function UvSetupDialog({ open, onClose }: UvSetupDialogProps) {
               </div>
               <div className="min-w-0 flex-1 overflow-hidden">
                 <div className="font-medium text-sm">
-                  {venvReady
-                    ? "Virtual Environment Active"
-                    : "No Virtual Environment"}
+                  {venvReady ? t("env.venvActive") : t("env.noVirtualEnv")}
                 </div>
                 {venvPath && (
                   <div
@@ -153,13 +153,15 @@ export function UvSetupDialog({ open, onClose }: UvSetupDialogProps) {
                     className="truncate text-muted-foreground text-xs"
                     title={pythonPath}
                   >
-                    Python: {pythonPath.split(/[/\\]/).pop()}
+                    {t("env.pythonBinary", {
+                      name: pythonPath.split(/[/\\]/).pop() ?? "",
+                    })}
                   </div>
                 )}
               </div>
               {!venvReady && projectRoot && (
                 <Button size="sm" variant="outline" onClick={handleSetupVenv}>
-                  Setup .venv
+                  {t("env.setupVenv")}
                 </Button>
               )}
             </div>
@@ -168,11 +170,7 @@ export function UvSetupDialog({ open, onClose }: UvSetupDialogProps) {
           {/* Info text */}
           {status === "ready" && venvReady && (
             <p className="max-w-full break-words text-muted-foreground text-xs leading-relaxed">
-              Claude Code and LocalPrism terminal tools use this environment
-              when running Python code. OpenAI-compatible providers use it
-              through PowerShell/Bash tool calls. Use{" "}
-              <code className="text-foreground">uv pip install</code> to add
-              packages.
+              {t("env.venvHelp")}
             </p>
           )}
         </div>

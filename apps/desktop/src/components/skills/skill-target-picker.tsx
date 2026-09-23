@@ -39,11 +39,7 @@ export function SkillTargetPicker({
             size="sm"
             variant={active ? "default" : "outline"}
             disabled={disabled}
-            title={
-              disabled
-                ? "Open a project to use project-scoped skills"
-                : t(option.labelKey)
-            }
+            title={disabled ? t("skills.projectRequired") : t(option.labelKey)}
             onClick={() => {
               if (active) {
                 onChange(

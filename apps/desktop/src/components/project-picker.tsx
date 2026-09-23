@@ -331,22 +331,22 @@ export function ProjectPicker() {
                 <SettingsDetailButton
                   active={settingsDetailSection === "runtimes"}
                   icon={KeyRoundIcon}
-                  label="Providers"
+                  label={t("settings.providers")}
                   meta={providerBadge}
                   onClick={() => setSettingsDetailSection("runtimes")}
                 />
                 <SettingsDetailButton
                   active={settingsDetailSection === "environment"}
                   icon={CheckCircle2Icon}
-                  label="Environment"
-                  meta="Python / Skills"
+                  label={t("settings.environment")}
+                  meta={t("settings.environmentMeta")}
                   onClick={() => setSettingsDetailSection("environment")}
                 />
               </aside>
               <div className="min-w-0">
                 {settingsDetailSection === "runtimes" ? (
                   <SettingsPanel
-                    title="Providers"
+                    title={t("settings.providers")}
                     icon={KeyRoundIcon}
                     contentClassName="p-0"
                   >
@@ -354,7 +354,7 @@ export function ProjectPicker() {
                   </SettingsPanel>
                 ) : (
                   <SettingsPanel
-                    title="Environment"
+                    title={t("settings.environment")}
                     icon={CheckCircle2Icon}
                     contentClassName="p-0"
                   >
@@ -855,6 +855,7 @@ function SettingsPanel({
 }
 
 function EnvironmentStatus({ appVersion }: { appVersion: string }) {
+  const { t } = useI18n();
   const uvStatus = useUvSetupStore((s) => s.status);
   const uvVersion = useUvSetupStore((s) => s.version);
   const uvInstalling = useUvSetupStore((s) => s.isInstalling);
@@ -929,44 +930,44 @@ function EnvironmentStatus({ appVersion }: { appVersion: string }) {
         {/* Python (uv) */}
         <StatusRow
           ok={uvStatus === "ready"}
-          label="Python (uv)"
+          label={t("env.pythonUv")}
           detail={
             uvInstalling
-              ? "Installing..."
+              ? t("env.installing")
               : uvStatus === "ready"
-                ? (uvVersion ?? "Installed")
+                ? (uvVersion ?? t("env.installed"))
                 : uvStatus === "checking"
-                  ? "Checking..."
-                  : "Not installed"
+                  ? t("env.checking")
+                  : t("env.notInstalled")
           }
           action={
             uvStatus === "not-installed" && !uvInstalling
-              ? { label: "Install", onClick: installUv }
+              ? { label: t("env.install"), onClick: installUv }
               : uvInstalling
-                ? { label: "Installing...", loading: true }
+                ? { label: t("env.installing"), loading: true }
                 : undefined
           }
         />
 
         <StatusRow
           ok={paperSpineReady}
-          label="PaperSpine + default skills"
+          label={t("env.paperSpine")}
           detail={
             paperSpineInstalling || installingPackId
               ? installingPackId
-                ? `Installing ${installingPackId}...`
-                : "Installing PaperSpine, academic-research, nature, and scientific skills..."
+                ? t("env.installingNamed", { name: installingPackId })
+                : t("env.installingPacks")
               : paperSpineReady
-                ? "PaperSpine and default skill packs installed"
-                : "Not installed"
+                ? t("env.packsInstalled")
+                : t("env.notInstalled")
           }
           action={
             paperSpineInstalling
-              ? { label: "Installing...", loading: true }
+              ? { label: t("env.installing"), loading: true }
               : paperSpineReady
                 ? undefined
                 : {
-                    label: "Install",
+                    label: t("env.install"),
                     onClick: () => {
                       setPaperSpineInstalling(true);
                       void ensurePaperSpineSkills().finally(() =>
@@ -980,19 +981,21 @@ function EnvironmentStatus({ appVersion }: { appVersion: string }) {
         {/* Optional scientific packs */}
         <StatusRow
           ok={!!skillsStatus?.installed}
-          label="Scientific Skills"
+          label={t("env.scientificSkills")}
           detail={
             skillsInstalling
-              ? "Installing..."
+              ? t("env.installing")
               : skillsStatus?.installed
-                ? `${skillsStatus.skill_count} skills`
-                : "Not installed"
+                ? t("env.skillCount", { count: skillsStatus.skill_count })
+                : t("env.notInstalled")
           }
           action={
             skillsInstalling
-              ? { label: "Installing...", loading: true }
+              ? { label: t("env.installing"), loading: true }
               : {
-                  label: skillsStatus?.installed ? "Manage" : "Install",
+                  label: skillsStatus?.installed
+                    ? t("env.manage")
+                    : t("env.install"),
                   onClick: () => setShowSkillsOnboarding(true),
                   icon: skillsStatus?.installed ? "settings" : "download",
                 }
@@ -1002,7 +1005,7 @@ function EnvironmentStatus({ appVersion }: { appVersion: string }) {
         <StatusRow
           ok={true}
           label="LocalPrism"
-          detail={appVersion ? `v${appVersion}` : "Checking..."}
+          detail={appVersion ? `v${appVersion}` : t("env.checking")}
         />
       </div>
 

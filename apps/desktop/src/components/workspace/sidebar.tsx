@@ -1053,7 +1053,7 @@ export function Sidebar({
     if (!name) return;
     const resolved = resolveNewProjectFile(name, newFileKind);
     if (nameExistsIn(resolved.name, addDialogFolder)) {
-      setNameError("A file or folder with this name already exists");
+      setNameError(t("chrome.nameExists"));
       return;
     }
     createNewFile(resolved.name, resolved.type, addDialogFolder);
@@ -1067,7 +1067,7 @@ export function Sidebar({
     const name = newFolderName.trim();
     if (!name) return;
     if (nameExistsIn(name, folderDialogParent)) {
-      setNameError("A file or folder with this name already exists");
+      setNameError(t("chrome.nameExists"));
       return;
     }
     createFolder(name, folderDialogParent);
@@ -1128,7 +1128,7 @@ export function Sidebar({
       ? name.toLowerCase() === file?.name.toLowerCase()
       : name === file?.name;
     if (nameExistsIn(name, parentFolder) && !isSameName) {
-      setNameError("A file or folder with this name already exists");
+      setNameError(t("chrome.nameExists"));
       return;
     }
     renameFile(renameFileId, name);
@@ -1176,8 +1176,8 @@ export function Sidebar({
           size="icon"
           className="size-7 transition-transform duration-300 ease-in-out hover:scale-105"
           onClick={onToggleCollapsed}
-          title="Files"
-          aria-label="Expand Files"
+          title={t("chrome.files")}
+          aria-label={t("chrome.expandFiles")}
         >
           <FolderIcon className="size-3.5" />
         </Button>
@@ -1186,8 +1186,8 @@ export function Sidebar({
           size="icon"
           className="size-7 transition-transform duration-300 ease-in-out hover:scale-105"
           onClick={onToggleCollapsed}
-          title="Outline"
-          aria-label="Expand Outline"
+          title={t("chrome.outline")}
+          aria-label={t("chrome.expandOutline")}
         >
           <ListIcon className="size-3.5" />
         </Button>
@@ -1197,7 +1197,7 @@ export function Sidebar({
           className="size-7 transition-transform duration-300 ease-in-out hover:scale-105"
           onClick={onToggleCollapsed}
           title="Zotero"
-          aria-label="Expand Zotero"
+          aria-label={t("chrome.expandZotero")}
         >
           <FileTextIcon className="size-3.5" />
         </Button>
@@ -1206,8 +1206,8 @@ export function Sidebar({
           size="icon"
           className="size-7 transition-transform duration-300 ease-in-out hover:scale-105"
           onClick={onToggleCollapsed}
-          title="Environment"
-          aria-label="Expand Environment"
+          title={t("chrome.environment")}
+          aria-label={t("chrome.expandEnvironment")}
         >
           <AppWindowIcon className="size-3.5" />
         </Button>
@@ -1221,10 +1221,14 @@ export function Sidebar({
             }
             data-testid="sidebar-open-ai-assistant"
             title={
-              layoutControls.chatVisible ? "Hide AI chat" : "Open AI Assistant"
+              layoutControls.chatVisible
+                ? t("chrome.hideAiChat")
+                : t("chrome.openAiAssistant")
             }
             aria-label={
-              layoutControls.chatVisible ? "Hide AI chat" : "Open AI Assistant"
+              layoutControls.chatVisible
+                ? t("chrome.hideAiChat")
+                : t("chrome.openAiAssistant")
             }
           >
             <MessageCircleIcon className="size-3.5" />
@@ -1417,16 +1421,16 @@ export function Sidebar({
                     <ContextMenuContent>
                       <ContextMenuItem onClick={() => openNewFileDialog()}>
                         <FileTextIcon className="mr-2 size-4" />
-                        New File
+                        {t("chrome.newFile")}
                       </ContextMenuItem>
                       <ContextMenuItem onClick={() => openNewFolderDialog()}>
                         <FolderPlusIcon className="mr-2 size-4" />
-                        New Folder
+                        {t("chrome.newFolder")}
                       </ContextMenuItem>
                       <ContextMenuSeparator />
                       <ContextMenuItem onClick={() => handleImport()}>
                         <UploadIcon className="mr-2 size-4" />
-                        Import File
+                        {t("chrome.importFile")}
                       </ContextMenuItem>
                     </ContextMenuContent>
                   </ContextMenu>
@@ -1440,7 +1444,9 @@ export function Sidebar({
                         )}
                         <span className="truncate">
                           {activeDrag.count > 1
-                            ? `${activeDrag.count} selected`
+                            ? t("chrome.selectedCount", {
+                                count: activeDrag.count,
+                              })
                             : activeDrag.name}
                         </span>
                       </div>
@@ -1459,7 +1465,9 @@ export function Sidebar({
               <div className="flex h-full flex-col">
                 <div className="flex h-8 shrink-0 items-center justify-center gap-2 px-3">
                   <ListIcon className="size-3.5 text-muted-foreground" />
-                  <span className="font-medium text-xs">Outline</span>
+                  <span className="font-medium text-xs">
+                    {t("chrome.outline")}
+                  </span>
                 </div>
                 <div className="min-h-0 flex-1 overflow-y-auto p-1">
                   {toc.length > 0 ? (
@@ -1478,7 +1486,7 @@ export function Sidebar({
                     ))
                   ) : (
                     <div className="px-2 py-1 text-muted-foreground text-xs">
-                      No sections found
+                      {t("chrome.noSections")}
                     </div>
                   )}
                 </div>
@@ -1520,8 +1528,8 @@ export function Sidebar({
                 size="icon"
                 className="size-6"
                 onClick={() => setSettingsOpen(true)}
-                title="Settings"
-                aria-label="Open settings"
+                title={t("chrome.settings")}
+                aria-label={t("chrome.openSettings")}
               >
                 <SettingsIcon className="size-3.5" />
               </Button>
@@ -1576,7 +1584,9 @@ export function Sidebar({
             <DialogContent className="overflow-hidden sm:max-w-md">
               <DialogHeader>
                 <DialogTitle>
-                  New File{addDialogFolder ? ` in ${addDialogFolder}` : ""}
+                  {addDialogFolder
+                    ? t("chrome.newFileIn", { folder: addDialogFolder })
+                    : t("chrome.newFile")}
                 </DialogTitle>
               </DialogHeader>
               <div className="space-y-2 py-4">
@@ -1625,10 +1635,10 @@ export function Sidebar({
                   variant="outline"
                   onClick={() => setAddDialogOpen(false)}
                 >
-                  Cancel
+                  {t("chrome.cancel")}
                 </Button>
                 <Button onClick={handleAddFile} disabled={!newFileName.trim()}>
-                  Create
+                  {t("chrome.create")}
                 </Button>
               </DialogFooter>
             </DialogContent>
@@ -1639,13 +1649,14 @@ export function Sidebar({
             <DialogContent className="sm:max-w-md">
               <DialogHeader>
                 <DialogTitle>
-                  New Folder
-                  {folderDialogParent ? ` in ${folderDialogParent}` : ""}
+                  {folderDialogParent
+                    ? t("chrome.newFolderIn", { folder: folderDialogParent })
+                    : t("chrome.newFolder")}
                 </DialogTitle>
               </DialogHeader>
               <div className="space-y-2 py-4">
                 <Input
-                  placeholder="folder name"
+                  placeholder={t("chrome.folderPlaceholder")}
                   value={newFolderName}
                   onChange={(e) => {
                     setNewFolderName(e.target.value);
@@ -1665,13 +1676,13 @@ export function Sidebar({
                   variant="outline"
                   onClick={() => setFolderDialogOpen(false)}
                 >
-                  Cancel
+                  {t("chrome.cancel")}
                 </Button>
                 <Button
                   onClick={handleCreateFolder}
                   disabled={!newFolderName.trim()}
                 >
-                  Create
+                  {t("chrome.create")}
                 </Button>
               </DialogFooter>
             </DialogContent>
@@ -1686,7 +1697,7 @@ export function Sidebar({
           >
             <DialogContent className="sm:max-w-md">
               <DialogHeader>
-                <DialogTitle>Rename Project</DialogTitle>
+                <DialogTitle>{t("chrome.renameProjectTitle")}</DialogTitle>
               </DialogHeader>
               <div className="space-y-2 py-4">
                 <Input
@@ -1712,13 +1723,15 @@ export function Sidebar({
                   onClick={() => setProjectRenameDialogOpen(false)}
                   disabled={isRenamingProject}
                 >
-                  Cancel
+                  {t("chrome.cancel")}
                 </Button>
                 <Button
                   onClick={handleProjectRename}
                   disabled={!projectRenameValue.trim() || isRenamingProject}
                 >
-                  {isRenamingProject ? "Renaming..." : "Rename"}
+                  {isRenamingProject
+                    ? t("chrome.renaming")
+                    : t("chrome.rename")}
                 </Button>
               </DialogFooter>
             </DialogContent>
@@ -1728,7 +1741,7 @@ export function Sidebar({
           <Dialog open={renameDialogOpen} onOpenChange={setRenameDialogOpen}>
             <DialogContent className="sm:max-w-md">
               <DialogHeader>
-                <DialogTitle>Rename</DialogTitle>
+                <DialogTitle>{t("chrome.rename")}</DialogTitle>
               </DialogHeader>
               <div className="space-y-2 py-4">
                 <Input
@@ -1751,9 +1764,9 @@ export function Sidebar({
                   variant="outline"
                   onClick={() => setRenameDialogOpen(false)}
                 >
-                  Cancel
+                  {t("chrome.cancel")}
                 </Button>
-                <Button onClick={handleRename}>Rename</Button>
+                <Button onClick={handleRename}>{t("chrome.rename")}</Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
@@ -1771,12 +1784,14 @@ export function Sidebar({
             <DialogContent className="sm:max-w-md">
               <DialogHeader>
                 <DialogTitle>
-                  Delete {pendingDeleteCount === 1 ? "Item" : "Items"}
+                  {pendingDeleteCount === 1
+                    ? t("chrome.deleteItem")
+                    : t("chrome.deleteItems")}
                 </DialogTitle>
                 <DialogDescription>
                   {pendingDeleteCount === 1
-                    ? "This item will be removed from disk."
-                    : `${pendingDeleteCount} selected items will be removed from disk.`}
+                    ? t("chrome.deleteOne")
+                    : t("chrome.deleteMany", { count: pendingDeleteCount })}
                 </DialogDescription>
               </DialogHeader>
               {pendingDeletePreview.length > 0 && (
@@ -1787,13 +1802,18 @@ export function Sidebar({
                         key={fileTreeSelectionKey(item)}
                         className="min-w-0 break-all font-mono text-muted-foreground text-xs"
                       >
-                        {item.type === "folder" ? "Folder" : "File"}:{" "}
-                        {item.path}
+                        {item.type === "folder"
+                          ? t("chrome.folder")
+                          : t("chrome.file")}
+                        : {item.path}
                       </div>
                     ))}
                     {pendingDeleteCount > pendingDeletePreview.length && (
                       <div className="text-muted-foreground text-xs">
-                        +{pendingDeleteCount - pendingDeletePreview.length} more
+                        {t("chrome.more", {
+                          count:
+                            pendingDeleteCount - pendingDeletePreview.length,
+                        })}
                       </div>
                     )}
                   </div>
@@ -1814,14 +1834,16 @@ export function Sidebar({
                   }}
                   disabled={isDeletingSelection}
                 >
-                  Cancel
+                  {t("chrome.cancel")}
                 </Button>
                 <Button
                   variant="destructive"
                   onClick={() => void confirmDeleteSelection()}
                   disabled={!pendingDeleteItems || isDeletingSelection}
                 >
-                  {isDeletingSelection ? "Deleting..." : "Delete"}
+                  {isDeletingSelection
+                    ? t("chrome.deleting")
+                    : t("chrome.delete")}
                 </Button>
               </DialogFooter>
             </DialogContent>
@@ -1924,6 +1946,7 @@ function FileTreeNode({
   getEffectiveSelectionCount,
   nativeDragOver,
 }: FileTreeNodeProps) {
+  const { t } = useI18n();
   const isExpanded = expandedFolders.has(node.relativePath);
 
   if (node.type === "folder") {
@@ -1970,15 +1993,15 @@ function FileTreeNode({
             <ContextMenuContent>
               <ContextMenuItem onClick={() => onNewFile(node.relativePath)}>
                 <FileTextIcon className="mr-2 size-4" />
-                New File Here
+                {t("chrome.newFileHere")}
               </ContextMenuItem>
               <ContextMenuItem onClick={() => onNewFolder(node.relativePath)}>
                 <FolderPlusIcon className="mr-2 size-4" />
-                New Folder
+                {t("chrome.newFolder")}
               </ContextMenuItem>
               <ContextMenuItem onClick={() => onImport(node.relativePath)}>
                 <UploadIcon className="mr-2 size-4" />
-                Import File Here
+                {t("chrome.importHere")}
               </ContextMenuItem>
               <ContextMenuSeparator />
               <ContextMenuItem
@@ -1986,7 +2009,7 @@ function FileTreeNode({
                 disabled={batchOperation}
               >
                 <PencilIcon className="mr-2 size-4" />
-                Rename
+                {t("chrome.rename")}
               </ContextMenuItem>
               <ContextMenuItem
                 variant="destructive"
@@ -1995,8 +2018,10 @@ function FileTreeNode({
               >
                 <Trash2Icon className="mr-2 size-4" />
                 {batchOperation
-                  ? `Delete ${effectiveSelectionCount} selected`
-                  : "Delete"}
+                  ? t("chrome.deleteSelected", {
+                      count: effectiveSelectionCount,
+                    })
+                  : t("chrome.delete")}
               </ContextMenuItem>
             </ContextMenuContent>
           </ContextMenu>
@@ -2066,7 +2091,7 @@ function FileTreeNode({
             {file.isDirty && (
               <span
                 className="ml-auto size-2 shrink-0 rounded-full bg-blue-500"
-                title="Modified"
+                title={t("chrome.modified")}
               />
             )}
           </button>
@@ -2077,7 +2102,7 @@ function FileTreeNode({
             disabled={batchOperation}
           >
             <PencilIcon className="mr-2 size-4" />
-            Rename
+            {t("chrome.rename")}
           </ContextMenuItem>
           <ContextMenuItem
             variant="destructive"
@@ -2086,8 +2111,10 @@ function FileTreeNode({
           >
             <Trash2Icon className="mr-2 size-4" />
             {batchOperation
-              ? `Delete ${effectiveSelectionCount} selected`
-              : "Delete"}
+              ? t("chrome.deleteSelected", {
+                  count: effectiveSelectionCount,
+                })
+              : t("chrome.delete")}
           </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
@@ -2110,6 +2137,7 @@ function EnvironmentSection({
   projectPath: string | null;
   onOpenAgents: () => void;
 }) {
+  const { t } = useI18n();
   // ── Python / uv ──
   const venvReady = useUvSetupStore((s) => s.venvReady);
   const uvStatus = useUvSetupStore((s) => s.status);
@@ -2162,23 +2190,23 @@ function EnvironmentSection({
   }, [showOnboarding, OnboardingComponent]);
 
   const pythonLabel = venvReady
-    ? "Active"
+    ? t("env.active")
     : uvStatus === "not-installed"
-      ? "Not installed"
+      ? t("env.notInstalled")
       : uvStatus === "ready"
-        ? "No venv"
+        ? t("env.noVenv")
         : "";
   const skillsLabel = skillsStatus?.installed
-    ? `${skillsStatus.skill_count} skills`
-    : "Not installed";
-  const agentsLabel = `${agents.length} agents`;
+    ? t("env.skillCount", { count: skillsStatus.skill_count })
+    : t("env.notInstalled");
+  const agentsLabel = t("env.agentCount", { count: agents.length });
 
   return (
     <>
       <div className="border-sidebar-border border-t">
         <div className="flex h-8 shrink-0 items-center justify-center gap-2 px-3">
           <AppWindowIcon className="size-3.5 text-muted-foreground" />
-          <span className="font-medium text-xs">Environment</span>
+          <span className="font-medium text-xs">{t("chrome.environment")}</span>
         </div>
         <div className="space-y-0.5 px-1 pb-1.5">
           {/* Python / uv row */}
@@ -2207,7 +2235,7 @@ function EnvironmentSection({
             <button
               className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-sidebar-accent/50"
               onClick={() => setShowOnboarding(true)}
-              title="Browse curated scientific skills"
+              title={t("env.browseSkills")}
             >
               <FlaskConicalIcon
                 className={cn(
@@ -2217,7 +2245,9 @@ function EnvironmentSection({
                     : "text-muted-foreground",
                 )}
               />
-              <span className="min-w-0 flex-1 truncate text-xs">Skills</span>
+              <span className="min-w-0 flex-1 truncate text-xs">
+                {t("settings.skills")}
+              </span>
               <span
                 className={cn(
                   "shrink-0 text-xs",
@@ -2233,7 +2263,7 @@ function EnvironmentSection({
             <button
               className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-sidebar-accent/50"
               onClick={onOpenAgents}
-              title="Manage custom subagents"
+              title={t("env.manageAgents")}
             >
               <BotIcon
                 className={cn(
@@ -2243,7 +2273,9 @@ function EnvironmentSection({
                     : "text-muted-foreground",
                 )}
               />
-              <span className="min-w-0 flex-1 truncate text-xs">Agents</span>
+              <span className="min-w-0 flex-1 truncate text-xs">
+                {t("settings.agents")}
+              </span>
               <span
                 className={cn(
                   "shrink-0 text-xs",

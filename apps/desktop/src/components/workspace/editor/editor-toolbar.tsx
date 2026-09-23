@@ -39,6 +39,7 @@ import { useDocumentStore } from "@/stores/document-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { findCiteAtSelection, type CiteAtCursor } from "@/lib/latex-cite-edit";
 import { CitationPickerDialog } from "@/components/workspace/editor/citation-picker-dialog";
+import { useI18n } from "@/lib/use-i18n";
 
 interface EditorInfo {
   id: string;
@@ -88,6 +89,7 @@ function OpenInEditorMenu({
   onOpen: (editorId: string) => void;
   onRefresh: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <DropdownMenu
       onOpenChange={(open) => {
@@ -99,14 +101,14 @@ function OpenInEditorMenu({
           variant="ghost"
           size="icon"
           className="size-6 p-1"
-          title="Open in Editor"
+          title={t("editor.openIn")}
         >
           <ExternalLinkIcon className="size-4" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         {editors.length === 0 ? (
-          <DropdownMenuItem disabled>No editors found</DropdownMenuItem>
+          <DropdownMenuItem disabled>{t("editor.noneFound")}</DropdownMenuItem>
         ) : (
           editors.map((editor) => (
             <DropdownMenuItem key={editor.id} onClick={() => onOpen(editor.id)}>
