@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { deriveReasoningStrength } from "@/lib/reasoning-strength";
+import {
+  deriveReasoningStrength,
+  reasoningStrengthChipLabel,
+} from "@/lib/reasoning-strength";
 
 describe("deriveReasoningStrength", () => {
   it("builds a segmented control from the model's discrete efforts", () => {
@@ -109,5 +112,46 @@ describe("deriveReasoningStrength", () => {
       reason: "Reasoning strength is fixed at High",
       value: "high",
     });
+  });
+});
+
+describe("reasoningStrengthChipLabel", () => {
+  it("shows the selected model effort on the chip", () => {
+    const control = deriveReasoningStrength(
+      { id: "opus", reasoningEfforts: ["low", "medium", "high"] },
+      "medium",
+    );
+    expect(reasoningStrengthChipLabel(control)).toBe("Medium");
+  });
+
+  it("shows a continuous budget without inventing a named preset", () => {
+    const control = deriveReasoningStrength(
+      {
+        id: "budget-model",
+        metadata: {
+          capabilities: {
+            thinking: { min: 0, max: 64, step: 8, default: 16 },
+          },
+        },
+      },
+      "20",
+    );
+    expect(reasoningStrengthChipLabel(control)).toBe("24");
+  });
+
+  it("omits a suffix when the model has no adjustable effort", () => {
+    const missing = deriveReasoningStrength(
+      { id: "embed", reasoningEfforts: [] },
+      "medium",
+    );
+    expect(reasoningStrengthChipLabel(missing)).toBeNull();
+  });
+
+  it("keeps a single advertised effort because the model defines it", () => {
+    const fixed = deriveReasoningStrength(
+      { id: "fixed", reasoningEfforts: ["high"] },
+      "low",
+    );
+    expect(reasoningStrengthChipLabel(fixed)).toBe("High");
   });
 });

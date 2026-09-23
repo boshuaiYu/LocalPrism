@@ -80,3 +80,49 @@ export function isOnboardingTextField(target: EventTarget | null): boolean {
     target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement
   );
 }
+
+const ONBOARDING_DIALOG_SELECTOR = "[data-slot='dialog-content']";
+
+export function onboardingDialogShell(
+  active: Element | null,
+): HTMLElement | null {
+  if (!(active instanceof Element)) return null;
+  const dialog = active.closest(ONBOARDING_DIALOG_SELECTOR);
+  return dialog instanceof HTMLElement ? dialog : null;
+}
+
+/**
+ * Gallery Escape runs after the preview dialog. A dialog that already handled
+ * this keydown marks it; closing the preview in that same event must not also
+ * leave the gallery.
+ */
+export function onboardingGalleryEscape(input: {
+  defaultPrevented: boolean;
+  previewOpen: boolean;
+  searchQuery: string;
+  fieldFocused: boolean;
+}): OnboardingDismiss | null {
+  if (input.defaultPrevented || input.previewOpen) return null;
+  return onboardingEscape({
+    surface: "gallery",
+    searchQuery: input.searchQuery,
+    fieldFocused: input.fieldFocused,
+    referencesOpen: false,
+    locationOpen: false,
+    hasDraft: false,
+  });
+}
+
+/**
+ * Move focus off a text field without letting a dialog focus trap put it back.
+ * Inside a dialog, focus the dialog shell. Elsewhere, blur the field.
+ */
+export function releaseOnboardingTextFocus(active: Element | null): void {
+  if (!(active instanceof HTMLElement)) return;
+  const dialog = onboardingDialogShell(active);
+  if (dialog) {
+    if (dialog !== active) dialog.focus();
+    return;
+  }
+  active.blur();
+}

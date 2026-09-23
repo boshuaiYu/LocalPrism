@@ -60,9 +60,9 @@ import {
 import { composerControlsLayout } from "@/lib/composer-controls-layout";
 import {
   deriveReasoningStrength,
+  reasoningStrengthChipLabel,
   reasoningStrengthWireValue,
 } from "@/lib/reasoning-strength";
-import { ReasoningStrengthControl } from "@/components/claude-chat/reasoning-strength-control";
 import { PermissionModePicker } from "@/components/runtime/permission-mode-picker";
 import { AgentSelector } from "@/components/agents/agent-selector";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
@@ -210,6 +210,7 @@ function claudeModelDisplayName(model: string) {
 function ComposerModelChip({
   buttonRef,
   label,
+  effortLabel,
   modelId,
   providerName,
   disabled,
@@ -218,6 +219,7 @@ function ComposerModelChip({
 }: {
   buttonRef: RefObject<HTMLButtonElement | null>;
   label: string;
+  effortLabel: string | null;
   modelId: string;
   providerName: string;
   disabled: boolean;
@@ -230,7 +232,11 @@ function ComposerModelChip({
       type="button"
       onClick={onClick}
       title={modelId}
-      aria-label={`Switch model ${modelId}`}
+      aria-label={
+        effortLabel
+          ? `Switch model ${modelId}, ${effortLabel}`
+          : `Switch model ${modelId}`
+      }
       disabled={disabled}
       className={cn(
         "flex h-8 min-w-0 items-center gap-1.5 rounded-full border border-border/80 bg-background/70 px-2.5 text-foreground text-xs transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50",
@@ -238,6 +244,11 @@ function ComposerModelChip({
       )}
     >
       <span className="min-w-0 flex-1 truncate text-left">{label}</span>
+      {effortLabel ? (
+        <span className="shrink-0 text-muted-foreground/60">
+          · {effortLabel}
+        </span>
+      ) : null}
       <span className="sr-only">{providerName}</span>
       <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
     </button>
@@ -1245,14 +1256,7 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
   const composerModelLabel =
     composerCatalogModel?.displayName ??
     claudeModelDisplayName(composerModelId);
-  const applyStrength = (value: string) => {
-    setEffortLevel(value);
-    updateTabRuntimeSelection(activeTabId, {
-      runtimeModel: selectedRuntimeModelId ?? selectedModel,
-      reasoningEffort: value,
-      agentId: activeTabMeta.agentId ?? null,
-    });
-  };
+  const composerEffortLabel = reasoningStrengthChipLabel(strengthControl);
   const sendButton = (
     <TooltipIconButton
       tooltip={
@@ -1594,23 +1598,16 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
                 }}
               />
               {controlsLayout === "wide" ? (
-                <>
-                  <ComposerModelChip
-                    buttonRef={modelButtonRef}
-                    label={composerModelLabel}
-                    modelId={composerModelId}
-                    providerName={activeProviderName}
-                    disabled={runtimeBusy}
-                    fullWidth={false}
-                    onClick={() => setModelPickerOpen((open) => !open)}
-                  />
-                  <ReasoningStrengthControl
-                    control={strengthControl}
-                    layout="wide"
-                    disabled={runtimeBusy || !catalogModel}
-                    onChange={applyStrength}
-                  />
-                </>
+                <ComposerModelChip
+                  buttonRef={modelButtonRef}
+                  label={composerModelLabel}
+                  effortLabel={composerEffortLabel}
+                  modelId={composerModelId}
+                  providerName={activeProviderName}
+                  disabled={runtimeBusy}
+                  fullWidth={false}
+                  onClick={() => setModelPickerOpen((open) => !open)}
+                />
               ) : null}
               <ChatTokenMeter />
               {controlsLayout === "narrow" ? (
@@ -1620,23 +1617,16 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
             {controlsLayout === "wide" ? (
               <div className="shrink-0">{sendButton}</div>
             ) : (
-              <div className="flex w-full min-w-0 flex-col gap-1.5">
-                <ComposerModelChip
-                  buttonRef={modelButtonRef}
-                  label={composerModelLabel}
-                  modelId={composerModelId}
-                  providerName={activeProviderName}
-                  disabled={runtimeBusy}
-                  fullWidth
-                  onClick={() => setModelPickerOpen((open) => !open)}
-                />
-                <ReasoningStrengthControl
-                  control={strengthControl}
-                  layout="narrow"
-                  disabled={runtimeBusy || !catalogModel}
-                  onChange={applyStrength}
-                />
-              </div>
+              <ComposerModelChip
+                buttonRef={modelButtonRef}
+                label={composerModelLabel}
+                effortLabel={composerEffortLabel}
+                modelId={composerModelId}
+                providerName={activeProviderName}
+                disabled={runtimeBusy}
+                fullWidth
+                onClick={() => setModelPickerOpen((open) => !open)}
+              />
             )}
           </div>
         </div>

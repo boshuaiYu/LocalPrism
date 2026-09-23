@@ -9,7 +9,10 @@ import {
 import { TemplateCard } from "./template-card";
 import { CategorySidebar } from "./category-sidebar";
 import { TemplatePreview } from "./template-preview";
-import { isOnboardingTextField, onboardingEscape } from "@/lib/onboarding-flow";
+import {
+  isOnboardingTextField,
+  onboardingGalleryEscape,
+} from "@/lib/onboarding-flow";
 
 export function TemplateGallery({ onExit }: { onExit?: () => void }) {
   const searchQuery = useTemplateStore((s) => s.searchQuery);
@@ -33,15 +36,13 @@ export function TemplateGallery({ onExit }: { onExit?: () => void }) {
         return;
       }
       if (e.key !== "Escape") return;
-      if (useTemplateStore.getState().previewTemplateId) return;
-      const action = onboardingEscape({
-        surface: "gallery",
+      const action = onboardingGalleryEscape({
+        defaultPrevented: e.defaultPrevented,
+        previewOpen: Boolean(useTemplateStore.getState().previewTemplateId),
         searchQuery: useTemplateStore.getState().searchQuery,
         fieldFocused: isOnboardingTextField(e.target),
-        referencesOpen: false,
-        locationOpen: false,
-        hasDraft: false,
       });
+      if (!action) return;
       if (action.type === "clear-search") {
         e.preventDefault();
         setSearchQuery("");

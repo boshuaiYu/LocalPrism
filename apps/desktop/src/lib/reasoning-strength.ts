@@ -311,3 +311,20 @@ export function reasoningStrengthWireValue(
   if (control.kind === "continuous") return String(control.value);
   return control.value;
 }
+
+/** Model-driven effort suffix for the composer chip. Null when the catalog lists none. */
+export function reasoningStrengthChipLabel(
+  control: ReasoningStrengthControl,
+): string | null {
+  if (control.kind === "discrete") {
+    const label =
+      control.options.find((option) => option.value === control.value)?.label ??
+      control.value;
+    const trimmed = label.trim();
+    return trimmed || null;
+  }
+  if (control.kind === "continuous") return String(control.value);
+  if (!control.value) return null;
+  const fixed = formatReasoningEffortLabel(control.value).trim();
+  return fixed || null;
+}

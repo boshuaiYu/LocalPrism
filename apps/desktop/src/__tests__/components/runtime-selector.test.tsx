@@ -774,11 +774,17 @@ describe("ChatComposer provider wiring", () => {
       ).toBeTruthy();
 
       const trigger = document.querySelector('button[title="opus"]');
-      expect(trigger?.getAttribute("aria-label")).toBe("Switch model opus");
+      expect(trigger?.getAttribute("aria-label")).toBe(
+        "Switch model opus, High",
+      );
       if (!(trigger instanceof HTMLButtonElement)) {
         throw new Error("Composer runtime trigger not found");
       }
       expect(trigger.textContent).toContain("Opus");
+      expect(trigger.textContent).toContain("High");
+      expect(
+        document.querySelector('[data-testid="reasoning-strength-control"]'),
+      ).toBeNull();
       await act(async () => trigger.click());
       expect(
         buttonByLabel(document.body, "Select model Opus").getAttribute(
@@ -1069,7 +1075,9 @@ describe("ChatComposer provider wiring", () => {
         await Promise.resolve();
       });
       const trigger = document.querySelector('button[title="opus"]');
-      expect(trigger?.getAttribute("aria-label")).toBe("Switch model opus");
+      expect(trigger?.getAttribute("aria-label")).toBe(
+        "Switch model opus, High",
+      );
       if (!(trigger instanceof HTMLButtonElement)) {
         throw new Error("Composer runtime trigger not found");
       }
