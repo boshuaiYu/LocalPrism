@@ -26,7 +26,6 @@ import {
   FlaskConicalIcon,
   TerminalIcon,
   SettingsIcon,
-  CircleHelpIcon,
   MessageCircleIcon,
   Bot as BotIcon,
   type LucideIcon,
@@ -88,7 +87,7 @@ import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import { ProjectCloseButton } from "@/components/workspace/project-close-button";
 import { UvSetupDialog } from "@/components/uv-setup";
 import { SettingsDialog } from "@/components/settings/settings-dialog";
-import { GettingStartedDialog } from "@/components/getting-started-dialog";
+import { AppStatusCluster } from "@/components/app-status-cluster";
 import { SIDEBAR_SPLIT_AUTOSAVE_ID } from "@/lib/workspace-pane-layout";
 import { createLogger } from "@/lib/debug/logger";
 import { resolveNewProjectFile } from "@/lib/new-project-file";
@@ -973,7 +972,6 @@ export function Sidebar({
   const [newFileKind, setNewFileKind] = useState<"tex" | "markdown">("tex");
   const [newFolderName, setNewFolderName] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [guideOpen, setGuideOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<
     "runtimes" | "skills" | "agents"
   >("runtimes");
@@ -1234,16 +1232,6 @@ export function Sidebar({
         )}
       </div>
       <div className="flex h-9 w-full items-center justify-center gap-1 border-sidebar-border border-t">
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-7"
-          onClick={() => setGuideOpen(true)}
-          title={t("chrome.gettingStarted")}
-          aria-label={t("chrome.gettingStarted")}
-        >
-          <CircleHelpIcon className="size-3.5" />
-        </Button>
         <ProjectCloseButton
           className="size-7 transition-transform duration-300 ease-in-out hover:scale-105"
           onClose={closeProject}
@@ -1324,6 +1312,7 @@ export function Sidebar({
                 ref={sidebarFilesRef}
                 className="flex h-full flex-col"
                 data-sidebar-files
+                data-tour="tour-projects"
               >
                 <div className="flex h-8 shrink-0 items-center justify-between gap-2 border-sidebar-border border-b px-3">
                   <div className="flex min-w-0 items-center gap-2">
@@ -1523,19 +1512,9 @@ export function Sidebar({
           />
 
           {/* Footer */}
-          <div className="flex h-9 items-center justify-between border-sidebar-border border-t px-3 text-muted-foreground text-xs">
-            <span className="truncate">LocalPrism v{appVersion}</span>
-            <div className="flex shrink-0 items-center gap-1">
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-6"
-                onClick={() => setGuideOpen(true)}
-                title="Getting Started"
-                aria-label="Getting Started"
-              >
-                <CircleHelpIcon className="size-3.5" />
-              </Button>
+          <div className="flex min-h-9 items-center justify-between gap-1 border-sidebar-border border-t px-2 py-1 text-muted-foreground text-xs">
+            <AppStatusCluster version={appVersion} compact />
+            <div className="flex shrink-0 items-center gap-0.5">
               <Button
                 variant="ghost"
                 size="icon"
@@ -1592,13 +1571,6 @@ export function Sidebar({
               if (!open) setSettingsTab("runtimes");
             }}
           />
-          <GettingStartedDialog
-            open={guideOpen}
-            onOpenChange={setGuideOpen}
-            beforeOpenGuide={closeProject}
-            leavesProject
-          />
-
           {/* New File Dialog */}
           <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
             <DialogContent className="overflow-hidden sm:max-w-md">
@@ -2259,6 +2231,7 @@ function EnvironmentSection({
           {/* Agents row — Settings → Agents */}
           <button
             className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-sidebar-accent/50"
+            data-tour="tour-agents"
             onClick={onOpenAgents}
             title="Manage custom subagents"
           >

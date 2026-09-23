@@ -151,7 +151,11 @@ describe("ProjectPicker runtime settings", () => {
     expect(container.textContent).toContain("Open Folder");
     expect(
       container.querySelector('[data-testid="language-switch"]'),
-    ).toBeNull();
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="check-for-updates"]'),
+    ).not.toBeNull();
+    expect(container.textContent).not.toContain("Getting Started");
 
     await act(async () => findButton(container, "Settings").click());
 

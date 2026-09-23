@@ -32,7 +32,6 @@ import {
   MonitorIcon,
   MoonIcon,
   SunIcon,
-  CircleHelpIcon,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useTheme } from "next-themes";
@@ -43,7 +42,7 @@ import { useProviderStore } from "@/stores/provider-store";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
 import { getMupdfClient } from "@/lib/mupdf/mupdf-client";
 import { exists, join } from "@/lib/tauri/fs";
-import { GettingStartedDialog } from "@/components/getting-started-dialog";
+import { AppStatusCluster } from "@/components/app-status-cluster";
 import { HomeEmptyState } from "@/components/home/home-empty-state";
 import { Button } from "@/components/ui/button";
 import {
@@ -111,7 +110,6 @@ export function ProjectPicker() {
   const [searchQuery, setSearchQuery] = useState("");
   const [removeProjectTarget, setRemoveProjectTarget] =
     useState<RecentProject | null>(null);
-  const [guideOpen, setGuideOpen] = useState(false);
   const { t } = useI18n();
   const defaultProjectsDiscoveredRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -303,16 +301,9 @@ export function ProjectPicker() {
           )}
         </Button>
         <Button
-          variant="ghost"
-          className="h-8 gap-2 rounded-lg px-2 text-muted-foreground hover:text-foreground"
-          onClick={() => setGuideOpen(true)}
-        >
-          <CircleHelpIcon className="size-4" />
-          {t("chrome.gettingStarted")}
-        </Button>
-        <Button
           variant={activeSection === "settings" ? "secondary" : "ghost"}
           className="h-8 gap-2 rounded-lg px-2 text-muted-foreground hover:text-foreground"
+          data-tour="tour-agents"
           onClick={() =>
             setActiveSection((section) =>
               section === "settings" ? "projects" : "settings",
@@ -388,7 +379,7 @@ export function ProjectPicker() {
               </p>
             </div>
 
-            <div className="flex gap-2">
+            <div className="flex gap-2" data-tour="tour-projects">
               <Button
                 onClick={() => setShowModeDialog(true)}
                 size="lg"
@@ -463,13 +454,15 @@ export function ProjectPicker() {
                 )}
               </section>
             )}
-
-            <p className="mt-10 text-center text-muted-foreground text-xs">
-              LocalPrism{appVersion ? ` v${appVersion}` : ""}
-            </p>
           </div>
         )}
       </main>
+      <footer
+        data-testid="home-footer"
+        className="flex h-11 shrink-0 items-center justify-between gap-3 border-border/70 border-t px-4 text-muted-foreground text-xs"
+      >
+        <AppStatusCluster version={appVersion} />
+      </footer>
 
       {/* New Project mode selection dialog */}
       <Dialog open={showModeDialog} onOpenChange={setShowModeDialog}>
@@ -524,8 +517,6 @@ export function ProjectPicker() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      <GettingStartedDialog open={guideOpen} onOpenChange={setGuideOpen} />
 
       <Dialog
         open={!!removeProjectTarget}

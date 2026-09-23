@@ -2,6 +2,10 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { isUiLanguage, type UiLanguage } from "@/lib/i18n";
 import {
+  normalizeProductTourStatus,
+  type ProductTourStatus,
+} from "@/lib/product-tour";
+import {
   DEFAULT_PERMISSION_MODE,
   normalizePermissionMode,
   type PermissionMode,
@@ -25,10 +29,14 @@ interface SettingsState {
   setBuiltinAgentPresetsSeeded: (seeded: boolean) => void;
   /**
    * Last applied builtin preset copy. 0 = never seeded, 1 = first install,
-   * 2 = playful names and stronger prompts.
+   * 2 = playful names and stronger prompts,
+   * 3 = richer instructions and refreshed skill attachments.
    */
   builtinAgentPresetsSeedVersion: number;
   setBuiltinAgentPresetsSeedVersion: (version: number) => void;
+  /** First-run product tour. Skip and finish both stick. */
+  productTour: ProductTourStatus;
+  setProductTour: (status: ProductTourStatus) => void;
 }
 
 function normalizeSeedVersion(state: Partial<SettingsState>): number {
@@ -65,6 +73,9 @@ export const useSettingsStore = create<SettingsState>()(
           builtinAgentPresetsSeedVersion: version,
           builtinAgentPresetsSeeded: version > 0,
         }),
+      productTour: "pending",
+      setProductTour: (status) =>
+        set({ productTour: normalizeProductTourStatus(status) }),
     }),
     {
       name: "claude-prism-settings",
@@ -78,6 +89,7 @@ export const useSettingsStore = create<SettingsState>()(
           uiLanguage: isUiLanguage(state.uiLanguage) ? state.uiLanguage : "en",
           builtinAgentPresetsSeeded: state.builtinAgentPresetsSeeded === true,
           builtinAgentPresetsSeedVersion: normalizeSeedVersion(state),
+          productTour: normalizeProductTourStatus(state.productTour),
         };
       },
       merge: (persisted, current) => {
@@ -95,6 +107,7 @@ export const useSettingsStore = create<SettingsState>()(
           builtinAgentPresetsSeeded:
             seedVersion > 0 || state.builtinAgentPresetsSeeded === true,
           builtinAgentPresetsSeedVersion: seedVersion,
+          productTour: normalizeProductTourStatus(state.productTour),
         };
       },
     },

@@ -28,8 +28,8 @@ export interface AgentStoreState {
   compatible: (runtime: RuntimeKind) => AgentProfile[];
   /**
    * Create missing built-in presets, and once per seed version refresh the
-   * three builtins' name, description, and instructions. Other agents and
-   * skill selections are left alone. Later deletions stay deleted.
+   * three builtins' name, description, instructions, and skillIds. Other
+   * agents are left alone. Later deletions stay deleted.
    */
   ensureBuiltinPresets: () => Promise<void>;
 }
@@ -170,12 +170,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       await useSkillStore.getState().refresh();
       await get().refresh("claude");
       const agents = get().agents;
-      const profiles = builtinPresetProfilesToSeed(
-        agents,
-        useSkillStore.getState().skills ?? [],
-      );
+      const skills = useSkillStore.getState().skills ?? [];
+      const profiles = builtinPresetProfilesToSeed(agents, skills);
       const updates = agents.flatMap((agent) => {
-        const next = builtinPresetContentUpdate(agent);
+        const next = builtinPresetContentUpdate(agent, skills);
         return next ? [next] : [];
       });
       let failed = false;
