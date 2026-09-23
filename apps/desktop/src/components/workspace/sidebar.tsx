@@ -86,6 +86,12 @@ import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import { ProjectCloseButton } from "@/components/workspace/project-close-button";
 import { UvSetupDialog } from "@/components/uv-setup";
 import { SettingsDialog } from "@/components/settings/settings-dialog";
+import {
+  PRODUCT_TOUR_EVENT,
+  applyProductTourCue,
+  initialTourWorkspaceChrome,
+  type ProductTourCue,
+} from "@/lib/product-tour";
 import { SIDEBAR_SPLIT_AUTOSAVE_ID } from "@/lib/workspace-pane-layout";
 import { createLogger } from "@/lib/debug/logger";
 import { resolveNewProjectFile } from "@/lib/new-project-file";
@@ -955,15 +961,42 @@ export function Sidebar({
   const [newFileKind, setNewFileKind] = useState<"tex" | "markdown">("tex");
   const [newFolderName, setNewFolderName] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  useEffect(() => {
-    const openSettings = () => setSettingsOpen(true);
-    window.addEventListener("localprism-open-settings", openSettings);
-    return () =>
-      window.removeEventListener("localprism-open-settings", openSettings);
-  }, []);
   const [settingsTab, setSettingsTab] = useState<
     "runtimes" | "skills" | "agents"
   >("runtimes");
+  const settingsChrome = useRef({
+    open: settingsOpen,
+    tab: settingsTab,
+  });
+  settingsChrome.current = { open: settingsOpen, tab: settingsTab };
+  useEffect(() => {
+    const openSettings = () => {
+      settingsChrome.current = { ...settingsChrome.current, open: true };
+      setSettingsOpen(true);
+    };
+    const onTourCue = (event: Event) => {
+      const cue = (event as CustomEvent<ProductTourCue>).detail;
+      const next = applyProductTourCue(
+        initialTourWorkspaceChrome({
+          settingsOpen: settingsChrome.current.open,
+          settingsTab: settingsChrome.current.tab,
+        }),
+        cue,
+      );
+      settingsChrome.current = {
+        open: next.settingsOpen,
+        tab: next.settingsTab,
+      };
+      setSettingsOpen(next.settingsOpen);
+      setSettingsTab(next.settingsTab);
+    };
+    window.addEventListener("localprism-open-settings", openSettings);
+    window.addEventListener(PRODUCT_TOUR_EVENT, onTourCue);
+    return () => {
+      window.removeEventListener("localprism-open-settings", openSettings);
+      window.removeEventListener(PRODUCT_TOUR_EVENT, onTourCue);
+    };
+  }, []);
 
   // Folder expand/collapse
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(
@@ -1503,6 +1536,7 @@ export function Sidebar({
           <EnvironmentSection
             projectPath={projectRoot}
             onOpenAgents={() => {
+              settingsChrome.current = { open: true, tab: "agents" };
               setSettingsTab("agents");
               setSettingsOpen(true);
             }}
@@ -1561,6 +1595,8 @@ export function Sidebar({
             open={settingsOpen}
             defaultTab={settingsTab}
             onOpenChange={(open) => {
+              const tab = open ? settingsChrome.current.tab : "runtimes";
+              settingsChrome.current = { open, tab };
               setSettingsOpen(open);
               if (!open) setSettingsTab("runtimes");
             }}
@@ -2132,6 +2168,8 @@ function EnvironmentSection({
   // ── Scientific Skills ──
   const [skillsStatus, setSkillsStatus] = useState<SkillsStatus | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const skillsOpenRef = useRef(showOnboarding);
+  skillsOpenRef.current = showOnboarding;
 
   // ── Agents ──
   const agents = useAgentStore((state) => state.agents);
@@ -2158,6 +2196,20 @@ function EnvironmentSection({
   useEffect(() => {
     void refreshAgents("claude");
   }, [refreshAgents]);
+
+  useEffect(() => {
+    const onTourCue = (event: Event) => {
+      const cue = (event as CustomEvent<ProductTourCue>).detail;
+      const next = applyProductTourCue(
+        initialTourWorkspaceChrome({ skillsOpen: skillsOpenRef.current }),
+        cue,
+      );
+      skillsOpenRef.current = next.skillsOpen;
+      setShowOnboarding(next.skillsOpen);
+    };
+    window.addEventListener(PRODUCT_TOUR_EVENT, onTourCue);
+    return () => window.removeEventListener(PRODUCT_TOUR_EVENT, onTourCue);
+  }, []);
 
   // Lazy import onboarding
   const [OnboardingComponent, setOnboardingComponent] =
@@ -2216,10 +2268,11 @@ function EnvironmentSection({
               {pythonLabel}
             </span>
           </button>
-          <div data-tour="tour-agents-skills" className="space-y-0.5">
+          <div className="space-y-0.5">
             {/* Skills row — curated catalog (also available under Settings → Skills) */}
             <button
               className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-sidebar-accent/50"
+              data-tour="tour-skills"
               onClick={() => setShowOnboarding(true)}
               title={t("env.browseSkills")}
             >
@@ -2248,6 +2301,7 @@ function EnvironmentSection({
             {/* Agents row — Settings → Agents */}
             <button
               className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-sidebar-accent/50"
+              data-tour="tour-agents-open"
               onClick={onOpenAgents}
               title={t("env.manageAgents")}
             >

@@ -77,9 +77,25 @@ const en = {
   "tour.pdf.title": "PDF preview",
   "tour.pdf.body":
     "The right side compiles the project and shows the PDF so you can check the layout.",
-  "tour.agentsSkills.title": "Agents and skills",
-  "tour.agentsSkills.body":
-    "Agents and skills sit at the bottom of the sidebar. Pick a writing agent or a skill for the task.",
+  "tour.skills.title": "Skills",
+  "tour.skills.body":
+    "Skills are callable writing tools — open this panel and click one to inspect it; you do not need them all on.",
+  "tour.skillCategories.title": "Skill packs",
+  "tour.skillCategories.body":
+    "Packs group them: PaperSpine, academic-research-skills, nature-skills, scientific-agent-skills, and paper-humanizer-skill.",
+  "tour.skillImport.title": "Add a skill",
+  "tour.skillImport.body":
+    "Add a skill from a folder here, or from a folder or URL in Settings.",
+  "tour.agents.title": "Agents",
+  "tour.agents.body": "Open Agents to see the built-in writing roles.",
+  "tour.agentRoles.title": "Built-in roles",
+  "tour.agentRoles.body":
+    "This settings list holds the built-in roles: 论文抛光机 (Polish Lab), AI消除器 (De-AI), and 毒舌审稿官 (Review Duo).",
+  "tour.agentSkills.title": "Agent skills",
+  "tour.agentSkills.body":
+    "This control chooses the agent for the current chat. The chat loads only that agent's skills into context.",
+  "tour.updates.title": "Updates",
+  "tour.updates.body": "This button checks for updates.",
 
   "onboarding.progress": "Project setup progress",
   "onboarding.step.template": "Template",
@@ -557,9 +573,25 @@ const zh: Record<MessageKey, string> = {
   "tour.chat.body": "在这个对话里让写作助手起草、修改和解释文稿。",
   "tour.pdf.title": "右侧预览",
   "tour.pdf.body": "右侧编译项目并显示 PDF，写的时候可以对照版式。",
-  "tour.agentsSkills.title": "智能体和 Skill",
-  "tour.agentsSkills.body":
-    "智能体和 Skill 在侧边栏底部。按任务选择写作智能体或技能。",
+  "tour.skills.title": "技能",
+  "tour.skills.body":
+    "技能是可调用的写作工具：打开这个面板，点一个即可查看，不必全部启用。",
+  "tour.skillCategories.title": "技能分类",
+  "tour.skillCategories.body":
+    "技能按这些包分组：PaperSpine、academic-research-skills、nature-skills、scientific-agent-skills、paper-humanizer-skill。",
+  "tour.skillImport.title": "添加技能",
+  "tour.skillImport.body":
+    "可以在这里从文件夹添加，也可以在设置里用文件夹或网址添加。",
+  "tour.agents.title": "智能体",
+  "tour.agents.body": "打开智能体，查看内置的写作角色。",
+  "tour.agentRoles.title": "内置角色",
+  "tour.agentRoles.body":
+    "这是设置里的智能体列表，内置角色是论文抛光机（Polish Lab）、AI消除器（De-AI）和毒舌审稿官（Review Duo）。",
+  "tour.agentSkills.title": "智能体与技能",
+  "tour.agentSkills.body":
+    "这个控件选择当前对话的智能体，对话只会把该智能体的技能放进上下文。",
+  "tour.updates.title": "更新",
+  "tour.updates.body": "这个按钮会检查更新。",
 
   "onboarding.progress": "项目创建进度",
   "onboarding.step.template": "模板",

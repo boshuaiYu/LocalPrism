@@ -35,6 +35,7 @@ import {
   ICON_MAP,
 } from "./skill-category-card";
 import { InstallProgress } from "./install-progress";
+import { useProductTourDialogGuard } from "@/components/product-tour";
 import { useSkillStore } from "@/stores/skill-store";
 import { useDocumentStore } from "@/stores/document-store";
 import { useI18n } from "@/lib/use-i18n";
@@ -81,6 +82,7 @@ export function ScientificSkillsOnboarding({
   onClose,
 }: ScientificSkillsOnboardingProps) {
   const { t } = useI18n();
+  const tourDialog = useProductTourDialogGuard();
   const [categories, setCategories] = useState<SkillCategoryData[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isInstalling, setIsInstalling] = useState(false);
@@ -382,6 +384,7 @@ export function ScientificSkillsOnboarding({
   if (isInstalling || isComplete || error) {
     return (
       <Dialog
+        modal={tourDialog.modal}
         open
         onOpenChange={(open) => {
           if (!open) onClose();
@@ -389,6 +392,7 @@ export function ScientificSkillsOnboarding({
       >
         <DialogContent
           showCloseButton={false}
+          onInteractOutside={tourDialog.onInteractOutside}
           className="gap-3 px-6 pt-6 pb-4 sm:max-w-md"
         >
           <button
@@ -470,6 +474,7 @@ export function ScientificSkillsOnboarding({
   return (
     <>
       <Dialog
+        modal={tourDialog.modal}
         open
         onOpenChange={(open) => {
           if (!open) onClose();
@@ -477,6 +482,7 @@ export function ScientificSkillsOnboarding({
       >
         <DialogContent
           showCloseButton={false}
+          onInteractOutside={tourDialog.onInteractOutside}
           className="flex h-[min(36rem,calc(100vh-6rem))] w-[min(56rem,calc(100vw-4rem))] max-w-none flex-col gap-0 overflow-hidden p-0 sm:max-w-none"
         >
           {/* Header */}
@@ -536,6 +542,7 @@ export function ScientificSkillsOnboarding({
                 <Button
                   variant="outline"
                   size="sm"
+                  data-tour="tour-skill-import"
                   onClick={handleImportSkill}
                   disabled={
                     isImporting ||
@@ -559,7 +566,10 @@ export function ScientificSkillsOnboarding({
           {/* Body — sidebar + detail */}
           <div className="flex flex-1 overflow-hidden">
             {/* Category sidebar */}
-            <nav className="w-64 max-w-64 shrink-0 overflow-hidden border-border border-r">
+            <nav
+              className="w-64 max-w-64 shrink-0 overflow-hidden border-border border-r"
+              data-tour="tour-skill-categories"
+            >
               <ScrollArea className="h-full w-full overflow-hidden [&_[data-slot=scroll-area-scrollbar]]:hidden">
                 <div className="box-border flex w-full min-w-0 flex-col gap-0.5 overflow-x-hidden p-2">
                   {displayCategories.map((cat, index) => {

@@ -107,7 +107,7 @@ export function AgentLibrary({ projectPath = null }: AgentLibraryProps) {
         />
       )}
 
-      <ul className="space-y-2">
+      <ul className="space-y-2" data-tour="tour-agent-list">
         {agents.map((agent) => (
           <li
             key={`${agent.scope}:${agent.id}:${agent.sourcePath}`}

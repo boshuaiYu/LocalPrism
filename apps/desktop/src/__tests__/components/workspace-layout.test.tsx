@@ -228,14 +228,51 @@ describe("WorkspaceLayout chat pane", () => {
     useSettingsStore.setState({ productTour: "pending", uiLanguage: "en" });
     useDocumentStore.setState({ initialized: false, projectRoot: "C:/paper" });
     await act(async () => root.render(<WorkspaceLayout />));
-    expect(container.querySelector('[data-testid="product-tour"]')).toBeNull();
+    expect(
+      document.body.querySelector('[data-testid="product-tour"]'),
+    ).toBeNull();
 
     await act(async () => {
       useDocumentStore.setState({ initialized: true });
     });
     expect(
-      container.querySelector('[data-testid="product-tour"]'),
+      document.body.querySelector('[data-testid="product-tour"]'),
     ).not.toBeNull();
-    expect(container.textContent).toContain("Project files");
+    expect(document.body.textContent).toContain("Project files");
+  });
+
+  it("restores chat only when the tour opened it", async () => {
+    await act(async () => root.render(<WorkspaceLayout />));
+    expect(useChatLayoutStore.getState().visible).toBe(true);
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("localprism-product-tour", { detail: "show-chat" }),
+      );
+      window.dispatchEvent(
+        new CustomEvent("localprism-product-tour", {
+          detail: "close-overlays",
+        }),
+      );
+    });
+    expect(useChatLayoutStore.getState().visible).toBe(true);
+
+    await act(async () => {
+      useChatLayoutStore.getState().setVisible(false);
+    });
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("localprism-product-tour", { detail: "show-chat" }),
+      );
+    });
+    expect(useChatLayoutStore.getState().visible).toBe(true);
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("localprism-product-tour", {
+          detail: "close-overlays",
+        }),
+      );
+    });
+    expect(useChatLayoutStore.getState().visible).toBe(false);
   });
 });

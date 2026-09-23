@@ -50,6 +50,7 @@ export function AppStatusCluster({
         size={compact ? "icon" : "sm"}
         className={compact ? "size-6" : "h-7 gap-1 px-2 text-xs"}
         data-testid="check-for-updates"
+        data-tour="tour-updates"
         title={t("updates.check")}
         aria-label={t("updates.check")}
         disabled={busy}

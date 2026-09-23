@@ -72,6 +72,7 @@ export function AgentSkillPicker({
     <div
       className="space-y-2"
       data-testid="agent-skill-picker"
+      data-tour="tour-agent-skills"
       onPointerDown={(event) => event.stopPropagation()}
     >
       <Input
