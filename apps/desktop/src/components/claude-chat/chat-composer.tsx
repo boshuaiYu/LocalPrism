@@ -287,7 +287,10 @@ function ReplyModePill({ agentId }: { agentId: string | null }) {
   );
 }
 
-export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
+export const ChatComposer: FC<{
+  isOpen?: boolean;
+  agentFlashId?: string | null;
+}> = ({ isOpen, agentFlashId = null }) => {
   const { t } = useI18n();
   const sendPrompt = useClaudeChatStore((s) => s.sendPrompt);
   const setChatError = useClaudeChatStore((s) => s._setError);
@@ -1447,8 +1450,10 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
       ) : (
         <div
           data-composer-shell
+          data-agent-flash={agentFlashId ?? undefined}
           className={cn(
             "flex w-full flex-col gap-2.5 overflow-hidden rounded-(--composer-radius) border border-border/70 bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_20px_-10px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:border-border focus-within:shadow-[0_8px_28px_-12px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] dark:border-muted-foreground/15 dark:shadow-none dark:focus-within:border-muted-foreground/30",
+            agentFlashId && "lp-agent-switch-flash",
             isDragOver &&
               "border-ring border-dashed bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))]",
           )}
@@ -1626,7 +1631,7 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
                     result === "changed" &&
                     shouldFlashPresetAgentSwitch(previousAgentId, nextAgentId)
                   ) {
-                    requestPresetAgentFlash();
+                    requestPresetAgentFlash(nextAgentId ?? "");
                   }
                 }}
               />

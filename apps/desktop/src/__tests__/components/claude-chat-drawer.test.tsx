@@ -2,6 +2,7 @@ import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ClaudeChatDrawer } from "@/components/claude-chat/claude-chat-drawer";
+import { AGENT_SWITCH_FLASH_EVENT } from "@/lib/reply-mode";
 import {
   resetChatLayoutStoreForTests,
   useChatLayoutStore,
@@ -21,7 +22,13 @@ vi.mock("@/components/claude-chat/chat-messages", () => ({
 }));
 
 vi.mock("@/components/claude-chat/chat-composer", () => ({
-  ChatComposer: () => <div data-testid="chat-composer" />,
+  ChatComposer: ({ agentFlashId }: { agentFlashId?: string | null }) => (
+    <div
+      data-testid="chat-composer"
+      data-agent-flash={agentFlashId ?? undefined}
+      className={agentFlashId ? "lp-agent-switch-flash" : undefined}
+    />
+  ),
 }));
 
 vi.mock("@/components/claude-chat/chat-tab-bar", () => ({
@@ -85,6 +92,27 @@ describe("ClaudeChatDrawer", () => {
     expect(
       container.querySelector('[data-testid="chat-token-meter-trigger"]'),
     ).toBeNull();
+  });
+
+  it("flashes the composer border token, not the message thread", async () => {
+    await act(async () => root.render(<ClaudeChatDrawer />));
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(AGENT_SWITCH_FLASH_EVENT, {
+          detail: { agentId: "de-ai" },
+        }),
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    });
+
+    const thread = container.querySelector('[data-testid="chat-thread"]');
+    const composer = container.querySelector('[data-testid="chat-composer"]');
+    expect(thread?.className).not.toContain("lp-agent-switch-flash");
+    expect(composer?.className).toContain("lp-agent-switch-flash");
+    expect(composer?.getAttribute("data-agent-flash")).toBe("de-ai");
   });
 
   it("hides the workspace chat column without covering the editor", async () => {
