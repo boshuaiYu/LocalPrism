@@ -43,15 +43,12 @@ listen("window-focus-restored", () => {
 
 // Platform-specific titlebar height adjustments
 if (navigator.userAgent.includes("Windows")) {
-  // Overlay caption buttons sit on the top-right and cover a short header.
   document.documentElement.style.setProperty("--titlebar-height", "32px");
   document.documentElement.style.setProperty("--traffic-light-width", "0px");
-  document.documentElement.style.setProperty("--window-controls-inset", "8.75rem");
 } else if (!navigator.userAgent.includes("Macintosh")) {
   // Linux and others: no overlay titlebar
   document.documentElement.style.setProperty("--titlebar-height", "0px");
   document.documentElement.style.setProperty("--traffic-light-width", "0px");
-  document.documentElement.style.setProperty("--window-controls-inset", "0px");
 }
 
 const rootEl = document.getElementById("root");
