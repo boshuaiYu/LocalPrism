@@ -1,12 +1,10 @@
-import { type ComponentType, useCallback, useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   CheckCircle2Icon,
   CircleIcon,
   DownloadIcon,
   Loader2Icon,
-  SettingsIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { LinuxRuntimeNote } from "@/components/linux-runtime-note";
@@ -22,12 +20,6 @@ import { useSkillStore } from "@/stores/skill-store";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
 import { LanguageSwitch } from "@/components/language-switch";
 import { useI18n } from "@/lib/use-i18n";
-
-interface SkillsStatus {
-  installed: boolean;
-  skill_count: number;
-  location: string;
-}
 
 export function WelcomeWizard({ onComplete }: { onComplete?: () => void }) {
   const { t } = useI18n();
@@ -121,38 +113,30 @@ function SetupStep() {
     engineStatus === "ready" || engineStatus === "not-authenticated";
 
   const [paperSpineInstalling, setPaperSpineInstalling] = useState(false);
-  const [skillsStatus, setSkillsStatus] = useState<SkillsStatus | null>(null);
-  const [showSkillsOnboarding, setShowSkillsOnboarding] = useState(false);
-  const [OnboardingComponent, setOnboardingComponent] = useState<ComponentType<{
-    onClose: () => void;
-  }> | null>(null);
-
-  const checkSkills = useCallback(async () => {
-    try {
-      const status = await invoke<SkillsStatus>("check_skills_installed", {
-        projectPath: null,
-      });
-      setSkillsStatus(status);
-    } catch {
-      setSkillsStatus(null);
-    }
-  }, []);
+  const installedSkillCount = paperSpineSkills.length;
+  const packsBusy = paperSpineInstalling || skillLoading;
+  const withSkillCount = (text: string) =>
+    installedSkillCount > 0
+      ? `${text} · ${t("env.skillCount", { count: installedSkillCount })}`
+      : text;
+  const packsDetail = packsBusy
+    ? withSkillCount(
+        installingPackId
+          ? t("env.installingNamed", { name: installingPackId })
+          : t("env.installingPacks"),
+      )
+    : paperSpineReady
+      ? installedSkillCount > 0
+        ? t("env.packsInstalledCount", { count: installedSkillCount })
+        : t("env.packsInstalled")
+      : (skillError ?? t("env.notInstalled"));
 
   useEffect(() => {
     void checkUv();
     void refreshSkills();
-    void checkSkills();
     void ensureEngine();
-    void ensureDefaultSkillPacks().finally(() => {
-      void checkSkills();
-    });
-  }, [
-    checkSkills,
-    checkUv,
-    ensureDefaultSkillPacks,
-    ensureEngine,
-    refreshSkills,
-  ]);
+    void ensureDefaultSkillPacks();
+  }, [checkUv, ensureDefaultSkillPacks, ensureEngine, refreshSkills]);
 
   useEffect(() => {
     const unlisten = listen<boolean>("uv-install-complete", (event) => {
@@ -162,16 +146,6 @@ function SetupStep() {
       void unlisten.then((fn) => fn());
     };
   }, [finishUvInstall]);
-
-  useEffect(() => {
-    if (showSkillsOnboarding && !OnboardingComponent) {
-      void import(
-        "@/components/scientific-skills/scientific-skills-onboarding"
-      ).then((mod) =>
-        setOnboardingComponent(() => mod.ScientificSkillsOnboarding),
-      );
-    }
-  }, [OnboardingComponent, showSkillsOnboarding]);
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 py-2">
@@ -211,19 +185,11 @@ function SetupStep() {
         />
         <SetupRow
           ok={paperSpineReady}
-          busy={paperSpineInstalling || skillLoading}
+          busy={packsBusy}
           label={t("env.paperSpine")}
-          detail={
-            paperSpineInstalling || skillLoading
-              ? installingPackId
-                ? t("env.installingNamed", { name: installingPackId })
-                : t("env.installingPacks")
-              : paperSpineReady
-                ? t("env.packsInstalled")
-                : (skillError ?? t("env.notInstalled"))
-          }
+          detail={packsDetail}
           action={
-            paperSpineInstalling || skillLoading
+            packsBusy
               ? { label: t("env.installing"), loading: true }
               : paperSpineReady
                 ? undefined
@@ -265,20 +231,6 @@ function SetupStep() {
           }
         />
         <SetupRow
-          ok={!!skillsStatus?.installed}
-          label={t("env.scientificSkills")}
-          detail={
-            skillsStatus?.installed
-              ? t("env.skillCount", { count: skillsStatus.skill_count })
-              : t("env.optionalPacks")
-          }
-          action={{
-            label: skillsStatus?.installed ? t("env.manage") : t("env.install"),
-            icon: skillsStatus?.installed ? "settings" : "download",
-            onClick: () => setShowSkillsOnboarding(true),
-          }}
-        />
-        <SetupRow
           ok={runtimeReady}
           label={t("env.modelProvider")}
           detail={runtimeReady ? t("env.ready") : t("env.apiOrOfficial")}
@@ -294,16 +246,6 @@ function SetupStep() {
         </div>
         <RuntimeSettings refreshOnMount showEngine={false} />
       </section>
-
-      {showSkillsOnboarding && OnboardingComponent && (
-        <OnboardingComponent
-          onClose={() => {
-            setShowSkillsOnboarding(false);
-            void checkSkills();
-            void refreshSkills();
-          }}
-        />
-      )}
     </div>
   );
 }
@@ -323,7 +265,6 @@ function SetupRow({
     label: string;
     onClick?: () => void;
     loading?: boolean;
-    icon?: "download" | "settings";
   };
 }) {
   return (
@@ -367,8 +308,6 @@ function SetupRow({
         >
           {action.loading ? (
             <Loader2Icon className="size-3 animate-spin" />
-          ) : action.icon === "settings" ? (
-            <SettingsIcon className="size-3" />
           ) : (
             <DownloadIcon className="size-3" />
           )}
