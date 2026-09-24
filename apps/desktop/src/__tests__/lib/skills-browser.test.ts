@@ -90,4 +90,39 @@ describe("buildSkillsBrowserCategories", () => {
       packIdFromBrowserCategoryId(installedBrowserCategoryId("paper-spine")),
     ).toBe("paper-spine");
   });
+
+  it("keeps scientific-pack imports in one pack and other URLs in a new category", () => {
+    const categories = buildSkillsBrowserCategories({
+      installedSkills: [
+        {
+          folder: "waypoint-bio",
+          name: "Waypoint Bio",
+          sourceUrl: "https://github.com/K-Dense-AI/scientific-agent-skills",
+        },
+        {
+          folder: "docx",
+          name: "Docx",
+          sourceUrl:
+            "https://github.com/K-Dense-AI/claude-scientific-skills/tree/main/skills/docx",
+        },
+        {
+          folder: "lab-notes",
+          name: "Lab notes",
+          sourceUrl: "https://github.com/example/lab-notes",
+        },
+      ],
+      catalog: [],
+    });
+
+    expect(
+      categories
+        .find((category) => category.name === "scientific-agent-skills")
+        ?.skills.map((skill) => skill.folder),
+    ).toEqual(["waypoint-bio", "docx"]);
+    expect(
+      categories
+        .find((category) => category.name === "lab-notes")
+        ?.skills.map((skill) => skill.folder),
+    ).toEqual(["lab-notes"]);
+  });
 });

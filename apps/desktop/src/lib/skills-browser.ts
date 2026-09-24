@@ -14,6 +14,7 @@ export interface SkillsBrowserSkill {
   name: string;
   folder: string;
   category?: string | null;
+  sourceUrl?: string | null;
 }
 
 export interface SkillsBrowserCategory {

@@ -364,85 +364,6 @@ fn skill_categories() -> Vec<SkillCategory> {
     cats
 }
 
-/// Folder names LocalPrism treats as the scientific-agent-skills seed.
-///
-/// The upstream repo has grown past this set (waypoint-bio, office-doc helpers,
-/// and similar). Default install and re-init keep the curated folders only.
-fn curated_scientific_skill_folders() -> std::collections::HashSet<String> {
-    skill_categories()
-        .into_iter()
-        .flat_map(|category| category.skills)
-        .map(|skill| skill.folder.to_ascii_lowercase())
-        .collect()
-}
-
-fn is_scientific_skills_repo(url: &str) -> bool {
-    parse_github_import_url(url).is_some_and(|spec| {
-        matches!(
-            spec.repo.to_ascii_lowercase().as_str(),
-            "scientific-agent-skills" | "claude-scientific-skills"
-        )
-    })
-}
-
-/// A tree URL that names one skill (or a nested folder), not the skills root.
-fn is_explicit_scientific_skill_url(url: &str) -> bool {
-    if !is_scientific_skills_repo(url) {
-        return false;
-    }
-    let Some(subpath) = parse_github_import_url(url).and_then(|spec| spec.subpath) else {
-        return false;
-    };
-    let normalized = subpath.trim_matches('/');
-    if normalized.is_empty()
-        || normalized.eq_ignore_ascii_case("skills")
-        || normalized.eq_ignore_ascii_case("scientific-skills")
-    {
-        return false;
-    }
-    safe_import_subpath(normalized).is_some()
-}
-
-/// Curate scientific imports unless the caller named a subtree we actually found.
-fn retain_curated_scientific_import(url: &str, resolved_full_repo: bool) -> bool {
-    if !is_scientific_skills_repo(url) {
-        return false;
-    }
-    if is_bulk_scientific_seed_url(url) || resolved_full_repo {
-        return true;
-    }
-    !is_explicit_scientific_skill_url(url)
-}
-
-/// True for a whole-repo scientific seed. A single-skill tree URL is an
-/// explicit import and is not filtered.
-fn is_bulk_scientific_seed_url(url: &str) -> bool {
-    let Some(spec) = parse_github_import_url(url) else {
-        return false;
-    };
-    let repo = spec.repo.to_ascii_lowercase();
-    if repo != "scientific-agent-skills" && repo != "claude-scientific-skills" {
-        return false;
-    }
-    match spec.subpath.as_deref() {
-        None => true,
-        Some(path) => {
-            let normalized = path.trim_matches('/');
-            normalized.eq_ignore_ascii_case("skills")
-                || normalized.eq_ignore_ascii_case("scientific-skills")
-        }
-    }
-}
-
-fn retain_curated_scientific_skill_dirs(dirs: &mut Vec<PathBuf>) {
-    let allowed = curated_scientific_skill_folders();
-    dirs.retain(|dir| {
-        dir.file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| allowed.contains(&name.to_ascii_lowercase()))
-    });
-}
-
 // ─── Helpers ───
 
 /// Resolve the target skills directory.
@@ -1352,13 +1273,6 @@ fn copy_skills(repo_dir: &Path, target_dir: &Path) -> Result<usize, String> {
     if skill_dirs.is_empty() {
         return Err("No skills found in downloaded repository".into());
     }
-    let discovered = skill_dirs.len();
-    retain_curated_scientific_skill_dirs(&mut skill_dirs);
-    if skill_dirs.is_empty() {
-        return Err(format!(
-            "Downloaded repository contained {discovered} skills, but none are in the curated scientific-agent-skills set. Unlisted extras such as waypoint-bio are not installed."
-        ));
-    }
 
     let staging_dir = skills_staging_dir(target_dir);
     std::fs::create_dir_all(&staging_dir)
@@ -1872,28 +1786,15 @@ pub async fn skill_import_url(
             .as_ref()
             .map(|path| repo_dir.join(path))
             .filter(|path| path.exists() && path.starts_with(&repo_dir));
-        let resolved_full_repo = requested_root.is_none();
         let search_root = requested_root.unwrap_or_else(|| repo_dir.clone());
         let mut skill_dirs = Vec::new();
         import::collect_skill_dirs(&search_root, &mut skill_dirs);
         skill_dirs.sort();
-        if retain_curated_scientific_import(&source_url, resolved_full_repo) {
-            let discovered = skill_dirs.len();
-            retain_curated_scientific_skill_dirs(&mut skill_dirs);
-            emit_install_log(
-                &app,
-                &format!(
-                    "Keeping {} curated scientific skills ({} unlisted extras skipped)",
-                    skill_dirs.len(),
-                    discovered.saturating_sub(skill_dirs.len())
-                ),
+        if skill_dirs.is_empty() {
+            return Err(
+                "Downloaded source does not contain any skills. A skill must contain SKILL.md."
+                    .into(),
             );
-            if skill_dirs.is_empty() {
-                return Err(
-                    "No curated scientific skills were found. Bulk extras such as waypoint-bio are not installed."
-                        .into(),
-                );
-            }
         }
         emit_install_log(&app, "Copying skills...");
         let imported = import_collected_skill_dirs(
@@ -2695,7 +2596,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_skills_drops_unlisted_scientific_extras() {
+    fn copy_skills_keeps_the_full_scientific_tree() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         let target = tmp.path().join("target");
@@ -2706,48 +2607,10 @@ mod tests {
         }
 
         let count = copy_skills(&repo, &target).unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(count, 3);
         assert!(target.join("scanpy").join("SKILL.md").exists());
-        assert!(!target.join("waypoint-bio").exists());
-        assert!(!target.join("docx").exists());
-    }
-
-    #[test]
-    fn bulk_scientific_seed_urls_are_filtered_and_single_skill_urls_are_not() {
-        assert!(is_bulk_scientific_seed_url(
-            "https://github.com/K-Dense-AI/scientific-agent-skills"
-        ));
-        assert!(is_bulk_scientific_seed_url(
-            "https://github.com/K-Dense-AI/scientific-agent-skills/tree/main/skills"
-        ));
-        assert!(is_bulk_scientific_seed_url(
-            "https://github.com/K-Dense-AI/claude-scientific-skills/tree/main/scientific-skills"
-        ));
-        assert!(!is_bulk_scientific_seed_url(
-            "https://github.com/K-Dense-AI/scientific-agent-skills/tree/main/skills/waypoint-bio"
-        ));
-        assert!(!is_bulk_scientific_seed_url(
-            "https://github.com/Yuan1z0825/nature-skills/tree/main/skills"
-        ));
-        assert!(TARBALL_URLS
-            .iter()
-            .all(|url| !url.contains("claude-scientific-skills")));
-        assert!(retain_curated_scientific_import(
-            "https://github.com/K-Dense-AI/scientific-agent-skills/tree/main/does-not-exist",
-            true
-        ));
-        assert!(!retain_curated_scientific_import(
-            "https://github.com/K-Dense-AI/scientific-agent-skills/tree/main/skills/waypoint-bio",
-            false
-        ));
-        assert!(retain_curated_scientific_import(
-            "https://github.com/K-Dense-AI/scientific-agent-skills",
-            false
-        ));
-        assert!(!retain_curated_scientific_import(
-            "https://github.com/Yuan1z0825/nature-skills/tree/main/skills",
-            true
-        ));
+        assert!(target.join("waypoint-bio").join("SKILL.md").exists());
+        assert!(target.join("docx").join("SKILL.md").exists());
     }
 
     #[test]

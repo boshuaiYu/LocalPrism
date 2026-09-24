@@ -61,6 +61,7 @@ export function AgentSkillPicker({
           folder: skill.folder,
           name: skill.name,
           category: skill.category,
+          sourceUrl: skill.sourceUrl,
         }),
         { categories: [], assignments: {} },
         [],
