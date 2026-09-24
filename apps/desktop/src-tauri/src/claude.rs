@@ -2978,6 +2978,28 @@ fn openai_compatible_turn_args(
     args
 }
 
+/// Provider turns publish the agent file through `exposure`, but Claude only
+/// loads that file when `--agent` is on the argv. Official Claude already
+/// adds the flag; both compatible-provider spawners must do the same.
+fn extend_provider_claude_args(
+    args: &mut Vec<String>,
+    agent_id: Option<&str>,
+    permission_mode: Option<&str>,
+    model: &str,
+    model_alias: Option<&str>,
+) {
+    if let Some(alias) = model_alias.map(str::trim).filter(|value| !value.is_empty()) {
+        args.push("--model".to_string());
+        args.push(alias.to_string());
+    }
+    push_agent_arg(args, agent_id);
+    args.extend(openai_compatible_turn_args(
+        Vec::new(),
+        permission_mode,
+        model,
+    ));
+}
+
 fn system_prompt_flag(identity: crate::providers::ActiveProviderIdentity) -> &'static str {
     match identity {
         crate::providers::ActiveProviderIdentity::ChatGptOfficial
@@ -3477,13 +3499,13 @@ async fn execute_openai_compatible_via_claude_proxy(
     let claude_path = find_claude_binary()?;
 
     let (mut args, stdin_payload) = with_prompt_transport(args_prefix, prompt);
-    args.push("--model".to_string());
-    args.push("sonnet".to_string());
-    args.extend(openai_compatible_turn_args(
-        Vec::new(),
+    extend_provider_claude_args(
+        &mut args,
+        exposure.agent_id.as_deref(),
         permission_mode.as_deref(),
         credential.model.as_str(),
-    ));
+        Some("sonnet"),
+    );
 
     let mut cmd = create_command(
         &claude_path,
@@ -3586,11 +3608,13 @@ async fn execute_openai_compatible_via_native_anthropic(
     let claude_path = find_claude_binary()?;
 
     let (mut args, stdin_payload) = with_prompt_transport(args_prefix, prompt);
-    args.extend(openai_compatible_turn_args(
-        Vec::new(),
+    extend_provider_claude_args(
+        &mut args,
+        exposure.agent_id.as_deref(),
         permission_mode.as_deref(),
         credential.model.as_str(),
-    ));
+        None,
+    );
 
     let mut cmd = create_command(
         &claude_path,
@@ -5988,6 +6012,28 @@ mod tests {
             Some("plan"),
             "agent permissionMode is only a fallback when the picker sends nothing"
         );
+    }
+
+    #[test]
+    fn test_provider_claude_args_keep_the_selected_agent() {
+        let mut args = vec!["--resume".to_string(), "session".to_string()];
+        extend_provider_claude_args(
+            &mut args,
+            Some("  peer-review  "),
+            Some("acceptEdits"),
+            "deepseek-chat",
+            Some("sonnet"),
+        );
+        let agent_idx = args
+            .iter()
+            .position(|arg| arg == "--agent")
+            .expect("provider turns must pass --agent");
+        assert_eq!(args.get(agent_idx + 1).map(String::as_str), Some("peer-review"));
+        assert!(agent_idx > args.iter().position(|arg| arg == "--model").unwrap());
+
+        let mut bare = Vec::new();
+        extend_provider_claude_args(&mut bare, None, Some("acceptEdits"), "deepseek-chat", None);
+        assert!(!bare.iter().any(|arg| arg == "--agent"));
     }
 
     #[test]
