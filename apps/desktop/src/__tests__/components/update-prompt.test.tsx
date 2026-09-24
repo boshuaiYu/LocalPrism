@@ -178,6 +178,36 @@ describe("AppStatusBar updates", () => {
     expect(container.textContent).not.toContain("1.0.8beta2");
   });
 
+  it("offers stable 1.0.8 when Beta is turned off on 1.0.8-4", async () => {
+    const update = updateFixture();
+    update.version = "1.0.8";
+    vi.mocked(getVersion).mockResolvedValue("1.0.8-4");
+    vi.mocked(check).mockResolvedValue(update as never);
+    useSettingsStore.setState({ joinBetaChannel: true });
+
+    await renderBar();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(update.download).not.toHaveBeenCalled();
+    const toggle = container.querySelector(
+      "[data-testid='beta-channel-toggle']",
+    );
+    await act(async () => {
+      if (toggle instanceof HTMLButtonElement) toggle.click();
+      await Promise.resolve();
+    });
+
+    expect(useSettingsStore.getState().joinBetaChannel).toBe(false);
+    expect(check).toHaveBeenLastCalledWith({ allowDowngrades: true });
+    expect(update.download).toHaveBeenCalledOnce();
+    expect(container.textContent).not.toContain(
+      translate("en", "updates.flashError"),
+    );
+    expect(container.textContent).toMatch(/1\.0\.8/);
+  });
+
   it("discovers v1.0.8beta3 from the tag manifest when Beta is on", async () => {
     useSettingsStore.setState({ joinBetaChannel: true });
     vi.mocked(check).mockResolvedValue(null);

@@ -19,7 +19,10 @@ import {
   type UpdateApplyMode,
   type UpdateOffer,
 } from "@/lib/update-policy";
+import { createLogger } from "@/lib/debug/logger";
 import { useSettingsStore } from "@/stores/settings-store";
+
+const log = createLogger("updater");
 
 export type UpdateStatus =
   | { state: "idle" }
@@ -62,6 +65,12 @@ let stopProgress: (() => void) | null = null;
 function notesFrom(update: Update): string | undefined {
   const body = update.body?.trim();
   return body ? body : undefined;
+}
+
+function formatUpdateError(err: unknown): string {
+  if (err instanceof Error && err.message.trim()) return err.message.trim();
+  if (typeof err === "string" && err.trim()) return err.trim();
+  return String(err);
 }
 
 async function closePending() {
@@ -240,11 +249,22 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
         }
         const mode: UpdateApplyMode = updateApplyMode(channel);
         const [stableResult, betas] = await Promise.all([
-          check()
+          // Beta off must still receive the stable manifest when this
+          // install is `1.0.8-4`. Semver ranks that build below `1.0.8`,
+          // but a comparator that treats the build number as newer would
+          // hide the channel return. allowDowngrades keeps the payload.
+          check(allowPrerelease ? undefined : { allowDowngrades: true })
             .then((value) => ({ ok: true as const, value }))
             .catch((error: unknown) => ({ ok: false as const, error })),
           allowPrerelease ? loadBetaCandidates() : Promise.resolve([]),
         ]);
+
+        if (!stableResult.ok) {
+          log.error("Stable update check failed", {
+            message: formatUpdateError(stableResult.error),
+            allowPrerelease,
+          });
+        }
 
         if (!stableResult.ok && betas.length === 0) {
           throw stableResult.error;
@@ -311,11 +331,13 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
         pending = stableUpdate;
         await downloadPending(stableUpdate, set);
       } catch (err) {
+        const message = formatUpdateError(err);
+        log.error("Update check failed", { message, explicit });
         const failedDuringDownload = get().status.state === "downloading";
         set({
           status: {
             state: "error",
-            message: String(err),
+            message,
             explicit: explicit || failedDuringDownload,
           },
         });

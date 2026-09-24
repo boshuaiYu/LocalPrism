@@ -294,6 +294,19 @@ function releaseVersion(version: string): string {
   return version.trim().replace(/^v(?=\d)/, "");
 }
 
+function sameReleaseCore(left: SemVer, right: SemVer): boolean {
+  return (
+    left.major === right.major &&
+    left.minor === right.minor &&
+    left.patch === right.patch
+  );
+}
+
+/** `1.0.8-4` and `1.0.8beta4`. Not a word prerelease such as `1.0.8-beta.2`. */
+function isPostReleaseBuild(version: SemVer): boolean {
+  return msiBuildNumber(version) !== null;
+}
+
 function prereleaseManifestForVersion(version: string): string | null {
   const trimmed = releaseVersion(version);
   if (!isPrereleaseVersion(trimmed)) return null;
@@ -303,11 +316,15 @@ function prereleaseManifestForVersion(version: string): string | null {
 /**
  * Stable builds from `releases/latest` may download immediately.
  * Prereleases, including `v1.0.8beta3`, stay hidden unless `allowPrerelease`.
- * A compact beta of the same core is newer than that plain stable tag.
- * `1.0.8beta2` is the same post-release build as `1.0.8-2`, and both are
- * newer than plain `1.0.8`. `1.0.8beta3` is newer than `1.0.8-2`.
- * A word prerelease such as `1.0.8-beta.2` stays older than `1.0.8`.
- * Beta manifests are `releases/download/<tag>/latest.json`, never `releases/latest`.
+ * A compact beta of the same core is newer than that plain stable tag
+ * while Beta stays on. `1.0.8beta2` is the same post-release build as
+ * `1.0.8-2`, and both are newer than plain `1.0.8`. `1.0.8beta3` is
+ * newer than `1.0.8-2`. A word prerelease such as `1.0.8-beta.2` stays
+ * older than `1.0.8`.
+ * Turning Beta off is a channel return: the plain stable tag of the
+ * same core (`1.0.8`) is offered even though the beta build number
+ * compares newer. Beta manifests are `releases/download/<tag>/latest.json`,
+ * never `releases/latest`.
  */
 export function chooseUpdateOffer(input: {
   currentVersion: string;
@@ -421,6 +438,26 @@ export function chooseUpdateOffer(input: {
   }
 
   if (stable && stableVersion && !stableParsed && !stableIsBeta) {
+    return {
+      action: "download",
+      version: stableVersion,
+      notes: stable.notes,
+    };
+  }
+
+  // Leaving beta: `1.0.8-4` / `1.0.8beta4` may install plain `1.0.8`.
+  // Beta-on keeps the post-release ordering and does not replace them.
+  if (
+    !allowPrerelease &&
+    stable &&
+    stableVersion &&
+    !stableIsBeta &&
+    stableParsed &&
+    current &&
+    isPostReleaseBuild(current) &&
+    sameReleaseCore(current, stableParsed) &&
+    !isPostReleaseBuild(stableParsed)
+  ) {
     return {
       action: "download",
       version: stableVersion,
