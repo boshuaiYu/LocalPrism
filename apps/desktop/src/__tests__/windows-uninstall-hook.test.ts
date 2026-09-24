@@ -9,6 +9,34 @@ const templatePath = resolve(
   "../../src-tauri/windows/installer.nsi",
 );
 
+const INSTALL_DIR_CHILDREN = [
+  "claude-home",
+  "providers",
+  "uv",
+  "skills",
+  ".skills",
+  "agents",
+  ".agents",
+  "slash",
+];
+
+const nsisIf = "$" + "{If}";
+const nsisEndIf = "$" + "{EndIf}";
+
+function commandLines(source: string): string[] {
+  return source
+    .split("\n")
+    .filter((line) => /^\s*(rmdir|delete)\b/i.test(line));
+}
+
+function guardedDelete(condition: string, body: string): string {
+  return [
+    `    ${nsisIf} ${condition}`,
+    `      ${body}`,
+    `    ${nsisEndIf}`,
+  ].join("\n");
+}
+
 describe("Windows NSIS uninstall app-data hook", () => {
   const conf = JSON.parse(readFileSync(confPath, "utf-8"));
   const hook = readFileSync(hookPath, "utf-8");
@@ -20,30 +48,49 @@ describe("Windows NSIS uninstall app-data hook", () => {
     expect(conf.bundle.windows.nsis.installMode).toBe("perMachine");
   });
 
-  it("deletes LocalPrism app data only when the uninstall checkbox is checked", () => {
+  it("deletes only named LocalPrism children inside guarded AppData paths", () => {
     expect(hook).toContain("!macro NSIS_HOOK_POSTUNINSTALL");
     expect(hook).toContain("$DeleteAppDataCheckboxState = 1");
     expect(hook).toContain("$UpdateMode <> 1");
-    expect(hook).toContain('RMDir /r "$APPDATA\\LocalPrism"');
-    expect(hook).toContain('RMDir /r "$LOCALAPPDATA\\LocalPrism"');
-    expect(hook).toContain('RMDir /r "$INSTDIR\\claude-home"');
-    expect(hook).toContain('RMDir /r "$INSTDIR\\providers"');
-    expect(hook).toContain('RMDir /r "$INSTDIR\\uv"');
+    expect(hook).toContain("SetShellVarContext current");
+    expect(hook).toContain(
+      guardedDelete(
+        '"$APPDATA\\LocalPrism" != $INSTDIR',
+        'RMDir /r "$APPDATA\\LocalPrism"',
+      ),
+    );
+    expect(hook).toContain(
+      guardedDelete(
+        '"$LOCALAPPDATA\\LocalPrism" != $INSTDIR',
+        'RMDir /r "$LOCALAPPDATA\\LocalPrism"',
+      ),
+    );
+    expect(hook.match(/RMDir\s+\/r\s+"\$APPDATA\\LocalPrism"/g)).toHaveLength(
+      1,
+    );
+    expect(
+      hook.match(/RMDir\s+\/r\s+"\$LOCALAPPDATA\\LocalPrism"/g),
+    ).toHaveLength(1);
+    for (const name of INSTALL_DIR_CHILDREN) {
+      expect(hook).toContain(`RMDir /r "$INSTDIR\\${name}"`);
+    }
     expect(hook).toContain('Delete "$INSTDIR\\skills-manifest.json"');
     expect(hook).toContain('Delete "$INSTDIR\\.localprism-writable"');
+    expect(hook).toContain('RMDir "$INSTDIR"');
+    expect(hook).not.toMatch(/RMDir\s+\/r\s+"\$INSTDIR"\s*$/im);
+    expect(hook).not.toContain("LOCALPRISM_HOME");
   });
 
   it("does not delete ClaudePrism app data or the shared WebView2 profile", () => {
-    const commands = [hook, template]
-      .flatMap((source) => source.split("\n"))
-      .filter((line) => /^\s*(RMDir|Delete)\b/.test(line))
-      .join("\n");
-    expect(commands).not.toContain("ClaudePrism");
-    expect(commands).not.toContain("BUNDLEID");
-    expect(commands).not.toContain("com.claude-prism.desktop");
-    expect(commands).not.toContain("codexprism");
-    expect(commands).not.toMatch(/RMDir\s+\/r\s+"\$INSTDIR"\s*$/m);
-    expect(commands).not.toContain("Documents");
-    expect(commands).toContain('RMDir "$INSTDIR"');
+    const commands = commandLines(`${hook}\n${template}`).join("\n");
+    expect(commands).not.toMatch(/claudeprism/i);
+    expect(commands).not.toMatch(/bundleid/i);
+    expect(commands).not.toMatch(/com\.claude-prism\.desktop/i);
+    expect(commands).not.toMatch(/codexprism/i);
+    expect(commands).not.toMatch(/documents/i);
+    expect(template).not.toMatch(/RmDir\s+\/r\s+"\$APPDATA\\\$\{BUNDLEID\}"/i);
+    expect(template).not.toMatch(
+      /RmDir\s+\/r\s+"\$LOCALAPPDATA\\\$\{BUNDLEID\}"/i,
+    );
   });
 });

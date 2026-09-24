@@ -1,3 +1,5 @@
+; Fork of tauri-v2.11.1 installer.nsi.
+; Do not restore RmDir /r of $APPDATA\${BUNDLEID} or $LOCALAPPDATA\${BUNDLEID}.
 Unicode true
 ManifestDPIAware true
 ; Add in `dpiAwareness` `PerMonitorV2` to manifest for Windows 10 1607+ (note this should not affect lower versions since they should be able to ignore this and pick up `dpiAware` `true` set by `ManifestDPIAware true`)

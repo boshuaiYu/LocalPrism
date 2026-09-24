@@ -40,6 +40,6 @@ The MSI package has no checkbox. Uninstalling it removes the installed binaries 
 
 不勾选时只删除 LocalPrism 的程序文件、指向本次安装的快捷方式和卸载注册表项。
 
-勾选后额外删除当前用户的 `%APPDATA%\LocalPrism`、`%LOCALAPPDATA%\LocalPrism`，以及当前安装目录（例如 `D:\LocalPrism`）里的 `claude-home`、`providers`、`uv` 和迁移前留在安装目录根上的 `skills` / `agents` / `slash`。安装目录只有在随后为空时才删除。
+勾选后额外删除当前用户的 `%APPDATA%\LocalPrism`、`%LOCALAPPDATA%\LocalPrism`，以及当前安装目录（例如 `D:\LocalPrism`）里的 `claude-home`、`providers`、`uv`、`skills`、`.skills`、`agents`、`.agents`、`slash` 和 `skills-manifest.json`。若安装目录本身就是 `%APPDATA%\LocalPrism` 或 `%LOCALAPPDATA%\LocalPrism`，不会整棵树删除，只删除这些列出的子项。安装目录只有在随后为空时才删除（`RMDir`，不带 `/r`）。
 
 即使勾选，也不删除 `%APPDATA%\ClaudePrism`、`%LOCALAPPDATA%\com.claude-prism.desktop`（WebView2）、另一套 ClaudePrism 1.3.0（例如 `D:\codexprism\ClaudePrism` 及其快捷方式），以及「文档\LocalPrism」和用户打开的论文目录。

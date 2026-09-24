@@ -14,9 +14,9 @@
 ; com.claude-prism.desktop, ClaudePrism shortcuts, or another install such as
 ; D:\codexprism\ClaudePrism.
 ;
-; User papers are not listed: %USERPROFILE%\Documents\LocalPrism, any project
-; folder outside app data, and LOCALPRISM_HOME when it is outside both
-; AppData and $INSTDIR.
+; User papers are not listed: %USERPROFILE%\Documents\LocalPrism and any
+; project folder outside app data. An environment override outside AppData
+; and $INSTDIR is not read here.
 
 !macro NSIS_HOOK_POSTUNINSTALL
   ${If} $DeleteAppDataCheckboxState = 1
