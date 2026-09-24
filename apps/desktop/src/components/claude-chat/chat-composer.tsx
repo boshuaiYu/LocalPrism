@@ -238,7 +238,7 @@ function ComposerModelChip({
           : `Switch model ${modelId}`
       }
       disabled={disabled}
-      className="flex h-8 w-fit min-w-0 max-w-full shrink-0 items-center gap-1.5 self-start rounded-full border border-border/80 bg-background/70 px-2.5 text-foreground text-xs transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+      className="flex h-8 w-fit min-w-0 max-w-full shrink items-center gap-1.5 self-start overflow-hidden rounded-full border border-border/80 bg-background/70 px-2.5 text-foreground text-xs transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
     >
       <span className="min-w-0 truncate text-left">{label}</span>
       {effortLabel ? (
@@ -1546,15 +1546,14 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
               "flex min-w-0 gap-1.5 px-0.5",
               controlsLayout === "narrow"
                 ? "flex-col"
-                : "flex-row items-center",
+                : "w-full flex-row items-center",
             )}
           >
             <div
+              data-testid="composer-controls-leading"
               className={cn(
                 "flex min-w-0 items-center gap-1.5",
-                controlsLayout === "narrow"
-                  ? "w-full flex-wrap"
-                  : "min-w-0 flex-1",
+                controlsLayout === "narrow" ? "w-full flex-wrap" : "shrink-0",
               )}
             >
               <TooltipIconButton
@@ -1594,7 +1593,18 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
                   });
                 }}
               />
-              {controlsLayout === "wide" ? (
+              <ChatTokenMeter />
+              {controlsLayout === "narrow" ? (
+                <div data-testid="composer-send" className="ml-auto shrink-0">
+                  {sendButton}
+                </div>
+              ) : null}
+            </div>
+            {controlsLayout === "wide" ? (
+              <div
+                data-testid="composer-controls-model"
+                className="flex min-w-0 flex-1 justify-end overflow-hidden"
+              >
                 <ComposerModelChip
                   buttonRef={modelButtonRef}
                   label={composerModelLabel}
@@ -1604,14 +1614,12 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
                   disabled={runtimeBusy}
                   onClick={() => setModelPickerOpen((open) => !open)}
                 />
-              ) : null}
-              <ChatTokenMeter />
-              {controlsLayout === "narrow" ? (
-                <div className="ml-auto shrink-0">{sendButton}</div>
-              ) : null}
-            </div>
+              </div>
+            ) : null}
             {controlsLayout === "wide" ? (
-              <div className="shrink-0">{sendButton}</div>
+              <div data-testid="composer-send" className="shrink-0">
+                {sendButton}
+              </div>
             ) : (
               <ComposerModelChip
                 buttonRef={modelButtonRef}
