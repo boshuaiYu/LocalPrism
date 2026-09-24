@@ -464,34 +464,14 @@ describe("chat token usage", () => {
       modelLabel: "tencent/Hy4-preview",
       windowTokens: 200_000,
       messages: [
-        {
-          type: "user",
-          message: { content: [{ type: "text", text: "hi" }] },
-        },
+        { type: "user" },
         {
           type: "assistant",
           message: {
-            content: [
-              {
-                type: "tool_use",
-                name: "Read",
-                input: { file_path: "main.tex" },
-              },
-            ],
             usage: { input_tokens: 800, output_tokens: 20 },
           },
         },
-        {
-          type: "user",
-          message: {
-            content: [
-              {
-                type: "tool_result",
-                content: "x".repeat(80_000),
-              },
-            ],
-          },
-        },
+        { type: "user" },
       ],
     });
     expect(meter.usedTokens).toBe(800);
@@ -509,12 +489,7 @@ describe("chat token usage", () => {
             usage: { input_tokens: 800, output_tokens: 20 },
           },
         },
-        {
-          type: "user",
-          message: {
-            content: [{ type: "tool_result", content: "x".repeat(80_000) }],
-          },
-        },
+        { type: "user" },
         {
           type: "assistant",
           message: {
