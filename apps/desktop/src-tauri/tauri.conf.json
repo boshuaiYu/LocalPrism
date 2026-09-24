@@ -54,7 +54,9 @@
     },
     "windows": {
       "nsis": {
-        "installMode": "perMachine"
+        "installMode": "perMachine",
+        "template": "./windows/installer.nsi",
+        "installerHooks": "./windows/hooks.nsh"
       }
     },
     "linux": {
