@@ -237,6 +237,25 @@ function nextResumeRequestId(tabId: string): string {
 }
 
 const pendingRuntimeStarts = new Map<string, Promise<void>>();
+
+/** True while save/snapshot preflight may still adopt a newer chip. */
+export function isAgentSelectionOpen(tab: {
+  isStreaming?: boolean;
+  preflightAttemptEpoch?: number | null;
+  attemptEpoch?: number | null;
+  activeAttemptId?: string | null;
+  selectionLocked?: boolean;
+}): boolean {
+  if (!tab.isStreaming) return true;
+  if (tab.selectionLocked) return false;
+  if (tab.activeAttemptId && pendingRuntimeStarts.has(tab.activeAttemptId)) {
+    return false;
+  }
+  return (
+    tab.preflightAttemptEpoch != null &&
+    tab.preflightAttemptEpoch === tab.attemptEpoch
+  );
+}
 const compressionInFlight = new Set<string>();
 const rewindInFlight = new Set<string>();
 
@@ -289,6 +308,12 @@ export interface TabState {
   activeAttemptId?: string | null;
   /** Attempt that is still saving/snapshotting before its runtime starts. */
   preflightAttemptEpoch?: number | null;
+  /**
+   * Set in the same synchronous stretch as `startRuntimeTurn`. Preflight stays
+   * open for `isCurrentPreflight()` until that promise settles; this flag is
+   * what freezes the chip and `updateTabRuntimeSelection` during spawn.
+   */
+  selectionLocked?: boolean;
   /** Latest history request allowed to populate this tab. Never persisted. */
   resumeRequestId?: string | null;
   /** Stop intents awaiting their corresponding legacy completion event. */
@@ -1540,8 +1565,6 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     const runtime = "claude" as const;
     const runtimeModel = activeTab.runtimeModel?.trim() || null;
     const tabReasoningEffort = activeTab.reasoningEffort?.trim() || null;
-    // Agent id is read again after preflight. A chip click can land while
-    // files are saving, and that last write must win over this early tab.
     const requestModel =
       resolveProviderRequestModel(
         runtimeModel ?? state.selectedModel,
@@ -1693,6 +1716,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         attemptEpoch,
         activeAttemptId: attemptId,
         preflightAttemptEpoch: attemptEpoch,
+        selectionLocked: false,
         resumeRequestId: null,
         // A new send must not inherit stop tombstones from a prior attempt.
         cancelledAttempts: [],
@@ -1795,6 +1819,11 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         abortUnstablePreflight();
         return;
       }
+      // Freeze the chip in the same turn as the spawn call. Preflight epoch
+      // stays set until `startPromise` settles so `isCurrentPreflight()` holds.
+      set((current) =>
+        applyTabUpdate(current, activeTabId, { selectionLocked: true }),
+      );
       const startPromise = startRuntimeTurn({
         runtime,
         projectPath,
@@ -1836,6 +1865,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       set((current) =>
         applyTabUpdate(current, activeTabId, {
           preflightAttemptEpoch: null,
+          selectionLocked: false,
           ...(compressionCarryover ? { compressionCarryover: null } : {}),
         }),
       );
@@ -1892,6 +1922,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
           streamingStartedAt: null,
           streamingStatus: null,
           preflightAttemptEpoch: null,
+          selectionLocked: false,
           activeAttemptId: null,
           pendingTemporaryFilePaths: [],
           error,
@@ -2946,13 +2977,9 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     set((state) => {
       const tab = state.tabs.find((candidate) => candidate.id === tabId);
       if (!tab) return state;
-      // Preflight already shows the new chip. Locking here drops the last
-      // rapid click while sendPrompt is still awaiting save/snapshot.
-      const selectionOpen =
-        tab.isStreaming &&
-        tab.preflightAttemptEpoch != null &&
-        tab.preflightAttemptEpoch === tab.attemptEpoch;
-      if (tab.isStreaming && !selectionOpen) {
+      // Save/snapshot may still adopt a newer chip. Once startRuntimeTurn has
+      // been called, selectionLocked / pendingRuntimeStarts freeze the turn.
+      if (tab.isStreaming && !isAgentSelectionOpen(tab)) {
         result = "blocked-streaming";
         return state;
       }
