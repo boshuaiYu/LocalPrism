@@ -1540,7 +1540,8 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     const runtime = "claude" as const;
     const runtimeModel = activeTab.runtimeModel?.trim() || null;
     const tabReasoningEffort = activeTab.reasoningEffort?.trim() || null;
-    const selectedAgentId = activeTab.agentId?.trim() || null;
+    // Agent id is read again after preflight. A chip click can land while
+    // files are saving, and that last write must win over this early tab.
     const requestModel =
       resolveProviderRequestModel(
         runtimeModel ?? state.selectedModel,
@@ -1773,6 +1774,11 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         prompt = `${ctx}\n\n${userPrompt}`;
       }
       prompt = prependCompressionCarryover(prompt, compressionCarryover);
+      // Last chip click wins, including one that lands during this preflight.
+      const selectedAgentId =
+        get()
+          .tabs.find((tab) => tab.id === activeTabId)
+          ?.agentId?.trim() || null;
       // Preset speaking style applies to this turn only. History stays as sent.
       prompt = applyReplyStyleToPrompt(
         prompt,
@@ -2940,7 +2946,13 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     set((state) => {
       const tab = state.tabs.find((candidate) => candidate.id === tabId);
       if (!tab) return state;
-      if (tab.isStreaming) {
+      // Preflight already shows the new chip. Locking here drops the last
+      // rapid click while sendPrompt is still awaiting save/snapshot.
+      const selectionOpen =
+        tab.isStreaming &&
+        tab.preflightAttemptEpoch != null &&
+        tab.preflightAttemptEpoch === tab.attemptEpoch;
+      if (tab.isStreaming && !selectionOpen) {
         result = "blocked-streaming";
         return state;
       }

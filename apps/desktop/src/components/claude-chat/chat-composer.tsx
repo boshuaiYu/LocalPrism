@@ -338,6 +338,7 @@ export const ChatComposer: FC<{
         runtimeModel: tab?.runtimeModel ?? null,
         reasoningEffort: tab?.reasoningEffort ?? null,
         agentId: tab?.agentId ?? null,
+        preflightAttemptEpoch: tab?.preflightAttemptEpoch ?? null,
         isStopping: (tab?.cancelledAttempts?.length ?? 0) > 0,
       };
     }),
@@ -430,6 +431,11 @@ export const ChatComposer: FC<{
   const codexAvailable = codexAccount.installed && codexAccount.authenticated;
   const runtimeSelectionReady = archivedCodex ? false : providerReady;
   const runtimeBusy = isStreaming || activeTabMeta.isStopping;
+  // The chip stays clickable until the runtime process is actually up, so a
+  // burst of preset clicks is not frozen by the preflight streaming flag.
+  const agentSwitchBusy =
+    activeTabMeta.isStopping ||
+    (isStreaming && activeTabMeta.preflightAttemptEpoch == null);
   const selectedProviderModel = selectedProviderCredential
     ? selectedProviderModels[selectedProviderCredential.id] ||
       selectedProviderCredential.model
@@ -1639,7 +1645,7 @@ export const ChatComposer: FC<{
                 peer="claude"
                 projectPath={projectRoot}
                 agentId={activeTabMeta.agentId ?? null}
-                busy={runtimeBusy}
+                busy={agentSwitchBusy}
                 onAgentChange={(agent) => {
                   const previousAgentId = activeTabMeta.agentId ?? null;
                   const nextAgentId = agent?.id ?? null;
