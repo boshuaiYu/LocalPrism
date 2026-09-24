@@ -737,7 +737,7 @@ async fn read_clipboard_file_paths() -> Result<Vec<String>, String> {
     }
 }
 
-pub use project_path_guard::bind_project_path_hook;
+pub use project_path_guard::{bind_project_path_hook, write_hook_stdout};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

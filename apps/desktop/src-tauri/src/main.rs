@@ -11,10 +11,10 @@ fn main() {
         let mut payload = String::new();
         let _ = std::io::stdin().read_to_string(&mut payload);
         let spec = args.get(2).map(String::as_str);
-        print!(
-            "{}",
-            claude_prism_desktop_lib::bind_project_path_hook(spec, &payload)
-        );
+        let output = claude_prism_desktop_lib::bind_project_path_hook(spec, &payload);
+        // `process::exit` skips Stdout Drop, so a piped BufWriter can discard
+        // JSON under ~8KB. Flush before exit or Claude Code sees empty Keep.
+        let _ = claude_prism_desktop_lib::write_hook_stdout(&output);
         std::process::exit(0);
     }
     if args.len() >= 4 && args[1] == "--tectonic-compile" {

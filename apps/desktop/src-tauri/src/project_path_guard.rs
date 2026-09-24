@@ -11,6 +11,7 @@
 //! can be allow-listed so skill/reference Reads keep working. `..` in an
 //! absolute path is normalized before the inside-project check.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -178,6 +179,18 @@ fn hook_deny_output(message: &str) -> String {
         }
     })
     .to_string()
+}
+
+/// Write hook JSON and flush. `print!` + `process::exit` skips `Stdout` Drop,
+/// so a block-buffered pipe can discard a payload under ~8KB and Claude Code
+/// treats empty stdout as Keep.
+pub fn write_hook_stdout(output: &str) -> std::io::Result<()> {
+    write_hook_response(&mut std::io::stdout(), output)
+}
+
+fn write_hook_response<W: Write>(writer: &mut W, output: &str) -> std::io::Result<()> {
+    writer.write_all(output.as_bytes())?;
+    writer.flush()
 }
 
 pub fn install_path_guard_hook(config_dir: &Path, project_root: &Path) -> Result<(), String> {
@@ -413,12 +426,20 @@ fn bind_bash(root: &ProjectRoot, input: Value) -> ToolPathDecision {
     else {
         return ToolPathDecision::Keep(Value::Object(map));
     };
-    let rewritten = replace_placeholder_homes(root, &command);
-    if rewritten == command {
-        return ToolPathDecision::Keep(Value::Object(map));
+    match replace_placeholder_homes(root, &command) {
+        CommandRewrite::Keep => ToolPathDecision::Keep(Value::Object(map)),
+        CommandRewrite::Rewrite(rewritten) => {
+            map.insert("command".into(), Value::String(rewritten));
+            ToolPathDecision::Rewrite(Value::Object(map))
+        }
+        CommandRewrite::Deny => ToolPathDecision::Deny(DENY_MESSAGE.to_string()),
     }
-    map.insert("command".into(), Value::String(rewritten));
-    ToolPathDecision::Rewrite(Value::Object(map))
+}
+
+enum CommandRewrite {
+    Keep,
+    Rewrite(String),
+    Deny,
 }
 
 fn bind_path(root: &ProjectRoot, allow: &[ProjectRoot], raw: &str) -> PathBind {
@@ -493,11 +514,11 @@ fn is_tilde(value: &str) -> bool {
     value == "~" || value.starts_with("~/") || value.starts_with("~\\")
 }
 
-fn replace_placeholder_homes(root: &ProjectRoot, command: &str) -> String {
-    let replacement = display_absolute(&root.sep.to_string(), &root.prefix_display, &root.parts);
+fn replace_placeholder_homes(root: &ProjectRoot, command: &str) -> CommandRewrite {
     let chars: Vec<char> = command.chars().collect();
     let mut out = String::new();
     let mut index = 0;
+    let mut changed = false;
     while index < chars.len() {
         let prev = if index == 0 {
             None
@@ -505,16 +526,37 @@ fn replace_placeholder_homes(root: &ProjectRoot, command: &str) -> String {
             Some(chars[index - 1])
         };
         if is_token_start(prev) {
-            if let Some(len) = placeholder_prefix_len(&chars[index..]) {
-                out.push_str(&replacement);
-                index += len;
-                continue;
+            if let Some(prefix_len) = placeholder_prefix_len(&chars[index..]) {
+                let token_end = path_token_end(&chars, index);
+                let remainder = &chars[index + prefix_len..token_end];
+                if remainder.iter().any(|ch| matches!(ch, '*' | '?')) {
+                    out.extend(chars[index..token_end].iter());
+                    index = token_end;
+                    continue;
+                }
+                let token: String = chars[index..token_end].iter().collect();
+                match bind_path(root, &[], &token) {
+                    PathBind::Inside(next) => {
+                        if next.split(['/', '\\']).any(|part| part == "..") {
+                            return CommandRewrite::Deny;
+                        }
+                        out.push_str(&next);
+                        changed = true;
+                        index = token_end;
+                        continue;
+                    }
+                    PathBind::Deny => return CommandRewrite::Deny,
+                }
             }
         }
         out.push(chars[index]);
         index += 1;
     }
-    out
+    if changed {
+        CommandRewrite::Rewrite(out)
+    } else {
+        CommandRewrite::Keep
+    }
 }
 
 fn is_token_start(prev: Option<char>) -> bool {
@@ -524,6 +566,22 @@ fn is_token_start(prev: Option<char>) -> bool {
             ch.is_whitespace() || matches!(ch, '"' | '\'' | '=' | '(' | '[' | ',' | ';' | '|')
         }
     }
+}
+
+fn path_token_end(chars: &[char], start: usize) -> usize {
+    let mut index = start;
+    while index < chars.len() && !is_shell_token_end(chars[index]) {
+        index += 1;
+    }
+    index
+}
+
+fn is_shell_token_end(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '"' | '\'' | ';' | '|' | '&' | '(' | ')' | '<' | '>' | '`' | ','
+        )
 }
 
 fn placeholder_prefix_len(chars: &[char]) -> Option<usize> {
@@ -538,7 +596,7 @@ fn placeholder_prefix_len(chars: &[char]) -> Option<usize> {
             if matches!(after_users.first(), Some('\\' | '/')) {
                 if let Some(user_len) = starts_with_ignore(&after_users[1..], PLACEHOLDER_USER) {
                     let end = 3 + users_len + 1 + user_len;
-                    if is_path_boundary(chars.get(end).copied()) {
+                    if is_placeholder_account_end(chars.get(end).copied()) {
                         return Some(end);
                     }
                 }
@@ -547,7 +605,7 @@ fn placeholder_prefix_len(chars: &[char]) -> Option<usize> {
     }
     for prefix in ["/Users/user", "/home/user", "\\Users\\user", "\\home\\user"] {
         if let Some(len) = starts_with_ignore(chars, prefix) {
-            if is_path_boundary(chars.get(len).copied()) {
+            if is_placeholder_account_end(chars.get(len).copied()) {
                 return Some(len);
             }
         }
@@ -567,10 +625,11 @@ fn starts_with_ignore(chars: &[char], literal: &str) -> Option<usize> {
     matches.then_some(literal.len())
 }
 
-fn is_path_boundary(next: Option<char>) -> bool {
+fn is_placeholder_account_end(next: Option<char>) -> bool {
     match next {
         None => true,
-        Some(ch) => !ch.is_ascii_alphanumeric() && ch != '_' && ch != '.',
+        Some('/' | '\\') => true,
+        Some(ch) => is_shell_token_end(ch),
     }
 }
 
@@ -1037,6 +1096,80 @@ mod tests {
             decision,
             ToolPathDecision::Keep(json!({ "command": nested }))
         );
+    }
+
+    #[test]
+    fn does_not_rewrite_a_bash_glob_on_a_placeholder_home() {
+        let command = "rm -rf /home/user/*";
+        let decision = bind_tool_input(PROJECT, "Bash", json!({ "command": command }));
+        assert_eq!(
+            decision,
+            ToolPathDecision::Keep(json!({ "command": command }))
+        );
+        let command = r"Remove-Item C:\Users\user\*";
+        let decision = bind_tool_input(PROJECT, "Bash", json!({ "command": command }));
+        assert_eq!(
+            decision,
+            ToolPathDecision::Keep(json!({ "command": command }))
+        );
+    }
+
+    #[test]
+    fn denies_a_bash_placeholder_path_that_escapes_with_dotdot() {
+        let decision = bind_tool_input(
+            PROJECT,
+            "Bash",
+            json!({ "command": r"cat C:\Users\user\..\..\..\Users\real\.ssh\id_rsa" }),
+        );
+        assert!(matches!(decision, ToolPathDecision::Deny(_)));
+        let decision = bind_tool_input(
+            "/home/23873/paper",
+            "Bash",
+            json!({ "command": "cat /home/user/../../.ssh/id_rsa" }),
+        );
+        assert!(matches!(decision, ToolPathDecision::Deny(_)));
+    }
+
+    #[test]
+    fn does_not_treat_user_name_as_placeholder_user() {
+        let command = "cat /home/user-name/notes.tex";
+        let decision = bind_tool_input(PROJECT, "Bash", json!({ "command": command }));
+        assert_eq!(
+            decision,
+            ToolPathDecision::Keep(json!({ "command": command }))
+        );
+        let command = r"Get-Content C:\Users\user_backup\main.tex";
+        let decision = bind_tool_input(PROJECT, "Bash", json!({ "command": command }));
+        assert_eq!(
+            decision,
+            ToolPathDecision::Keep(json!({ "command": command }))
+        );
+    }
+
+    #[test]
+    fn write_hook_response_flushes_before_returning() {
+        struct Probe {
+            bytes: Vec<u8>,
+            flushes: usize,
+        }
+        impl Write for Probe {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.bytes.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.flushes += 1;
+                Ok(())
+            }
+        }
+        let mut probe = Probe {
+            bytes: Vec::new(),
+            flushes: 0,
+        };
+        let payload = r#"{"hookSpecificOutput":{"permissionDecision":"allow"}}"#;
+        write_hook_response(&mut probe, payload).unwrap();
+        assert_eq!(probe.bytes, payload.as_bytes());
+        assert_eq!(probe.flushes, 1);
     }
 
     #[test]
