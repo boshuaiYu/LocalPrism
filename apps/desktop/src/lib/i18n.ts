@@ -483,6 +483,12 @@ const en = {
   "skills.selectedGroup": "Selected",
   "skills.selectedShown": "{{selected}} selected · {{shown}} shown",
 
+  "chat.replyMode": "Reply mode",
+  "chat.replyMode.custom": "Custom",
+  "chat.replyMode.academic-polish": "Polish",
+  "chat.replyMode.de-ai": "De-AI",
+  "chat.replyMode.peer-review": "Review",
+
   "agents.one": "Agent",
   "agents.default": "Default",
   "agents.select": "Select custom agent",
@@ -967,6 +973,12 @@ const zh: Record<MessageKey, string> = {
   "skills.searchLabel": "搜索技能",
   "skills.selectedGroup": "已选",
   "skills.selectedShown": "已选 {{selected}} · 显示 {{shown}}",
+
+  "chat.replyMode": "回复模式",
+  "chat.replyMode.custom": "自定义",
+  "chat.replyMode.academic-polish": "润色",
+  "chat.replyMode.de-ai": "去模板",
+  "chat.replyMode.peer-review": "审稿",
 
   "agents.one": "智能体",
   "agents.default": "默认",

@@ -233,6 +233,40 @@ describe("dual-runtime chat dispatch", () => {
         agentId: "reviewer",
       }),
     );
+    expect(String(runtimeRequest()?.prompt)).not.toContain("Reply mode:");
+  });
+
+  it("loads a preset agent's speaking style into the next turn only", async () => {
+    resetStore(
+      makeTab({
+        runtime: "claude",
+        agentId: "peer-review",
+        messages: [
+          {
+            type: "user",
+            message: { content: [{ type: "text", text: "earlier" }] },
+          },
+        ],
+      }),
+    );
+
+    await useClaudeChatStore.getState().sendPrompt("请审这一段");
+
+    const request = runtimeRequest();
+    expect(request).toEqual(
+      expect.objectContaining({ agentId: "peer-review" }),
+    );
+    expect(String(request?.prompt)).toContain("[Reply mode: peer-review.");
+    expect(String(request?.prompt)).toContain("请审这一段");
+    const messages = useClaudeChatStore.getState().messages;
+    expect(messages[0]).toEqual(
+      expect.objectContaining({
+        message: { content: [{ type: "text", text: "earlier" }] },
+      }),
+    );
+    const latest = messages[messages.length - 1];
+    expect(JSON.stringify(latest)).toContain("请审这一段");
+    expect(JSON.stringify(latest)).not.toContain("Reply mode:");
   });
 
   it("falls back to legacy global Claude model and effort selections", async () => {
