@@ -13,8 +13,10 @@ LocalPrism itself stores skills, providers, and the uv/Python toolchain under `l
 2. Otherwise `%APPDATA%\LocalPrism` (`dirs::config_dir()` on Windows).
 
 `%APPDATA%\ClaudePrism` is the pre-rename auth folder (`anthropic-auth.json`).
-Because the checkbox never named these directories, checking it removed nothing the user could see.
-`RMDir "$INSTDIR"` also only removes an empty install directory, so a writable install folder that still held `claude-home` stayed on disk after the binaries were removed.
+`$INSTDIR\ClaudePrism` is only the legacy skills-manifest directory inside this install.
+A writable custom directory such as `D:\LocalPrism` is the app home, so `claude-home`, `providers`, and `uv` sit next to `LocalPrism.exe`. Tauri's `RMDir "$INSTDIR"` does not remove that non-empty folder.
+
+Checking the box used to remove none of those paths. On a machine that also has the older ClaudePrism 1.3.0 registration (`D:\codexprism\ClaudePrism`, Start Menu `ClaudePrism.lnk`), that other install is a different product. This uninstaller does not delete that directory, its uninstall registry key, or a shortcut that points at it.
 
 `windows/hooks.nsh` runs from `NSIS_HOOK_POSTUNINSTALL` after Tauri's own file and registry removal.
 
@@ -37,7 +39,9 @@ Windows Settings often starts the uninstaller with `/S` or `/P`. Those modes ski
 
 Everything in the "without" list of app-data paths is removed, plus Tauri's bundle-id folders above.
 
-Inside the install directory only these app-owned entries are removed: `claude-home`, `providers`, `uv`, `skills`, `.skills`, `agents`, `.agents`, `slash`, and `.localprism-writable`. The install directory itself is removed only when it is then empty. Other files next to the executable are kept.
+Inside the install directory only these app-owned entries are removed: `claude-home`, `providers`, `uv`, `skills`, `.skills`, `agents`, `.agents`, `slash`, `ClaudePrism` (legacy manifest), `skills-manifest.json`, and `.localprism-writable`. The install directory itself is removed only when it is then empty. Other files next to the executable are kept.
+
+A `ClaudePrism.lnk` shortcut is removed only when its target is this install's `LocalPrism.exe` or `ClaudePrism.exe`. The shortcut for a still-registered ClaudePrism install on another path is left in place.
 
 Not removed:
 
@@ -54,8 +58,8 @@ The MSI package has no "delete application data" checkbox. Uninstalling the MSI 
 勾选后会删除当前用户的：
 
 - `%APPDATA%\LocalPrism`、`%LOCALAPPDATA%\LocalPrism`
-- `%APPDATA%\ClaudePrism`、`%LOCALAPPDATA%\ClaudePrism`（旧名称下的登录信息）
+- `%APPDATA%\ClaudePrism`、`%LOCALAPPDATA%\ClaudePrism`（本程序写过的旧登录信息）
 - `%APPDATA%\com.claude-prism.desktop`、`%LOCALAPPDATA%\com.claude-prism.desktop`（Tauri / WebView2）
-- 安装目录里的 `claude-home`、`providers`、`uv` 以及迁移前的 `skills` / `agents` / `slash`
+- 当前安装目录（例如 `D:\LocalPrism`）里的 `claude-home`、`providers`、`uv`、迁移前的 `skills` / `agents` / `slash`、`ClaudePrism`（旧技能清单）、`skills-manifest.json`
 
-不会删除「文档\LocalPrism」、用户自行打开的论文目录，以及安装目录里除此之外的其他文件。
+不会删除「文档\LocalPrism」、用户自行打开的论文目录、安装目录里除此之外的其他文件，也不会卸载另一套仍在注册表里的 ClaudePrism（例如 `D:\codexprism\ClaudePrism` 及其开始菜单快捷方式）。那套程序要用它自己的 `uninstall.exe`。

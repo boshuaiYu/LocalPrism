@@ -18,6 +18,8 @@ describe("Windows NSIS uninstall app-data hook", () => {
     expect(hook).toContain("!macro NSIS_HOOK_POSTUNINSTALL");
     expect(hook).toContain("$DeleteAppDataCheckboxState = 1");
     expect(hook).toContain("$UpdateMode <> 1");
+    expect(hook).toContain('RMDir /r "$APPDATA\\${BUNDLEID}"');
+    expect(hook).toContain('RMDir /r "$LOCALAPPDATA\\${BUNDLEID}"');
     expect(hook).toContain('RMDir /r "$APPDATA\\LocalPrism"');
     expect(hook).toContain('RMDir /r "$LOCALAPPDATA\\LocalPrism"');
     expect(hook).toContain('RMDir /r "$APPDATA\\ClaudePrism"');
@@ -25,7 +27,10 @@ describe("Windows NSIS uninstall app-data hook", () => {
     expect(hook).toContain('RMDir /r "$INSTDIR\\claude-home"');
     expect(hook).toContain('RMDir /r "$INSTDIR\\providers"');
     expect(hook).toContain('RMDir /r "$INSTDIR\\uv"');
+    expect(hook).toContain('RMDir /r "$INSTDIR\\ClaudePrism"');
+    expect(hook).toContain('Delete "$INSTDIR\\skills-manifest.json"');
     expect(hook).toContain('Delete "$INSTDIR\\.localprism-writable"');
+    expect(hook).toContain('IsShortcutTarget "$SMPROGRAMS\\ClaudePrism.lnk"');
   });
 
   it("does not recursively delete the install dir or user project folders", () => {
@@ -36,6 +41,7 @@ describe("Windows NSIS uninstall app-data hook", () => {
     expect(commandText).not.toMatch(/RMDir\s+\/r\s+"\$INSTDIR"\s*$/m);
     expect(commandText).not.toContain("Documents");
     expect(commandText).not.toContain("\\$INSTDIR\\.localprism\"");
+    expect(commandText).not.toContain("codexprism");
     expect(commandText).toContain('RMDir "$INSTDIR"');
   });
 });

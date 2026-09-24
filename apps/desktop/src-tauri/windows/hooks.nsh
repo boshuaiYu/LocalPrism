@@ -1,34 +1,64 @@
 ; LocalPrism uninstall cleanup.
 ;
-; Tauri's NSIS "Delete application data" checkbox only removes
-; $APPDATA\${BUNDLEID} and $LOCALAPPDATA\${BUNDLEID}
-; (com.claude-prism.desktop). This app does not store its data there.
+; Tauri's "Delete application data" checkbox only removes
+; $APPDATA\${BUNDLEID} and $LOCALAPPDATA\${BUNDLEID}. This binary's data is
+; elsewhere:
+;   - $INSTDIR when that folder is writable (custom installs such as D:\LocalPrism)
+;   - otherwise %APPDATA%\LocalPrism
+; The same binary also wrote %APPDATA%\ClaudePrism (legacy auth) and
+; $INSTDIR\ClaudePrism (legacy skills manifest). WebView2 uses ${BUNDLEID}
+; (com.claude-prism.desktop), usually under %LOCALAPPDATA%.
 ;
-; localprism_home() is:
-;   1. $INSTDIR when that folder is writable (custom install such as D:\LocalPrism)
-;   2. otherwise %APPDATA%\LocalPrism  (dirs::config_dir on Windows)
-; Legacy auth from the ClaudePrism name lives in %APPDATA%\ClaudePrism.
+; A separate registered product also named ClaudePrism (its own uninstall.exe,
+; for example D:\codexprism\ClaudePrism) is not this install. Do not remove
+; that directory or a Start Menu shortcut that points at it.
 ;
-; This hook runs only when that checkbox is checked and this is not an update.
-; It never removes user papers. Default projects live in
-; %USERPROFILE%\Documents\LocalPrism, and project files may also live in any
-; folder the user opened. Those paths are not listed here.
-; A LOCALPRISM_HOME override outside AppData and outside $INSTDIR is also kept.
+; Checked paths are removed only when the checkbox is set and this is not an
+; update. User papers are not listed: %USERPROFILE%\Documents\LocalPrism,
+; any project folder outside app data, and LOCALPRISM_HOME when it is outside
+; both AppData and $INSTDIR.
 
 !macro NSIS_HOOK_POSTUNINSTALL
+  ; Drop a same-install shortcut that still uses the old file name.
+  ; Leave ClaudePrism.lnk alone when it belongs to the other install.
+  ${If} $UpdateMode <> 1
+    !insertmacro IsShortcutTarget "$SMPROGRAMS\ClaudePrism.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    Pop $0
+    ${If} $0 = 1
+      Delete "$SMPROGRAMS\ClaudePrism.lnk"
+    ${EndIf}
+    !insertmacro IsShortcutTarget "$SMPROGRAMS\ClaudePrism.lnk" "$INSTDIR\ClaudePrism.exe"
+    Pop $0
+    ${If} $0 = 1
+      Delete "$SMPROGRAMS\ClaudePrism.lnk"
+    ${EndIf}
+    !insertmacro IsShortcutTarget "$DESKTOP\ClaudePrism.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    Pop $0
+    ${If} $0 = 1
+      Delete "$DESKTOP\ClaudePrism.lnk"
+    ${EndIf}
+    !insertmacro IsShortcutTarget "$DESKTOP\ClaudePrism.lnk" "$INSTDIR\ClaudePrism.exe"
+    Pop $0
+    ${If} $0 = 1
+      Delete "$DESKTOP\ClaudePrism.lnk"
+    ${EndIf}
+  ${EndIf}
+
   ${If} $DeleteAppDataCheckboxState = 1
   ${AndIf} $UpdateMode <> 1
-    ; perMachine installers switch $APPDATA to ProgramData until this runs.
+    ; perMachine installers point $APPDATA at ProgramData until this runs.
     SetShellVarContext current
 
+    RMDir /r "$APPDATA\${BUNDLEID}"
+    RMDir /r "$LOCALAPPDATA\${BUNDLEID}"
     RMDir /r "$APPDATA\LocalPrism"
     RMDir /r "$LOCALAPPDATA\LocalPrism"
     RMDir /r "$APPDATA\ClaudePrism"
     RMDir /r "$LOCALAPPDATA\ClaudePrism"
 
-    ; Writable install dir used as the app home. Remove only app-owned trees,
-    ; then remove $INSTDIR if nothing else remains. Do not RMDir /r $INSTDIR:
-    ; the user may have placed other files next to the executable.
+    ; Writable install dir used as the app home. Only app-owned entries.
+    ; $INSTDIR\ClaudePrism is the legacy manifest folder inside this install,
+    ; not another product's install directory.
     RMDir /r "$INSTDIR\claude-home"
     RMDir /r "$INSTDIR\providers"
     RMDir /r "$INSTDIR\uv"
@@ -37,6 +67,8 @@
     RMDir /r "$INSTDIR\agents"
     RMDir /r "$INSTDIR\.agents"
     RMDir /r "$INSTDIR\slash"
+    RMDir /r "$INSTDIR\ClaudePrism"
+    Delete "$INSTDIR\skills-manifest.json"
     Delete "$INSTDIR\.localprism-writable"
     RMDir "$INSTDIR"
   ${EndIf}
