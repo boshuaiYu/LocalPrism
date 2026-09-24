@@ -161,7 +161,8 @@ describe("useClaudeChatStore.sendPrompt context assembly", () => {
 
     const prompt = (vi.mocked(invoke).mock.calls[0]?.[1] as any)?.request
       ?.prompt as string;
-    expect(prompt).toContain("[Currently open file: main.tex]");
+    expect(prompt).toContain("[Currently open file: main.tex.");
+    expect(prompt).toContain("do not read this file unless the user asked");
     expect(prompt).toContain("[Selection: @main.tex]");
     expect(prompt).toContain(wholeFileText);
 
@@ -186,7 +187,7 @@ describe("useClaudeChatStore.sendPrompt context assembly", () => {
     const prompt = (vi.mocked(invoke).mock.calls[0]?.[1] as any)?.request
       ?.prompt as string;
     expect(prompt).toContain(expanded);
-    expect(prompt).toContain("[Currently open file: main.tex]");
+    expect(prompt).toContain("[Currently open file: main.tex.");
   });
 
   it("uses a line-range label and only the selected slice for selection context", async () => {
@@ -218,7 +219,7 @@ describe("useClaudeChatStore.sendPrompt context assembly", () => {
 
     const prompt = (vi.mocked(invoke).mock.calls[0]?.[1] as any)?.request
       ?.prompt as string;
-    expect(prompt).toContain("[Currently open file: main.tex]");
+    expect(prompt).toContain("[Currently open file: main.tex.");
     expect(prompt).toContain("[Selection: @main.tex:2:1-3:6]");
     expect(prompt).toContain("[Selected text:\nbeta\ngamma\n]");
     expect(prompt).not.toContain("alpha\na");
