@@ -276,12 +276,43 @@ describe("WorkspaceLayout chat pane", () => {
     expect(useChatLayoutStore.getState().visible).toBe(false);
   });
 
-  it("does not render a top-bar Settings control", async () => {
+  it("keeps the top-bar Settings control mounted while a chat turn streams", async () => {
     await act(async () => root.render(<WorkspaceLayout />));
+    const header = container.querySelector("[data-testid='app-chrome-header']");
+    const settings = container.querySelector("[data-testid='chrome-settings']");
+    expect(header).not.toBeNull();
+    expect(settings).not.toBeNull();
+    expect(settings?.textContent).toContain("Settings");
+    expect(header?.className).toContain("pointer-events-none");
+    expect(header?.className).toContain("shrink-0");
+    expect(header?.className).not.toContain("z-[10000]");
+    expect(settings?.className).toContain("pointer-events-auto");
+
+    await act(async () => {
+      const current = useClaudeChatStore.getState();
+      useClaudeChatStore.setState({
+        tabs: current.tabs.map((tab, index) =>
+          index === 0
+            ? {
+                ...tab,
+                isStreaming: true,
+                messages: [
+                  {
+                    type: "user",
+                    message: { content: [{ type: "text", text: "你好" }] },
+                  },
+                ],
+              }
+            : tab,
+        ),
+      });
+    });
+
     expect(
-      container.querySelector("[data-testid='app-chrome-header']"),
-    ).toBeNull();
-    expect(container.querySelector("[data-testid='chrome-settings']")).toBeNull();
-    expect(container.textContent).not.toContain("Settings");
+      container.querySelector("[data-testid='chrome-settings']"),
+    ).not.toBeNull();
+    expect(container.querySelector("[data-testid='app-chrome-header']")).toBe(
+      container.querySelector("[data-testid='chrome-settings']")?.parentElement,
+    );
   });
 });

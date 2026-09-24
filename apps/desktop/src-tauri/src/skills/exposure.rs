@@ -95,6 +95,12 @@ mod tests {
             "---\nname: De-AI\ndescription: Revise prose\nskills:\n  - nature-writing\n  - paper-spine\n---\nRevise.\n",
         )
         .unwrap();
+        let commands = home.join("claude-home").join("commands");
+        let slash = home.join("claude-home").join("slash");
+        fs::create_dir_all(&commands).unwrap();
+        fs::create_dir_all(&slash).unwrap();
+        fs::write(commands.join("paperspine.md"), "# paperspine\n").unwrap();
+        fs::write(slash.join("waypoint.md"), "# waypoint\n").unwrap();
 
         let previous = std::env::var("LOCALPRISM_HOME").ok();
         std::env::set_var("LOCALPRISM_HOME", &home);
@@ -150,6 +156,36 @@ mod tests {
             .flatten()
             .count();
         assert_eq!(hello_agents, 0);
+        assert_eq!(
+            fs::read_dir(hello_runtime.join("commands"))
+                .unwrap()
+                .flatten()
+                .count(),
+            0
+        );
+        assert_eq!(
+            fs::read_dir(hello_runtime.join("slash"))
+                .unwrap()
+                .flatten()
+                .count(),
+            0
+        );
+        assert_eq!(
+            fs::read_dir(runtime.join("commands"))
+                .unwrap()
+                .flatten()
+                .count(),
+            0
+        );
+        assert_eq!(
+            fs::read_dir(runtime.join("slash"))
+                .unwrap()
+                .flatten()
+                .count(),
+            0
+        );
+        assert!(commands.join("paperspine.md").is_file());
+        assert!(slash.join("waypoint.md").is_file());
         assert_eq!(
             projects.canonicalize().unwrap(),
             home.join("claude-home")

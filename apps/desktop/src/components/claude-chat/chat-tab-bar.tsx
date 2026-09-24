@@ -129,7 +129,7 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
   );
 
   return (
-    <div className="flex h-11 items-center border-border/70 border-b bg-background">
+    <div className="flex h-[calc(2.75rem+var(--titlebar-height))] items-center border-border/70 border-b bg-background pt-[var(--titlebar-height)] pr-[max(0px,var(--window-controls-inset,0px))]">
       {leading}
       <div
         ref={scrollRef}
