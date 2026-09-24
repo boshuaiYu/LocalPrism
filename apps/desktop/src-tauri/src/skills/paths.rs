@@ -164,6 +164,14 @@ pub fn prepare_isolated_claude_home(
     // Do not pass --add-dir to `claude -p`: sdk-cli waits for directory trust
     // and never calls the model. Pre-approve Read of the install folders instead.
     let _ = write_install_folder_read_allows(&runtime);
+    if let Some(project) = project_path.filter(|path| path.is_absolute()) {
+        crate::project_path_guard::install_path_guard_hook(&runtime, project).map_err(
+            |message| SkillPathError::PathResolution {
+                path: runtime.clone(),
+                message,
+            },
+        )?;
+    }
 
     Ok(runtime)
 }
@@ -1362,6 +1370,16 @@ mod tests {
         assert!(settings.contains("Read(//"));
         assert!(settings.contains("claude-home/skills/**"));
         assert!(settings.contains("claude-home/agents/**"));
+        assert!(settings.contains("--bind-project-path"));
+        assert!(settings.contains("path-guard.json"));
+        let spec: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(config.join("path-guard.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            spec["project"].as_str(),
+            Some(project.to_string_lossy().as_ref())
+        );
     }
 
     #[test]

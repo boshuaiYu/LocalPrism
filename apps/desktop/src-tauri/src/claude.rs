@@ -3050,7 +3050,10 @@ fn prism_system_prompt(
          Use `uv pip install` to add packages and `python` to run scripts.\n\
          8. READ TOOL: pages is optional and PDF-only. Omit it for text, markdown, and code. \
          Never set pages to an empty string. For PDFs, use a 1-indexed range such as \
-         \"1\", \"3\", \"1-5\", or \"10-20\"."
+         \"1\", \"3\", \"1-5\", or \"10-20\".\n\
+         9. PROJECT FILES: The open project is the current working directory. Pass Read, \
+         Write, Edit, Glob, and Grep paths relative to that directory, such as main.tex. \
+         Do not invent an absolute path in a home directory."
     )
 }
 
@@ -6011,6 +6014,9 @@ mod tests {
         assert!(prompt.contains("LaTeX"), "{prompt}");
         assert!(prompt.len() < 4000, "system prompt grew to {}", prompt.len());
         assert!(prompt.contains("skills listed for this turn"));
+        assert!(prompt.contains("relative to that directory"));
+        assert!(!prompt.contains("Users\\user"));
+        assert!(!prompt.contains("/Users/user"));
         assert!(!prompt.contains("waypoint-bio"));
     }
 

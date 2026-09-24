@@ -8,6 +8,7 @@ mod claude_process;
 mod editors;
 mod history;
 mod latex;
+mod project_path_guard;
 mod providers;
 mod runtime;
 mod skills;
@@ -735,6 +736,8 @@ async fn read_clipboard_file_paths() -> Result<Vec<String>, String> {
         Ok(vec![])
     }
 }
+
+pub use project_path_guard::{bind_project_path_hook, write_hook_stdout};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
