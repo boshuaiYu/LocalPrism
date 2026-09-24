@@ -10,10 +10,10 @@ fn main() {
         use std::io::Read;
         let mut payload = String::new();
         let _ = std::io::stdin().read_to_string(&mut payload);
-        let hint = args.get(2).map(String::as_str);
+        let spec = args.get(2).map(String::as_str);
         print!(
             "{}",
-            claude_prism_desktop_lib::bind_project_path_hook(hint, &payload)
+            claude_prism_desktop_lib::bind_project_path_hook(spec, &payload)
         );
         std::process::exit(0);
     }
