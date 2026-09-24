@@ -68,6 +68,7 @@ describe("ClaudeChatDrawer", () => {
     expect(pane?.className).toContain("h-full");
     expect(pane?.className).toContain("max-h-full");
     expect(pane?.className).toContain("overflow-hidden");
+    expect(pane?.className).toContain("grid-cols-[minmax(0,1fr)]");
     expect(pane?.className).toContain("minmax(0,1fr)");
     const thread = container.querySelector('[data-testid="chat-thread"]');
     const composer = container.querySelector(
@@ -76,6 +77,8 @@ describe("ClaudeChatDrawer", () => {
     expect(thread?.className).toContain("min-h-0");
     expect(thread?.className).toContain("flex-1");
     expect(composer?.className).toContain("shrink-0");
+    expect(composer?.className).toContain("max-h-full");
+    expect(composer?.className).not.toContain("overflow-y-auto");
     expect(thread?.compareDocumentPosition(composer as Node)).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
     );
