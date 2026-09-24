@@ -18,7 +18,11 @@ pub fn exposure_for_turn(
     if let Some(command) = invoked_skill_folder(prompt) {
         folders.push(command);
     }
-    SessionSkillExposure { folders }
+    let agent_id = agent_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    SessionSkillExposure { folders, agent_id }
 }
 
 fn agent_skill_folders(project_path: Option<&Path>, agent_id: &str) -> Vec<String> {
@@ -135,6 +139,17 @@ mod tests {
         assert!(!exposed.iter().any(|name| name.contains("paper-spine")));
         assert!(!exposed.iter().any(|name| name == "waypoint-bio"));
         assert!(exposed.len() < 5, "turn leaked skills: {exposed:?}");
+        let runtime_agents: Vec<_> = fs::read_dir(runtime.join("agents"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(runtime_agents, vec!["de-ai.md".to_string()]);
+        let hello_agents = fs::read_dir(hello_runtime.join("agents"))
+            .unwrap()
+            .flatten()
+            .count();
+        assert_eq!(hello_agents, 0);
         assert_eq!(
             projects.canonicalize().unwrap(),
             home.join("claude-home")
@@ -190,6 +205,7 @@ more notes";
         std::env::set_var("LOCALPRISM_HOME", &home);
         let exposure = SessionSkillExposure {
             folders: vec!["scanpy".into()],
+            agent_id: None,
         };
         let runtime = prepare_isolated_claude_home(None, &exposure).unwrap();
         assert!(runtime

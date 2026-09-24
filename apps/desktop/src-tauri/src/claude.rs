@@ -6538,6 +6538,7 @@ mod tests {
         std::env::set_var("LOCALPRISM_HOME", &home);
         let exposure = SessionSkillExposure {
             folders: vec!["scanpy".into()],
+            agent_id: None,
         };
         let cmd = create_command("/usr/bin/claude", vec![], "/tmp/project", None, &exposure).unwrap();
         let config = cmd

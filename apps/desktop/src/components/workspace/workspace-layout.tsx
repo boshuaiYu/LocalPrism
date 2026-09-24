@@ -314,15 +314,16 @@ export function WorkspaceLayout() {
   ) : null;
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-background text-foreground">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background text-foreground">
       <header
         data-testid="app-chrome-header"
-        className="flex shrink-0 items-center justify-end gap-2 border-b px-3 pt-[var(--titlebar-height)] pb-1"
+        className="relative z-[10000] flex min-h-10 shrink-0 items-center justify-end gap-2 border-b bg-background px-3 pt-[var(--titlebar-height)] pr-[max(0.75rem,var(--window-controls-inset,0px))] pb-1"
       >
         <Button
           type="button"
           variant="ghost"
-          className="h-8 gap-2 rounded-lg px-2 text-muted-foreground hover:text-foreground"
+          data-testid="chrome-settings"
+          className="h-8 shrink-0 gap-2 rounded-lg px-2 text-muted-foreground hover:text-foreground"
           onClick={() =>
             window.dispatchEvent(new CustomEvent("localprism-open-settings"))
           }
