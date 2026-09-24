@@ -199,6 +199,7 @@ export function ScientificSkillsOnboarding({
             name: skill.name,
             folder: skill.folder,
             category: skill.category,
+            sourceUrl: skill.sourceUrl,
           })),
           ...installedSkills
             .filter(
