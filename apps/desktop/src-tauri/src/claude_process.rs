@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 
 use crate::claude_permissions::{
     classify_claude_stdout_line, control_ack_line, control_allow_line, control_deny_line,
-    ClaudeStdoutControl,
+    tool_command_summary, ClaudeStdoutControl,
 };
 use crate::runtime::codex::approvals::{ResolveRuntimeRequest, RuntimeRequestDecision};
 use crate::runtime::codex::rpc::RpcId;
@@ -948,6 +948,10 @@ pub async fn spawn_claude_process(
         cmd.stdin(std::process::Stdio::piped());
     }
 
+    let project_root = cmd
+        .as_std()
+        .get_current_dir()
+        .map(|path| path.to_string_lossy().to_string());
     let mut child = cmd.spawn().map_err(|e| {
         eprintln!(
             "[claude-spawn] Failed to spawn process for tab {}: {}",
@@ -1031,6 +1035,7 @@ pub async fn spawn_claude_process(
     let reservation_stdout = reservation.clone();
     let permissions_stdout = permissions.clone();
     let window_label_stdout = window.label().to_string();
+    let project_root_stdout = project_root.clone();
     let stdout_task = tokio::spawn(async move {
         let mut lines = stdout_reader.lines();
         let mut line_count: u64 = 0;
@@ -1099,11 +1104,37 @@ pub async fn spawn_claude_process(
             ) {
                 ClaudeStdoutControl::CanUseTool {
                     request_id,
-                    runtime_request,
+                    mut runtime_request,
                     input,
                     suggestions,
                     tool_name,
                 } => {
+                    let input = match project_root_stdout.as_deref() {
+                        Some(root) => {
+                            match crate::project_path_guard::bind_tool_input(
+                                root,
+                                &tool_name,
+                                input,
+                            ) {
+                                crate::project_path_guard::ToolPathDecision::Deny(message) => {
+                                    let _ = permissions_stdout
+                                        .write_line(
+                                            &reservation_stdout.attempt_id,
+                                            &control_deny_line(&request_id, &message, false),
+                                        )
+                                        .await;
+                                    continue;
+                                }
+                                crate::project_path_guard::ToolPathDecision::Keep(value)
+                                | crate::project_path_guard::ToolPathDecision::Rewrite(value) => {
+                                    value
+                                }
+                            }
+                        }
+                        None => input,
+                    };
+                    runtime_request.details = input.clone();
+                    runtime_request.command = tool_command_summary(&tool_name, &input);
                     permissions_stdout
                         .register_tool(
                             request_id,

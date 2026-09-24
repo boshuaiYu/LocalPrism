@@ -161,6 +161,9 @@ pub fn prepare_isolated_claude_home(
     // Do not pass --add-dir to `claude -p`: sdk-cli waits for directory trust
     // and never calls the model. Pre-approve Read of the install folders instead.
     let _ = write_install_folder_read_allows(&runtime);
+    if let Some(project) = project_path.filter(|path| path.is_absolute()) {
+        let _ = crate::project_path_guard::install_path_guard_hook(&runtime, project);
+    }
 
     Ok(runtime)
 }
@@ -1158,6 +1161,8 @@ mod tests {
         assert!(settings.contains("Read(//"));
         assert!(settings.contains("claude-home/skills/**"));
         assert!(settings.contains("claude-home/agents/**"));
+        assert!(settings.contains("--bind-project-path"));
+        assert!(settings.contains(&project.to_string_lossy().to_string()));
     }
 
     #[test]

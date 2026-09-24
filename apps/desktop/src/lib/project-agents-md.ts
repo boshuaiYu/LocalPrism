@@ -7,7 +7,7 @@ import { writeTextFile } from "@tauri-apps/plugin-fs";
  */
 export const DEFAULT_AGENTS_MD = `# Project Instructions
 
-Work inside this project directory. Preserve existing LaTeX structure and verify generated outputs before reporting completion.
+Work inside this project directory. Pass file tools paths relative to it, such as main.tex. Preserve existing LaTeX structure and verify generated outputs before reporting completion.
 `;
 
 export type AgentsMdWriteReason = "created" | "exists" | "disabled";
