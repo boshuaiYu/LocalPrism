@@ -4,7 +4,10 @@ import { describe, expect, it } from "vitest";
 
 const confPath = resolve(__dirname, "../../src-tauri/tauri.conf.json");
 const hookPath = resolve(__dirname, "../../src-tauri/windows/hooks.nsh");
-const templatePath = resolve(__dirname, "../../src-tauri/windows/installer.nsi");
+const templatePath = resolve(
+  __dirname,
+  "../../src-tauri/windows/installer.nsi",
+);
 
 describe("Windows NSIS uninstall app-data hook", () => {
   const conf = JSON.parse(readFileSync(confPath, "utf-8"));

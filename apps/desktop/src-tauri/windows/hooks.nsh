@@ -24,8 +24,14 @@
     ; perMachine installers point $APPDATA at ProgramData until this runs.
     SetShellVarContext current
 
-    RMDir /r "$APPDATA\LocalPrism"
-    RMDir /r "$LOCALAPPDATA\LocalPrism"
+    ; Skip when that folder is this install. A full RMDir /r would remove
+    ; files next to the executable that are not in the list below.
+    ${If} "$APPDATA\LocalPrism" != $INSTDIR
+      RMDir /r "$APPDATA\LocalPrism"
+    ${EndIf}
+    ${If} "$LOCALAPPDATA\LocalPrism" != $INSTDIR
+      RMDir /r "$LOCALAPPDATA\LocalPrism"
+    ${EndIf}
 
     ; Writable install dir used as the app home. Only app-owned entries
     ; inside this LocalPrism install. Do not RMDir /r $INSTDIR.

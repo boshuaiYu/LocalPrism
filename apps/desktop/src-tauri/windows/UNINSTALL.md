@@ -28,7 +28,7 @@ Windows Settings often starts the uninstaller with `/S` or `/P` and skips the co
 
 Also removed:
 
-- `%APPDATA%\LocalPrism` and `%LOCALAPPDATA%\LocalPrism`
+- `%APPDATA%\LocalPrism` and `%LOCALAPPDATA%\LocalPrism`, unless that path is the install directory itself (then only the named entries below are removed)
 - Inside this install directory only: `claude-home`, `providers`, `uv`, `skills`, `.skills`, `agents`, `.agents`, `slash`, `skills-manifest.json`, and `.localprism-writable`
 - The install directory itself, only when it is then empty
 
