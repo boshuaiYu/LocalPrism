@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { PEER_REVIEW_INSTRUCTIONS } from "@/lib/agent-presets";
 import {
+  agentFlashAttribute,
   applyReplyStyleToPrompt,
   replyModeForAgent,
   replyStylePrefix,
@@ -19,6 +20,20 @@ describe("replyModeForAgent", () => {
     expect(replyModeForAgent("")).toBe("custom");
     expect(replyModeForAgent("  ")).toBe("custom");
     expect(replyModeForAgent("my-reviewer")).toBe("custom");
+  });
+});
+
+describe("agentFlashAttribute", () => {
+  it("uses the chip agent id for each built-in preset", () => {
+    expect(agentFlashAttribute("academic-polish")).toBe("academic-polish");
+    expect(agentFlashAttribute(" de-ai ")).toBe("de-ai");
+    expect(agentFlashAttribute("peer-review")).toBe("peer-review");
+  });
+
+  it("leaves custom and default without a flash token", () => {
+    expect(agentFlashAttribute(null)).toBeNull();
+    expect(agentFlashAttribute("")).toBeNull();
+    expect(agentFlashAttribute("my-agent")).toBeNull();
   });
 });
 

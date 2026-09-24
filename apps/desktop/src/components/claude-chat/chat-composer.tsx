@@ -67,6 +67,7 @@ import {
 import { PermissionModePicker } from "@/components/runtime/permission-mode-picker";
 import { AgentSelector } from "@/components/agents/agent-selector";
 import {
+  agentFlashAttribute,
   replyModeForAgent,
   requestPresetAgentFlash,
   shouldFlashPresetAgentSwitch,
@@ -303,6 +304,7 @@ export const ChatComposer: FC<{
   isOpen?: boolean;
   agentFlashId?: string | null;
 }> = ({ isOpen, agentFlashId = null }) => {
+  const agentFlashToken = agentFlashAttribute(agentFlashId);
   const { t } = useI18n();
   const sendPrompt = useClaudeChatStore((s) => s.sendPrompt);
   const setChatError = useClaudeChatStore((s) => s._setError);
@@ -1474,10 +1476,10 @@ export const ChatComposer: FC<{
       ) : (
         <div
           data-composer-shell
-          data-agent-flash={agentFlashId ?? undefined}
+          data-agent-flash={agentFlashToken ?? undefined}
           className={cn(
             "flex min-h-0 w-full min-w-0 max-w-full flex-1 flex-col gap-2.5 overflow-hidden rounded-(--composer-radius) border border-border/70 bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_20px_-10px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:border-border focus-within:shadow-[0_8px_28px_-12px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] dark:border-muted-foreground/15 dark:shadow-none dark:focus-within:border-muted-foreground/30",
-            agentFlashId && "lp-agent-switch-flash",
+            agentFlashToken && "lp-agent-switch-flash",
             isDragOver &&
               "border-ring border-dashed bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))]",
           )}

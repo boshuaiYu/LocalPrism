@@ -685,33 +685,122 @@
   }
 }
 
+/* Literal colors live in the keyframes. WebKit (Tauri on macOS and Linux)
+   does not reliably substitute an element custom property inside @keyframes,
+   so a shared var(--lp-agent-flash, var(--primary)) paints --primary for
+   every preset. Hues stay far apart: blue 255, green 145, red 25. */
 @keyframes lp-agent-switch-flash {
   0%,
   100% {
     outline-color: transparent;
   }
-  45% {
-    outline-color: var(--lp-agent-flash, var(--primary));
+  20%,
+  80% {
+    outline-color: var(--primary);
+  }
+}
+
+@keyframes lp-agent-switch-flash-academic-polish {
+  0%,
+  100% {
+    outline-color: transparent;
+  }
+  20%,
+  80% {
+    outline-color: oklch(0.52 0.23 255);
+  }
+}
+
+@keyframes lp-agent-switch-flash-de-ai {
+  0%,
+  100% {
+    outline-color: transparent;
+  }
+  20%,
+  80% {
+    outline-color: oklch(0.56 0.21 145);
+  }
+}
+
+@keyframes lp-agent-switch-flash-peer-review {
+  0%,
+  100% {
+    outline-color: transparent;
+  }
+  20%,
+  80% {
+    outline-color: oklch(0.57 0.23 25);
+  }
+}
+
+@keyframes lp-agent-switch-flash-academic-polish-dark {
+  0%,
+  100% {
+    outline-color: transparent;
+  }
+  20%,
+  80% {
+    outline-color: oklch(0.74 0.17 255);
+  }
+}
+
+@keyframes lp-agent-switch-flash-de-ai-dark {
+  0%,
+  100% {
+    outline-color: transparent;
+  }
+  20%,
+  80% {
+    outline-color: oklch(0.78 0.18 145);
+  }
+}
+
+@keyframes lp-agent-switch-flash-peer-review-dark {
+  0%,
+  100% {
+    outline-color: transparent;
+  }
+  20%,
+  80% {
+    outline-color: oklch(0.74 0.19 25);
   }
 }
 
 /* Outer ring on the composer card. No background fill. */
 .lp-agent-switch-flash {
-  outline: 3px solid transparent;
+  outline: 4px solid transparent;
   outline-offset: 0;
   animation: lp-agent-switch-flash 0.48s ease-in-out 3;
 }
 
 .lp-agent-switch-flash[data-agent-flash="academic-polish"] {
-  --lp-agent-flash: oklch(0.58 0.2 255);
+  --lp-agent-flash: oklch(0.52 0.23 255);
+  animation-name: lp-agent-switch-flash-academic-polish;
 }
 
 .lp-agent-switch-flash[data-agent-flash="de-ai"] {
-  --lp-agent-flash: oklch(0.62 0.16 165);
+  --lp-agent-flash: oklch(0.56 0.21 145);
+  animation-name: lp-agent-switch-flash-de-ai;
 }
 
 .lp-agent-switch-flash[data-agent-flash="peer-review"] {
-  --lp-agent-flash: oklch(0.6 0.21 25);
+  --lp-agent-flash: oklch(0.57 0.23 25);
+  animation-name: lp-agent-switch-flash-peer-review;
+}
+
+.dark .lp-agent-switch-flash[data-agent-flash="academic-polish"] {
+  --lp-agent-flash: oklch(0.74 0.17 255);
+  animation-name: lp-agent-switch-flash-academic-polish-dark;
+}
+
+.dark .lp-agent-switch-flash[data-agent-flash="de-ai"] {
+  --lp-agent-flash: oklch(0.78 0.18 145);
+  animation-name: lp-agent-switch-flash-de-ai-dark;
+}
+
+.dark .lp-agent-switch-flash[data-agent-flash="peer-review"] {
+  --lp-agent-flash: oklch(0.74 0.19 25);
+  animation-name: lp-agent-switch-flash-peer-review-dark;
 }
 
 @media (prefers-reduced-motion: reduce) {
