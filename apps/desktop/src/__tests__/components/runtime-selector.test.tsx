@@ -866,6 +866,143 @@ describe("ChatComposer provider wiring", () => {
     }
   });
 
+  it("truncates the model chip beside a fully reserved send button on a wide row", async () => {
+    const chatSnapshot = useClaudeChatStore.getState();
+    const setupSnapshot = useClaudeSetupStore.getState();
+    const documentSnapshot = useDocumentStore.getState();
+    const runtimeSnapshot = useRuntimeStore.getState();
+    const baseTab = chatSnapshot.tabs[0];
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const OriginalResizeObserver = globalThis.ResizeObserver;
+    class WideResizeObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(target: Element) {
+        Object.defineProperty(target, "clientWidth", {
+          configurable: true,
+          value: 640,
+        });
+        this.callback([], this);
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+    globalThis.ResizeObserver =
+      WideResizeObserver as unknown as typeof ResizeObserver;
+    seedClaudeProvider();
+    useProviderStore.setState({
+      models: [
+        {
+          id: "gpt-5.4-extra",
+          displayName: "GPT-5.4 Extra",
+          reasoningEfforts: ["low", "medium", "high"],
+          isDefault: true,
+        },
+      ],
+    });
+
+    useDocumentStore.setState({ projectRoot: "C:/project" });
+    useClaudeSetupStore.setState({
+      status: "ready",
+      providerKind: "claude-code",
+      claudeProviderConfigured: true,
+      openAiCredentials: [],
+      activeOpenAiCredentialId: null,
+    });
+    useRuntimeStore.setState({
+      accounts: {
+        claude: runtimeAccount("claude", true),
+        codex: runtimeAccount("codex", true),
+      },
+      models: { claude: [], codex: [] },
+      loading: {},
+      login: {},
+    });
+    useClaudeChatStore.setState({
+      tabs: [
+        {
+          ...baseTab,
+          id: "tab-wide",
+          projectPath: "C:/project",
+          runtime: "claude",
+          chatPeer: "claude",
+          runtimeModel: "gpt-5.4-extra",
+          reasoningEffort: "high",
+          providerKey: null,
+        },
+      ],
+      activeTabId: "tab-wide",
+      activeProjectPath: "C:/project",
+      selectedModel: "gpt-5.4-extra",
+      effortLevel: "high",
+      selectedProviderCredentialId: CLAUDE_CODE_PROVIDER_ID,
+      selectedProviderModels: {},
+      messages: [],
+      sessionId: null,
+      isStreaming: false,
+    });
+    (
+      globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+
+    try {
+      await act(async () => {
+        root.render(
+          <TooltipProvider>
+            <ChatComposer />
+          </TooltipProvider>,
+        );
+        await Promise.resolve();
+      });
+
+      const controls = container.querySelector(
+        '[data-testid="composer-controls"]',
+      );
+      const leading = container.querySelector(
+        '[data-testid="composer-controls-leading"]',
+      );
+      const modelSlot = container.querySelector(
+        '[data-testid="composer-controls-model"]',
+      );
+      const sendSlot = container.querySelector('[data-testid="composer-send"]');
+      const trigger = container.querySelector(
+        '[data-testid="composer-model-trigger"]',
+      );
+      expect(controls?.getAttribute("data-layout")).toBe("wide");
+      expect(leading?.className).toContain("shrink-0");
+      expect(
+        leading?.querySelector('[data-testid="composer-model-trigger"]'),
+      ).toBeNull();
+      expect(modelSlot?.className.split(/\s+/)).toEqual(
+        expect.arrayContaining(["min-w-0", "flex-1", "overflow-hidden"]),
+      );
+      expect(modelSlot?.contains(trigger ?? null)).toBe(true);
+      expect(sendSlot?.className).toContain("shrink-0");
+      expect(sendSlot?.previousElementSibling).toBe(modelSlot);
+      const triggerClasses = trigger?.className.split(/\s+/) ?? [];
+      expect(triggerClasses).toContain("max-w-full");
+      expect(triggerClasses).toContain("min-w-0");
+      expect(triggerClasses).toContain("overflow-hidden");
+      expect(triggerClasses).toContain("shrink");
+      expect(triggerClasses).not.toContain("shrink-0");
+      expect(trigger?.querySelector("span")?.className.split(/\s+/)).toContain(
+        "truncate",
+      );
+      expect(trigger?.textContent).toContain("GPT-5.4 Extra");
+      expect(trigger?.textContent).toContain("High");
+    } finally {
+      globalThis.ResizeObserver = OriginalResizeObserver;
+      await act(async () => root.unmount());
+      container.remove();
+      resetProviderStoreForTests();
+      useClaudeChatStore.setState(chatSnapshot, true);
+      useClaudeSetupStore.setState(setupSnapshot, true);
+      useDocumentStore.setState(documentSnapshot, true);
+      useRuntimeStore.setState(runtimeSnapshot, true);
+    }
+  });
+
   it("keeps archived Codex conversations read-only", async () => {
     const chatSnapshot = useClaudeChatStore.getState();
     const setupSnapshot = useClaudeSetupStore.getState();
