@@ -59,6 +59,19 @@ describe("ClaudeChatDrawer", () => {
     const pane = container.querySelector('[data-testid="chat-pane"]');
     expect(pane).not.toBeNull();
     expect(pane?.className).toContain("h-full");
+    expect(pane?.className).toContain("max-h-full");
+    expect(pane?.className).toContain("overflow-hidden");
+    expect(pane?.className).toContain("minmax(0,1fr)");
+    const thread = container.querySelector('[data-testid="chat-thread"]');
+    const composer = container.querySelector(
+      '[data-testid="chat-composer-slot"]',
+    );
+    expect(thread?.className).toContain("min-h-0");
+    expect(thread?.className).toContain("flex-1");
+    expect(composer?.className).toContain("shrink-0");
+    expect(thread?.compareDocumentPosition(composer as Node)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
     expect(container.querySelector('[aria-label="Fullscreen"]')).toBeNull();
     expect(
       container.querySelector('[aria-label="Open AI Assistant"]'),

@@ -14,10 +14,11 @@ describe("composerControlsLayout", () => {
   });
 
   it("keeps model and strength on one row at and above the breakpoint", () => {
+    expect(composerControlsLayout(400)).toBe("narrow");
     expect(composerControlsLayout(COMPOSER_CONTROLS_STACK_BREAKPOINT_PX)).toBe(
       "wide",
     );
-    expect(composerControlsLayout(480)).toBe("wide");
+    expect(composerControlsLayout(640)).toBe("wide");
   });
 
   it("stacks before the width has been measured so controls are not clipped", () => {

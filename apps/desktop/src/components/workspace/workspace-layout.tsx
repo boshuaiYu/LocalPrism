@@ -402,9 +402,14 @@ export function WorkspaceLayout() {
                   collapsible
                   collapsedSize={0}
                   onCollapse={() => setChatPaneVisible(false)}
-                  className="min-w-0 overflow-hidden"
+                  className="relative min-h-0 min-w-0 overflow-hidden"
                 >
-                  <ClaudeChatDrawer />
+                  {/* Fill the panel box. Percentage height on the drawer is not
+                      enough: a flex-basis panel lets the column grow with the
+                      thread and overflow:hidden then clips the composer. */}
+                  <div className="absolute inset-0 flex min-h-0 min-w-0 flex-col">
+                    <ClaudeChatDrawer />
+                  </div>
                 </Panel>
               )}
 

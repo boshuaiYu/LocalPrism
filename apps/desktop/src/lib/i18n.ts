@@ -366,6 +366,8 @@ const en = {
   "env.installingNamed": "Installing {{name}}…",
   "env.packsReady": "Default skill packs ready",
   "env.packsInstalled": "PaperSpine and default skill packs installed",
+  "env.packsInstalledCount":
+    "PaperSpine and default skill packs installed · {{count}} skills",
   "env.scientificSkills": "Scientific Skills",
   "env.optionalPacks": "Optional domain packs",
   "env.writingEngine": "Writing engine",
@@ -859,6 +861,8 @@ const zh: Record<MessageKey, string> = {
   "env.installingNamed": "正在安装 {{name}}…",
   "env.packsReady": "默认技能包已就绪",
   "env.packsInstalled": "已安装 PaperSpine 和默认技能包",
+  "env.packsInstalledCount":
+    "已安装 PaperSpine 和默认技能包 · {{count}} 个技能",
   "env.scientificSkills": "科研技能",
   "env.optionalPacks": "可选领域技能包",
   "env.writingEngine": "写作引擎",

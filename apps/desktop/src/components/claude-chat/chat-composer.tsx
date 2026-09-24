@@ -1325,7 +1325,7 @@ export const ChatComposer: FC<{ isOpen?: boolean }> = ({ isOpen }) => {
   return (
     <div
       ref={composerRef}
-      className="relative mx-auto w-full max-w-[44rem] shrink-0 px-4 pt-1 pb-5"
+      className="relative mx-auto w-full min-w-0 max-w-[44rem] shrink-0 px-4 pt-1 pb-5"
       style={
         {
           "--composer-bg":

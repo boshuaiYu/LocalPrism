@@ -4,6 +4,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WelcomeWizard } from "@/components/welcome-wizard";
 import {
+  resetDefaultSkillPacksForTests,
+  useSkillStore,
+} from "@/stores/skill-store";
+import type { RuntimeSkill } from "@/runtime/types";
+import {
   resetClaudeEngineAutoInstallForTests,
   useClaudeSetupStore,
 } from "@/stores/claude-setup-store";
@@ -108,9 +113,83 @@ describe("WelcomeWizard", () => {
     expect(container.textContent).toMatch(/Python \(uv\)/);
     expect(container.textContent).toMatch(/Writing engine/);
     expect(container.textContent).toMatch(/PaperSpine/);
+    expect(container.textContent).not.toMatch(/Scientific Skills/);
+    expect(
+      Array.from(container.querySelectorAll("button")).some(
+        (button) => button.textContent?.trim() === "Manage",
+      ),
+    ).toBe(false);
     expect(
       container.querySelector('[data-testid="runtime-settings"]'),
     ).not.toBeNull();
+  });
+
+  it("shows scientific pack status on the default packs row", async () => {
+    resetDefaultSkillPacksForTests();
+    useSkillStore.setState({
+      skills: [],
+      loading: false,
+      error: null,
+      installingPackId: null,
+    });
+    const folders = [
+      "paper-spine",
+      "deep-research",
+      "nature-polishing",
+      "scanpy",
+      "biopython",
+      "rdkit",
+      "paper-humanizer",
+    ];
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "check_uv_status") {
+        return { installed: true, binary_path: "uv", version: "uv 0.11.19" };
+      }
+      if (command === "skill_list") {
+        return folders.map(
+          (folder): RuntimeSkill => ({
+            id: folder,
+            name: folder,
+            description: "",
+            folder,
+            sourcePath: folder,
+            targets: [],
+            managed: true,
+            compatibleRuntimes: ["claude"],
+            enabled: true,
+            discoveryError: null,
+          }),
+        );
+      }
+      if (command === "slash_commands_list") {
+        return [
+          { name: "paperspine", scope: "user" },
+          { name: "ars-plan", scope: "user" },
+          { name: "ars-lit-review", scope: "user" },
+        ];
+      }
+      if (command === "list_agents") {
+        return [];
+      }
+      return undefined;
+    });
+
+    await renderWizard();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).not.toMatch(/Scientific Skills/);
+    expect(container.textContent).toMatch(/7 skills/);
+    expect(container.textContent).toMatch(
+      /PaperSpine and default skill packs installed/,
+    );
+    expect(
+      Array.from(container.querySelectorAll("button")).some(
+        (button) => button.textContent?.trim() === "Manage",
+      ),
+    ).toBe(false);
   });
 
   it("marks welcome completed and hides the wizard on skip", async () => {
