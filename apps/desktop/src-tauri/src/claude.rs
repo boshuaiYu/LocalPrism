@@ -4076,13 +4076,16 @@ struct SessionCandidate {
 /// Resolve the Claude Code sessions directory for a given project path.
 /// Claude Code encodes paths by replacing all non-alphanumeric characters with '-'.
 /// e.g. "/Users/dev/my_project" 鈫?"-Users-dev-my-project"
-fn get_sessions_dir(project_path: &str) -> Result<PathBuf, String> {
-    let config_dir = crate::providers::paths::claude_config_dir()?;
-
-    let encoded: String = project_path
+fn encode_project_dir_name(project_path: &str) -> String {
+    project_path
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
+        .collect()
+}
+
+fn get_sessions_dir(project_path: &str) -> Result<PathBuf, String> {
+    let config_dir = crate::providers::paths::claude_config_dir()?;
+    let encoded = encode_project_dir_name(project_path);
 
     eprintln!(
         "[session] project_path={} encoded={}",
@@ -4856,6 +4859,68 @@ pub(crate) fn rewind_claude_session_file(
         format!("Failed to replace session file: {error}")
     })?;
     Ok(())
+}
+
+/// Session id safe to pass to `claude --resume`.
+///
+/// Claude Code exits with "No conversation found with session ID" when the
+/// id is missing from the project transcript store, or when the file exists
+/// but has no user/assistant turn (metadata left after rewind). A missing
+/// stable file is recovered from a previous per-turn runtime directory when
+/// that copy still holds a real conversation.
+pub(crate) fn resumable_claude_session_id(project_path: &str, session_id: &str) -> Option<String> {
+    if !is_valid_session_id(session_id) {
+        return None;
+    }
+    let sessions_dir = get_sessions_dir(project_path).ok()?;
+    let session_path = sessions_dir.join(format!("{session_id}.jsonl"));
+    if !session_path.is_file() {
+        recover_stranded_runtime_session(project_path, session_id, &session_path)?;
+    }
+    if session_transcript_is_resumable(&session_path) {
+        Some(session_id.to_string())
+    } else {
+        None
+    }
+}
+
+fn session_transcript_is_resumable(path: &Path) -> bool {
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    body.lines()
+        .any(|line| conversational_rewind_text(line).is_some())
+}
+
+fn recover_stranded_runtime_session(
+    project_path: &str,
+    session_id: &str,
+    destination: &Path,
+) -> Option<()> {
+    if destination.exists() {
+        return None;
+    }
+    let home = crate::providers::paths::claude_config_dir().ok()?;
+    let encoded = encode_project_dir_name(project_path);
+    let entries = std::fs::read_dir(home.join("runtimes")).ok()?;
+    for entry in entries.flatten() {
+        let projects = entry.path().join("projects");
+        let Ok(metadata) = std::fs::symlink_metadata(&projects) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        let source = projects.join(&encoded).join(format!("{session_id}.jsonl"));
+        if !source.is_file() || !session_transcript_is_resumable(&source) {
+            continue;
+        }
+        let parent = destination.parent()?;
+        std::fs::create_dir_all(parent).ok()?;
+        std::fs::copy(&source, destination).ok()?;
+        return Some(());
+    }
+    None
 }
 
 /// Replace `destination` with `source`. Windows `rename` fails when the
@@ -6772,6 +6837,7 @@ mod tests {
 
     #[test]
     fn rewind_replaces_existing_session_and_stores_a_hidden_backup() {
+        let _guard = crate::providers::paths::lock_provider_env();
         let project = format!(
             "rewind-replace-{}",
             std::time::SystemTime::now()
@@ -6819,6 +6885,111 @@ mod tests {
             .count();
         assert_eq!(listed_jsonl, 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rewind_to_the_only_user_turn_is_not_resumed() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var("LOCALPRISM_HOME").ok();
+        std::env::set_var("LOCALPRISM_HOME", home.path());
+        let project = "/paper/rewind-empty";
+        let session_id = "550e8400-e29b-41d4-a716-446655440000";
+        let dir = get_sessions_dir(project).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let session_path = dir.join(format!("{session_id}.jsonl"));
+        std::fs::write(
+            &session_path,
+            "{\"type\":\"user\",\"message\":{\"content\":\"Rewrite the abstract\"}}\n\
+{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Done\"}]}}\n",
+        )
+        .unwrap();
+
+        rewind_claude_session_file(
+            project,
+            session_id,
+            &SessionRewindAnchor {
+                role: "user".into(),
+                text: "Rewrite the abstract".into(),
+                ordinal: 1,
+            },
+            false,
+        )
+        .unwrap();
+
+        assert!(resumable_claude_session_id(project, session_id).is_none());
+        assert!(session_path.is_file());
+
+        if let Some(value) = previous {
+            std::env::set_var("LOCALPRISM_HOME", value);
+        } else {
+            std::env::remove_var("LOCALPRISM_HOME");
+        }
+    }
+
+    #[test]
+    fn earlier_turn_stays_resumable_and_stranded_runtime_transcript_is_recovered() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var("LOCALPRISM_HOME").ok();
+        std::env::set_var("LOCALPRISM_HOME", home.path());
+        let project = "/paper/rewind-keep";
+        let session_id = "550e8400-e29b-41d4-a716-446655440001";
+        let dir = get_sessions_dir(project).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let session_path = dir.join(format!("{session_id}.jsonl"));
+        std::fs::write(
+            &session_path,
+            "{\"type\":\"ai-title\",\"aiTitle\":\"Draft\"}\n\
+{\"type\":\"user\",\"message\":{\"content\":\"Rewrite the abstract\"}}\n\
+{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Done\"}]}}\n\
+{\"type\":\"user\",\"message\":{\"content\":\"Second question\"}}\n",
+        )
+        .unwrap();
+        rewind_claude_session_file(
+            project,
+            session_id,
+            &SessionRewindAnchor {
+                role: "user".into(),
+                text: "Second question".into(),
+                ordinal: 1,
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            resumable_claude_session_id(project, session_id).as_deref(),
+            Some(session_id)
+        );
+
+        let stranded_id = "550e8400-e29b-41d4-a716-446655440002";
+        let encoded = encode_project_dir_name(project);
+        let stranded = home
+            .path()
+            .join("claude-home")
+            .join("runtimes")
+            .join("old-turn")
+            .join("projects")
+            .join(&encoded)
+            .join(format!("{stranded_id}.jsonl"));
+        std::fs::create_dir_all(stranded.parent().unwrap()).unwrap();
+        std::fs::write(
+            &stranded,
+            "{\"type\":\"user\",\"message\":{\"content\":\"Kept in the old runtime\"}}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resumable_claude_session_id(project, stranded_id).as_deref(),
+            Some(stranded_id)
+        );
+        assert!(dir.join(format!("{stranded_id}.jsonl")).is_file());
+        assert!(resumable_claude_session_id(project, "missing-session").is_none());
+
+        if let Some(value) = previous {
+            std::env::set_var("LOCALPRISM_HOME", value);
+        } else {
+            std::env::remove_var("LOCALPRISM_HOME");
+        }
     }
 
     #[test]

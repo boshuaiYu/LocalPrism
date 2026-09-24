@@ -284,6 +284,33 @@ fn link_runtime_tree(
     })
 }
 
+/// `CreateProcess` flag. A console-subsystem `cmd.exe` spawned from this GUI
+/// otherwise allocates a visible console. Each chat turn creates a fresh
+/// runtime directory and may fall back to `mklink /J` four times.
+const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
+
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+struct JunctionCommand {
+    program: &'static str,
+    args: Vec<String>,
+    creation_flags: u32,
+}
+
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn directory_junction_command(link: &Path, target: &Path) -> JunctionCommand {
+    JunctionCommand {
+        program: "cmd",
+        args: vec![
+            "/C".to_string(),
+            "mklink".to_string(),
+            "/J".to_string(),
+            link.to_string_lossy().into_owned(),
+            target.to_string_lossy().into_owned(),
+        ],
+        creation_flags: WINDOWS_CREATE_NO_WINDOW,
+    }
+}
+
 fn symlink_directory(relative: &Path, absolute: &Path, link: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -292,20 +319,19 @@ fn symlink_directory(relative: &Path, absolute: &Path, link: &Path) -> Result<()
     }
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         let _ = relative;
         if std::os::windows::fs::symlink_dir(absolute, link).is_ok() {
             return Ok(());
         }
-        let status = std::process::Command::new("cmd")
-            .args([
-                "/C",
-                "mklink",
-                "/J",
-                &link.to_string_lossy(),
-                &absolute.to_string_lossy(),
-            ])
-            .status()
-            .map_err(|error| error.to_string())?;
+        let junction = directory_junction_command(link, absolute);
+        let mut command = std::process::Command::new(junction.program);
+        command.args(&junction.args);
+        command.creation_flags(junction.creation_flags);
+        command.stdin(std::process::Stdio::null());
+        command.stdout(std::process::Stdio::null());
+        command.stderr(std::process::Stdio::null());
+        let status = command.status().map_err(|error| error.to_string())?;
         if status.success() {
             Ok(())
         } else {
@@ -974,6 +1000,27 @@ mod tests {
 
         let error = ensure_canonical_skill_containment(&root, &outside).unwrap_err();
         assert!(matches!(error, SkillPathError::OutsideRoot { .. }));
+    }
+
+    #[test]
+    fn directory_junction_fallback_does_not_open_a_console() {
+        let command = super::directory_junction_command(
+            Path::new(r"D:\LocalPrism\claude-home\runtimes\abc\projects"),
+            Path::new(r"D:\LocalPrism\claude-home\projects"),
+        );
+        assert_eq!(command.program, "cmd");
+        assert_eq!(
+            command.args,
+            vec![
+                "/C".to_string(),
+                "mklink".to_string(),
+                "/J".to_string(),
+                r"D:\LocalPrism\claude-home\runtimes\abc\projects".to_string(),
+                r"D:\LocalPrism\claude-home\projects".to_string(),
+            ]
+        );
+        assert_eq!(command.creation_flags, super::WINDOWS_CREATE_NO_WINDOW);
+        assert_ne!(command.creation_flags, 0);
     }
 
     #[test]

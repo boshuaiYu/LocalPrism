@@ -345,6 +345,50 @@ describe("rewindToMessage", () => {
     });
   });
 
+  it("starts a fresh session when rewind clears the stale session id", async () => {
+    allowRewindResend();
+    const tab = useClaudeChatStore.getState().tabs[0];
+    const messages = [user("你好"), assistant("Hello"), user("Later")];
+    const reference = {
+      runtime: "claude" as const,
+      sessionId: "cdb3b674-85f2-48ca-8b5b-26859673abe4",
+      projectPath: "/project-a",
+    };
+    useClaudeChatStore.setState({
+      tabs: [
+        {
+          ...tab,
+          messages,
+          projectPath: "/project-a",
+          runtime: "claude",
+          sessionId: reference.sessionId,
+          sessionRef: reference,
+        },
+      ],
+      messages,
+      sessionId: reference.sessionId,
+      activeProjectPath: "/project-a",
+    });
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === "runtime_rewind_conversation") {
+        return { ...reference, sessionId: "" };
+      }
+      return undefined;
+    });
+
+    const result = await useClaudeChatStore.getState().rewindToMessage(0);
+
+    expect(result).toBe("rewound");
+    expect(useClaudeChatStore.getState().tabs[0]?.sessionId).toBeNull();
+    expect(useClaudeChatStore.getState().tabs[0]?.sessionRef).toBeNull();
+    expect(invoke).toHaveBeenCalledWith("runtime_start_turn", {
+      request: expect.objectContaining({
+        prompt: "你好",
+        sessionId: null,
+      }),
+    });
+  });
+
   it("offers regenerate when a user rewind cannot safely resend", async () => {
     const tab = useClaudeChatStore.getState().tabs[0];
     const messages = [user("你好"), assistant("Hello")];
