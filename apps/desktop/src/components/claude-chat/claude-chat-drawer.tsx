@@ -52,13 +52,13 @@ export function ClaudeChatDrawer() {
   }, []);
 
   return (
-    // Column contract: tab | thread (minmax(0,1fr)) | composer.
-    // The middle row is the only one allowed to shrink, so a wide or tall
-    // window cannot push the composer below the pane and clip it.
+    // Rows: tab | thread (minmax(0,1fr)) | composer (minmax(0,auto)).
+    // The composer may shrink with a short pane. Send stays in the card
+    // footer; a fixed bottom gutter keeps it above a Linux dock.
     <section
       data-testid="chat-pane"
       data-tour="tour-chat"
-      className="grid h-full max-h-full min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden bg-background"
+      className="grid h-full max-h-full min-h-0 min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)_minmax(0,auto)] overflow-hidden bg-background"
       aria-label={t("chrome.chat")}
     >
       <div className="shrink-0">
@@ -109,7 +109,10 @@ export function ClaudeChatDrawer() {
         </div>
       </div>
 
-      <div data-testid="chat-composer-slot" className="min-w-0 shrink-0">
+      <div
+        data-testid="chat-composer-slot"
+        className="flex max-h-full min-h-0 min-w-0 shrink-0 flex-col"
+      >
         <ChatComposer isOpen={visible} agentFlashId={agentFlashId} />
       </div>
     </section>

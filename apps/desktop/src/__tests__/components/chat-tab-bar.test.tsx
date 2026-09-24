@@ -10,7 +10,10 @@ vi.mock("@/components/claude-chat/workspace-account-button", () => ({
   WorkspaceAccountButton: () => <div data-testid="workspace-account-button" />,
 }));
 
-import { ChatTabBar } from "@/components/claude-chat/chat-tab-bar";
+import {
+  accountHeaderChrome,
+  ChatTabBar,
+} from "@/components/claude-chat/chat-tab-bar";
 import { useApprovalStore } from "@/stores/approval-store";
 import { type TabState, useClaudeChatStore } from "@/stores/claude-chat-store";
 
@@ -268,6 +271,22 @@ describe("ChatTabBar runtime badges", () => {
       newTab.querySelector('[data-testid="tab-approval-indicator"]'),
     ).toBeNull();
     useApprovalStore.getState().reset();
+  });
+
+  it("gives the account chip room once the header gets narrow", () => {
+    expect(accountHeaderChrome(0).utilities).toBe(true);
+    expect(accountHeaderChrome(234)).toMatchObject({
+      utilities: false,
+      density: "full",
+      accountMin: "min-w-[10rem]",
+    });
+    expect(accountHeaderChrome(94)).toMatchObject({
+      utilities: false,
+      hideLabel: true,
+      density: "provider",
+      accountMin: "min-w-0",
+    });
+    expect(accountHeaderChrome(234).accountMin).not.toContain("46%");
   });
 
   it("shows a close control on the last idle tab", async () => {

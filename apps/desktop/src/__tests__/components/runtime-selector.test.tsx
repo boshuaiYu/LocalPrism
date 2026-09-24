@@ -970,7 +970,10 @@ describe("ChatComposer provider wiring", () => {
         '[data-testid="composer-model-trigger"]',
       );
       expect(controls?.getAttribute("data-layout")).toBe("wide");
-      expect(leading?.className).toContain("shrink-0");
+      expect(leading?.className).toContain("min-w-0");
+      expect(leading?.className).toContain("max-w-full");
+      expect(leading?.className).toContain("flex-wrap");
+      expect(leading?.className).not.toContain("shrink-0");
       expect(
         leading?.querySelector('[data-testid="composer-model-trigger"]'),
       ).toBeNull();

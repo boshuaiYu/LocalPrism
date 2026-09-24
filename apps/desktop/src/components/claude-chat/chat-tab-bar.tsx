@@ -1,4 +1,12 @@
-import { useCallback, useMemo, useRef, useEffect, type ReactNode } from "react";
+import {
+  useCallback,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useEffect,
+  useState,
+  type ReactNode,
+} from "react";
 import { PlusIcon, XIcon } from "lucide-react";
 import { useStoreWithEqualityFn } from "zustand/traditional";
 import { cn } from "@/lib/utils";
@@ -12,6 +20,43 @@ import { tabOpenedUnderOtherAccount } from "@/lib/provider-account";
 import { useI18n } from "@/lib/use-i18n";
 import { SessionSelector } from "./session-selector";
 import { WorkspaceAccountButton } from "./workspace-account-button";
+
+export type AccountHeaderChrome = {
+  utilities: boolean;
+  hideLabel: boolean;
+  density: "full" | "provider";
+  accountMin: string;
+};
+
+/**
+ * Wide bars keep new-tab and history beside a truncating provider · model chip.
+ * Mid bars drop those icons so the chip can show `SiliconFlow · Qw…`.
+ * Very narrow bars keep the provider name only.
+ */
+export function accountHeaderChrome(widthPx: number): AccountHeaderChrome {
+  if (!Number.isFinite(widthPx) || widthPx <= 0 || widthPx >= 420) {
+    return {
+      utilities: true,
+      hideLabel: false,
+      density: "full",
+      accountMin: "min-w-[4.5rem]",
+    };
+  }
+  if (widthPx >= 200) {
+    return {
+      utilities: false,
+      hideLabel: false,
+      density: "full",
+      accountMin: "min-w-[10rem]",
+    };
+  }
+  return {
+    utilities: false,
+    hideLabel: true,
+    density: "provider",
+    accountMin: "min-w-0",
+  };
+}
 
 type TabBarItem = {
   id: string;
@@ -61,6 +106,19 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
     [pendingTabKey],
   );
   const scrollRef = useRef<HTMLDivElement>(null);
+  const barRef = useRef<HTMLDivElement>(null);
+  const [barWidth, setBarWidth] = useState(0);
+  const chrome = accountHeaderChrome(barWidth);
+
+  useLayoutEffect(() => {
+    const node = barRef.current;
+    if (!node || typeof ResizeObserver === "undefined") return;
+    const update = () => setBarWidth(node.clientWidth);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
 
   // Scroll active tab into view when it changes
   useEffect(() => {
@@ -130,15 +188,18 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
 
   return (
     <div
+      ref={barRef}
       data-testid="chat-tab-bar"
       className={cn(
-        "flex items-center border-border/70 border-b bg-background",
+        "flex min-w-0 items-center overflow-hidden border-border/70 border-b bg-background",
         "h-[calc(2.75rem+var(--titlebar-height))]",
         "pt-[var(--titlebar-height)]",
         "pr-[max(0px,var(--window-controls-inset,0px))]",
       )}
     >
-      {leading}
+      <div className={cn("shrink-0", chrome.hideLabel && "[&_span]:sr-only")}>
+        {leading}
+      </div>
       <div
         ref={scrollRef}
         className="scrollbar-none flex min-w-0 flex-1 items-center self-stretch overflow-x-auto"
@@ -158,17 +219,28 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
           />
         ))}
       </div>
-      <div className="flex shrink-0 items-center gap-1 pr-2.5">
-        <button
-          type="button"
-          onClick={handleCreate}
-          className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          aria-label={t("chat.newTab")}
-        >
-          <PlusIcon className="size-3.5" />
-        </button>
-        <SessionSelector />
-        <WorkspaceAccountButton />
+      <div
+        data-testid="chat-account-cluster"
+        className={cn(
+          "flex items-center gap-1 overflow-hidden pr-2.5",
+          chrome.utilities ? "shrink-0" : "min-w-0 flex-1",
+          chrome.accountMin,
+        )}
+      >
+        {chrome.utilities ? (
+          <button
+            type="button"
+            onClick={handleCreate}
+            className="flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            aria-label={t("chat.newTab")}
+          >
+            <PlusIcon className="size-3.5" />
+          </button>
+        ) : null}
+        {chrome.utilities ? <SessionSelector /> : null}
+        <div className="min-w-0 flex-1 overflow-hidden">
+          <WorkspaceAccountButton density={chrome.density} />
+        </div>
       </div>
     </div>
   );

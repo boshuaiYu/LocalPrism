@@ -280,11 +280,22 @@ function ReplyModePill({ agentId }: { agentId: string | null }) {
       data-testid="reply-mode"
       data-reply-mode={mode}
       title={t("chat.replyMode")}
-      className="flex h-7 max-w-28 shrink-0 items-center truncate rounded-full px-2 text-muted-foreground text-xs"
+      className="flex h-7 min-w-0 max-w-28 shrink items-center overflow-hidden rounded-full px-2 text-muted-foreground text-xs"
     >
-      {label}
+      <span className="min-w-0 truncate">{label}</span>
     </span>
   );
+}
+
+const COMPOSER_FIELD_MAX_PX = 160;
+
+function syncComposerFieldHeight(el: HTMLTextAreaElement, value: string) {
+  if (value.length === 0) {
+    el.style.removeProperty("height");
+    return;
+  }
+  el.style.height = "auto";
+  el.style.height = `${Math.min(el.scrollHeight, COMPOSER_FIELD_MAX_PX)}px`;
 }
 
 export const ChatComposer: FC<{
@@ -586,7 +597,7 @@ export const ChatComposer: FC<{
     setMentionQuery(null);
     setSlashQuery(null);
     if (textareaRef.current) {
-      textareaRef.current.style.height = "auto";
+      syncComposerFieldHeight(textareaRef.current, draft?.input ?? "");
     }
   }, [activeTabId]);
 
@@ -772,8 +783,7 @@ export const ChatComposer: FC<{
         textarea.focus();
         textarea.selectionStart = textarea.selectionEnd = newInput.length;
         // Auto-resize
-        textarea.style.height = "auto";
-        textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`;
+        syncComposerFieldHeight(textarea, newInput);
       }
     }, 0);
   }, []);
@@ -1116,7 +1126,7 @@ export const ChatComposer: FC<{
     }
     // Reset textarea height
     if (textareaRef.current) {
-      textareaRef.current.style.height = "auto";
+      syncComposerFieldHeight(textareaRef.current, "");
     }
     // Clear pinned contexts after send. Temporary files are removed by the
     // completion event once the provider has finished with them.
@@ -1249,10 +1259,7 @@ export const ChatComposer: FC<{
         }
       }
 
-      // Auto-resize
-      const el = e.target;
-      el.style.height = "auto";
-      el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+      syncComposerFieldHeight(e.target, value);
     },
     [],
   );
@@ -1328,7 +1335,7 @@ export const ChatComposer: FC<{
   return (
     <div
       ref={composerRef}
-      className="relative mx-auto w-full min-w-0 max-w-[44rem] shrink-0 px-4 pt-1 pb-5"
+      className="relative mx-auto flex h-full min-h-0 w-full min-w-0 max-w-[44rem] shrink-0 flex-col px-4 pt-1 pb-[max(3rem,env(safe-area-inset-bottom,0px))]"
       style={
         {
           "--composer-bg":
@@ -1452,148 +1459,166 @@ export const ChatComposer: FC<{
           data-composer-shell
           data-agent-flash={agentFlashId ?? undefined}
           className={cn(
-            "flex w-full flex-col gap-2.5 overflow-hidden rounded-(--composer-radius) border border-border/70 bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_20px_-10px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:border-border focus-within:shadow-[0_8px_28px_-12px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] dark:border-muted-foreground/15 dark:shadow-none dark:focus-within:border-muted-foreground/30",
+            "flex min-h-0 w-full min-w-0 max-w-full flex-1 flex-col gap-2.5 overflow-hidden rounded-(--composer-radius) border border-border/70 bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_20px_-10px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:border-border focus-within:shadow-[0_8px_28px_-12px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] dark:border-muted-foreground/15 dark:shadow-none dark:focus-within:border-muted-foreground/30",
             agentFlashId && "lp-agent-switch-flash",
             isDragOver &&
               "border-ring border-dashed bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))]",
           )}
         >
-          {visibleQueuedGuidance.length > 0 && (
-            <div className="max-h-20 overflow-y-auto rounded-xl border border-border/60 bg-background/60 text-xs">
-              {visibleQueuedGuidance.map((guidance) => {
-                const displayText = formatGuidanceText(guidance);
-                return (
-                  <div
-                    key={guidance.id}
-                    className="flex min-h-8 items-center gap-1.5 border-border/50 border-b px-3 py-1 last:border-b-0"
-                  >
-                    <ListEndIcon className="size-3 shrink-0 text-muted-foreground/60" />
-                    <span className="min-w-0 flex-1 truncate text-muted-foreground">
-                      {displayText}
+          <div className="flex min-h-0 flex-col gap-2.5 overflow-y-auto">
+            {visibleQueuedGuidance.length > 0 && (
+              <div className="max-h-20 overflow-y-auto rounded-xl border border-border/60 bg-background/60 text-xs">
+                {visibleQueuedGuidance.map((guidance) => {
+                  const displayText = formatGuidanceText(guidance);
+                  return (
+                    <div
+                      key={guidance.id}
+                      className="flex min-h-8 items-center gap-1.5 border-border/50 border-b px-3 py-1 last:border-b-0"
+                    >
+                      <ListEndIcon className="size-3 shrink-0 text-muted-foreground/60" />
+                      <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                        {displayText}
+                      </span>
+                      <button
+                        type="button"
+                        className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2 font-normal text-muted-foreground transition-colors hover:bg-muted-foreground/15 hover:text-foreground/90 dark:hover:bg-muted"
+                        title={
+                          isStreaming
+                            ? t("chat.guideNow")
+                            : t("chat.sendGuidance")
+                        }
+                        onClick={() => handleGuideQueuedGuidance(guidance)}
+                      >
+                        <CornerDownRightIcon className="size-3" />
+                        {t("chat.guide")}
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={t("chat.removeQueued")}
+                        className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-red-500/10 hover:text-red-600 dark:hover:bg-red-500/15 dark:hover:text-red-400"
+                        onClick={() => {
+                          void cleanupTemporaryFilePaths(
+                            guidance.contextOverride?.temporaryFilePaths,
+                          );
+                          removeQueuedGuidance(activeTabId, guidance.id);
+                        }}
+                      >
+                        <Trash2Icon className="size-3" />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Pinned context chips */}
+            {pinnedContexts.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 px-2.5">
+                {pinnedContexts.map((ctx, i) =>
+                  ctx.imageDataUrl ? (
+                    <div
+                      key={`${ctx.label}-${i}`}
+                      className="group relative overflow-hidden rounded-lg border border-border bg-muted"
+                    >
+                      <img
+                        src={ctx.imageDataUrl}
+                        alt={ctx.label}
+                        className="block h-16 w-auto object-contain"
+                      />
+                      <button
+                        aria-label={t("chat.removeAttachment")}
+                        onClick={() => {
+                          void cleanupTemporaryPinnedContext(ctx);
+                          setPinnedContexts((prev) =>
+                            prev.filter((_, idx) => idx !== i),
+                          );
+                        }}
+                        className="absolute top-0.5 right-0.5 rounded-full bg-background/80 p-0.5 opacity-0 transition-opacity group-hover:opacity-100"
+                      >
+                        <XIcon className="size-3" />
+                      </button>
+                    </div>
+                  ) : (
+                    <span
+                      key={`${ctx.label}-${i}`}
+                      className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-0.5 font-mono text-muted-foreground text-xs"
+                    >
+                      {ctx.label}
+                      <button
+                        aria-label={t("chat.removeContext")}
+                        onClick={() => {
+                          void cleanupTemporaryPinnedContext(ctx);
+                          setPinnedContexts((prev) =>
+                            prev.filter((_, idx) => idx !== i),
+                          );
+                        }}
+                        className="ml-0.5 rounded-sm p-0.5 transition-colors hover:bg-muted-foreground/20"
+                      >
+                        <XIcon className="size-3" />
+                      </button>
                     </span>
-                    <button
-                      type="button"
-                      className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2 font-normal text-muted-foreground transition-colors hover:bg-muted-foreground/15 hover:text-foreground/90 dark:hover:bg-muted"
-                      title={
-                        isStreaming
-                          ? t("chat.guideNow")
-                          : t("chat.sendGuidance")
-                      }
-                      onClick={() => handleGuideQueuedGuidance(guidance)}
-                    >
-                      <CornerDownRightIcon className="size-3" />
-                      {t("chat.guide")}
-                    </button>
-                    <button
-                      type="button"
-                      aria-label={t("chat.removeQueued")}
-                      className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-red-500/10 hover:text-red-600 dark:hover:bg-red-500/15 dark:hover:text-red-400"
-                      onClick={() => {
-                        void cleanupTemporaryFilePaths(
-                          guidance.contextOverride?.temporaryFilePaths,
-                        );
-                        removeQueuedGuidance(activeTabId, guidance.id);
-                      }}
-                    >
-                      <Trash2Icon className="size-3" />
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+                  ),
+                )}
+              </div>
+            )}
 
-          {/* Pinned context chips */}
-          {pinnedContexts.length > 0 && (
-            <div className="flex flex-wrap items-center gap-1.5 px-2.5">
-              {pinnedContexts.map((ctx, i) =>
-                ctx.imageDataUrl ? (
+            {isDragOver ? (
+              <div className="flex min-h-10 items-center justify-center px-2.5 py-1 text-muted-foreground text-sm">
+                <PaperclipIcon className="mr-2 size-4" />
+                {t("chat.dropFiles")}
+              </div>
+            ) : (
+              <div className="relative min-h-16 min-w-0 max-w-full shrink-0">
+                {input.length === 0 ? (
                   <div
-                    key={`${ctx.label}-${i}`}
-                    className="group relative overflow-hidden rounded-lg border border-border bg-muted"
+                    aria-hidden
+                    className="pointer-events-none absolute inset-0 overflow-hidden px-2.5 py-1.5 text-base text-muted-foreground/70 leading-relaxed"
                   >
-                    <img
-                      src={ctx.imageDataUrl}
-                      alt={ctx.label}
-                      className="block h-16 w-auto object-contain"
-                    />
-                    <button
-                      aria-label={t("chat.removeAttachment")}
-                      onClick={() => {
-                        void cleanupTemporaryPinnedContext(ctx);
-                        setPinnedContexts((prev) =>
-                          prev.filter((_, idx) => idx !== i),
-                        );
-                      }}
-                      className="absolute top-0.5 right-0.5 rounded-full bg-background/80 p-0.5 opacity-0 transition-opacity group-hover:opacity-100"
-                    >
-                      <XIcon className="size-3" />
-                    </button>
+                    <span className="line-clamp-2">
+                      {isStreaming
+                        ? t("chat.placeholderStreaming")
+                        : engineInstalling
+                          ? t("chat.placeholderInstalling")
+                          : t("chat.placeholder")}
+                    </span>
                   </div>
-                ) : (
-                  <span
-                    key={`${ctx.label}-${i}`}
-                    className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-0.5 font-mono text-muted-foreground text-xs"
-                  >
-                    {ctx.label}
-                    <button
-                      aria-label={t("chat.removeContext")}
-                      onClick={() => {
-                        void cleanupTemporaryPinnedContext(ctx);
-                        setPinnedContexts((prev) =>
-                          prev.filter((_, idx) => idx !== i),
-                        );
-                      }}
-                      className="ml-0.5 rounded-sm p-0.5 transition-colors hover:bg-muted-foreground/20"
-                    >
-                      <XIcon className="size-3" />
-                    </button>
-                  </span>
-                ),
-              )}
-            </div>
-          )}
-
-          {isDragOver ? (
-            <div className="flex min-h-10 items-center justify-center px-2.5 py-1 text-muted-foreground text-sm">
-              <PaperclipIcon className="mr-2 size-4" />
-              {t("chat.dropFiles")}
-            </div>
-          ) : (
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={handleInput}
-              onKeyDown={handleKeyDown}
-              onPaste={handlePaste}
-              placeholder={
-                isStreaming
-                  ? t("chat.placeholderStreaming")
-                  : engineInstalling
-                    ? t("chat.placeholderInstalling")
-                    : t("chat.placeholder")
-              }
-              className="max-h-32 min-h-11 w-full resize-none bg-transparent px-2.5 py-1.5 text-base leading-relaxed outline-none placeholder:text-muted-foreground/70"
-              rows={1}
-            />
-          )}
+                ) : null}
+                <textarea
+                  ref={textareaRef}
+                  value={input}
+                  onChange={handleInput}
+                  onKeyDown={handleKeyDown}
+                  onPaste={handlePaste}
+                  aria-label={
+                    isStreaming
+                      ? t("chat.placeholderStreaming")
+                      : engineInstalling
+                        ? t("chat.placeholderInstalling")
+                        : t("chat.placeholder")
+                  }
+                  className="max-h-32 min-h-16 w-full min-w-0 max-w-full resize-none bg-transparent px-2.5 py-1.5 text-base leading-relaxed outline-none"
+                  rows={1}
+                />
+              </div>
+            )}
+          </div>
 
           <div
             ref={controlsRef}
             data-testid="composer-controls"
             data-layout={controlsLayout}
             className={cn(
-              "flex min-w-0 gap-1.5 px-0.5",
+              "flex w-full min-w-0 max-w-full shrink-0 gap-1.5 px-0.5",
               controlsLayout === "narrow"
                 ? "flex-col"
-                : "w-full flex-row items-center",
+                : "flex-row flex-wrap items-center",
             )}
           >
             <div
               data-testid="composer-controls-leading"
               className={cn(
-                "flex min-w-0 items-center gap-1.5",
-                controlsLayout === "narrow" ? "w-full flex-wrap" : "shrink-0",
+                "flex min-w-0 max-w-full flex-wrap items-center gap-1.5",
+                controlsLayout === "narrow" ? "w-full" : "shrink",
               )}
             >
               <TooltipIconButton

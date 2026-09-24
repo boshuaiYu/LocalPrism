@@ -1,7 +1,11 @@
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { WorkspaceAccountButton } from "@/components/claude-chat/workspace-account-button";
+import {
+  WorkspaceAccountButton,
+  workspaceAccountChipText,
+  workspaceAccountVisibleLabel,
+} from "@/components/claude-chat/workspace-account-button";
 import {
   resetProviderStoreForTests,
   useProviderStore,
@@ -71,7 +75,15 @@ describe("WorkspaceAccountButton", () => {
     await act(async () => root.render(<WorkspaceAccountButton />));
 
     const button = container.querySelector("button");
+    expect(button?.textContent).toContain("ChatGPT Official");
     expect(button?.textContent).toContain("writer@example.com");
+    expect(button?.getAttribute("title")).toBe(
+      "ChatGPT Official · writer@example.com",
+    );
+    expect(button?.className).toContain("min-w-[4.5rem]");
+    expect(button?.querySelector("span")?.className).toContain("min-w-0");
+    expect(button?.className).toContain("overflow-hidden");
+    expect(button?.querySelector("span")?.className).toContain("truncate");
     expect(container.querySelector('[role="dialog"]')).toBeNull();
 
     await act(async () => button?.click());
@@ -81,6 +93,66 @@ describe("WorkspaceAccountButton", () => {
     expect(
       mocks.runtimeSettingsProps[mocks.runtimeSettingsProps.length - 1],
     ).toEqual({ officialOpenDefault: true });
+  });
+
+  it("keeps a provider and long model id in one truncating label", () => {
+    expect(
+      workspaceAccountChipText(
+        "SiliconFlow",
+        "Qwen/Qwen3.6-35B-A3B",
+        "Signed in",
+      ),
+    ).toBe("SiliconFlow · Qwen/Qwen3.6-35B-A3B");
+    expect(
+      workspaceAccountChipText("SiliconFlow", "SiliconFlow", "Signed in"),
+    ).toBe("SiliconFlow");
+    expect(workspaceAccountChipText("SiliconFlow", "  ", "Signed in")).toBe(
+      "SiliconFlow",
+    );
+    expect(workspaceAccountChipText("  ", "   ", "Signed in")).toBe(
+      "Signed in",
+    );
+  });
+
+  it("uses the provider name alone when the header is too narrow for the model", () => {
+    expect(
+      workspaceAccountVisibleLabel(
+        "SiliconFlow",
+        "Qwen/Qwen3.6-35B-A3B",
+        "Signed in",
+        "provider",
+      ),
+    ).toBe("SiliconFlow");
+    expect(
+      workspaceAccountVisibleLabel(
+        "SiliconFlow",
+        "Qwen/Qwen3.6-35B-A3B",
+        "Signed in",
+        "full",
+      ),
+    ).toBe("SiliconFlow · Qwen/Qwen3.6-35B-A3B");
+  });
+
+  it("does not repeat the provider in the tooltip when it is the only label", async () => {
+    useProviderStore.setState({
+      cards: [
+        {
+          id: "siliconflow",
+          kind: "third-party",
+          name: "SiliconFlow",
+          authenticated: true,
+          isActive: true,
+          accountLabel: "SiliconFlow",
+        },
+      ],
+    });
+
+    await act(async () => root.render(<WorkspaceAccountButton />));
+
+    const button = container.querySelector("button");
+    expect(button?.textContent).toContain("SiliconFlow");
+    expect(button?.getAttribute("title")).toBe("SiliconFlow");
+    expect(button?.getAttribute("aria-label")).toBe("Account: SiliconFlow");
   });
 
   it("prompts sign-in when no account is active", async () => {
