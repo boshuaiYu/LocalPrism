@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { MarkdownRenderer } from "@/components/claude-chat/markdown-renderer";
+import { useDocumentStore } from "@/stores/document-store";
 
 describe("MarkdownRenderer links", () => {
   let container: HTMLDivElement;
@@ -160,5 +161,105 @@ describe("MarkdownRenderer links", () => {
     expect(table).toBeTruthy();
     expect(table?.className).toMatch(/overflow-x-auto/);
     expect(table?.querySelector("table")).toBeTruthy();
+  });
+
+  it("renders latex fences as KaTeX and still inserts the source", async () => {
+    const insertAtCursor = vi.fn();
+    useDocumentStore.setState({ insertAtCursor });
+
+    await act(async () => {
+      root.render(
+        <MarkdownRenderer
+          content={["```latex", "\\min_w F(w)", "```"].join("\n")}
+        />,
+      );
+    });
+
+    const preview = await vi.waitFor(() => {
+      const node = container.querySelector(
+        "[data-testid='chat-latex-preview']",
+      );
+      if (!(node instanceof HTMLElement))
+        throw new Error("latex preview missing");
+      return node;
+    });
+    expect(preview.querySelector(".katex")).toBeTruthy();
+    expect(preview.querySelector(".katex-html")?.textContent).toContain("F");
+    expect(preview.querySelector(".katex-html")?.textContent).not.toContain(
+      "\\min",
+    );
+
+    const insert = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Insert"),
+    );
+    if (!(insert instanceof HTMLButtonElement)) {
+      throw new Error("Insert button missing");
+    }
+    insert.click();
+    expect(insertAtCursor).toHaveBeenCalledWith("\\min_w F(w)");
+  });
+
+  it("renders bracket and bare formulas that models emit without delimiters", async () => {
+    await act(async () => {
+      root.render(
+        <MarkdownRenderer
+          content={[
+            "\\min_w F(w)",
+            "",
+            "[\\Delta_i^t = w_i^t-w_t,]",
+            "",
+            "[ w_{t+1}=w_t+\\sum_{i\\in S_t} \\alpha_i^t \\tilde{\\Delta}_i^t. ]",
+          ].join("\n")}
+        />,
+      );
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        container.querySelectorAll(".katex-display").length,
+      ).toBeGreaterThanOrEqual(3);
+    });
+    const visible = Array.from(container.querySelectorAll(".katex-html")).map(
+      (node) => node.textContent ?? "",
+    );
+    expect(visible.some((text) => text.includes("F"))).toBe(true);
+    expect(
+      visible.some((text) => text.includes("∑") || text.includes("Δ")),
+    ).toBe(true);
+    expect(visible.join("")).not.toContain("\\sum");
+    expect(container.querySelector(".chat-markdown-code")).toBeNull();
+  });
+
+  it("keeps a non-formula latex document as insertable source", async () => {
+    await act(async () => {
+      root.render(
+        <MarkdownRenderer
+          content={[
+            "```tex",
+            "\\documentclass{article}",
+            "\\begin{document}",
+            "Hi",
+            "\\end{document}",
+            "```",
+          ].join("\n")}
+        />,
+      );
+    });
+
+    const code = await vi.waitFor(() => {
+      const node = container.querySelector(".chat-markdown-code");
+      if (!(node instanceof HTMLElement))
+        throw new Error("source block missing");
+      return node;
+    });
+    expect(code.textContent).toContain("\\documentclass{article}");
+    expect(
+      container.querySelector("[data-testid='chat-latex-preview']"),
+    ).toBeNull();
+    expect(
+      Array.from(container.querySelectorAll("button")).some((button) =>
+        button.textContent?.includes("Insert"),
+      ),
+    ).toBe(true);
   });
 });
