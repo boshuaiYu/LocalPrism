@@ -66,6 +66,32 @@ describe("skill categories", () => {
     ).toEqual([{ folder: "mystery", name: "Mystery" }]);
     expect(
       resolveSkillCategory(
+        {
+          folder: "literature-review",
+          name: "Literature review",
+          sourceUrl: "https://github.com/K-Dense-AI/scientific-agent-skills",
+        },
+        emptySkillCategorySnapshot(),
+        catalog,
+      ).id,
+    ).toBe("scientific-agent-skills");
+    expect(
+      resolveSkillCategory(
+        {
+          folder: "scanpy",
+          name: "Scanpy",
+          sourceUrl: "https://github.com/example/scanpy",
+        },
+        emptySkillCategorySnapshot(),
+        catalog,
+      ),
+    ).toEqual({
+      id: "category:scanpy",
+      name: "scanpy",
+      source: "custom",
+    });
+    expect(
+      resolveSkillCategory(
         { folder: "scanpy", name: "Scanpy" },
         emptySkillCategorySnapshot(),
         catalog,

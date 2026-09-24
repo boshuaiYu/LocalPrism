@@ -233,11 +233,11 @@ export function resolveSkillCategory(
   catalog: CatalogSkillCategory[],
   catalogMap = catalogFolderMap(catalog),
 ): ResolvedSkillCategory {
-  const scientificFolders = new Set(
-    [...catalogMap.keys()].map((folder) => folder.toLowerCase()),
-  );
-  // Pack membership (folder or name) wins over a SKILL.md category label so
-  // scanpy stays in scientific-agent-skills even when frontmatter says otherwise.
+  // A recorded install URL decides the pack. The scientific catalog is only
+  // a fallback for skills that have no sourceUrl.
+  const scientificFolders = input.sourceUrl?.trim()
+    ? undefined
+    : new Set([...catalogMap.keys()].map((folder) => folder.toLowerCase()));
   const packId = resolveSkillPackId(input, scientificFolders);
   if (packId !== IMPORTED_SKILL_PACK_ID) {
     return packCategory(packId);

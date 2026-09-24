@@ -254,23 +254,59 @@ function matchesScientificFolder(
   return scientificFolders.has(key) || scientificFolders.has(key.toLowerCase());
 }
 
+function githubRepoPath(url: string): { owner: string; repo: string } | null {
+  const match = url.trim().match(/github\.com\/([^/]+)\/([^/#?]+)/i);
+  if (!match?.[1] || !match[2]) return null;
+  return {
+    owner: match[1].toLowerCase(),
+    repo: match[2].replace(/\.git$/i, "").toLowerCase(),
+  };
+}
+
 /** True when the install URL is the scientific-agent-skills repository. */
 export function isScientificAgentSkillsSource(
   sourceUrl?: string | null,
 ): boolean {
-  const match = sourceUrl?.trim().match(/github\.com\/[^/]+\/([^/#?]+)/i);
-  if (!match?.[1]) return false;
-  const repo = match[1].replace(/\.git$/i, "").toLowerCase();
+  const repo = sourceUrl ? githubRepoPath(sourceUrl)?.repo : null;
   return (
     repo === "scientific-agent-skills" || repo === "claude-scientific-skills"
   );
 }
 
-/** Group a newly added skill by folder or display name, using the five default packs. */
+/** Map an install URL onto one of the five default packs. */
+export function defaultPackIdFromSourceUrl(
+  sourceUrl?: string | null,
+): DefaultSkillPackId | null {
+  const trimmed = sourceUrl?.trim();
+  if (!trimmed) return null;
+  if (isScientificAgentSkillsSource(trimmed)) {
+    return "scientific-agent-skills";
+  }
+  const parsed = githubRepoPath(trimmed);
+  if (!parsed) return null;
+  for (const pack of DEFAULT_SKILL_PACKS) {
+    const packRepo = githubRepoPath(pack.sourceUrl);
+    if (
+      packRepo &&
+      packRepo.owner === parsed.owner &&
+      packRepo.repo === parsed.repo
+    ) {
+      return pack.id;
+    }
+  }
+  return null;
+}
+
+/** Group a skill by install URL, then by folder when no URL was recorded. */
 export function resolveSkillPackId(
   skill: { folder: string; name?: string; sourceUrl?: string | null },
   scientificFolders?: ReadonlySet<string>,
 ): SkillPackGroupId {
+  if (skill.sourceUrl?.trim()) {
+    return (
+      defaultPackIdFromSourceUrl(skill.sourceUrl) ?? IMPORTED_SKILL_PACK_ID
+    );
+  }
   if (
     isPaperSpineSkill({
       folder: skill.folder,
@@ -302,7 +338,6 @@ export function resolveSkillPackId(
     return "paper-humanizer-skill";
   }
   if (
-    isScientificAgentSkillsSource(skill.sourceUrl) ||
     keys.some(
       (key) =>
         (scientific && folderMatchesPack(key, scientific)) ||
