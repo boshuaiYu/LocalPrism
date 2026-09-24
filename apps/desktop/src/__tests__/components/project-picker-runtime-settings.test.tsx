@@ -55,16 +55,6 @@ function account(runtime: RuntimeKind, authenticated: boolean): RuntimeAccount {
   };
 }
 
-function findButton(container: HTMLElement, label: string): HTMLButtonElement {
-  const button = Array.from(container.querySelectorAll("button")).find(
-    (candidate) => candidate.textContent?.trim() === label,
-  );
-  if (!(button instanceof HTMLButtonElement)) {
-    throw new Error(`Button not found: ${label}`);
-  }
-  return button;
-}
-
 describe("ProjectPicker runtime settings", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -179,21 +169,11 @@ describe("ProjectPicker runtime settings", () => {
         ?.querySelector('[data-testid="language-switch"]'),
     ).toBeNull();
     expect(container.textContent).not.toContain("Getting Started");
-
-    await act(async () => findButton(container, "Settings").click());
-
-    expect(container.textContent).toContain("Providers");
-    expect(container.textContent).toContain(
-      "Engine on · 1 connected · Model set",
-    );
-    expect(container.textContent).not.toContain("0/2 ready");
-    expect(container.textContent).not.toContain("1/2 ready");
+    const header = container.querySelector("[data-testid='app-chrome-header']");
+    expect(header?.textContent).not.toContain("Settings");
     expect(
       container.querySelector('[data-testid="runtime-settings"]'),
-    ).not.toBeNull();
-    expect(container.textContent).toContain("Environment");
-    expect(container.textContent).toContain("Python / Skills");
-    expect(container.textContent).not.toContain("AI Runtimes");
+    ).toBeNull();
     expect(checkClaudeStatus).not.toHaveBeenCalled();
   });
 
@@ -222,7 +202,7 @@ describe("ProjectPicker runtime settings", () => {
     expect(
       header?.querySelector("[data-testid='check-for-updates']"),
     ).toBeNull();
-    expect(header?.textContent).toContain("Settings");
+    expect(header?.textContent).not.toContain("Settings");
     expect(container.querySelector("[data-testid='update-prompt']")).toBeNull();
     expect(download).not.toHaveBeenCalled();
     expect(container.textContent).not.toContain("1.0.9-1");

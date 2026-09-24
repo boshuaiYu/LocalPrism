@@ -1,15 +1,5 @@
-import {
-  type ComponentType,
-  type ReactNode,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getVersion } from "@tauri-apps/api/app";
-import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { toast } from "sonner";
@@ -20,26 +10,16 @@ import {
   XIcon,
   FileTextIcon,
   SparklesIcon,
-  CheckCircle2Icon,
-  CircleIcon,
-  DownloadIcon,
   Loader2Icon,
-  KeyRoundIcon,
   SearchIcon,
-  ArrowLeftIcon,
-  SettingsIcon,
   GithubIcon,
   MonitorIcon,
   MoonIcon,
   SunIcon,
 } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useProjectStore } from "@/stores/project-store";
 import { useDocumentStore } from "@/stores/document-store";
-import { providerReadinessBadge } from "@/lib/provider-readiness";
-import { useProviderStore } from "@/stores/provider-store";
-import { useUvSetupStore } from "@/stores/uv-setup-store";
 import { getMupdfClient } from "@/lib/mupdf/mupdf-client";
 import { exists, join } from "@/lib/tauri/fs";
 import { AppStatusBar } from "@/components/app-status-cluster";
@@ -59,13 +39,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { ProjectWizard, type CreationMode } from "./project-wizard";
-import { RuntimeSettings } from "./runtime/runtime-settings";
 import { HomepageEnvironmentStatus } from "./homepage-environment-status";
-import { areDefaultSkillPacksReady } from "@/lib/default-skill-packs";
-import { useAgentStore } from "@/stores/agent-store";
-import { useSkillStore } from "@/stores/skill-store";
-import { cn } from "@/lib/utils";
-import { useI18n } from "@/lib/use-i18n";
 
 interface DefaultProject {
   path: string;
@@ -73,9 +47,6 @@ interface DefaultProject {
   last_modified: number;
   has_main_tex: boolean;
 }
-
-type ProjectPickerSection = "projects" | "settings";
-type SettingsDetailSection = "runtimes" | "environment";
 
 type RecentProject = {
   path: string;
@@ -102,18 +73,11 @@ const projectPreviewRequests = new Map<string, Promise<ProjectPreviewData>>();
 export function ProjectPicker() {
   const [showModeDialog, setShowModeDialog] = useState(false);
   const [wizardMode, setWizardMode] = useState<CreationMode | null>(null);
-  const [appVersion, setAppVersion] = useState("");
-  const [activeSection, setActiveSection] =
-    useState<ProjectPickerSection>("projects");
-  const [settingsDetailSection, setSettingsDetailSection] =
-    useState<SettingsDetailSection>("runtimes");
   const [searchQuery, setSearchQuery] = useState("");
   const [removeProjectTarget, setRemoveProjectTarget] =
     useState<RecentProject | null>(null);
-  const { t } = useI18n();
   const defaultProjectsDiscoveredRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const pendingSearchFocus = useRef(false);
   const { theme = "system", setTheme } = useTheme();
   const searchShortcutLabel = useMemo(() => {
     if (typeof navigator === "undefined") return "Ctrl+K";
@@ -124,18 +88,6 @@ export function ProjectPicker() {
   const addRecentProject = useProjectStore((s) => s.addRecentProject);
   const removeRecentProject = useProjectStore((s) => s.removeRecentProject);
   const openProject = useDocumentStore((s) => s.openProject);
-
-  const providerBadge = useProviderStore((state) =>
-    providerReadinessBadge({
-      engineInstalled: state.engineInstalled,
-      cards: state.cards,
-      models: state.models,
-    }),
-  );
-
-  useEffect(() => {
-    getVersion().then(setAppVersion);
-  }, []);
 
   useEffect(() => {
     const handleSearchShortcut = (event: KeyboardEvent) => {
@@ -148,26 +100,18 @@ export function ProjectPicker() {
         return;
       }
 
-      if (recentProjects.length === 0 && activeSection === "projects") {
+      if (recentProjects.length === 0) {
         return;
       }
 
       event.preventDefault();
-      pendingSearchFocus.current = true;
-      setActiveSection("projects");
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
     };
 
     window.addEventListener("keydown", handleSearchShortcut);
     return () => window.removeEventListener("keydown", handleSearchShortcut);
-  }, [activeSection, recentProjects.length]);
-
-  useEffect(() => {
-    if (!pendingSearchFocus.current) return;
-    if (activeSection !== "projects" || !searchInputRef.current) return;
-    pendingSearchFocus.current = false;
-    searchInputRef.current.focus();
-    searchInputRef.current.select();
-  }, [activeSection, recentProjects.length, searchQuery]);
+  }, [recentProjects.length]);
 
   useEffect(() => {
     if (defaultProjectsDiscoveredRef.current || recentProjects.length > 0) {
@@ -304,162 +248,99 @@ export function ProjectPicker() {
               <MoonIcon className="size-4" />
             )}
           </Button>
-          <Button
-            variant={activeSection === "settings" ? "secondary" : "ghost"}
-            className="h-8 gap-2 rounded-lg px-2 text-muted-foreground hover:text-foreground"
-            onClick={() =>
-              setActiveSection((section) =>
-                section === "settings" ? "projects" : "settings",
-              )
-            }
-          >
-            <SettingsIcon className="size-4" />
-            {t("chrome.settings")}
-          </Button>
         </div>
       </header>
 
       <main className="relative z-10 min-h-0 flex-1 overflow-auto">
-        {activeSection === "settings" ? (
-          <div className="mx-auto w-full max-w-4xl px-6 pb-12">
-            <button
-              type="button"
-              onClick={() => setActiveSection("projects")}
-              className="mb-5 inline-flex items-center gap-1.5 text-muted-foreground text-sm transition-colors hover:text-foreground"
+        <div className="mx-auto flex min-h-full w-full max-w-xl flex-col justify-center px-6 py-10">
+          <div className="mb-8 text-center">
+            <div className="lp-mark mx-auto mb-4 flex size-16 items-center justify-center rounded-lg p-0.5">
+              <div className="flex size-full items-center justify-center rounded-md bg-background">
+                <img src="/icon-192.png" alt="" className="size-10" />
+              </div>
+            </div>
+            <h1 className="lp-title text-[1.75rem]">LocalPrism</h1>
+            <p className="lp-meta mt-2">
+              AI-powered academic writing workspace
+            </p>
+          </div>
+
+          <div className="flex gap-2">
+            <Button
+              onClick={() => setShowModeDialog(true)}
+              size="lg"
+              variant="outline"
+              className="h-10 flex-1 gap-2 rounded-lg"
             >
-              <ArrowLeftIcon className="size-3.5" />
-              {t("chrome.backHome")}
-            </button>
-            <h1 className="lp-title mb-6">{t("settings.title")}</h1>
-            <div className="grid grid-cols-1 gap-6 lg:grid-cols-[13rem_minmax(0,1fr)]">
-              <aside className="space-y-1 lg:border-border/60 lg:border-r lg:pr-4">
-                <SettingsDetailButton
-                  active={settingsDetailSection === "runtimes"}
-                  icon={KeyRoundIcon}
-                  label={t("settings.providers")}
-                  meta={providerBadge}
-                  onClick={() => setSettingsDetailSection("runtimes")}
-                />
-                <SettingsDetailButton
-                  active={settingsDetailSection === "environment"}
-                  icon={CheckCircle2Icon}
-                  label={t("settings.environment")}
-                  meta={t("settings.environmentMeta")}
-                  onClick={() => setSettingsDetailSection("environment")}
-                />
-              </aside>
-              <div className="min-w-0">
-                {settingsDetailSection === "runtimes" ? (
-                  <SettingsPanel
-                    title={t("settings.providers")}
-                    icon={KeyRoundIcon}
-                    contentClassName="p-0"
-                  >
-                    <RuntimeSettings />
-                  </SettingsPanel>
-                ) : (
-                  <SettingsPanel
-                    title={t("settings.environment")}
-                    icon={CheckCircle2Icon}
-                    contentClassName="p-0"
-                  >
-                    <EnvironmentStatus appVersion={appVersion} />
-                  </SettingsPanel>
-                )}
-              </div>
-            </div>
+              <FolderPlusIcon className="size-4" />
+              New Project
+            </Button>
+            <Button
+              onClick={handleOpenFolder}
+              size="lg"
+              className="lp-primary-cta h-10 flex-1 gap-2 rounded-lg"
+            >
+              <FolderOpenIcon className="size-4" />
+              Open Folder
+            </Button>
           </div>
-        ) : (
-          <div className="mx-auto flex min-h-full w-full max-w-xl flex-col justify-center px-6 py-10">
-            <div className="mb-8 text-center">
-              <div className="lp-mark mx-auto mb-4 flex size-16 items-center justify-center rounded-lg p-0.5">
-                <div className="flex size-full items-center justify-center rounded-md bg-background">
-                  <img src="/icon-192.png" alt="" className="size-10" />
+          <p className="lp-meta mt-2 text-center">{OPEN_FOLDER_HINT}</p>
+
+          <HomepageEnvironmentStatus />
+
+          {listState === "empty" && (
+            <HomeEmptyState
+              variant="empty"
+              onNewProject={() => setShowModeDialog(true)}
+              onOpenFolder={() => void handleOpenFolder()}
+            />
+          )}
+
+          {(listState === "list" || listState === "no-results") && (
+            <section className="mt-8">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <div className="lp-meta flex items-center gap-2 uppercase tracking-wide">
+                  <ClockIcon className="size-3.5" />
+                  Recent Projects
                 </div>
-              </div>
-              <h1 className="lp-title text-[1.75rem]">LocalPrism</h1>
-              <p className="lp-meta mt-2">
-                AI-powered academic writing workspace
-              </p>
-            </div>
-
-            <div className="flex gap-2">
-              <Button
-                onClick={() => setShowModeDialog(true)}
-                size="lg"
-                variant="outline"
-                className="h-10 flex-1 gap-2 rounded-lg"
-              >
-                <FolderPlusIcon className="size-4" />
-                New Project
-              </Button>
-              <Button
-                onClick={handleOpenFolder}
-                size="lg"
-                className="lp-primary-cta h-10 flex-1 gap-2 rounded-lg"
-              >
-                <FolderOpenIcon className="size-4" />
-                Open Folder
-              </Button>
-            </div>
-            <p className="lp-meta mt-2 text-center">{OPEN_FOLDER_HINT}</p>
-
-            <HomepageEnvironmentStatus />
-
-            {listState === "empty" && (
-              <HomeEmptyState
-                variant="empty"
-                onNewProject={() => setShowModeDialog(true)}
-                onOpenFolder={() => void handleOpenFolder()}
-              />
-            )}
-
-            {(listState === "list" || listState === "no-results") && (
-              <section className="mt-8">
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <div className="lp-meta flex items-center gap-2 uppercase tracking-wide">
-                    <ClockIcon className="size-3.5" />
-                    Recent Projects
-                  </div>
-                  <div className="relative w-40">
-                    <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                    <input
-                      ref={searchInputRef}
-                      value={searchQuery}
-                      onChange={(event) => setSearchQuery(event.target.value)}
-                      placeholder="Search"
-                      className="lp-focus h-8 w-full rounded-lg border border-input bg-background pr-12 pl-8 text-xs outline-none transition-colors placeholder:text-muted-foreground"
-                    />
-                    <kbd className="pointer-events-none absolute top-1/2 right-1.5 -translate-y-1/2 rounded border border-border/70 px-1 font-medium text-[10px] text-muted-foreground">
-                      {searchShortcutLabel}
-                    </kbd>
-                  </div>
-                </div>
-
-                {listState === "no-results" ? (
-                  <HomeEmptyState
-                    variant="no-results"
-                    query={searchQuery}
-                    onNewProject={() => setShowModeDialog(true)}
-                    onOpenFolder={() => void handleOpenFolder()}
-                    onClearSearch={() => setSearchQuery("")}
+                <div className="relative w-40">
+                  <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                  <input
+                    ref={searchInputRef}
+                    value={searchQuery}
+                    onChange={(event) => setSearchQuery(event.target.value)}
+                    placeholder="Search"
+                    className="lp-focus h-8 w-full rounded-lg border border-input bg-background pr-12 pl-8 text-xs outline-none transition-colors placeholder:text-muted-foreground"
                   />
-                ) : (
-                  <div className="overflow-hidden rounded-lg border border-border/70 bg-background/70">
-                    {visibleProjects.map((project) => (
-                      <RecentProjectRow
-                        key={project.path}
-                        project={project}
-                        onOpen={() => handleOpenRecent(project.path)}
-                        onRemove={() => setRemoveProjectTarget(project)}
-                      />
-                    ))}
-                  </div>
-                )}
-              </section>
-            )}
-          </div>
-        )}
+                  <kbd className="pointer-events-none absolute top-1/2 right-1.5 -translate-y-1/2 rounded border border-border/70 px-1 font-medium text-[10px] text-muted-foreground">
+                    {searchShortcutLabel}
+                  </kbd>
+                </div>
+              </div>
+
+              {listState === "no-results" ? (
+                <HomeEmptyState
+                  variant="no-results"
+                  query={searchQuery}
+                  onNewProject={() => setShowModeDialog(true)}
+                  onOpenFolder={() => void handleOpenFolder()}
+                  onClearSearch={() => setSearchQuery("")}
+                />
+              ) : (
+                <div className="overflow-hidden rounded-lg border border-border/70 bg-background/70">
+                  {visibleProjects.map((project) => (
+                    <RecentProjectRow
+                      key={project.path}
+                      project={project}
+                      onOpen={() => handleOpenRecent(project.path)}
+                      onRemove={() => setRemoveProjectTarget(project)}
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+        </div>
       </main>
       {/* New Project mode selection dialog */}
       <Dialog open={showModeDialog} onOpenChange={setShowModeDialog}>
@@ -553,14 +434,6 @@ export function ProjectPicker() {
       <AppStatusBar className="relative z-10 shrink-0 border-border bg-background" />
     </div>
   );
-}
-
-// ─── Environment Status (shown when Claude is ready) ───
-
-interface SkillsStatus {
-  installed: boolean;
-  skill_count: number;
-  location: string;
 }
 
 function projectPreviewCacheKey(project: RecentProject) {
@@ -780,311 +653,6 @@ function ProjectPreviewSurface({
   return (
     <div className="flex h-full w-full items-center justify-center bg-muted/10 text-muted-foreground">
       <FileTextIcon className="size-4" />
-    </div>
-  );
-}
-
-function SettingsDetailButton({
-  active,
-  icon: Icon,
-  label,
-  meta,
-  onClick,
-}: {
-  active: boolean;
-  icon: LucideIcon;
-  label: string;
-  meta: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={meta}
-      className={cn(
-        "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors",
-        active
-          ? "bg-muted text-foreground"
-          : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-      )}
-    >
-      <div
-        className={cn(
-          "flex size-7 shrink-0 items-center justify-center rounded-md border",
-          active
-            ? "border-border/70 bg-background/70"
-            : "border-border/60 bg-muted/20",
-        )}
-      >
-        <Icon className="size-3.5" />
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="truncate font-medium text-sm">{label}</div>
-        <div className="truncate text-muted-foreground text-xs">{meta}</div>
-      </div>
-    </button>
-  );
-}
-
-function SettingsPanel({
-  title,
-  icon: Icon,
-  contentClassName,
-  children,
-}: {
-  title: string;
-  icon: LucideIcon;
-  contentClassName?: string;
-  children: ReactNode;
-}) {
-  return (
-    <section className="overflow-hidden rounded-xl border border-border/60 bg-muted/10">
-      <div className="flex items-center gap-3 border-border/60 border-b px-5 py-4">
-        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-border/70 bg-muted/30 text-muted-foreground">
-          <Icon className="size-4" />
-        </div>
-        <div className="min-w-0">
-          <h2 className="truncate font-semibold text-sm">{title}</h2>
-        </div>
-      </div>
-      <div className={cn("p-4", contentClassName)}>{children}</div>
-    </section>
-  );
-}
-
-function EnvironmentStatus({ appVersion }: { appVersion: string }) {
-  const { t } = useI18n();
-  const uvStatus = useUvSetupStore((s) => s.status);
-  const uvVersion = useUvSetupStore((s) => s.version);
-  const uvInstalling = useUvSetupStore((s) => s.isInstalling);
-  const checkUv = useUvSetupStore((s) => s.checkStatus);
-  const installUv = useUvSetupStore((s) => s.install);
-  const _finishUvInstall = useUvSetupStore((s) => s._finishInstall);
-
-  const [skillsStatus, setSkillsStatus] = useState<SkillsStatus | null>(null);
-  const [skillsInstalling, _setSkillsInstalling] = useState(false);
-  const [showSkillsOnboarding, setShowSkillsOnboarding] = useState(false);
-  const [paperSpineInstalling, setPaperSpineInstalling] = useState(false);
-  const paperSpineSkills = useSkillStore((state) => state.skills);
-  const refreshSkills = useSkillStore((state) => state.refresh);
-  const ensurePaperSpineSkills = useSkillStore(
-    (state) => state.ensurePaperSpineSkills,
-  );
-  const ensureDefaultSkillPacks = useSkillStore(
-    (state) => state.ensureDefaultSkillPacks,
-  );
-  const installingPackId = useSkillStore((state) => state.installingPackId);
-  const agents = useAgentStore((state) => state.agents);
-  const paperSpineReady = areDefaultSkillPacksReady(paperSpineSkills, agents);
-
-  const checkSkills = useCallback(async () => {
-    try {
-      const gs = await invoke<SkillsStatus>("check_skills_installed", {
-        projectPath: null,
-      });
-      setSkillsStatus(gs);
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  useEffect(() => {
-    checkUv();
-    checkSkills();
-    void refreshSkills();
-    void ensureDefaultSkillPacks().finally(() => {
-      void checkSkills();
-    });
-  }, [checkSkills, checkUv, ensureDefaultSkillPacks, refreshSkills]);
-
-  // Listen for uv install completion
-  useEffect(() => {
-    const unlisten = listen<boolean>("uv-install-complete", (event) => {
-      _finishUvInstall(event.payload);
-    });
-    return () => {
-      unlisten.then((fn) => fn());
-    };
-  }, [_finishUvInstall]);
-
-  // Lazy load skills onboarding
-  const [OnboardingComponent, setOnboardingComponent] = useState<ComponentType<{
-    onClose: () => void;
-  }> | null>(null);
-
-  useEffect(() => {
-    if (showSkillsOnboarding && !OnboardingComponent) {
-      import(
-        "@/components/scientific-skills/scientific-skills-onboarding"
-      ).then((mod) =>
-        setOnboardingComponent(() => mod.ScientificSkillsOnboarding),
-      );
-    }
-  }, [showSkillsOnboarding, OnboardingComponent]);
-
-  return (
-    <>
-      <div className="divide-y divide-border/60">
-        {/* Python (uv) */}
-        <StatusRow
-          ok={uvStatus === "ready"}
-          label={t("env.pythonUv")}
-          detail={
-            uvInstalling
-              ? t("env.installing")
-              : uvStatus === "ready"
-                ? (uvVersion ?? t("env.installed"))
-                : uvStatus === "checking"
-                  ? t("env.checking")
-                  : t("env.notInstalled")
-          }
-          action={
-            uvStatus === "not-installed" && !uvInstalling
-              ? { label: t("env.install"), onClick: installUv }
-              : uvInstalling
-                ? { label: t("env.installing"), loading: true }
-                : undefined
-          }
-        />
-
-        <StatusRow
-          ok={paperSpineReady}
-          label={t("env.paperSpine")}
-          detail={
-            paperSpineInstalling || installingPackId
-              ? installingPackId
-                ? t("env.installingNamed", { name: installingPackId })
-                : t("env.installingPacks")
-              : paperSpineReady
-                ? t("env.packsInstalled")
-                : t("env.notInstalled")
-          }
-          action={
-            paperSpineInstalling
-              ? { label: t("env.installing"), loading: true }
-              : paperSpineReady
-                ? undefined
-                : {
-                    label: t("env.install"),
-                    onClick: () => {
-                      setPaperSpineInstalling(true);
-                      void ensurePaperSpineSkills().finally(() =>
-                        setPaperSpineInstalling(false),
-                      );
-                    },
-                  }
-          }
-        />
-
-        {/* Optional scientific packs */}
-        <StatusRow
-          ok={!!skillsStatus?.installed}
-          label={t("env.scientificSkills")}
-          detail={
-            skillsInstalling
-              ? t("env.installing")
-              : skillsStatus?.installed
-                ? t("env.skillCount", { count: skillsStatus.skill_count })
-                : t("env.notInstalled")
-          }
-          action={
-            skillsInstalling
-              ? { label: t("env.installing"), loading: true }
-              : {
-                  label: skillsStatus?.installed
-                    ? t("env.manage")
-                    : t("env.install"),
-                  onClick: () => setShowSkillsOnboarding(true),
-                  icon: skillsStatus?.installed ? "settings" : "download",
-                }
-          }
-        />
-
-        <StatusRow
-          ok={true}
-          label="LocalPrism"
-          detail={appVersion ? `v${appVersion}` : t("env.checking")}
-        />
-      </div>
-
-      {showSkillsOnboarding && OnboardingComponent && (
-        <OnboardingComponent
-          onClose={() => {
-            setShowSkillsOnboarding(false);
-            checkSkills();
-          }}
-        />
-      )}
-    </>
-  );
-}
-
-function StatusRow({
-  ok,
-  label,
-  detail,
-  action,
-}: {
-  ok: boolean;
-  label: string;
-  detail: string;
-  action?: {
-    label: string;
-    onClick?: () => void;
-    loading?: boolean;
-    icon?: "download" | "key" | "settings";
-  };
-}) {
-  return (
-    <div className="flex min-h-12 min-w-0 items-center gap-3 px-4 py-3">
-      <div
-        className={cn(
-          "flex size-7 shrink-0 items-center justify-center rounded-md border",
-          ok
-            ? "border-green-500/20 bg-green-500/10 text-green-600"
-            : "border-border/70 bg-muted/30 text-muted-foreground",
-        )}
-      >
-        {ok ? (
-          <CheckCircle2Icon className="size-3.5" />
-        ) : (
-          <CircleIcon className="size-3.5" />
-        )}
-      </div>
-      <div className="flex min-w-0 flex-1 items-baseline gap-3">
-        <span
-          className={cn(
-            "w-32 shrink-0 truncate font-medium text-sm",
-            ok ? "text-foreground" : "text-muted-foreground",
-          )}
-        >
-          {label}
-        </span>
-        <span className="min-w-0 flex-1 truncate text-muted-foreground text-xs">
-          {detail}
-        </span>
-      </div>
-      {action && (
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-7 shrink-0 rounded-md px-2.5 text-xs"
-          onClick={action.onClick}
-          disabled={action.loading}
-        >
-          {action.loading ? (
-            <Loader2Icon className="mr-1 size-3 animate-spin" />
-          ) : action.icon === "key" ? (
-            <KeyRoundIcon className="mr-1 size-3" />
-          ) : action.icon === "settings" ? (
-            <SettingsIcon className="mr-1 size-3" />
-          ) : (
-            <DownloadIcon className="mr-1 size-3" />
-          )}
-          {action.label}
-        </Button>
-      )}
     </div>
   );
 }
