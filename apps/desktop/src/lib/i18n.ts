@@ -281,6 +281,10 @@ const en = {
   "errors.rewindFailed":
     "Couldn't rewind this chat. {{detail}} The conversation was kept.",
   "errors.rewindInProgress": "Wait until rewind finishes before sending.",
+  "errors.emptyReply":
+    "The model finished without a reply. Retry, or switch to another model in the model picker.",
+  "errors.noOutputTimeout":
+    "{{model}} produced no output before the request timed out. Check the connection, then retry or switch models in the model picker.",
 
   "chat.newChat": "New Chat",
   "chat.newTab": "New tab",
@@ -777,6 +781,10 @@ const zh: Record<MessageKey, string> = {
     "无法压缩更早的消息（HTTP 400）。{{detail}} 原始消息已保留。",
   "errors.rewindFailed": "无法回溯这段对话。{{detail}} 对话已保留。",
   "errors.rewindInProgress": "回溯完成前无法发送。",
+  "errors.emptyReply":
+    "模型没有返回可见回复。请重试，或在模型选择器里更换模型。",
+  "errors.noOutputTimeout":
+    "{{model}} 在超时前没有返回内容。请检查网络后重试，或在模型选择器里更换模型。",
 
   "chat.newChat": "新对话",
   "chat.newTab": "新标签",

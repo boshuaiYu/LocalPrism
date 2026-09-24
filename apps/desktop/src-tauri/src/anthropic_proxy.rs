@@ -14,7 +14,7 @@ use self::messages::{
 use self::providers::apply_provider_request_transforms;
 use self::responses::{
     anthropic_to_codex_responses, parse_sse_block, responses_headers, CodexProxyCredential,
-    ResponsesToAnthropic,
+    NO_OUTPUT_TIMEOUT_PREFIX, ResponsesToAnthropic,
 };
 use self::stream::{sse_response, stream_openai_sse_to_anthropic};
 use self::transformers::ProxyTransformerChain;
@@ -435,14 +435,15 @@ async fn handle_codex_messages(
                 return Ok(());
             }
             Err(_) => {
-                write_proxy_sse(
-                    stream,
-                    &translator.fail(&format!(
-                        "Codex Responses produced no output for {} within 45s. Switch to GPT-5.5 or GPT-5.6 Sol.",
+                let payload = if saw_output {
+                    translator.close_stream()
+                } else {
+                    translator.fail(&format!(
+                        "{NO_OUTPUT_TIMEOUT_PREFIX}{}",
                         credential.model
-                    )),
-                )
-                .await?;
+                    ))
+                };
+                write_proxy_sse(stream, &payload).await?;
                 return Ok(());
             }
         };

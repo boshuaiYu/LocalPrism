@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { chatErrorSummary } from "@/lib/chat-error-card";
+import { localizeChatNotice } from "@/lib/chat-empty-reply";
 import { useI18n } from "@/lib/use-i18n";
 
 export function ChatErrorCard({
@@ -17,9 +18,12 @@ export function ChatErrorCard({
   onClearConversation: () => void;
   onDismiss: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const [expanded, setExpanded] = useState(false);
-  const summary = chatErrorSummary(error, expanded);
+  const summary = chatErrorSummary(
+    localizeChatNotice(error, language),
+    expanded,
+  );
 
   return (
     <div

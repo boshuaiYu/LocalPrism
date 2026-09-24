@@ -39,6 +39,7 @@ import {
   lastUserPromptIndex,
   rewindAnchor,
 } from "@/lib/chat-rewind";
+import { localizeChatNotice } from "@/lib/chat-empty-reply";
 import { useI18n } from "@/lib/use-i18n";
 
 const EMPTY_PENDING_GUIDANCE: QueuedGuidance[] = [];
@@ -753,6 +754,7 @@ const AssistantMessage: FC<{
   toolResultMap: Map<string, ContentBlock>;
   live?: boolean;
 }> = ({ message, toolResultMap, live = false }) => {
+  const { language } = useI18n();
   const content = message.message?.content;
   if (!Array.isArray(content) || content.length === 0) return null;
   const visibleContent = live
@@ -794,7 +796,7 @@ const AssistantMessage: FC<{
       (block) =>
         block.type === "text" && block.text && !isHiddenSkillText(block.text),
     )
-    .map((block) => block.text)
+    .map((block) => localizeChatNotice(block.text ?? "", language))
     .join("\n\n");
 
   return (
@@ -811,7 +813,7 @@ const AssistantMessage: FC<{
             return (
               <MarkdownRenderer
                 key={idx}
-                content={block.text}
+                content={localizeChatNotice(block.text, language)}
                 className="prose prose-sm dark:prose-invert max-w-none"
               />
             );
