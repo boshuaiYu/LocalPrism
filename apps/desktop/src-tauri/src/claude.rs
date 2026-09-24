@@ -6616,7 +6616,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("lp-home");
         let library = home.join("claude-home").join("skills");
-        for name in ["scanpy", "waypoint-bio"] {
+        for name in [
+            "nature-reviewer",
+            "scanpy",
+            "biopython",
+            "rdkit",
+            "waypoint-bio",
+        ] {
             let skill = library.join(name);
             std::fs::create_dir_all(&skill).unwrap();
             std::fs::write(skill.join("SKILL.md"), format!("# {name}\n")).unwrap();
@@ -6655,7 +6661,19 @@ mod tests {
             .flatten()
             .map(|entry| entry.file_name().to_string_lossy().to_string())
             .collect();
-        assert_eq!(names, vec!["scanpy".to_string()]);
+        assert!(names.iter().any(|name| name == "scanpy"));
+        assert!(names.iter().any(|name| name == "nature-reviewer"));
+        assert!(names.iter().any(|name| name == "scientific-agent-skills"));
+        assert!(!names.iter().any(|name| name == "waypoint-bio"));
+        assert!(!names.iter().any(|name| name.starts_with("bulk-skill-")));
+        let reviewer = std::fs::read_to_string(
+            config
+                .join("skills")
+                .join("nature-reviewer")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert_eq!(reviewer, "# nature-reviewer\n");
         assert!(library.join("waypoint-bio").join("SKILL.md").exists());
         assert!(library.join("bulk-skill-39").join("SKILL.md").exists());
     }
