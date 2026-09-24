@@ -253,8 +253,7 @@ impl ResponsesToAnthropic {
                 let text = data.get("text").and_then(Value::as_str).unwrap_or("");
                 self.emit_text_delta(text)
             }
-            "response.reasoning_summary_text.delta"
-            | "response.reasoning_summary.delta" => {
+            "response.reasoning_summary_text.delta" | "response.reasoning_summary.delta" => {
                 let text = data.get("delta").and_then(Value::as_str).unwrap_or("");
                 self.emit_thinking_delta(text)
             }
@@ -539,13 +538,28 @@ impl ResponsesToAnthropic {
             return String::new();
         }
         self.thinking_open = false;
-        sse_event(
+        let index = self.thinking_index.unwrap_or(0);
+        // Claude Code drops unsigned thinking blocks. Match the Chat Completions
+        // proxy and emit a synthetic signature before content_block_stop.
+        let mut out = sse_event(
+            "content_block_delta",
+            &json!({
+                "type": "content_block_delta",
+                "index": index,
+                "delta": {
+                    "type": "signature_delta",
+                    "signature": format!("ccr_{}", uuid::Uuid::new_v4().simple()),
+                }
+            }),
+        );
+        out.push_str(&sse_event(
             "content_block_stop",
             &json!({
                 "type": "content_block_stop",
-                "index": self.thinking_index.unwrap_or(0)
+                "index": index
             }),
-        )
+        ));
+        out
     }
 
     fn finish(&mut self, stop_reason: &str) -> String {
@@ -909,7 +923,20 @@ mod tests {
         assert!(delta.contains("Checking the section."));
         let done = translator.handle_event("response.completed", &json!({}));
         assert!(!done.contains(EMPTY_REPLY_TOKEN));
+        assert!(done.contains("signature_delta"));
         assert!(done.contains("content_block_stop"));
+    }
+
+    #[test]
+    fn close_stream_after_text_does_not_claim_empty_or_timeout() {
+        let mut translator = ResponsesToAnthropic::default();
+        translator.handle_event("response.output_text.delta", &json!({ "delta": "Partial" }));
+        let out = translator.close_stream();
+        assert!(out.contains("message_stop"));
+        assert!(!out.contains(EMPTY_REPLY_TOKEN));
+        assert!(!out.contains(NO_OUTPUT_TIMEOUT_PREFIX));
+        assert!(!out.contains("GPT-5.5"));
+        assert!(!out.contains("no output"));
     }
 
     #[test]
