@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
+import katex from "katex";
 import "katex/dist/katex.min.css";
 
 import { useDocumentStore } from "@/stores/document-store";
@@ -23,6 +24,11 @@ import {
   promoteChatCitations,
   transformChatUrl,
 } from "@/lib/chat-citations";
+import {
+  canPreviewLatexBlock,
+  normalizeChatMath,
+  unwrapMathDelimiters,
+} from "@/lib/chat-math";
 import { cn } from "@/lib/utils";
 
 // ─── Shell Detection ───
@@ -257,7 +263,7 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = memo(
             : MARKDOWN_COMPONENTS
         }
       >
-        {promoteChatCitations(content)}
+        {promoteChatCitations(normalizeChatMath(content))}
       </ReactMarkdown>
     );
   },
@@ -272,6 +278,52 @@ type RunState =
   | { status: "done"; exitCode: number; stdout: string; stderr: string }
   | { status: "error"; message: string };
 
+const LATEX_PREVIEW_CACHE_LIMIT = 100;
+const latexPreviewCache = new Map<string, string | null>();
+
+function latexPreviewHtml(code: string): string | null {
+  const cached = latexPreviewCache.get(code);
+  if (cached !== undefined) {
+    latexPreviewCache.delete(code);
+    latexPreviewCache.set(code, cached);
+    return cached;
+  }
+
+  let html: string | null = null;
+  if (canPreviewLatexBlock(code)) {
+    try {
+      html = katex.renderToString(unwrapMathDelimiters(code), {
+        displayMode: true,
+        throwOnError: true,
+        strict: "ignore",
+        trust: false,
+      });
+    } catch {
+      html = null;
+    }
+  }
+
+  latexPreviewCache.set(code, html);
+  if (latexPreviewCache.size > LATEX_PREVIEW_CACHE_LIMIT) {
+    const oldest = latexPreviewCache.keys().next().value;
+    if (oldest !== undefined) latexPreviewCache.delete(oldest);
+  }
+  return html;
+}
+
+function LatexInsertButton({ onInsert }: { onInsert: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onInsert}
+      className="flex items-center gap-0.5 rounded bg-primary px-1.5 py-0.5 text-primary-foreground text-xs"
+    >
+      <PlusIcon className="size-3" />
+      Insert
+    </button>
+  );
+}
+
 const CodeBlock: FC<{ language: string; code: string; preview?: boolean }> = ({
   language,
   code,
@@ -279,7 +331,11 @@ const CodeBlock: FC<{ language: string; code: string; preview?: boolean }> = ({
 }) => {
   const insertAtCursor = useDocumentStore((s) => s.insertAtCursor);
   const projectRoot = useDocumentStore((s) => s.projectRoot);
-  const isLatex = !preview && (language === "latex" || language === "tex");
+  const normalizedLanguage = language.toLowerCase();
+  const isLatexLang =
+    normalizedLanguage === "latex" || normalizedLanguage === "tex";
+  const isLatex = !preview && isLatexLang;
+  const latexHtml = isLatexLang ? latexPreviewHtml(code) : null;
   const isShell = !preview && isShellCodeBlock(language, code);
 
   const [runState, setRunState] = useState<RunState>({ status: "idle" });
@@ -333,6 +389,23 @@ const CodeBlock: FC<{ language: string; code: string; preview?: boolean }> = ({
     setRunState({ status: "idle" });
   }, []);
 
+  if (latexHtml) {
+    return (
+      <div className="not-prose group relative my-2">
+        <div
+          data-testid="chat-latex-preview"
+          className="chat-latex-preview max-w-full overflow-x-auto rounded-lg border border-border/70 bg-muted/30 px-3 py-1"
+          dangerouslySetInnerHTML={{ __html: latexHtml }}
+        />
+        {isLatex && (
+          <div className="absolute top-1 right-1 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+            <LatexInsertButton onInsert={handleInsert} />
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="not-prose group relative my-2">
       <pre className="chat-markdown-code max-w-full overflow-x-auto whitespace-pre rounded bg-muted p-3 text-sm [overflow-wrap:normal]">
@@ -341,16 +414,7 @@ const CodeBlock: FC<{ language: string; code: string; preview?: boolean }> = ({
 
       {/* Hover-reveal buttons */}
       <div className="absolute top-1 right-1 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-        {isLatex && (
-          <button
-            type="button"
-            onClick={handleInsert}
-            className="flex items-center gap-0.5 rounded bg-primary px-1.5 py-0.5 text-primary-foreground text-xs"
-          >
-            <PlusIcon className="size-3" />
-            Insert
-          </button>
-        )}
+        {isLatex && <LatexInsertButton onInsert={handleInsert} />}
         {isShell && runState.status === "idle" && (
           <button
             type="button"
