@@ -68,6 +68,8 @@ import {
   writePersistedChatForProject,
 } from "./chat-persistence";
 import { useApprovalStore } from "./approval-store";
+import { applyReplyStyleToPrompt } from "@/lib/reply-mode";
+import { useAgentStore } from "./agent-store";
 
 const log = createLogger("claude");
 export const CLAUDE_CODE_PROVIDER_ID = "__claude-code__";
@@ -1771,6 +1773,12 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         prompt = `${ctx}\n\n${userPrompt}`;
       }
       prompt = prependCompressionCarryover(prompt, compressionCarryover);
+      // Preset speaking style applies to this turn only. History stays as sent.
+      prompt = applyReplyStyleToPrompt(
+        prompt,
+        selectedAgentId,
+        useAgentStore.getState().agents,
+      );
       log.info("invoking CLI", {
         promptLength: prompt.length,
         mode: resumeSessionId ? "resume" : "new",
