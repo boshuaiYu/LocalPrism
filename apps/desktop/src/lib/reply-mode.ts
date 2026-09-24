@@ -16,6 +16,14 @@ export function replyModeForAgent(
   return isBuiltinAgentPresetId(id) ? id : "custom";
 }
 
+/** Preset id written to `data-agent-flash`. Custom and Default stay unset. */
+export function agentFlashAttribute(
+  agentId: string | null | undefined,
+): BuiltinAgentPresetId | null {
+  const mode = replyModeForAgent(agentId);
+  return mode === "custom" ? null : mode;
+}
+
 /**
  * Preset switches flash the composer card's outer border. Custom agents,
  * Default, and re-selecting the same preset do not.

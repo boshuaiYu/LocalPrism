@@ -6,7 +6,10 @@ import { SubagentPanel } from "@/components/subagents/subagent-panel";
 import { useChatLayoutStore } from "@/stores/chat-layout-store";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import { lastUserPrompt } from "@/lib/chat-error-card";
-import { AGENT_SWITCH_FLASH_EVENT } from "@/lib/reply-mode";
+import {
+  AGENT_SWITCH_FLASH_EVENT,
+  agentFlashAttribute,
+} from "@/lib/reply-mode";
 import { ChatMessages } from "./chat-messages";
 import { ChatComposer } from "./chat-composer";
 import { ChatErrorCard } from "./chat-error-card";
@@ -32,11 +35,11 @@ export function ClaudeChatDrawer() {
     let timer = 0;
     const onFlash = (event: Event) => {
       const agentId =
-        (event as CustomEvent<{ agentId?: string }>).detail?.agentId?.trim() ||
-        null;
+        (event as CustomEvent<{ agentId?: string }>).detail?.agentId ?? null;
+      const token = agentFlashAttribute(agentId);
       setAgentFlashId(null);
       window.requestAnimationFrame(() => {
-        setAgentFlashId(agentId);
+        setAgentFlashId(token);
         window.clearTimeout(timer);
         timer = window.setTimeout(
           () => setAgentFlashId(null),

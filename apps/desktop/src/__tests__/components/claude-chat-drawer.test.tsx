@@ -97,13 +97,36 @@ describe("ClaudeChatDrawer", () => {
     ).toBeNull();
   });
 
-  it("flashes the composer border token, not the message thread", async () => {
+  it("flashes a distinct composer token for each built-in preset", async () => {
+    await act(async () => root.render(<ClaudeChatDrawer />));
+
+    for (const agentId of ["academic-polish", "de-ai", "peer-review"]) {
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent(AGENT_SWITCH_FLASH_EVENT, {
+            detail: { agentId },
+          }),
+        );
+      });
+      await act(async () => {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      });
+
+      const thread = container.querySelector('[data-testid="chat-thread"]');
+      const composer = container.querySelector('[data-testid="chat-composer"]');
+      expect(thread?.className).not.toContain("lp-agent-switch-flash");
+      expect(composer?.className).toContain("lp-agent-switch-flash");
+      expect(composer?.getAttribute("data-agent-flash")).toBe(agentId);
+    }
+  });
+
+  it("does not mark the composer when the switched agent is custom", async () => {
     await act(async () => root.render(<ClaudeChatDrawer />));
 
     await act(async () => {
       window.dispatchEvent(
         new CustomEvent(AGENT_SWITCH_FLASH_EVENT, {
-          detail: { agentId: "de-ai" },
+          detail: { agentId: "my-agent" },
         }),
       );
     });
@@ -111,11 +134,9 @@ describe("ClaudeChatDrawer", () => {
       await new Promise((resolve) => requestAnimationFrame(resolve));
     });
 
-    const thread = container.querySelector('[data-testid="chat-thread"]');
     const composer = container.querySelector('[data-testid="chat-composer"]');
-    expect(thread?.className).not.toContain("lp-agent-switch-flash");
-    expect(composer?.className).toContain("lp-agent-switch-flash");
-    expect(composer?.getAttribute("data-agent-flash")).toBe("de-ai");
+    expect(composer?.className ?? "").not.toContain("lp-agent-switch-flash");
+    expect(composer?.getAttribute("data-agent-flash")).toBeNull();
   });
 
   it("hides the workspace chat column without covering the editor", async () => {
