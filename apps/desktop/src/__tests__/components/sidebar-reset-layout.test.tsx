@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Sidebar } from "@/components/workspace/sidebar";
 
 vi.mock("@tauri-apps/api/app", () => ({
-  getVersion: vi.fn().mockResolvedValue("1.0.8-5"),
+  getVersion: vi.fn().mockResolvedValue("1.0.8-6"),
 }));
 
 vi.mock("next-themes", () => ({

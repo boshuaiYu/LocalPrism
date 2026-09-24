@@ -1,7 +1,7 @@
 {
   "name": "@claude-prism/root",
   "description": "Open-Source AI LaTeX writing workspace",
-  "version": "1.0.8-5",
+  "version": "1.0.8-6",
   "repository": {
     "type": "git",
     "url": "https://github.com/boshuaiYu/LocalPrism"
@@ -20,7 +20,7 @@
     "build:desktop:linux": "bash scripts/build-linux.sh",
     "lint": "pnpm exec biome check",
     "lint:fix": "pnpm exec biome check --fix",
-    "release": "echo \"To release: git tag v1.0.8beta5 && git push origin main && git push origin v1.0.8beta5\"",
+    "release": "echo \"To release: git tag v1.0.8beta6 && git push origin main && git push origin v1.0.8beta6\"",
     "prepare": "husky"
   },
   "devDependencies": {
