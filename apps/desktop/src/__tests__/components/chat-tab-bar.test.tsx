@@ -103,6 +103,13 @@ describe("ChatTabBar runtime badges", () => {
     await act(async () => root.render(<ChatTabBar />));
   }
 
+  it("reserves titlebar space beside window caption buttons", async () => {
+    await renderTabs([makeTab("tab-claude", "Hello", "claude")]);
+    const bar = container.querySelector("[data-testid='chat-tab-bar']");
+    expect(bar?.className).toContain("--titlebar-height");
+    expect(bar?.className).toContain("--window-controls-inset");
+  });
+
   it("shows tab titles without runtime badges", async () => {
     await renderTabs([
       makeTab("tab-claude", "Literature review", "claude"),

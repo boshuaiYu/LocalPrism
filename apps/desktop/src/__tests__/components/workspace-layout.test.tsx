@@ -275,4 +275,14 @@ describe("WorkspaceLayout chat pane", () => {
     });
     expect(useChatLayoutStore.getState().visible).toBe(false);
   });
+
+  it("does not render a workspace top-bar Settings control", async () => {
+    await act(async () => root.render(<WorkspaceLayout />));
+    expect(
+      container.querySelector("[data-testid='app-chrome-header']"),
+    ).toBeNull();
+    expect(
+      container.querySelector("[data-testid='chrome-settings']"),
+    ).toBeNull();
+  });
 });

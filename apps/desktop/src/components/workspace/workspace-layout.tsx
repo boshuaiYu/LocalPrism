@@ -5,7 +5,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { SettingsIcon } from "lucide-react";
 import {
   Panel,
   PanelGroup,
@@ -24,8 +23,6 @@ import {
   initialTourWorkspaceChrome,
   type ProductTourCue,
 } from "@/lib/product-tour";
-import { Button } from "@/components/ui/button";
-import { useI18n } from "@/lib/use-i18n";
 import { useRuntimeEvents } from "@/hooks/use-runtime-events";
 import { useApprovalStore } from "@/stores/approval-store";
 import { useDocumentStore } from "@/stores/document-store";
@@ -61,7 +58,6 @@ function WorkspaceResizeHandle({ testId }: { testId?: string }) {
 }
 
 export function WorkspaceLayout() {
-  const { t } = useI18n();
   useRuntimeEvents();
   const initialized = useDocumentStore((s) => s.initialized);
   const previewVisible = usePreviewStore((s) => s.visible);
@@ -314,27 +310,10 @@ export function WorkspaceLayout() {
   ) : null;
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-background text-foreground">
-      <header
-        data-testid="app-chrome-header"
-        className="flex shrink-0 items-center justify-end gap-2 border-b px-3 pt-[var(--titlebar-height)] pb-1"
-      >
-        <Button
-          type="button"
-          variant="ghost"
-          className="h-8 gap-2 rounded-lg px-2 text-muted-foreground hover:text-foreground"
-          onClick={() =>
-            window.dispatchEvent(new CustomEvent("localprism-open-settings"))
-          }
-        >
-          <SettingsIcon className="size-4" />
-          {t("chrome.settings")}
-        </Button>
-      </header>
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background text-foreground">
       <div
         ref={workspaceRef}
-        className="relative min-h-0 flex-1"
-        style={{ ["--titlebar-height" as string]: "0px" }}
+        className="relative min-h-0 flex-1 overflow-hidden"
       >
         {!initialized ? (
           <div className="flex h-full items-center justify-center">

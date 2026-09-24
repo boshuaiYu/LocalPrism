@@ -100,20 +100,27 @@ pub(super) fn resolve_skill_root_with_home(
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionSkillExposure {
     pub folders: Vec<String>,
+    /// Agent file to publish for `--agent`. `None` means this turn has no roster.
+    pub agent_id: Option<String>,
 }
 
 impl SessionSkillExposure {
     pub fn none() -> Self {
-        Self { folders: Vec::new() }
+        Self {
+            folders: Vec::new(),
+            agent_id: None,
+        }
     }
 }
 
 /// Prepare the Claude home, then return a per-turn config directory.
 ///
-/// Claude Code injects every skill under `$CLAUDE_CONFIG_DIR/skills` into the
-/// model request. The library stays at `claude-home/skills` so the UI can list
-/// it. The returned runtime directory links projects, agents, and commands back
-/// to that home, and its `skills` directory contains only `exposure`.
+/// Claude Code injects every skill under `$CLAUDE_CONFIG_DIR/skills`, and every
+/// agent and slash command under that config, into the model request. The
+/// libraries stay under `claude-home` so the UI can list them. The returned
+/// runtime directory links session `projects` back to that home. Its `skills`
+/// directory contains only `exposure.folders`, and `agents` contains only
+/// `exposure.agent_id`. `commands` and `slash` stay empty.
 pub fn prepare_isolated_claude_home(
     project_path: Option<&Path>,
     exposure: &SessionSkillExposure,
@@ -123,9 +130,17 @@ pub fn prepare_isolated_claude_home(
     ensure_claude_home_layout(&claude_home, project_path)?;
 
     let runtime = allocate_runtime_dir(&claude_home)?;
-    for name in ["projects", "agents", "slash", "commands"] {
-        link_runtime_tree(&runtime, &claude_home, name)?;
+    // Session transcripts stay shared. Agents and slash commands do not:
+    // Claude Code lists every file in those directories on each request.
+    link_runtime_tree(&runtime, &claude_home, "projects")?;
+    for name in ["agents", "slash", "commands"] {
+        let path = runtime.join(name);
+        std::fs::create_dir_all(&path).map_err(|error| SkillPathError::PathResolution {
+            path,
+            message: error.to_string(),
+        })?;
     }
+    publish_active_agent(&runtime, project_path, exposure.agent_id.as_deref())?;
     let dest_skills = runtime.join("skills");
     std::fs::create_dir_all(&dest_skills).map_err(|error| SkillPathError::PathResolution {
         path: dest_skills.clone(),
@@ -245,6 +260,11 @@ pub(crate) fn remove_runtime_dir(path: &Path) {
     for name in ["projects", "agents", "slash", "commands"] {
         unlink_symlink_only(&path.join(name));
     }
+    if let Ok(entries) = std::fs::read_dir(path.join("agents")) {
+        for entry in entries.flatten() {
+            unlink_symlink_only(&entry.path());
+        }
+    }
     // Skill entries are symlinks into the library. Unlink them before
     // remove_dir_all so a sweep cannot delete the real skill folders.
     if let Ok(entries) = std::fs::read_dir(path.join("skills")) {
@@ -312,6 +332,59 @@ fn symlink_directory(relative: &Path, absolute: &Path, link: &Path) -> Result<()
             Err(format!("failed to create directory junction ({status})"))
         }
     }
+}
+
+fn publish_active_agent(
+    runtime: &Path,
+    project_path: Option<&Path>,
+    agent_id: Option<&str>,
+) -> Result<(), SkillPathError> {
+    let dest_dir = runtime.join("agents");
+    std::fs::create_dir_all(&dest_dir).map_err(|error| SkillPathError::PathResolution {
+        path: dest_dir.clone(),
+        message: error.to_string(),
+    })?;
+    let Some(agent_id) = agent_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    let Ok(slug) = crate::agents::validate_agent_slug(agent_id) else {
+        return Ok(());
+    };
+    if crate::agents::is_skill_pack_bundled_agent(&slug) {
+        return Ok(());
+    }
+    let file_name = format!("{slug}.md");
+    let project = project_path.filter(|path| path.is_absolute());
+    let source = project
+        .map(|path| path.join(".localprism").join("agents").join(&file_name))
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            crate::providers::paths::user_agents_dir()
+                .ok()
+                .map(|root| root.join(&file_name))
+                .filter(|path| path.is_file())
+        });
+    let Some(source) = source else {
+        return Ok(());
+    };
+    let dest = dest_dir.join(&file_name);
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&source, &dest).map_err(|error| {
+            SkillPathError::PathResolution {
+                path: dest,
+                message: error.to_string(),
+            }
+        })?;
+    }
+    #[cfg(windows)]
+    {
+        std::fs::copy(&source, &dest).map_err(|error| SkillPathError::PathResolution {
+            path: dest,
+            message: error.to_string(),
+        })?;
+    }
+    Ok(())
 }
 
 fn sync_exposed_skills(
@@ -1009,6 +1082,7 @@ mod tests {
         std::env::set_var("LOCALPRISM_HOME", &home);
         let exposure = super::SessionSkillExposure {
             folders: vec!["pdf".into(), "writer".into()],
+            agent_id: None,
         };
         let config = super::prepare_isolated_claude_home(Some(&project), &exposure).unwrap();
         if let Some(value) = previous {
@@ -1079,8 +1153,26 @@ mod tests {
                 .count(),
             0
         );
-        assert!(config.join("agents").join("reviewer.md").exists());
-        assert!(config.join("agents").join("keep.md").exists());
+        assert!(home
+            .join("claude-home")
+            .join("agents")
+            .join("reviewer.md")
+            .exists());
+        assert!(home
+            .join("claude-home")
+            .join("agents")
+            .join("keep.md")
+            .exists());
+        assert_eq!(
+            config
+                .join("agents")
+                .read_dir()
+                .unwrap()
+                .flatten()
+                .count(),
+            0,
+            "a turn with no agent must not publish the agent roster"
+        );
         let settings = std::fs::read_to_string(config.join("settings.json")).unwrap();
         assert!(settings.contains("claude-home/skills/**"));
         assert!(settings.contains("claude-home/agents/**"));
@@ -1108,6 +1200,7 @@ mod tests {
                 "..".into(),
                 "scanpy".into(),
             ],
+            agent_id: None,
         };
         let config = super::prepare_isolated_claude_home(None, &exposure).unwrap();
         if let Some(value) = previous {
@@ -1153,6 +1246,7 @@ mod tests {
                 "paper-spine-intake".into(),
                 "writer".into(),
             ],
+            agent_id: None,
         };
         let config = super::prepare_isolated_claude_home(Some(&project), &exposure).unwrap();
         if let Some(value) = previous {

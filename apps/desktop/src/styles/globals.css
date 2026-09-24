@@ -142,8 +142,9 @@
   html {
     @apply overscroll-y-none scroll-smooth;
     /* macOS overlay titlebar inset — traffic lights safe area */
-    --titlebar-height: 18px;
+    --titlebar-height: 28px;
     --traffic-light-width: 70px;
+    --window-controls-inset: 0px;
     --workspace-topbar-height: 40px;
   }
   body {
