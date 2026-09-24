@@ -155,13 +155,22 @@ fn anthropic_tool_to_function(tool: &Value) -> Option<Value> {
     }))
 }
 
+/// Stable token the desktop UI localizes. Never name a specific model here.
+pub const EMPTY_REPLY_TOKEN: &str = "localprism:empty-reply";
+pub const NO_OUTPUT_TIMEOUT_PREFIX: &str = "localprism:no-output-timeout:";
+
 pub struct ResponsesToAnthropic {
     model: String,
     message_started: bool,
     finished: bool,
     text_open: bool,
+    thinking_open: bool,
+    saw_text: bool,
+    saw_tool: bool,
+    saw_thinking: bool,
     next_index: usize,
     text_index: Option<usize>,
+    thinking_index: Option<usize>,
     tool_index: Option<usize>,
     tool_arguments: String,
     tool_arguments_emitted: bool,
@@ -178,8 +187,13 @@ impl Default for ResponsesToAnthropic {
             message_started: false,
             finished: false,
             text_open: false,
+            thinking_open: false,
+            saw_text: false,
+            saw_tool: false,
+            saw_thinking: false,
             next_index: 0,
             text_index: None,
+            thinking_index: None,
             tool_index: None,
             tool_arguments: String::new(),
             tool_arguments_emitted: false,
@@ -230,20 +244,19 @@ impl ResponsesToAnthropic {
                     .and_then(Value::as_str)
                     .or_else(|| data.get("text").and_then(Value::as_str))
                     .unwrap_or("");
-                if text.is_empty() {
+                self.emit_text_delta(text)
+            }
+            "response.output_text.done" | "response.text.done" => {
+                if self.saw_text {
                     return String::new();
                 }
-                let mut out = self.start_message();
-                out.push_str(&self.ensure_text_block());
-                out.push_str(&sse_event(
-                    "content_block_delta",
-                    &json!({
-                        "type": "content_block_delta",
-                        "index": self.text_index.unwrap_or(0),
-                        "delta": { "type": "text_delta", "text": text }
-                    }),
-                ));
-                out
+                let text = data.get("text").and_then(Value::as_str).unwrap_or("");
+                self.emit_text_delta(text)
+            }
+            "response.reasoning_summary_text.delta"
+            | "response.reasoning_summary.delta" => {
+                let text = data.get("delta").and_then(Value::as_str).unwrap_or("");
+                self.emit_thinking_delta(text)
             }
             "response.output_item.added" => {
                 let item = data.get("item").cloned().unwrap_or(Value::Null);
@@ -251,7 +264,9 @@ impl ResponsesToAnthropic {
                     return String::new();
                 }
                 let mut out = self.start_message();
+                out.push_str(&self.close_thinking());
                 out.push_str(&self.close_text());
+                self.saw_tool = true;
                 if self.tool_index.is_some() {
                     out.push_str(&self.close_tool());
                 }
@@ -305,8 +320,21 @@ impl ResponsesToAnthropic {
             }
             "response.output_item.done" => {
                 let item = data.get("item").cloned().unwrap_or(Value::Null);
-                if item.get("type").and_then(Value::as_str) != Some("function_call") {
-                    return String::new();
+                match item.get("type").and_then(Value::as_str) {
+                    Some("function_call") => {}
+                    Some("reasoning") => {
+                        if self.saw_thinking {
+                            return String::new();
+                        }
+                        return self.emit_thinking_delta(&visible_reasoning_text(&item));
+                    }
+                    Some("message") => {
+                        if self.saw_text {
+                            return String::new();
+                        }
+                        return self.emit_text_delta(&visible_message_text(&item));
+                    }
+                    _ => return String::new(),
                 }
                 if !self.tool_arguments_emitted {
                     if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
@@ -361,23 +389,58 @@ impl ResponsesToAnthropic {
         if self.finished {
             return String::new();
         }
-        if self.message_started {
-            return self.finish("end_turn");
-        }
         let mut out = self.start_message();
+        out.push_str(&self.finish("end_turn"));
+        out
+    }
+
+    fn emit_text_delta(&mut self, text: &str) -> String {
+        if text.is_empty() {
+            return String::new();
+        }
+        self.saw_text = true;
+        let mut out = self.start_message();
+        out.push_str(&self.close_thinking());
         out.push_str(&self.ensure_text_block());
         out.push_str(&sse_event(
             "content_block_delta",
             &json!({
                 "type": "content_block_delta",
                 "index": self.text_index.unwrap_or(0),
-                "delta": {
-                    "type": "text_delta",
-                    "text": "The model finished without any visible text. Switch to GPT-5.5 or GPT-5.6 Sol and try again."
-                }
+                "delta": { "type": "text_delta", "text": text }
             }),
         ));
-        out.push_str(&self.finish("end_turn"));
+        out
+    }
+
+    fn emit_thinking_delta(&mut self, text: &str) -> String {
+        if text.is_empty() {
+            return String::new();
+        }
+        self.saw_thinking = true;
+        let mut out = self.start_message();
+        out.push_str(&self.ensure_thinking_block());
+        out.push_str(&sse_event(
+            "content_block_delta",
+            &json!({
+                "type": "content_block_delta",
+                "index": self.thinking_index.unwrap_or(0),
+                "delta": { "type": "thinking_delta", "thinking": text }
+            }),
+        ));
+        out
+    }
+
+    fn push_empty_reply(&mut self) -> String {
+        let mut out = self.ensure_text_block();
+        out.push_str(&sse_event(
+            "content_block_delta",
+            &json!({
+                "type": "content_block_delta",
+                "index": self.text_index.unwrap_or(0),
+                "delta": { "type": "text_delta", "text": EMPTY_REPLY_TOKEN }
+            }),
+        ));
         out
     }
 
@@ -395,6 +458,24 @@ impl ResponsesToAnthropic {
                 "type": "content_block_start",
                 "index": index,
                 "content_block": { "type": "text", "text": "" }
+            }),
+        )
+    }
+
+    fn ensure_thinking_block(&mut self) -> String {
+        if self.thinking_open {
+            return String::new();
+        }
+        let index = self.next_index;
+        self.next_index += 1;
+        self.thinking_index = Some(index);
+        self.thinking_open = true;
+        sse_event(
+            "content_block_start",
+            &json!({
+                "type": "content_block_start",
+                "index": index,
+                "content_block": { "type": "thinking", "thinking": "" }
             }),
         )
     }
@@ -453,26 +534,31 @@ impl ResponsesToAnthropic {
         )
     }
 
+    fn close_thinking(&mut self) -> String {
+        if !self.thinking_open {
+            return String::new();
+        }
+        self.thinking_open = false;
+        sse_event(
+            "content_block_stop",
+            &json!({
+                "type": "content_block_stop",
+                "index": self.thinking_index.unwrap_or(0)
+            }),
+        )
+    }
+
     fn finish(&mut self, stop_reason: &str) -> String {
         if self.finished {
             return String::new();
         }
         self.finished = true;
         let mut out = String::new();
-        if self.text_index.is_none() && self.tool_index.is_none() && stop_reason == "end_turn" {
-            out.push_str(&self.ensure_text_block());
-            out.push_str(&sse_event(
-                "content_block_delta",
-                &json!({
-                    "type": "content_block_delta",
-                    "index": self.text_index.unwrap_or(0),
-                    "delta": {
-                        "type": "text_delta",
-                        "text": "The model finished without any visible text. Switch to GPT-5.5 or GPT-5.6 Sol and try again."
-                    }
-                }),
-            ));
+        let nothing_visible = !self.saw_text && !self.saw_tool && !self.saw_thinking;
+        if nothing_visible && stop_reason == "end_turn" {
+            out.push_str(&self.push_empty_reply());
         }
+        out.push_str(&self.close_thinking());
         out.push_str(&self.close_text());
         out.push_str(&self.close_tool());
         out.push_str(&sse_event(
@@ -522,6 +608,54 @@ impl ResponsesToAnthropic {
             self.cache_read_tokens = cache;
         }
     }
+}
+
+fn visible_reasoning_text(item: &Value) -> String {
+    let summary = item.get("summary").and_then(Value::as_array);
+    if let Some(parts) = summary {
+        let text = parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.trim().is_empty() {
+            return text;
+        }
+    }
+    item.get("content")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_default()
+}
+
+fn visible_message_text(item: &Value) -> String {
+    item.get("content")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .filter(|text| !text.is_empty())
+        .or_else(|| {
+            item.get("text")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
 }
 
 fn coerce_codex_responses_effort(effort: &str) -> &str {
@@ -734,8 +868,65 @@ mod tests {
         let out = translator.close_stream();
         assert!(out.contains("message_start"));
         assert!(out.contains("message_stop"));
-        assert!(out.contains("Switch to GPT-5.5"));
+        assert_eq!(out.matches(EMPTY_REPLY_TOKEN).count(), 1);
+        assert!(!out.contains("GPT-5.5"));
+        assert!(!out.contains("GPT-5.6 Sol"));
         assert!(translator.close_stream().is_empty());
+    }
+
+    #[test]
+    fn tool_only_completion_is_not_an_empty_reply() {
+        let mut translator = ResponsesToAnthropic::default();
+        translator.handle_event(
+            "response.output_item.added",
+            &json!({
+                "item": { "type": "function_call", "call_id": "c1", "name": "Read" }
+            }),
+        );
+        translator.handle_event(
+            "response.output_item.done",
+            &json!({
+                "item": {
+                    "type": "function_call",
+                    "arguments": "{\"file_path\":\"main.tex\"}"
+                }
+            }),
+        );
+        let done = translator.handle_event("response.completed", &json!({}));
+        assert!(done.contains("tool_use") || done.contains("message_stop"));
+        assert!(!done.contains(EMPTY_REPLY_TOKEN));
+        assert!(!done.contains("GPT-5"));
+    }
+
+    #[test]
+    fn reasoning_summary_is_visible_and_not_replaced() {
+        let mut translator = ResponsesToAnthropic::default();
+        let delta = translator.handle_event(
+            "response.reasoning_summary_text.delta",
+            &json!({ "delta": "Checking the section." }),
+        );
+        assert!(delta.contains("thinking_delta"));
+        assert!(delta.contains("Checking the section."));
+        let done = translator.handle_event("response.completed", &json!({}));
+        assert!(!done.contains(EMPTY_REPLY_TOKEN));
+        assert!(done.contains("content_block_stop"));
+    }
+
+    #[test]
+    fn completed_message_text_is_kept_when_deltas_were_missing() {
+        let mut translator = ResponsesToAnthropic::default();
+        let out = translator.handle_event(
+            "response.output_item.done",
+            &json!({
+                "item": {
+                    "type": "message",
+                    "content": [{ "type": "output_text", "text": "Here is the edit." }]
+                }
+            }),
+        );
+        assert!(out.contains("Here is the edit."));
+        let done = translator.handle_event("response.completed", &json!({}));
+        assert!(!done.contains(EMPTY_REPLY_TOKEN));
     }
 
     #[test]

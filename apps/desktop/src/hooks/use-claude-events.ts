@@ -23,6 +23,7 @@ import type { RuntimeEventEnvelope } from "@/runtime/types";
 import { useApprovalStore } from "@/stores/approval-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { translate } from "@/lib/i18n";
+import { localizeChatNotice } from "@/lib/chat-empty-reply";
 import {
   classifyClaudeProcessStderr,
   formatUnexpectedClaudeExit,
@@ -49,10 +50,15 @@ const log = createLogger("claude-event");
 const CODEX_NO_PROGRESS_MS = 180_000;
 const CLAUDE_NO_PROGRESS_MS = 180_000;
 
-const EMPTY_CODEX_REPLY_ERROR =
-  "Codex finished without a reply. Stop and retry.";
 const INTERRUPTED_CODEX_REPLY_ERROR =
   "Codex turn was interrupted before a reply arrived.";
+
+function emptyCodexReplyError(): string {
+  return localizeChatNotice(
+    "localprism:empty-reply",
+    useSettingsStore.getState().uiLanguage,
+  );
+}
 
 function messageHasVisibleCodexContent(message: ClaudeStreamMessage): boolean {
   if (message.type === "assistant") {
@@ -891,7 +897,7 @@ export function useClaudeEvents() {
         } else if (event.type === "turnCompleted") {
           // Empty successful completions previously left only the user bubble
           // (streaming off, no error, empty assistant filtered from UI).
-          emptyReplyError = hadReply ? null : EMPTY_CODEX_REPLY_ERROR;
+          emptyReplyError = hadReply ? null : emptyCodexReplyError();
           chatStore._setError(tabId, emptyReplyError);
         }
         if (emptyReplyError) {
