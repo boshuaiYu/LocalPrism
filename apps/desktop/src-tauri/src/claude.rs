@@ -4835,7 +4835,12 @@ pub(crate) fn rewind_claude_session_file(
     }
     let sessions_dir = get_sessions_dir(project_path)?;
     let session_path = sessions_dir.join(format!("{session_id}.jsonl"));
-    if !session_path.exists() {
+    // A per-turn runtime dir may be the only copy. Bring it into the stable
+    // projects folder before truncating. An existing stable file is left
+    // alone, so a later full runtime copy cannot undo a rewind.
+    if !session_path.is_file()
+        && recover_stranded_runtime_session(project_path, session_id, &session_path).is_none()
+    {
         return Err(format!("Session file not found: {session_id}"));
     }
     let original = std::fs::read_to_string(&session_path)
@@ -4872,8 +4877,7 @@ pub(crate) fn resumable_claude_session_id(project_path: &str, session_id: &str) 
     if !is_valid_session_id(session_id) {
         return None;
     }
-    let sessions_dir = get_sessions_dir(project_path).ok()?;
-    let session_path = sessions_dir.join(format!("{session_id}.jsonl"));
+    let session_path = stable_session_path(project_path, session_id).ok()?;
     if !session_path.is_file() {
         recover_stranded_runtime_session(project_path, session_id, &session_path)?;
     }
@@ -4892,35 +4896,58 @@ fn session_transcript_is_resumable(path: &Path) -> bool {
         .any(|line| conversational_rewind_text(line).is_some())
 }
 
+fn stable_session_path(project_path: &str, session_id: &str) -> Result<PathBuf, String> {
+    Ok(get_sessions_dir(project_path)?.join(format!("{session_id}.jsonl")))
+}
+
 fn recover_stranded_runtime_session(
     project_path: &str,
     session_id: &str,
     destination: &Path,
 ) -> Option<()> {
+    // Never replace a stable transcript. Rewind may already have shortened it,
+    // and a runtime copy can still hold the pre-rewind conversation.
     if destination.exists() {
         return None;
     }
+    let source = newest_stranded_runtime_session(project_path, session_id)?;
+    let parent = destination.parent()?;
+    std::fs::create_dir_all(parent).ok()?;
+    std::fs::copy(&source, destination).ok()?;
+    Some(())
+}
+
+fn newest_stranded_runtime_session(project_path: &str, session_id: &str) -> Option<PathBuf> {
     let home = crate::providers::paths::claude_config_dir().ok()?;
     let encoded = encode_project_dir_name(project_path);
     let entries = std::fs::read_dir(home.join("runtimes")).ok()?;
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in entries.flatten() {
         let projects = entry.path().join("projects");
         let Ok(metadata) = std::fs::symlink_metadata(&projects) else {
             continue;
         };
-        if metadata.file_type().is_symlink() {
+        // Symlinks and Windows junctions both point at the stable store.
+        if crate::skills::manifest::metadata_is_unsafe_link(&metadata) || !metadata.is_dir() {
             continue;
         }
-        let source = projects.join(&encoded).join(format!("{session_id}.jsonl"));
+        let source = projects
+            .join(&encoded)
+            .join(format!("{session_id}.jsonl"));
         if !source.is_file() || !session_transcript_is_resumable(&source) {
             continue;
         }
-        let parent = destination.parent()?;
-        std::fs::create_dir_all(parent).ok()?;
-        std::fs::copy(&source, destination).ok()?;
-        return Some(());
+        let modified = std::fs::metadata(&source)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let replace = newest
+            .as_ref()
+            .is_none_or(|(current, _)| modified >= *current);
+        if replace {
+            newest = Some((modified, source));
+        }
     }
-    None
+    newest.map(|(_, path)| path)
 }
 
 /// Replace `destination` with `source`. Windows `rename` fails when the
@@ -6985,6 +7012,193 @@ mod tests {
         assert!(dir.join(format!("{stranded_id}.jsonl")).is_file());
         assert!(resumable_claude_session_id(project, "missing-session").is_none());
 
+        if let Some(value) = previous {
+            std::env::set_var("LOCALPRISM_HOME", value);
+        } else {
+            std::env::remove_var("LOCALPRISM_HOME");
+        }
+    }
+
+    #[test]
+    fn rewind_truncates_a_transcript_that_exists_only_in_a_runtime_dir() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var("LOCALPRISM_HOME").ok();
+        std::env::set_var("LOCALPRISM_HOME", home.path());
+        let project = "/paper/rewind-stranded";
+        let session_id = "550e8400-e29b-41d4-a716-446655440003";
+        let dir = get_sessions_dir(project).unwrap();
+        let stable = dir.join(format!("{session_id}.jsonl"));
+        assert!(!stable.exists());
+        let stranded = runtime_session_path(home.path(), project, "turn-a", session_id);
+        std::fs::create_dir_all(stranded.parent().unwrap()).unwrap();
+        std::fs::write(
+            &stranded,
+            "{\"type\":\"user\",\"message\":{\"content\":\"Rewrite the abstract\"}}\n\
+{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Done\"}]}}\n\
+{\"type\":\"user\",\"message\":{\"content\":\"Second question\"}}\n",
+        )
+        .unwrap();
+
+        rewind_claude_session_file(
+            project,
+            session_id,
+            &SessionRewindAnchor {
+                role: "user".into(),
+                text: "Second question".into(),
+                ordinal: 1,
+            },
+            false,
+        )
+        .unwrap();
+
+        let kept = std::fs::read_to_string(&stable).unwrap();
+        assert!(kept.contains("Rewrite the abstract"));
+        assert!(!kept.contains("Second question"));
+        let runtime_body = std::fs::read_to_string(&stranded).unwrap();
+        assert!(runtime_body.contains("Second question"));
+        assert_eq!(
+            resumable_claude_session_id(project, session_id).as_deref(),
+            Some(session_id)
+        );
+        let after_resume_lookup = std::fs::read_to_string(&stable).unwrap();
+        assert!(!after_resume_lookup.contains("Second question"));
+
+        restore_localprism_home(previous);
+    }
+
+    #[test]
+    fn truncated_stable_transcript_is_not_replaced_by_a_full_runtime_copy() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var("LOCALPRISM_HOME").ok();
+        std::env::set_var("LOCALPRISM_HOME", home.path());
+        let project = "/paper/rewind-keep-stable";
+        let session_id = "550e8400-e29b-41d4-a716-446655440004";
+        let dir = get_sessions_dir(project).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let stable = dir.join(format!("{session_id}.jsonl"));
+        std::fs::write(
+            &stable,
+            "{\"type\":\"user\",\"message\":{\"content\":\"Rewrite the abstract\"}}\n",
+        )
+        .unwrap();
+        let stranded = runtime_session_path(home.path(), project, "turn-full", session_id);
+        std::fs::create_dir_all(stranded.parent().unwrap()).unwrap();
+        std::fs::write(
+            &stranded,
+            "{\"type\":\"user\",\"message\":{\"content\":\"Rewrite the abstract\"}}\n\
+{\"type\":\"user\",\"message\":{\"content\":\"Second question from runtime\"}}\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            resumable_claude_session_id(project, session_id).as_deref(),
+            Some(session_id)
+        );
+        let kept = std::fs::read_to_string(&stable).unwrap();
+        assert!(!kept.contains("Second question from runtime"));
+
+        rewind_claude_session_file(
+            project,
+            session_id,
+            &SessionRewindAnchor {
+                role: "user".into(),
+                text: "Rewrite the abstract".into(),
+                ordinal: 1,
+            },
+            true,
+        )
+        .unwrap();
+        let after_rewind = std::fs::read_to_string(&stable).unwrap();
+        assert!(after_rewind.contains("Rewrite the abstract"));
+        assert!(!after_rewind.contains("Second question from runtime"));
+
+        restore_localprism_home(previous);
+    }
+
+    #[test]
+    fn stranded_recovery_prefers_the_newest_runtime_transcript() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var("LOCALPRISM_HOME").ok();
+        std::env::set_var("LOCALPRISM_HOME", home.path());
+        let project = "/paper/rewind-newest";
+        let session_id = "550e8400-e29b-41d4-a716-446655440005";
+        let older = runtime_session_path(home.path(), project, "turn-old", session_id);
+        let newer = runtime_session_path(home.path(), project, "turn-new", session_id);
+        std::fs::create_dir_all(older.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(newer.parent().unwrap()).unwrap();
+        std::fs::write(
+            &older,
+            "{\"type\":\"user\",\"message\":{\"content\":\"older runtime copy\"}}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &newer,
+            "{\"type\":\"user\",\"message\":{\"content\":\"newer runtime copy\"}}\n",
+        )
+        .unwrap();
+        set_mtime(&older, 10);
+        set_mtime(&newer, 50);
+
+        #[cfg(unix)]
+        {
+            let linked_root = home.path().join("linked-projects");
+            let encoded = encode_project_dir_name(project);
+            let linked_file = linked_root.join(&encoded).join(format!("{session_id}.jsonl"));
+            std::fs::create_dir_all(linked_file.parent().unwrap()).unwrap();
+            std::fs::write(
+                &linked_file,
+                "{\"type\":\"user\",\"message\":{\"content\":\"symlink runtime copy\"}}\n",
+            )
+            .unwrap();
+            let link = home
+                .path()
+                .join("claude-home")
+                .join("runtimes")
+                .join("turn-link")
+                .join("projects");
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&linked_root, &link).unwrap();
+        }
+
+        assert_eq!(
+            resumable_claude_session_id(project, session_id).as_deref(),
+            Some(session_id)
+        );
+        let stable = get_sessions_dir(project)
+            .unwrap()
+            .join(format!("{session_id}.jsonl"));
+        let body = std::fs::read_to_string(&stable).unwrap();
+        assert!(body.contains("newer runtime copy"));
+        assert!(!body.contains("older runtime copy"));
+        assert!(!body.contains("symlink runtime copy"));
+
+        restore_localprism_home(previous);
+    }
+
+    fn runtime_session_path(
+        home: &std::path::Path,
+        project: &str,
+        runtime_id: &str,
+        session_id: &str,
+    ) -> PathBuf {
+        home.join("claude-home")
+            .join("runtimes")
+            .join(runtime_id)
+            .join("projects")
+            .join(encode_project_dir_name(project))
+            .join(format!("{session_id}.jsonl"))
+    }
+
+    fn set_mtime(path: &std::path::Path, secs: u64) {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    fn restore_localprism_home(previous: Option<String>) {
         if let Some(value) = previous {
             std::env::set_var("LOCALPRISM_HOME", value);
         } else {

@@ -592,7 +592,7 @@ fn comparable_path(path: &Path) -> String {
     comparable_destination(&path.to_string_lossy())
 }
 
-fn metadata_is_unsafe_link(metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn metadata_is_unsafe_link(metadata: &std::fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
         return true;
     }
