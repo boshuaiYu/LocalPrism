@@ -631,7 +631,14 @@ pub async fn runtime_start_turn(
             codex_state.upsert_runtime_route(&routes, route).await;
             let attempt_id = request.attempt_id.clone();
             let route_tab_id = request.tab_id.clone();
-            let result = if let Some(session_id) = request.session_id {
+            // A rewind can leave a metadata-only transcript, and a per-turn
+            // runtime directory can orphan the jsonl Claude last wrote.
+            // `--resume` then exits with "No conversation found with session ID".
+            // Drop that id and start a new session instead of showing the banner.
+            let session_id = request.session_id.as_deref().and_then(|session_id| {
+                crate::claude::resumable_claude_session_id(&request.project_path, session_id)
+            });
+            let result = if let Some(session_id) = session_id {
                 crate::claude::resume_claude_code(
                     window,
                     request.project_path,
@@ -958,7 +965,16 @@ pub async fn runtime_rewind_conversation(
                 },
                 request.include_anchor,
             )?;
-            Ok(reference)
+            let session_id = crate::claude::resumable_claude_session_id(
+                &reference.project_path,
+                &reference.session_id,
+            )
+            .unwrap_or_default();
+            Ok(ConversationRef {
+                runtime: reference.runtime,
+                session_id,
+                project_path: reference.project_path,
+            })
         }
         RuntimeKind::Codex => {
             let thread =
