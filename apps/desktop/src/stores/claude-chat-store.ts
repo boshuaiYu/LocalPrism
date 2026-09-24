@@ -598,6 +598,14 @@ function reuseTrailingUserMessage(
   return false;
 }
 
+/** Blank session ids are not resumable. Keep them out of the next send. */
+function persistedSessionRef(
+  reference: ConversationRef | null | undefined,
+): ConversationRef | null {
+  if (!reference?.sessionId?.trim()) return null;
+  return reference;
+}
+
 function conversationReferenceForTab(
   tab: TabState,
   fallbackProjectPath: string | null,
@@ -1600,7 +1608,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       activeTab.sessionRef.projectPath === projectPath
         ? activeTab.sessionRef
         : null;
-    const sessionId = sessionRef?.sessionId ?? null;
+    const sessionId = sessionRef?.sessionId?.trim() || null;
     const { selectedProviderModels } = state;
     const providerCredentialId: string | null = null;
 
@@ -2718,7 +2726,9 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       set((current) =>
         applyTabUpdate(current, tabId, {
           messages,
-          ...(nextReference ? { sessionRef: nextReference } : {}),
+          ...(nextReference
+            ? { sessionRef: persistedSessionRef(nextReference) }
+            : {}),
           ...(currentTab.isStreaming
             ? {
                 isStreaming: false,
@@ -2807,7 +2817,9 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
           sessionIncludesAnchor = false;
           set((current) =>
             applyTabUpdate(current, tabId, {
-              ...(nextReference ? { sessionRef: nextReference } : {}),
+              ...(nextReference
+                ? { sessionRef: persistedSessionRef(nextReference) }
+                : {}),
             }),
           );
         } catch (error) {
