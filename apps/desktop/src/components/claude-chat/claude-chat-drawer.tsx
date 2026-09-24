@@ -7,7 +7,6 @@ import { useChatLayoutStore } from "@/stores/chat-layout-store";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import { lastUserPrompt } from "@/lib/chat-error-card";
 import { AGENT_SWITCH_FLASH_EVENT } from "@/lib/reply-mode";
-import { cn } from "@/lib/utils";
 import { ChatMessages } from "./chat-messages";
 import { ChatComposer } from "./chat-composer";
 import { ChatErrorCard } from "./chat-error-card";
@@ -18,7 +17,7 @@ const AGENT_SWITCH_FLASH_MS = 1500;
 
 export function ClaudeChatDrawer() {
   const { t } = useI18n();
-  const [agentFlash, setAgentFlash] = useState(false);
+  const [agentFlashId, setAgentFlashId] = useState<string | null>(null);
   const error = useClaudeChatStore((s) => s.error);
   const messages = useClaudeChatStore((s) => s.messages);
   const isStreaming = useClaudeChatStore((s) => s.isStreaming);
@@ -31,13 +30,16 @@ export function ClaudeChatDrawer() {
 
   useEffect(() => {
     let timer = 0;
-    const onFlash = () => {
-      setAgentFlash(false);
+    const onFlash = (event: Event) => {
+      const agentId =
+        (event as CustomEvent<{ agentId?: string }>).detail?.agentId?.trim() ||
+        null;
+      setAgentFlashId(null);
       window.requestAnimationFrame(() => {
-        setAgentFlash(true);
+        setAgentFlashId(agentId);
         window.clearTimeout(timer);
         timer = window.setTimeout(
-          () => setAgentFlash(false),
+          () => setAgentFlashId(null),
           AGENT_SWITCH_FLASH_MS,
         );
       });
@@ -100,10 +102,7 @@ export function ClaudeChatDrawer() {
 
         <div
           data-testid="chat-thread"
-          className={cn(
-            "relative min-h-0 flex-1 overflow-hidden",
-            agentFlash && "lp-agent-switch-flash",
-          )}
+          className="relative min-h-0 flex-1 overflow-hidden"
         >
           <ChatMessages />
           <ApprovalDialog />
@@ -111,7 +110,7 @@ export function ClaudeChatDrawer() {
       </div>
 
       <div data-testid="chat-composer-slot" className="min-w-0 shrink-0">
-        <ChatComposer isOpen={visible} />
+        <ChatComposer isOpen={visible} agentFlashId={agentFlashId} />
       </div>
     </section>
   );

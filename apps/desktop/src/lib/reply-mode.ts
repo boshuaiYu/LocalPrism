@@ -17,8 +17,8 @@ export function replyModeForAgent(
 }
 
 /**
- * Preset switches flash the chat chrome. Custom agents, Default, and
- * re-selecting the same preset do not.
+ * Preset switches flash the composer card's outer border. Custom agents,
+ * Default, and re-selecting the same preset do not.
  */
 export function shouldFlashPresetAgentSwitch(
   previousAgentId: string | null | undefined,
@@ -28,9 +28,13 @@ export function shouldFlashPresetAgentSwitch(
   return (previousAgentId?.trim() || null) !== (nextAgentId?.trim() || null);
 }
 
-export function requestPresetAgentFlash(): void {
+export function requestPresetAgentFlash(agentId: string): void {
   if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent(AGENT_SWITCH_FLASH_EVENT));
+  window.dispatchEvent(
+    new CustomEvent(AGENT_SWITCH_FLASH_EVENT, {
+      detail: { agentId },
+    }),
+  );
 }
 
 interface AgentInstructions {
