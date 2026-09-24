@@ -3038,8 +3038,12 @@ fn prism_system_prompt(
          NEVER write or rewrite an entire file at once. Always prefer editing existing content over replacing it wholesale.\n\
          3. STEP BY STEP: After each edit, mark the todo item as completed, then proceed to the next step. \
          This lets the user review changes incrementally.\n\
-         4. PRESERVE EXISTING CONTENT: Always read the file first. Keep the existing preamble, packages, \
-         and structure intact. Only add or modify what is needed for the current step.\n\
+         4. READ ONLY WHEN NEEDED: A greeting or other short message is not a request to \
+         open the manuscript. Do not Read, Grep, or otherwise load main.tex, bibliographies, \
+         PDFs, or attachments unless the user asked to edit, review, cite, or use those files. \
+         Project notes that say to review references do not override this. When the user does \
+         ask for an edit, read that file before changing it, keep the existing preamble, \
+         packages, and structure intact, and change only what the current step needs.\n\
          5. LaTeX BEST PRACTICES: Use proper sectioning (\\chapter, \\section, \\subsection), \
          citations (\\cite), cross-references (\\label, \\ref), and BibTeX for bibliographies.\n\
          6. SKILLS: Use only the skills listed for this turn — skills attached to the active agent, \
@@ -6015,6 +6019,9 @@ mod tests {
         assert!(prompt.len() < 4000, "system prompt grew to {}", prompt.len());
         assert!(prompt.contains("skills listed for this turn"));
         assert!(prompt.contains("relative to that directory"));
+        assert!(prompt.contains("not a request to"));
+        assert!(prompt.contains("Do not Read"));
+        assert!(!prompt.contains("Always read the file first"));
         assert!(!prompt.contains("Users\\user"));
         assert!(!prompt.contains("/Users/user"));
         assert!(!prompt.contains("waypoint-bio"));

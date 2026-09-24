@@ -459,6 +459,74 @@ describe("chat token usage", () => {
     expect(meter.usedTokens).toBe(2_500);
   });
 
+  it("does not count an unread Read result before a later request reports it", () => {
+    const meter = buildTokenMeterModel({
+      modelLabel: "tencent/Hy4-preview",
+      windowTokens: 200_000,
+      messages: [
+        {
+          type: "user",
+          message: { content: [{ type: "text", text: "hi" }] },
+        },
+        {
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                name: "Read",
+                input: { file_path: "main.tex" },
+              },
+            ],
+            usage: { input_tokens: 800, output_tokens: 20 },
+          },
+        },
+        {
+          type: "user",
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                content: "x".repeat(80_000),
+              },
+            ],
+          },
+        },
+      ],
+    });
+    expect(meter.usedTokens).toBe(800);
+    expect(meter.percent).toBe(0);
+  });
+
+  it("counts the manuscript only after a later request includes it", () => {
+    const meter = buildTokenMeterModel({
+      modelLabel: "tencent/Hy4-preview",
+      windowTokens: 200_000,
+      messages: [
+        {
+          type: "assistant",
+          message: {
+            usage: { input_tokens: 800, output_tokens: 20 },
+          },
+        },
+        {
+          type: "user",
+          message: {
+            content: [{ type: "tool_result", content: "x".repeat(80_000) }],
+          },
+        },
+        {
+          type: "assistant",
+          message: {
+            usage: { input_tokens: 20_000, output_tokens: 30 },
+          },
+        },
+      ],
+    });
+    expect(meter.usedTokens).toBe(20_000);
+    expect(meter.percent).toBe(10);
+  });
+
   it("ignores leftover lastUsage when this conversation has no messages", () => {
     const meter = buildTokenMeterModel({
       modelLabel: "sonnet",

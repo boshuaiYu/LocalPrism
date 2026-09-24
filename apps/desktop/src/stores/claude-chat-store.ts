@@ -1759,7 +1759,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
           selRange && activeFile.content
             ? activeFile.content.slice(selRange.start, selRange.end)
             : null;
-        let ctx = `[Currently open file: ${activeFile.relativePath}. File tools must use paths relative to the current working directory, such as ${activeFile.relativePath}.]`;
+        let ctx = `[Currently open file: ${activeFile.relativePath}. Location only — do not read this file unless the user asked to use the document. File tools must use paths relative to the current working directory, such as ${activeFile.relativePath}.]`;
         if (contextOverride) {
           ctx += `\n[Selection: ${contextOverride.label}]`;
           ctx += `\n[Selected text:\n${contextOverride.selectedText}\n]`;

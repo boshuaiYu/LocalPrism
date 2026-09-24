@@ -62,7 +62,7 @@ When generating figures with Python, always:
 - Do NOT create or modify files in \`.prism/\`, \`.claudeprism/\`, or \`.venv/\` — these are managed automatically.
 - When modifying LaTeX, ensure matching \`\\begin{}\` / \`\\end{}\` pairs — mismatches cause hard-to-debug compile errors.
 - Large tables and figures should use \`\\begin{table}[htbp]\` / \`\\begin{figure}[htbp]\` for proper float placement.
-- If the user provides reference files in \`attachments/\`, review them before writing — they contain key context.
+- Read files in \`attachments/\` only when the user asks you to write or revise from those references. A greeting is not that request.
 `;
 
 /** @deprecated Prefer DEFAULT_PROJECT_INSTRUCTIONS; kept for compatibility. */
