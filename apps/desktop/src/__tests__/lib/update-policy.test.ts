@@ -251,6 +251,46 @@ describe("beta update detection", () => {
         stable: { version: "1.0.8" },
         betas: [],
         allowPrerelease: false,
+      }),
+    ).toMatchObject({ action: "download", version: "1.0.8" });
+
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.8-4",
+        stable: { version: "1.0.8", notes: "stable" },
+        betas: [],
+        allowPrerelease: false,
+      }),
+    ).toMatchObject({
+      action: "download",
+      version: "1.0.8",
+      notes: "stable",
+    });
+
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.8beta4",
+        stable: { version: "1.0.8" },
+        betas: [],
+        allowPrerelease: false,
+      }),
+    ).toMatchObject({ action: "download", version: "1.0.8" });
+
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.8-4",
+        stable: { version: "1.0.8" },
+        betas: [],
+        allowPrerelease: true,
+      }).action,
+    ).toBe("none");
+
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.9-1",
+        stable: { version: "1.0.8" },
+        betas: [],
+        allowPrerelease: false,
       }).action,
     ).toBe("none");
 
