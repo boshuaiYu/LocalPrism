@@ -89,6 +89,7 @@ export function SkillLibrary({ projectPath = null }: SkillLibraryProps) {
           folder: skill.folder,
           name: skill.name,
           category: skill.category,
+          sourceUrl: skill.sourceUrl,
         }),
         { categories: [], assignments: {} },
         catalog,

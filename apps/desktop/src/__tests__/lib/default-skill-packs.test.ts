@@ -168,6 +168,25 @@ describe("default skill packs", () => {
     expect(resolveSkillPackId({ folder: "paper-humanizer-skill" })).toBe(
       "paper-humanizer-skill",
     );
+    expect(
+      resolveSkillPackId({
+        folder: "waypoint-bio",
+        sourceUrl: SCIENTIFIC_AGENT_SKILLS_URL,
+      }),
+    ).toBe("scientific-agent-skills");
+    expect(
+      resolveSkillPackId({
+        folder: "docx",
+        sourceUrl:
+          "https://github.com/K-Dense-AI/scientific-agent-skills/tree/main/skills/docx",
+      }),
+    ).toBe("scientific-agent-skills");
+    expect(
+      resolveSkillPackId({
+        folder: "waypoint-bio",
+        sourceUrl: "https://github.com/example/waypoint-bio",
+      }),
+    ).toBe("imported");
     expect(resolveSkillPackId({ folder: "my-writer" })).toBe("imported");
     expect(
       resolveSkillPackId({ folder: "lab-helper", name: "nature-figure" }),

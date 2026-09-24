@@ -254,9 +254,21 @@ function matchesScientificFolder(
   return scientificFolders.has(key) || scientificFolders.has(key.toLowerCase());
 }
 
+/** True when the install URL is the scientific-agent-skills repository. */
+export function isScientificAgentSkillsSource(
+  sourceUrl?: string | null,
+): boolean {
+  const match = sourceUrl?.trim().match(/github\.com\/[^/]+\/([^/#?]+)/i);
+  if (!match?.[1]) return false;
+  const repo = match[1].replace(/\.git$/i, "").toLowerCase();
+  return (
+    repo === "scientific-agent-skills" || repo === "claude-scientific-skills"
+  );
+}
+
 /** Group a newly added skill by folder or display name, using the five default packs. */
 export function resolveSkillPackId(
-  skill: { folder: string; name?: string },
+  skill: { folder: string; name?: string; sourceUrl?: string | null },
   scientificFolders?: ReadonlySet<string>,
 ): SkillPackGroupId {
   if (
@@ -290,6 +302,7 @@ export function resolveSkillPackId(
     return "paper-humanizer-skill";
   }
   if (
+    isScientificAgentSkillsSource(skill.sourceUrl) ||
     keys.some(
       (key) =>
         (scientific && folderMatchesPack(key, scientific)) ||
@@ -302,7 +315,7 @@ export function resolveSkillPackId(
 }
 
 export function isDefaultPackSkill(
-  skill: { folder: string; name?: string },
+  skill: { folder: string; name?: string; sourceUrl?: string | null },
   scientificFolders?: ReadonlySet<string>,
 ): boolean {
   return (

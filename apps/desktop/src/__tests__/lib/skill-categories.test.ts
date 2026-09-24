@@ -31,6 +31,16 @@ describe("skill categories", () => {
         { folder: "nature-polishing", name: "Nature polishing" },
         { folder: "paper-humanizer", name: "paper-humanizer" },
         { folder: "mystery", name: "Mystery" },
+        {
+          folder: "waypoint-bio",
+          name: "Waypoint Bio",
+          sourceUrl: "https://github.com/K-Dense-AI/scientific-agent-skills",
+        },
+        {
+          folder: "lab-notes",
+          name: "Lab notes",
+          sourceUrl: "https://github.com/example/lab-notes",
+        },
       ],
       (item) => item,
       emptySkillCategorySnapshot(),
@@ -43,8 +53,14 @@ describe("skill categories", () => {
       ["nature-skills", "nature-skills"],
       ["scientific-agent-skills", "scientific-agent-skills"],
       ["paper-humanizer-skill", "paper-humanizer-skill"],
+      ["category:lab-notes", "lab-notes"],
       ["category:mystery", "mystery"],
     ]);
+    expect(
+      groups
+        .find((group) => group.id === "scientific-agent-skills")
+        ?.items.map((item) => item.folder),
+    ).toEqual(["scanpy", "waypoint-bio"]);
     expect(
       groups.find((group) => group.id === "category:mystery")?.items,
     ).toEqual([{ folder: "mystery", name: "Mystery" }]);

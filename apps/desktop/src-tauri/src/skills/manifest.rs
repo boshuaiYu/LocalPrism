@@ -178,17 +178,25 @@ pub fn merge_manifest_with_disk(
         };
         let canonical_source = comparable_path(&canonical_source);
 
+        let mut matched_source = None;
         skill.managed = skill.targets.iter().any(|target| {
             let Ok(id) = stable_entry_id(target, &skill.folder) else {
                 return false;
             };
             entries.iter().any(|entry| {
-                entry.id == id
+                let matches = entry.id == id
                     && entry.target == *target
                     && entry.folder == skill.folder
-                    && comparable_destination(&entry.destination) == canonical_source
+                    && comparable_destination(&entry.destination) == canonical_source;
+                if matches {
+                    matched_source = source_url_from_skill_source(&entry.source);
+                }
+                matches
             })
         });
+        if skill.managed {
+            skill.source_url = matched_source;
+        }
     }
     disk_skills
 }
@@ -1136,6 +1144,10 @@ mod tests {
             vec![disk_skill(&destination, "writer", selected_target.clone())],
         );
         assert!(matching[0].managed);
+        assert_eq!(
+            matching[0].source_url.as_deref(),
+            Some("curated:package-writer")
+        );
 
         let wrong_path = merge_manifest_with_disk(
             &[owned.clone()],

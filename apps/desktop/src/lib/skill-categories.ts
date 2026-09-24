@@ -227,6 +227,7 @@ export function resolveSkillCategory(
     folder: string;
     name?: string;
     category?: string | null;
+    sourceUrl?: string | null;
   },
   _snapshot: SkillCategorySnapshot,
   catalog: CatalogSkillCategory[],
@@ -272,6 +273,7 @@ export function groupItemsBySkillCategory<T>(
     folder: string;
     name: string;
     category?: string | null;
+    sourceUrl?: string | null;
   },
   snapshot: SkillCategorySnapshot,
   catalog: CatalogSkillCategory[],
