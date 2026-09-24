@@ -24,50 +24,66 @@ export function ClaudeChatDrawer() {
   const hideChat = useChatLayoutStore((s) => s.setVisible);
 
   return (
+    // Column contract: tab | thread (minmax(0,1fr)) | composer.
+    // The middle row is the only one allowed to shrink, so a wide or tall
+    // window cannot push the composer below the pane and clip it.
     <section
       data-testid="chat-pane"
       data-tour="tour-chat"
-      className="flex h-full min-h-0 min-w-0 flex-col bg-background"
+      className="grid h-full max-h-full min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden bg-background"
       aria-label={t("chrome.chat")}
     >
-      <ChatTabBar
-        leading={
-          <button
-            type="button"
-            onClick={() => hideChat(false)}
-            className="ml-1.5 flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2 text-muted-foreground text-xs transition-colors hover:bg-muted/80 hover:text-foreground"
-            aria-label={t("chrome.hideChat")}
-            title={t("chrome.hideChat")}
-          >
-            <PanelRightCloseIcon className="size-3.5" />
-            <span>{t("chrome.hide")}</span>
-          </button>
-        }
-      />
-
-      {error && (
-        <ChatErrorCard
-          error={error}
-          retryPrompt={lastUserPrompt(messages)}
-          busy={isStreaming}
-          onRetry={(prompt) =>
-            void sendPrompt(prompt, undefined, {
-              reuseTrailingUserMessage: true,
-            })
+      <div className="shrink-0">
+        <ChatTabBar
+          leading={
+            <button
+              type="button"
+              onClick={() => hideChat(false)}
+              className="ml-1.5 flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2 text-muted-foreground text-xs transition-colors hover:bg-muted/80 hover:text-foreground"
+              aria-label={t("chrome.hideChat")}
+              title={t("chrome.hideChat")}
+            >
+              <PanelRightCloseIcon className="size-3.5" />
+              <span>{t("chrome.hide")}</span>
+            </button>
           }
-          onClearConversation={clearMessages}
-          onDismiss={() => setError(activeTabId, null)}
         />
-      )}
-
-      <SubagentPanel />
-
-      <div className="relative min-h-0 flex-1 overflow-hidden">
-        <ChatMessages />
-        <ApprovalDialog />
       </div>
 
-      <ChatComposer isOpen={visible} />
+      <div className="flex min-h-0 flex-col overflow-hidden">
+        {error && (
+          <div className="shrink-0">
+            <ChatErrorCard
+              error={error}
+              retryPrompt={lastUserPrompt(messages)}
+              busy={isStreaming}
+              onRetry={(prompt) =>
+                void sendPrompt(prompt, undefined, {
+                  reuseTrailingUserMessage: true,
+                })
+              }
+              onClearConversation={clearMessages}
+              onDismiss={() => setError(activeTabId, null)}
+            />
+          </div>
+        )}
+
+        <div className="shrink-0">
+          <SubagentPanel />
+        </div>
+
+        <div
+          data-testid="chat-thread"
+          className="relative min-h-0 flex-1 overflow-hidden"
+        >
+          <ChatMessages />
+          <ApprovalDialog />
+        </div>
+      </div>
+
+      <div data-testid="chat-composer-slot" className="min-w-0 shrink-0">
+        <ChatComposer isOpen={visible} />
+      </div>
     </section>
   );
 }

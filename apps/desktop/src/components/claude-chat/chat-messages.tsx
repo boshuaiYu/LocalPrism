@@ -395,7 +395,7 @@ export const ChatMessages: FC = () => {
         ref={viewportRef}
         onScroll={handleScroll}
         data-testid="chat-transcript"
-        className="absolute inset-0 min-w-0 overflow-y-auto overflow-x-hidden scroll-smooth px-5 pt-5 pb-2"
+        className="absolute inset-0 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden scroll-smooth px-5 pt-5 pb-2"
       >
         {settledMessages.length === 0 &&
           pendingGuidance.length === 0 &&

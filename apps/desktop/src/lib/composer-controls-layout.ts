@@ -1,5 +1,9 @@
-/** Sidebar composer width where the bottom bar stacks instead of clipping. */
-export const COMPOSER_CONTROLS_STACK_BREAKPOINT_PX = 360;
+/**
+ * Composer width where the bottom bar stacks instead of sharing one row.
+ * Wide enough that the model name still fits beside attach / agent / context
+ * (a 360px row left the chip as only the effort suffix).
+ */
+export const COMPOSER_CONTROLS_STACK_BREAKPOINT_PX = 480;
 
 export type ComposerControlsLayout = "wide" | "narrow";
 
