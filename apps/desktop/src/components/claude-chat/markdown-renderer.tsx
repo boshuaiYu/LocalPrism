@@ -278,18 +278,37 @@ type RunState =
   | { status: "done"; exitCode: number; stdout: string; stderr: string }
   | { status: "error"; message: string };
 
+const LATEX_PREVIEW_CACHE_LIMIT = 100;
+const latexPreviewCache = new Map<string, string | null>();
+
 function latexPreviewHtml(code: string): string | null {
-  if (!canPreviewLatexBlock(code)) return null;
-  try {
-    return katex.renderToString(unwrapMathDelimiters(code), {
-      displayMode: true,
-      throwOnError: true,
-      strict: "ignore",
-      trust: false,
-    });
-  } catch {
-    return null;
+  const cached = latexPreviewCache.get(code);
+  if (cached !== undefined) {
+    latexPreviewCache.delete(code);
+    latexPreviewCache.set(code, cached);
+    return cached;
   }
+
+  let html: string | null = null;
+  if (canPreviewLatexBlock(code)) {
+    try {
+      html = katex.renderToString(unwrapMathDelimiters(code), {
+        displayMode: true,
+        throwOnError: true,
+        strict: "ignore",
+        trust: false,
+      });
+    } catch {
+      html = null;
+    }
+  }
+
+  latexPreviewCache.set(code, html);
+  if (latexPreviewCache.size > LATEX_PREVIEW_CACHE_LIMIT) {
+    const oldest = latexPreviewCache.keys().next().value;
+    if (oldest !== undefined) latexPreviewCache.delete(oldest);
+  }
+  return html;
 }
 
 function LatexInsertButton({ onInsert }: { onInsert: () => void }) {
