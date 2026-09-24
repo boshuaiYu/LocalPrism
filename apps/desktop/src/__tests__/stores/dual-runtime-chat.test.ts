@@ -269,6 +269,119 @@ describe("dual-runtime chat dispatch", () => {
     expect(JSON.stringify(latest)).not.toContain("Reply mode:");
   });
 
+  it("re-reads the last preset written during preflight before spawn", async () => {
+    resetStore(makeTab({ agentId: "academic-polish" }));
+    const snapshot = deferred<null>();
+    createSnapshotMock.mockReturnValueOnce(snapshot.promise);
+    const sending = useClaudeChatStore
+      .getState()
+      .sendPrompt("用一句话说明身份");
+    await vi.waitFor(() => expect(createSnapshotMock).toHaveBeenCalledTimes(1));
+    for (const agentId of ["de-ai", "peer-review"] as const) {
+      expect(
+        useClaudeChatStore.getState().updateTabRuntimeSelection("tab-runtime", {
+          runtimeModel: "opus",
+          reasoningEffort: "medium",
+          agentId,
+        }),
+      ).toBe("changed");
+    }
+    snapshot.resolve(null);
+    await sending;
+
+    const request = runtimeRequest();
+    expect(request).toEqual(
+      expect.objectContaining({ agentId: "peer-review" }),
+    );
+    expect(String(request?.prompt)).toContain("[Reply mode: peer-review.");
+    expect(String(request?.prompt)).not.toContain(
+      "[Reply mode: academic-polish.",
+    );
+    expect(String(request?.prompt)).not.toContain("[Reply mode: de-ai.");
+    expect(useClaudeChatStore.getState().tabs[0]?.preflightAttemptEpoch).toBe(
+      null,
+    );
+  });
+
+  it("keeps a preset chosen during preflight on the outgoing turn", async () => {
+    resetStore(makeTab({ agentId: "academic-polish" }));
+    const snapshot = deferred<null>();
+    createSnapshotMock.mockReturnValueOnce(snapshot.promise);
+
+    const sending = useClaudeChatStore
+      .getState()
+      .sendPrompt("用一句话说明身份");
+    await vi.waitFor(() => expect(createSnapshotMock).toHaveBeenCalledTimes(1));
+    expect(useClaudeChatStore.getState().tabs[0]?.isStreaming).toBe(true);
+    expect(
+      useClaudeChatStore.getState().updateTabRuntimeSelection("tab-runtime", {
+        runtimeModel: "opus",
+        reasoningEffort: "medium",
+        agentId: "peer-review",
+      }),
+    ).toBe("changed");
+    snapshot.resolve(null);
+    await sending;
+
+    const request = runtimeRequest();
+    expect(request).toEqual(
+      expect.objectContaining({ agentId: "peer-review" }),
+    );
+    expect(String(request?.prompt)).toContain("[Reply mode: peer-review.");
+    expect(String(request?.prompt)).not.toContain(
+      "[Reply mode: academic-polish.",
+    );
+  });
+
+  it("ignores a preset switch while runtime_start_turn is still spawning", async () => {
+    resetStore(makeTab({ agentId: "academic-polish" }));
+    const start = deferred<void>();
+    vi.mocked(invoke).mockImplementation((command: string) => {
+      if (command === "runtime_start_turn") return start.promise;
+      return Promise.resolve();
+    });
+
+    const sending = useClaudeChatStore
+      .getState()
+      .sendPrompt("用一句话说明身份");
+    await vi.waitFor(() =>
+      expect(
+        vi
+          .mocked(invoke)
+          .mock.calls.some(([command]) => command === "runtime_start_turn"),
+      ).toBe(true),
+    );
+    const tabDuringSpawn = useClaudeChatStore.getState().tabs[0];
+    expect(tabDuringSpawn?.selectionLocked).toBe(true);
+    expect(tabDuringSpawn?.preflightAttemptEpoch).toBe(
+      tabDuringSpawn?.attemptEpoch,
+    );
+    expect(
+      useClaudeChatStore.getState().updateTabRuntimeSelection("tab-runtime", {
+        runtimeModel: "opus",
+        reasoningEffort: "medium",
+        agentId: "peer-review",
+      }),
+    ).toBe("blocked-streaming");
+    expect(useClaudeChatStore.getState().tabs[0]?.agentId).toBe(
+      "academic-polish",
+    );
+
+    start.resolve();
+    await sending;
+
+    const request = runtimeRequest();
+    expect(request).toEqual(
+      expect.objectContaining({ agentId: "academic-polish" }),
+    );
+    expect(String(request?.prompt)).toContain("[Reply mode: academic-polish.");
+    expect(String(request?.prompt)).not.toContain("[Reply mode: peer-review.");
+    expect(useClaudeChatStore.getState().tabs[0]?.selectionLocked).toBe(false);
+    expect(useClaudeChatStore.getState().tabs[0]?.preflightAttemptEpoch).toBe(
+      null,
+    );
+  });
+
   it("falls back to legacy global Claude model and effort selections", async () => {
     resetStore(
       makeTab({

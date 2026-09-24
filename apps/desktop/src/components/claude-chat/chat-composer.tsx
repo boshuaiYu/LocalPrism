@@ -35,6 +35,7 @@ import { useShallow } from "zustand/react/shallow";
 import {
   CLAUDE_CODE_PROVIDER_ID,
   chatPeerForTab,
+  isAgentSelectionOpen,
   offsetToLineCol,
   type PromptContextOverride,
   type QueuedGuidance,
@@ -338,6 +339,11 @@ export const ChatComposer: FC<{
         runtimeModel: tab?.runtimeModel ?? null,
         reasoningEffort: tab?.reasoningEffort ?? null,
         agentId: tab?.agentId ?? null,
+        isStreaming: tab?.isStreaming ?? false,
+        attemptEpoch: tab?.attemptEpoch ?? null,
+        activeAttemptId: tab?.activeAttemptId ?? null,
+        preflightAttemptEpoch: tab?.preflightAttemptEpoch ?? null,
+        selectionLocked: tab?.selectionLocked ?? false,
         isStopping: (tab?.cancelledAttempts?.length ?? 0) > 0,
       };
     }),
@@ -430,6 +436,17 @@ export const ChatComposer: FC<{
   const codexAvailable = codexAccount.installed && codexAccount.authenticated;
   const runtimeSelectionReady = archivedCodex ? false : providerReady;
   const runtimeBusy = isStreaming || activeTabMeta.isStopping;
+  // Same gate as updateTabRuntimeSelection: open during save/snapshot, frozen
+  // once this attempt's runtime start has been dispatched.
+  const agentSwitchBusy =
+    activeTabMeta.isStopping ||
+    !isAgentSelectionOpen({
+      isStreaming: activeTabMeta.isStreaming,
+      preflightAttemptEpoch: activeTabMeta.preflightAttemptEpoch,
+      attemptEpoch: activeTabMeta.attemptEpoch,
+      activeAttemptId: activeTabMeta.activeAttemptId,
+      selectionLocked: activeTabMeta.selectionLocked,
+    });
   const selectedProviderModel = selectedProviderCredential
     ? selectedProviderModels[selectedProviderCredential.id] ||
       selectedProviderCredential.model
@@ -1639,7 +1656,7 @@ export const ChatComposer: FC<{
                 peer="claude"
                 projectPath={projectRoot}
                 agentId={activeTabMeta.agentId ?? null}
-                busy={runtimeBusy}
+                busy={agentSwitchBusy}
                 onAgentChange={(agent) => {
                   const previousAgentId = activeTabMeta.agentId ?? null;
                   const nextAgentId = agent?.id ?? null;

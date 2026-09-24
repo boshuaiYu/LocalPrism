@@ -82,6 +82,10 @@ export function AgentSelector({
   }, [open]);
 
   useEffect(() => {
+    if (busy) setOpen(false);
+  }, [busy]);
+
+  useEffect(() => {
     if (!open) return;
     const onPointerDown = (event: MouseEvent) => {
       const target = event.target as Node;
@@ -121,6 +125,7 @@ export function AgentSelector({
           </span>
         </button>
         {open &&
+          !busy &&
           createPortal(
             <div
               ref={menuRef}
