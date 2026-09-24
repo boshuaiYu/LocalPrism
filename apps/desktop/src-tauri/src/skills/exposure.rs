@@ -2,10 +2,12 @@ use crate::skills::domain::SkillScope;
 use crate::skills::paths::SessionSkillExposure;
 use std::path::Path;
 
-/// Skills that may be visible to Claude Code for this turn.
+/// Extra skill folders forced into this turn.
 ///
-/// The installed library stays on disk for the Skills UI. A model request only
-/// receives the active agent's attached skills plus a `/name` the user typed.
+/// The installed library stays on disk. `prepare_isolated_claude_home` also
+/// lists installed academic skills. This function adds the active agent's
+/// attached skills plus a `/name` the user typed, including a scientific lab
+/// the user named.
 pub fn exposure_for_turn(
     project_path: Option<&Path>,
     agent_id: Option<&str>,
@@ -78,7 +80,10 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         for name in [
             "nature-writing",
+            "academic-paper-reviewer",
             "scanpy",
+            "biopython",
+            "rdkit",
             "waypoint-bio",
             "paper-humanizer",
             "paper-spine",
@@ -128,7 +133,43 @@ mod tests {
             std::env::remove_var("LOCALPRISM_HOME");
         }
 
-        assert_eq!(hello_skills, 0);
+        assert!(hello_skills > 0, "academic skills must be listed on an ordinary turn");
+        let hello_names: Vec<_> = fs::read_dir(hello_runtime.join("skills"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(hello_names.iter().any(|name| name == "nature-writing"));
+        assert!(hello_names
+            .iter()
+            .any(|name| name == "academic-paper-reviewer"));
+        assert!(hello_names.iter().any(|name| name == "paper-humanizer"));
+        assert!(hello_names
+            .iter()
+            .any(|name| name == "scientific-agent-skills"));
+        assert!(!hello_names.iter().any(|name| name.contains("paper-spine")));
+        assert!(!hello_names.iter().any(|name| name == "scanpy"));
+        assert!(!hello_names
+            .iter()
+            .any(|name| name.starts_with("bulk-skill-")));
+        let catalog = fs::read_to_string(
+            hello_runtime
+                .join("skills")
+                .join("scientific-agent-skills")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(catalog.contains("scanpy"));
+        assert!(catalog.contains("waypoint-bio"));
+        assert!(!catalog.contains("# bulk"));
+        let nature_body = fs::read_to_string(
+            hello_runtime
+                .join("skills")
+                .join("nature-writing")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(nature_body.contains("# nature-writing"));
         assert!(library.join("waypoint-bio").join("SKILL.md").exists());
         assert!(library.join("bulk-skill-29").join("SKILL.md").exists());
         assert!(library.join("paper-spine").join("SKILL.md").exists());
@@ -141,10 +182,12 @@ mod tests {
             .map(|entry| entry.file_name().to_string_lossy().to_string())
             .collect();
         assert!(exposed.contains(&"nature-writing".to_string()));
+        assert!(exposed.contains(&"academic-paper-reviewer".to_string()));
         assert!(exposed.contains(&"scanpy".to_string()));
         assert!(!exposed.iter().any(|name| name.contains("paper-spine")));
         assert!(!exposed.iter().any(|name| name == "waypoint-bio"));
-        assert!(exposed.len() < 5, "turn leaked skills: {exposed:?}");
+        assert!(!exposed.iter().any(|name| name.starts_with("bulk-skill-")));
+        assert!(exposed.contains(&"scientific-agent-skills".to_string()));
         let runtime_agents: Vec<_> = fs::read_dir(runtime.join("agents"))
             .unwrap()
             .flatten()

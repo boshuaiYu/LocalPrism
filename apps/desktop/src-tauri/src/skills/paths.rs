@@ -93,10 +93,12 @@ pub(super) fn resolve_skill_root_with_home(
     })
 }
 
-/// Skill folders that may appear in one Claude process's config.
+/// Extra skill folders forced into one Claude process, beyond the installed
+/// academic listing.
 ///
-/// Empty means the turn carries no skill catalog. Callers pass the active
-/// agent's attached skills plus a skill the user invoked with `/name`.
+/// Callers pass the active agent's attached skills plus a skill the user
+/// invoked with `/name`. Those folders are published even when they belong to
+/// the scientific tree. An empty list still lists installed academic skills.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionSkillExposure {
     pub folders: Vec<String>,
@@ -115,11 +117,12 @@ impl SessionSkillExposure {
 
 /// Prepare the Claude home, then return a per-turn config directory.
 ///
-/// Claude Code injects every skill under `$CLAUDE_CONFIG_DIR/skills`, and every
-/// agent and slash command under that config, into the model request. The
-/// libraries stay under `claude-home` so the UI can list them. The returned
-/// runtime directory links session `projects` back to that home. Its `skills`
-/// directory contains only `exposure.folders`, and `agents` contains only
+/// Claude Code lists every skill under `$CLAUDE_CONFIG_DIR/skills` and loads a
+/// body only when the Skill tool runs. The libraries stay under `claude-home`.
+/// The returned runtime links session `projects` back to that home. Its
+/// `skills` directory symlinks installed academic skills (so `skill_listing`
+/// and the Skill tool see them) plus `exposure.folders`. The scientific tree
+/// stays one catalog file, not one folder per lab. `agents` contains only
 /// `exposure.agent_id`. `commands` and `slash` stay empty.
 pub fn prepare_isolated_claude_home(
     project_path: Option<&Path>,
@@ -413,6 +416,12 @@ fn publish_active_agent(
     Ok(())
 }
 
+/// One session entry for the scientific-agent-skills tree. Claude lists this
+/// name; the body is a path index loaded only if the Skill tool opens it.
+const SCIENTIFIC_CATALOG_FOLDER: &str = "scientific-agent-skills";
+
+const SCIENTIFIC_PACK_MARKERS: &[&str] = &["scanpy", "biopython", "rdkit"];
+
 fn sync_exposed_skills(
     dest: &Path,
     library: Option<&Path>,
@@ -456,7 +465,183 @@ fn sync_exposed_skills(
         }
         publish_skill_dir(&source, &dest.join(name))?;
     }
+
+    let sources = manifest_source_urls();
+    let mut installed = Vec::new();
+    if let Some(root) = project_skills {
+        installed.extend(list_installed_skill_dirs(root, true));
+    }
+    if let Some(root) = library {
+        installed.extend(list_installed_skill_dirs(root, false));
+    }
+    let mut by_folder: Vec<InstalledSkillDir> = Vec::new();
+    let mut folder_names = HashSet::new();
+    for skill in installed {
+        let key = skill.name.to_ascii_lowercase();
+        if !folder_names.insert(key) {
+            continue;
+        }
+        by_folder.push(skill);
+    }
+    let names: HashSet<String> = by_folder
+        .iter()
+        .map(|skill| skill.name.to_ascii_lowercase())
+        .collect();
+    let scientific_tree = scientific_tree_installed(&names, &sources);
+    let mut deferred: Vec<InstalledSkillDir> = Vec::new();
+    for skill in by_folder {
+        let key = skill.name.to_ascii_lowercase();
+        if seen.contains(&key) {
+            continue;
+        }
+        if !list_skill_directly(&skill, scientific_tree, sources.get(&key).map(String::as_str))
+        {
+            deferred.push(skill);
+            continue;
+        }
+        if !seen.insert(key) {
+            continue;
+        }
+        publish_skill_dir(&skill.path, &dest.join(&skill.name))?;
+    }
+    if !deferred.is_empty() && !seen.contains(SCIENTIFIC_CATALOG_FOLDER) {
+        write_scientific_catalog(dest, &deferred)?;
+    }
     Ok(())
+}
+
+#[derive(Clone)]
+struct InstalledSkillDir {
+    name: String,
+    path: PathBuf,
+    from_project: bool,
+}
+
+fn list_installed_skill_dirs(root: &Path, from_project: bool) -> Vec<InstalledSkillDir> {
+    let mut skills = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return skills;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if validate_skill_slug(&name).is_err()
+            || crate::skills::paperspine::is_host_bound_skill_folder(&name)
+        {
+            continue;
+        }
+        if !path.join("SKILL.md").is_file() && !path.join("skill.md").is_file() {
+            continue;
+        }
+        skills.push(InstalledSkillDir {
+            name,
+            path,
+            from_project,
+        });
+    }
+    skills
+}
+
+fn manifest_source_urls() -> std::collections::HashMap<String, String> {
+    let Ok(home) = crate::providers::paths::localprism_home() else {
+        return std::collections::HashMap::new();
+    };
+    let Ok(manifest) = crate::skills::manifest::ManifestStore::new(home).load() else {
+        return std::collections::HashMap::new();
+    };
+    let mut urls = std::collections::HashMap::new();
+    for entry in manifest.entries {
+        if let Some(url) = crate::skills::manifest::source_url_from_skill_source(&entry.source) {
+            urls.insert(entry.folder.to_ascii_lowercase(), url);
+        }
+    }
+    urls
+}
+
+fn is_scientific_source_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.contains("scientific-agent-skills") || lower.contains("claude-scientific-skills")
+}
+
+fn is_academic_pack_folder(name: &str) -> bool {
+    let key = name.trim().to_ascii_lowercase();
+    key.starts_with("academic-")
+        || key.starts_with("academic_")
+        || key.starts_with("nature-")
+        || key.starts_with("nature_")
+        || key.starts_with("paper-humanizer")
+        || matches!(
+            key.as_str(),
+            "deep-research" | "literature-review" | "peer-review" | "reference-checker"
+        )
+}
+
+fn scientific_tree_installed(
+    names: &HashSet<String>,
+    sources: &std::collections::HashMap<String, String>,
+) -> bool {
+    if sources.values().any(|url| is_scientific_source_url(url)) {
+        return true;
+    }
+    SCIENTIFIC_PACK_MARKERS
+        .iter()
+        .all(|marker| names.contains(*marker))
+}
+
+fn list_skill_directly(
+    skill: &InstalledSkillDir,
+    scientific_tree: bool,
+    source_url: Option<&str>,
+) -> bool {
+    if source_url.is_some_and(is_scientific_source_url) {
+        return false;
+    }
+    if is_academic_pack_folder(&skill.name) || skill.from_project {
+        return true;
+    }
+    if source_url.is_some_and(|url| !url.trim().is_empty()) {
+        return true;
+    }
+    !scientific_tree
+}
+
+fn write_scientific_catalog(dest: &Path, skills: &[InstalledSkillDir]) -> Result<(), SkillPathError> {
+    let dir = dest.join(SCIENTIFIC_CATALOG_FOLDER);
+    std::fs::create_dir_all(&dir).map_err(|error| SkillPathError::PathResolution {
+        path: dir.clone(),
+        message: error.to_string(),
+    })?;
+    let mut body = String::from(
+        "---\n\
+         name: scientific-agent-skills\n\
+         description: Index of installed scientific-agent-skills lab tools. Use when a task needs one domain tool. Load that one skill file only; do not load the tree.\n\
+         ---\n\
+         \n\
+         This pack is one catalog. Read exactly one SKILL.md for the tool this task needs. Do not read the other files.\n\
+         \n",
+    );
+    let mut ordered = skills.to_vec();
+    ordered.sort_by(|left, right| {
+        left.name
+            .to_ascii_lowercase()
+            .cmp(&right.name.to_ascii_lowercase())
+    });
+    for skill in ordered {
+        let skill_md = if skill.path.join("SKILL.md").is_file() {
+            skill.path.join("SKILL.md")
+        } else {
+            skill.path.join("skill.md")
+        };
+        body.push_str(&format!("- {}: {}\n", skill.name, skill_md.display()));
+    }
+    let file = dir.join("SKILL.md");
+    std::fs::write(&file, body).map_err(|error| SkillPathError::PathResolution {
+        path: file,
+        message: error.to_string(),
+    })
 }
 
 fn find_named_skill_dir(root: &Path, folder: &str) -> Option<PathBuf> {
@@ -1114,21 +1299,26 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("lp-home");
         let project = temp.path().join("paper");
-        let user_skill = home.join("skills").join("pdf");
+        let user_skill = home.join("skills").join("nature-writing");
         let project_skill = project.join(".localprism").join("skills").join("writer");
         std::fs::create_dir_all(&user_skill).unwrap();
         std::fs::create_dir_all(&project_skill).unwrap();
-        std::fs::write(user_skill.join("SKILL.md"), "# PDF").unwrap();
+        std::fs::write(
+            user_skill.join("SKILL.md"),
+            "---\nname: nature-writing\ndescription: Revise prose\n---\n# Nature\n",
+        )
+        .unwrap();
         std::fs::write(project_skill.join("SKILL.md"), "# Writer").unwrap();
-
-        let junk = home.join("skills").join("waypoint-bio");
-        std::fs::create_dir_all(&junk).unwrap();
-        std::fs::write(junk.join("SKILL.md"), "# waypoint").unwrap();
+        for name in ["scanpy", "biopython", "rdkit", "waypoint-bio"] {
+            let skill = home.join("skills").join(name);
+            std::fs::create_dir_all(&skill).unwrap();
+            std::fs::write(skill.join("SKILL.md"), format!("# {name}\n")).unwrap();
+        }
 
         let previous = std::env::var("LOCALPRISM_HOME").ok();
         std::env::set_var("LOCALPRISM_HOME", &home);
         let exposure = super::SessionSkillExposure {
-            folders: vec!["pdf".into(), "writer".into()],
+            folders: vec!["writer".into()],
             agent_id: None,
         };
         let config = super::prepare_isolated_claude_home(Some(&project), &exposure).unwrap();
@@ -1140,13 +1330,27 @@ mod tests {
 
         assert!(config.starts_with(home.join("claude-home").join("runtimes")));
         assert_ne!(config, home.join("claude-home"));
-        assert!(config.join("skills").join("pdf").join("SKILL.md").exists());
+        assert!(config
+            .join("skills")
+            .join("nature-writing")
+            .join("SKILL.md")
+            .exists());
         assert!(config
             .join("skills")
             .join("writer")
             .join("SKILL.md")
             .exists());
         assert!(!config.join("skills").join("waypoint-bio").exists());
+        assert!(!config.join("skills").join("scanpy").exists());
+        let catalog = std::fs::read_to_string(
+            config
+                .join("skills")
+                .join("scientific-agent-skills")
+                .join("SKILL.md"),
+        )
+        .unwrap();
+        assert!(catalog.contains("waypoint-bio"));
+        assert!(!catalog.contains("# waypoint"));
         assert!(home
             .join("claude-home")
             .join("skills")
@@ -1191,15 +1395,16 @@ mod tests {
         let library = home.join("claude-home").join("skills");
         assert!(library.join("pdf").join("SKILL.md").exists());
         assert!(library.join("legacy-pdf").join("SKILL.md").exists());
-        assert_eq!(
-            config
-                .join("skills")
-                .read_dir()
-                .unwrap()
-                .flatten()
-                .count(),
-            0
-        );
+        let listed: Vec<_> = config
+            .join("skills")
+            .read_dir()
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(listed.iter().any(|name| name == "pdf"));
+        assert!(listed.iter().any(|name| name == "legacy-pdf"));
+        assert_eq!(listed.len(), 2);
         assert!(home
             .join("claude-home")
             .join("agents")
