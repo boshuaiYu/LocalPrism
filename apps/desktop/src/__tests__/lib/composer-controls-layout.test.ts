@@ -13,7 +13,7 @@ describe("composerControlsLayout", () => {
     ).toBe("narrow");
   });
 
-  it("keeps model and strength on one row at and above the breakpoint", () => {
+  it("keeps the model on the control row at and above the breakpoint", () => {
     expect(composerControlsLayout(400)).toBe("narrow");
     expect(composerControlsLayout(COMPOSER_CONTROLS_STACK_BREAKPOINT_PX)).toBe(
       "wide",

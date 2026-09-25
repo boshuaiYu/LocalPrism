@@ -1680,17 +1680,12 @@ export const ChatComposer: FC<{
                 }}
               />
               <ReplyModePill agentId={activeTabMeta.agentId ?? null} />
-              <ChatTokenMeter />
-              {controlsLayout === "narrow" ? (
-                <div data-testid="composer-send" className="ml-auto shrink-0">
-                  {sendButton}
-                </div>
-              ) : null}
-            </div>
-            {controlsLayout === "wide" ? (
               <div
                 data-testid="composer-controls-model"
-                className="flex min-w-0 flex-1 justify-end overflow-hidden"
+                className={cn(
+                  "flex min-w-0 max-w-full overflow-hidden",
+                  controlsLayout === "narrow" && "flex-1",
+                )}
               >
                 <ComposerModelChip
                   buttonRef={modelButtonRef}
@@ -1702,22 +1697,27 @@ export const ChatComposer: FC<{
                   onClick={() => setModelPickerOpen((open) => !open)}
                 />
               </div>
-            ) : null}
+              {controlsLayout === "narrow" ? (
+                <div data-testid="composer-send" className="ml-auto shrink-0">
+                  {sendButton}
+                </div>
+              ) : null}
+            </div>
+            <div
+              data-testid="composer-controls-context"
+              className={cn(
+                "flex shrink-0",
+                controlsLayout === "wide" &&
+                  "min-w-0 flex-1 justify-end overflow-hidden",
+              )}
+            >
+              <ChatTokenMeter />
+            </div>
             {controlsLayout === "wide" ? (
               <div data-testid="composer-send" className="shrink-0">
                 {sendButton}
               </div>
-            ) : (
-              <ComposerModelChip
-                buttonRef={modelButtonRef}
-                label={composerModelLabel}
-                effortLabel={composerEffortLabel}
-                modelId={composerModelId}
-                providerName={activeProviderName}
-                disabled={runtimeBusy}
-                onClick={() => setModelPickerOpen((open) => !open)}
-              />
-            )}
+            ) : null}
           </div>
         </div>
       )}
