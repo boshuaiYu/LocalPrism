@@ -68,10 +68,8 @@ import { PermissionModePicker } from "@/components/runtime/permission-mode-picke
 import { AgentSelector } from "@/components/agents/agent-selector";
 import {
   agentFlashAttribute,
-  replyModeForAgent,
   requestPresetAgentFlash,
   shouldFlashPresetAgentSwitch,
-  type ReplyMode,
 } from "@/lib/reply-mode";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
@@ -257,35 +255,6 @@ function ComposerModelChip({
       <span className="sr-only">{providerName}</span>
       <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
     </button>
-  );
-}
-
-const REPLY_MODE_LABEL: Record<
-  ReplyMode,
-  | "chat.replyMode.custom"
-  | "chat.replyMode.academic-polish"
-  | "chat.replyMode.de-ai"
-  | "chat.replyMode.peer-review"
-> = {
-  custom: "chat.replyMode.custom",
-  "academic-polish": "chat.replyMode.academic-polish",
-  "de-ai": "chat.replyMode.de-ai",
-  "peer-review": "chat.replyMode.peer-review",
-};
-
-function ReplyModePill({ agentId }: { agentId: string | null }) {
-  const { t } = useI18n();
-  const mode = replyModeForAgent(agentId);
-  const label = t(REPLY_MODE_LABEL[mode]);
-  return (
-    <span
-      data-testid="reply-mode"
-      data-reply-mode={mode}
-      title={t("chat.replyMode")}
-      className="flex h-7 min-w-0 max-w-28 shrink items-center overflow-hidden rounded-full px-2 text-muted-foreground text-xs"
-    >
-      <span className="min-w-0 truncate">{label}</span>
-    </span>
   );
 }
 
@@ -1679,7 +1648,6 @@ export const ChatComposer: FC<{
                   }
                 }}
               />
-              <ReplyModePill agentId={activeTabMeta.agentId ?? null} />
               <ChatTokenMeter />
               {controlsLayout === "narrow" ? (
                 <div data-testid="composer-send" className="ml-auto shrink-0">
