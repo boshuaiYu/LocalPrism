@@ -17,7 +17,7 @@ import {
 } from "@/stores/runtime-store";
 
 vi.mock("@tauri-apps/api/app", () => ({
-  getVersion: vi.fn().mockResolvedValue("1.0.8-6"),
+  getVersion: vi.fn().mockResolvedValue("1.9.0"),
 }));
 
 vi.mock("next-themes", () => ({
@@ -180,9 +180,9 @@ describe("ProjectPicker runtime settings", () => {
   it("keeps version, Beta, and the refresh check in the bottom bar", async () => {
     const download = vi.fn();
     vi.mocked(check).mockResolvedValue({
-      version: "1.0.9-1",
+      version: "1.9.1-1",
       body: "beta",
-      currentVersion: "1.0.8-6",
+      currentVersion: "1.9.0",
       download,
       install: vi.fn(),
       close: vi.fn(async () => undefined),
@@ -197,7 +197,7 @@ describe("ProjectPicker runtime settings", () => {
     });
 
     const header = container.querySelector("[data-testid='app-chrome-header']");
-    expect(header?.textContent).not.toContain("v1.0.8-6");
+    expect(header?.textContent).not.toContain("v1.9.0");
     expect(header?.querySelector("[data-testid='language-switch']")).toBeNull();
     expect(
       header?.querySelector("[data-testid='check-for-updates']"),
@@ -205,10 +205,10 @@ describe("ProjectPicker runtime settings", () => {
     expect(header?.textContent).not.toContain("Settings");
     expect(container.querySelector("[data-testid='update-prompt']")).toBeNull();
     expect(download).not.toHaveBeenCalled();
-    expect(container.textContent).not.toContain("1.0.9-1");
+    expect(container.textContent).not.toContain("1.9.1-1");
 
     const bar = container.querySelector("[data-testid='app-status-bar']");
-    expect(bar?.textContent).toContain("v1.0.8-6");
+    expect(bar?.textContent).toContain("v1.9.0");
     expect(
       bar?.querySelector("[data-testid='check-for-updates']"),
     ).toBeTruthy();
@@ -226,7 +226,7 @@ describe("ProjectPicker runtime settings", () => {
     expect(download).not.toHaveBeenCalled();
     expect(container.querySelector("[data-testid='update-prompt']")).toBeNull();
     const flash = container.querySelector("[data-testid='update-flash']");
-    expect(flash?.textContent).toContain("1.0.9-1");
+    expect(flash?.textContent).toContain("1.9.1-1");
     expect(flash?.className).toMatch(/lp-update-flash/);
     expect(container.querySelector("[role='dialog']")).toBeNull();
   });
