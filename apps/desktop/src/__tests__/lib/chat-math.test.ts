@@ -75,6 +75,54 @@ describe("normalizeChatMath", () => {
     }
   });
 
+  it("keeps parentheses inside a new bracket display as one region", () => {
+    const samples = [
+      "[ \\min_w (w + \\frac{1}{2}) ]",
+      "[ \\log(1 + \\frac{x}{y}) ]",
+      "[ \\left( \\frac{a}{b} \\right) ]",
+      "[ f\\left(x\\right) = \\frac{a}{b} ]",
+      "[ x = (\\frac{a}{b}) + 1 ]",
+    ];
+    for (const source of samples) {
+      const normalized = normalizeChatMath(source);
+      expect(normalized.match(/\$\$/g)).toHaveLength(2);
+      const body = normalized.replace(/^\$\$\n?/, "").replace(/\n?\$\$$/, "");
+      expect(body).not.toContain("$");
+      expect(body).toContain("\\frac");
+    }
+  });
+
+  it("does not rewrite \\[ or \\( already inside $ or $$", () => {
+    const samples = [
+      "$$\n\\[ x = \\frac{a}{b} \\]\n$$",
+      "$$\\[ \\frac{a}{b} \\]$$",
+      "Let $x = \\(a \\frac{1}{2}\\)$",
+      "$\\[ \\alpha \\]$",
+      "$$ x = \\( a \\frac{1}{2} \\) $$",
+    ];
+    for (const source of samples) {
+      expect(normalizeChatMath(source)).toBe(source);
+    }
+  });
+
+  it("does not shred \\left, \\right, or probability parentheses", () => {
+    const samples = [
+      "f\\left(x\\right) = \\frac{a}{b}",
+      "\\left[0,1\\right]",
+      "P(A \\mid B) = \\frac{P(B \\mid A)P(A)}{P(B)}",
+    ];
+    for (const source of samples) {
+      const normalized = normalizeChatMath(source);
+      const wrapped = normalized.match(/^\$\$\n([\s\S]*)\n\$\$$/);
+      if (wrapped) {
+        expect(wrapped[1]).toBe(source);
+        expect(wrapped[1]).not.toContain("$");
+      } else {
+        expect(normalized).toBe(source);
+      }
+    }
+  });
+
   it("turns the screenshot bracket display formula into display math", () => {
     const formula = "x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}";
     const source = `独立公式：[ ${formula} ]`;
