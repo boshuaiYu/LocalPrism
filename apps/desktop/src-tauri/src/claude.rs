@@ -5066,8 +5066,36 @@ fn truncate_session_lines(
     Ok(lines[..=end].to_vec())
 }
 
+/// Saved transcripts store the prompt that was sent, including reply-mode
+/// instructions, the open-file header, and selected text. The chat shows the
+/// user text after the last wrapper. Peel those wrappers before comparing.
+fn extract_rewind_body(text: &str) -> String {
+    let normalized = text.replace("\r\n", "\n");
+    let trimmed = normalized.trim_start();
+    let wrapped = trimmed.starts_with("[Reply mode:")
+        || trimmed.starts_with("[Currently open file:")
+        || trimmed.starts_with("[File:")
+        || trimmed.starts_with("[Selection:")
+        || trimmed.starts_with("The earlier part of this conversation was compressed.");
+    if !wrapped {
+        return text.to_string();
+    }
+    let Some(index) = normalized.rfind("]\n\n") else {
+        return text.to_string();
+    };
+    let body = &normalized[index + 3..];
+    if body.trim().is_empty() {
+        text.to_string()
+    } else {
+        body.to_string()
+    }
+}
+
 fn normalize_rewind_text(text: &str) -> String {
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = extract_rewind_body(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let mut value = collapsed.trim().to_string();
     let mut previous = String::new();
     while !value.is_empty() && value != previous {
@@ -6938,6 +6966,60 @@ mod tests {
         .unwrap();
         assert_eq!(kept.len(), 3);
         assert!(kept[2].contains("carefully now"));
+    }
+
+    #[test]
+    fn rewind_finds_visible_text_in_a_saved_wrapped_prompt() {
+        let stored = "\
+[Reply mode: academic-polish. Follow this speaking style for this turn only. Do not rewrite earlier messages.]
+你是一个学术 LaTeX 论文润色的智能体。
+
+[Currently open file: main.tex. Location only — do not read this file unless the user asked to use the document. File tools must use paths relative to the current working directory, such as main.tex.]
+[Selection: @main.tex:4:1-4:8]
+[Selected text:
+Hello abstract
+]
+
+请回复 OK";
+        let lines = vec![
+            serde_json::json!({
+                "type": "user",
+                "uuid": "user-visible-1",
+                "message": {"role": "user", "content": stored}
+            })
+            .to_string(),
+            r#"{"type":"assistant","uuid":"asst-1","message":{"content":[{"type":"text","text":"OK"}]}}"#.to_string(),
+            r#"{"type":"user","uuid":"user-visible-2","message":{"content":"请回复 OK"}}"#.to_string(),
+            r#"{"type":"assistant","uuid":"asst-2","message":{"content":[{"type":"text","text":"OK again"}]}}"#.to_string(),
+        ];
+        let kept = truncate_session_lines(
+            &lines,
+            &SessionRewindAnchor {
+                role: "user".into(),
+                text: "请回复 OK".into(),
+                ordinal: 1,
+            },
+            true,
+        )
+        .unwrap();
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0].contains("user-visible-1"));
+        assert!(kept[0].contains("Hello abstract"));
+        assert!(!kept[0].contains("user-visible-2"));
+
+        let second = truncate_session_lines(
+            &lines,
+            &SessionRewindAnchor {
+                role: "user".into(),
+                text: "@main.tex:4:1-4:8\n请回复 OK".into(),
+                ordinal: 2,
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(second.len(), 2);
+        assert!(second[0].contains("user-visible-1"));
+        assert!(!second.iter().any(|line| line.contains("user-visible-2")));
     }
 
     #[test]

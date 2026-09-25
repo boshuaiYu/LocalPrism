@@ -14,8 +14,30 @@ export interface RewindAnchor {
 
 const MATCH_LIMIT = 280;
 
+/**
+ * Saved transcripts store the prompt that was sent, including reply-mode
+ * instructions, the open-file header, and selected text. The chat shows the
+ * user text after the last wrapper. Peel those wrappers before comparing.
+ */
+function extractRewindBody(text: string): string {
+  const normalized = text.replace(/\r\n/g, "\n");
+  const trimmed = normalized.trimStart();
+  const wrapped =
+    trimmed.startsWith("[Reply mode:") ||
+    trimmed.startsWith("[Currently open file:") ||
+    trimmed.startsWith("[File:") ||
+    trimmed.startsWith("[Selection:") ||
+    trimmed.startsWith("The earlier part of this conversation was compressed.");
+  if (!wrapped) return text;
+  const marker = "]\n\n";
+  const index = normalized.lastIndexOf(marker);
+  if (index < 0) return text;
+  const body = normalized.slice(index + marker.length);
+  return body.trim() ? body : text;
+}
+
 export function rewindMatchText(text: string): string {
-  let value = text.replace(/\s+/g, " ").trim();
+  let value = extractRewindBody(text).replace(/\s+/g, " ").trim();
   let previous = "";
   while (value && value !== previous) {
     previous = value;
