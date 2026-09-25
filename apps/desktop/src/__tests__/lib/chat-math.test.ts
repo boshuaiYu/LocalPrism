@@ -59,7 +59,54 @@ describe("normalizeChatMath", () => {
   });
 
   it("does not rewrite math that is already delimited", () => {
-    const source = "Inline $E=mc^2$ and \\[ \\sum_i x_i \\].";
+    const source = "Inline $E=mc^2$ and $$\\sum_i x_i$$.";
+    expect(normalizeChatMath(source)).toBe(source);
+  });
+
+  it("turns the screenshot bracket display formula into display math", () => {
+    const formula = "x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}";
+    const source = `独立公式：[ ${formula} ]`;
+    const normalized = normalizeChatMath(source);
+    expect(normalized).toContain("$$");
+    expect(normalized).toContain(formula);
+    expect(normalized).not.toContain(`[ ${formula} ]`);
+  });
+
+  it("turns \\[...\\] display math into $$ so markdown cannot strip the delimiter", () => {
+    const formula = "x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}";
+    const source = `独立公式：\\[ ${formula} \\]`;
+    const normalized = normalizeChatMath(source);
+    expect(normalized).toContain("$$");
+    expect(normalized).toContain(formula);
+    expect(normalized).not.toContain("\\[");
+    expect(normalized).not.toContain("\\]");
+  });
+
+  it("keeps $$ display math and converts \\(...\\) inline math", () => {
+    const display = "$$\nx = \\frac{-b}{2a}\n$$";
+    expect(normalizeChatMath(display)).toBe(display);
+    expect(normalizeChatMath("行内 \\(E=mc^2\\) 结束")).toBe(
+      "行内 $E=mc^2$ 结束",
+    );
+    expect(normalizeChatMath("行内 $E=mc^2$ 结束")).toBe("行内 $E=mc^2$ 结束");
+  });
+
+  it("turns bare parentheses that contain TeX into inline math", () => {
+    const source = "其中 (E=mc^2) 与 (a \\neq 0)。";
+    const normalized = normalizeChatMath(source);
+    expect(normalized).toContain("$E=mc^2$");
+    expect(normalized).toContain("$a \\neq 0$");
+    expect(normalized).not.toContain("(E=mc^2)");
+  });
+
+  it("does not turn links, lists, or citation brackets into math", () => {
+    const source = [
+      "See [Nature](https://doi.org/10.1038/s41586-023-00000) and \\[1\\].",
+      "- [ ] todo",
+      "1. item",
+      "Recent work [1] is not a formula.",
+      "The vector is [1, 2, 3].",
+    ].join("\n");
     expect(normalizeChatMath(source)).toBe(source);
   });
 

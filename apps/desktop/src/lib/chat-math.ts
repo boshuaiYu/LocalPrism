@@ -103,6 +103,58 @@ function toDisplayMath(inner: string, trailing = ""): string {
   return punct ? `$$\n${body}\n$$${punct}` : `$$\n${body}\n$$`;
 }
 
+const TEX_DISPLAY_RE = /\\\[([\s\S]+?)\\\]/g;
+const TEX_INLINE_RE = /\\\(([\s\S]+?)\\\)/g;
+// Markdown links are `[label](url)` / `[label][id]`. Images start with `!`.
+const BARE_BRACKET_RE = /(?<![\\!])\[([^\]\n]+)\](?!\s*[[(:])/g;
+const BARE_PAREN_RE = /(?<!\\)\(([^)\n]+)\)/g;
+
+function replaceOutsideInlineCode(
+  text: string,
+  replacer: (chunk: string) => string,
+): string {
+  return text
+    .split(/(`+[^`\n]*`+)/g)
+    .map((chunk, index) => (index % 2 === 1 ? chunk : replacer(chunk)))
+    .join("");
+}
+
+function displayMathAt(text: string, offset: number, inner: string): string {
+  const block = toDisplayMath(inner);
+  const lineStart = offset === 0 || text[offset - 1] === "\n";
+  return lineStart ? block : `\n\n${block}`;
+}
+
+/** remark-math only tokenizes `$` / `$$`. `\[` `\]` survive as escaped brackets. */
+function rewriteExplicitTex(text: string): string {
+  return text
+    .replace(TEX_DISPLAY_RE, (full, inner: string, offset: number) => {
+      if (!isSafeMathFragment(inner)) return full;
+      return displayMathAt(text, offset, inner);
+    })
+    .replace(TEX_INLINE_RE, (full, inner: string) => {
+      if (!isSafeMathFragment(inner)) return full;
+      return `$${inner.trim()}$`;
+    });
+}
+
+function rewriteBareTex(text: string): string {
+  const brackets = text.replace(
+    BARE_BRACKET_RE,
+    (full, inner: string, offset: number) => {
+      if (!isSafeMathFragment(inner) || isProse(inner)) return full;
+      return displayMathAt(text, offset, inner);
+    },
+  );
+  const hidden = protectMath(brackets);
+  return hidden.restore(
+    hidden.text.replace(BARE_PAREN_RE, (full, inner: string) => {
+      if (!isSafeMathFragment(inner) || isProse(inner)) return full;
+      return `$${inner.trim()}$`;
+    }),
+  );
+}
+
 function transformMathLines(text: string): string {
   const lines = text.split("\n");
   const out: string[] = [];
@@ -226,7 +278,10 @@ function protectMathEnvironments(source: string): {
 
 function normalizeChunk(chunk: string): string {
   const withInline = convertInlineMathCode(chunk);
-  const protectedMath = protectMath(withInline);
+  const rewritten = replaceOutsideInlineCode(withInline, (part) =>
+    rewriteBareTex(rewriteExplicitTex(part)),
+  );
+  const protectedMath = protectMath(rewritten);
   const protectedEnv = protectMathEnvironments(protectedMath.text);
   return protectedMath.restore(
     protectedEnv.restore(transformMathLines(protectedEnv.text)),
@@ -314,7 +369,8 @@ function splitStreamingTail(source: string): {
 
 /**
  * Rewrite common model math mistakes into remark-math delimiters.
- * Fenced code, existing `$` / `$$` / `\(\)` / `\[\]` math, citations, and prose stay put.
+ * Fenced code, existing `$` / `$$`, citations, links, and prose stay put.
+ * `\[...\]` / `\(...\)` become `$$` / `$` because remark-math does not read them.
  */
 function normalizeClosed(markdown: string): string {
   const parts: string[] = [];
