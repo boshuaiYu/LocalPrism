@@ -33,14 +33,29 @@ describe("getProviderDisplayName", () => {
     ).toBe("Acme AI");
   });
 
-  it("recognizes Cursor composer endpoints", () => {
-    expect(
-      getProviderDisplayName({
-        label: "Cursor",
-        baseUrl: "http://127.0.0.1:8080/v1",
-        model: "composer-2.5",
-      }),
-    ).toBe("Cursor");
+  it("does not paint Cursor or SiliconFlow with the OpenAI mark", () => {
+    const cursor = {
+      label: "Cursor",
+      baseUrl: "http://127.0.0.1:8080/v1",
+      model: "composer-2.5",
+    };
+    expect(getProviderDisplayName(cursor)).toBe("Cursor");
+    expect(getProviderIconSrc(cursor)).toBeNull();
+
+    const siliconflow = {
+      label: "SiliconFlow",
+      baseUrl: "https://api.siliconflow.cn",
+    };
+    const siliconflowIcon = getProviderIconSrc(siliconflow);
+    expect(siliconflowIcon).toContain("SiliconCloud");
+    expect(siliconflowIcon).not.toContain("OpenAI");
+
+    const openai = getProviderIconSrc({
+      label: "OpenAI",
+      baseUrl: "https://api.openai.com/v1",
+    });
+    expect(openai).toContain("OpenAI");
+    expect(openai).not.toBe(siliconflowIcon);
   });
 
   it("recognizes local Ollama endpoints", () => {
