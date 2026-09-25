@@ -249,10 +249,10 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
         }
         const mode: UpdateApplyMode = updateApplyMode(channel);
         const [stableResult, betas] = await Promise.all([
-          // Beta off must still receive the stable manifest when this
-          // install is `1.0.8-4`. Semver ranks that build below `1.0.8`,
-          // but a comparator that treats the build number as newer would
-          // hide the channel return. allowDowngrades keeps the payload.
+          // Beta off still receives the stable manifest. A post-release
+          // build such as `1.0.8-6` compares newer than plain `1.0.8`, so
+          // allowDowngrades keeps that payload visible to the policy,
+          // which then declines the same-core stable.
           check(allowPrerelease ? undefined : { allowDowngrades: true })
             .then((value) => ({ ok: true as const, value }))
             .catch((error: unknown) => ({ ok: false as const, error })),
