@@ -1,12 +1,15 @@
+import type { MessageKey } from "@/lib/i18n";
 import type { ProviderApiFormat } from "@/stores/provider-store";
 
 export interface ThirdPartyPreset {
   id: string;
   name: string;
+  /** Chrome label when `name` is not a product name, such as Custom. */
+  nameKey?: MessageKey;
   baseUrl: string;
   model: string;
   apiFormat: ProviderApiFormat;
-  note: string;
+  note: MessageKey;
   editBaseUrl?: boolean;
 }
 
@@ -18,7 +21,7 @@ export const THIRD_PARTY_PRESETS: ThirdPartyPreset[] = [
     baseUrl: "https://api.deepseek.com/anthropic",
     model: "deepseek-chat",
     apiFormat: "anthropic",
-    note: "Anthropic-compatible DeepSeek endpoint.",
+    note: "providers.preset.deepseek.note",
   },
   {
     id: "kimi",
@@ -26,7 +29,7 @@ export const THIRD_PARTY_PRESETS: ThirdPartyPreset[] = [
     baseUrl: "https://api.moonshot.ai/anthropic",
     model: "kimi-k2-turbo-preview",
     apiFormat: "anthropic",
-    note: "Moonshot / Kimi Anthropic-compatible endpoint.",
+    note: "providers.preset.kimi.note",
   },
   {
     id: "qwen",
@@ -34,7 +37,7 @@ export const THIRD_PARTY_PRESETS: ThirdPartyPreset[] = [
     baseUrl: "https://dashscope.aliyuncs.com/apps/anthropic",
     model: "qwen-plus",
     apiFormat: "anthropic",
-    note: "Qwen Anthropic-compatible DashScope endpoint.",
+    note: "providers.preset.qwen.note",
   },
   {
     id: "glm",
@@ -42,7 +45,7 @@ export const THIRD_PARTY_PRESETS: ThirdPartyPreset[] = [
     baseUrl: "https://open.bigmodel.cn/api/anthropic",
     model: "glm-4.5",
     apiFormat: "anthropic",
-    note: "Zhipu BigModel Anthropic-compatible endpoint.",
+    note: "providers.preset.glm.note",
   },
   {
     id: "siliconflow",
@@ -50,7 +53,7 @@ export const THIRD_PARTY_PRESETS: ThirdPartyPreset[] = [
     baseUrl: "https://api.siliconflow.cn",
     model: "deepseek-ai/DeepSeek-V3",
     apiFormat: "anthropic",
-    note: "SiliconFlow Anthropic-compatible endpoint.",
+    note: "providers.preset.siliconflow.note",
   },
   {
     id: "gemini",
@@ -58,7 +61,7 @@ export const THIRD_PARTY_PRESETS: ThirdPartyPreset[] = [
     baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
     model: "gemini-2.5-flash",
     apiFormat: "openai_chat",
-    note: "Google Gemini OpenAI-compatible chat endpoint.",
+    note: "providers.preset.gemini.note",
   },
   {
     id: "ollama",
@@ -66,7 +69,7 @@ export const THIRD_PARTY_PRESETS: ThirdPartyPreset[] = [
     baseUrl: "http://localhost:11434/v1",
     model: "llama3.2",
     apiFormat: "openai_chat",
-    note: "Local Ollama OpenAI-compatible endpoint.",
+    note: "providers.preset.ollama.note",
   },
   {
     id: "openai",
@@ -75,16 +78,17 @@ export const THIRD_PARTY_PRESETS: ThirdPartyPreset[] = [
     model: "gpt-4o-mini",
     apiFormat: "openai_chat",
     editBaseUrl: true,
-    note: "OpenAI-compatible chat completions. Defaults to api.openai.com/v1.",
+    note: "providers.preset.openai.note",
   },
   {
     id: "custom",
     name: "Custom",
+    nameKey: "providers.preset.custom.name",
     baseUrl: "",
     model: "",
     apiFormat: "anthropic",
     editBaseUrl: true,
-    note: "Paste any Anthropic-compatible base URL and model.",
+    note: "providers.preset.custom.note",
   },
 ];
 

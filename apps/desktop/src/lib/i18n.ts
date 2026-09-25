@@ -179,6 +179,25 @@ const en = {
   "providers.connectedWord": "connected",
   "providers.modelSet": "Model set",
   "providers.noModel": "No model",
+  "providers.path.badge": "Recommended",
+  "providers.path.title": "Start with one API key",
+  "providers.path.body":
+    "DeepSeek is the recommended path. Other providers are under Advanced. Official Claude or ChatGPT login stays collapsed below.",
+  "providers.preset.deepseek.note": "Anthropic-compatible DeepSeek endpoint.",
+  "providers.preset.kimi.note":
+    "Moonshot / Kimi Anthropic-compatible endpoint.",
+  "providers.preset.qwen.note": "Qwen Anthropic-compatible DashScope endpoint.",
+  "providers.preset.glm.note": "Zhipu BigModel Anthropic-compatible endpoint.",
+  "providers.preset.siliconflow.note":
+    "SiliconFlow Anthropic-compatible endpoint.",
+  "providers.preset.gemini.note":
+    "Google Gemini OpenAI-compatible chat endpoint.",
+  "providers.preset.ollama.note": "Local Ollama OpenAI-compatible endpoint.",
+  "providers.preset.openai.note":
+    "OpenAI-compatible chat completions. Defaults to api.openai.com/v1.",
+  "providers.preset.custom.note":
+    "Paste any Anthropic-compatible base URL and model.",
+  "providers.preset.custom.name": "Custom",
 
   "skills.addTitle": "Add skills",
   "skills.addHelp":
@@ -685,6 +704,21 @@ const zh: Record<MessageKey, string> = {
   "providers.connectedWord": "个已连接",
   "providers.modelSet": "已设模型",
   "providers.noModel": "无模型",
+  "providers.path.badge": "推荐",
+  "providers.path.title": "先用一把 API 密钥开始",
+  "providers.path.body":
+    "DeepSeek 是推荐路径。其他服务商在“高级”里。官方 Claude 或 ChatGPT 登录收在下方。",
+  "providers.preset.deepseek.note": "兼容 Anthropic 的 DeepSeek 接口。",
+  "providers.preset.kimi.note": "兼容 Anthropic 的 Moonshot / Kimi 接口。",
+  "providers.preset.qwen.note": "兼容 Anthropic 的 Qwen DashScope 接口。",
+  "providers.preset.glm.note": "兼容 Anthropic 的 Zhipu BigModel 接口。",
+  "providers.preset.siliconflow.note": "兼容 Anthropic 的 SiliconFlow 接口。",
+  "providers.preset.gemini.note": "兼容 OpenAI 的 Google Gemini 对话接口。",
+  "providers.preset.ollama.note": "本地 Ollama 的兼容 OpenAI 接口。",
+  "providers.preset.openai.note":
+    "兼容 OpenAI 的对话补全接口。默认地址是 api.openai.com/v1。",
+  "providers.preset.custom.note": "粘贴任意兼容 Anthropic 的 Base URL 和模型。",
+  "providers.preset.custom.name": "自定义",
 
   "skills.addTitle": "添加技能",
   "skills.addHelp": "会保存到你的用户技能库，之后每篇文稿都可以使用。",

@@ -8,6 +8,7 @@ import {
   resetProviderStoreForTests,
   useProviderStore,
 } from "@/stores/provider-store";
+import { useSettingsStore } from "@/stores/settings-store";
 
 vi.mock("@/stores/claude-setup-store", () => ({
   useClaudeSetupStore: (
@@ -39,6 +40,7 @@ describe("RuntimeSettings", () => {
   let root: Root;
 
   beforeEach(() => {
+    useSettingsStore.setState({ uiLanguage: "en" });
     resetProviderStoreForTests();
     useProviderStore.setState({
       cards: [
@@ -82,6 +84,11 @@ describe("RuntimeSettings", () => {
     });
 
     expect(container.textContent).toContain("Use an API key");
+    expect(container.textContent).toContain("Recommended");
+    expect(container.textContent).toContain("Start with one API key");
+    expect(container.textContent).toContain(
+      "Anthropic-compatible DeepSeek endpoint.",
+    );
     expect(container.textContent).toContain("DeepSeek");
     expect(container.textContent).not.toContain("Kimi");
     expect(container.textContent).not.toContain("Cursor");
@@ -121,6 +128,54 @@ describe("RuntimeSettings", () => {
 
     expect(container.textContent).toContain("Sign in to Claude Official");
     expect(container.textContent).toContain("Sign in to ChatGPT Official");
+  });
+
+  it("translates the recommended API-key card and preset helper in Chinese", async () => {
+    useSettingsStore.setState({ uiLanguage: "zh" });
+
+    await act(async () => {
+      root.render(<RuntimeSettings />);
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("推荐");
+    expect(container.textContent).toContain("先用一把 API 密钥开始");
+    expect(container.textContent).toContain(
+      "DeepSeek 是推荐路径。其他服务商在“高级”里。官方 Claude 或 ChatGPT 登录收在下方。",
+    );
+    expect(container.textContent).toContain(
+      "兼容 Anthropic 的 DeepSeek 接口。",
+    );
+    expect(container.textContent).toContain("使用 API 密钥");
+    expect(container.textContent).not.toContain("Recommended");
+    expect(container.textContent).not.toContain("Start with one API key");
+    expect(container.textContent).not.toContain(
+      "Anthropic-compatible DeepSeek endpoint.",
+    );
+
+    const advancedToggle = container.querySelector(
+      '[data-testid="provider-advanced"]',
+    );
+    await act(async () => {
+      if (advancedToggle instanceof HTMLButtonElement) advancedToggle.click();
+    });
+
+    expect(container.textContent).toContain("自定义");
+    expect(container.textContent).not.toContain("Custom");
+
+    const openai = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("OpenAI"),
+    );
+    await act(async () => {
+      openai?.click();
+    });
+
+    expect(container.textContent).toContain(
+      "兼容 OpenAI 的对话补全接口。默认地址是 api.openai.com/v1。",
+    );
+    expect(container.textContent).not.toContain(
+      "OpenAI-compatible chat completions.",
+    );
   });
 
   it("hides the engine install banner once Claude Code CLI is present", async () => {
