@@ -1605,8 +1605,10 @@ export const ChatComposer: FC<{
             <div
               data-testid="composer-controls-leading"
               className={cn(
-                "flex min-w-0 max-w-full flex-wrap items-center gap-1.5",
-                controlsLayout === "narrow" ? "w-full" : "shrink",
+                "flex min-w-0 max-w-full items-center gap-1.5",
+                controlsLayout === "narrow"
+                  ? "w-full flex-wrap"
+                  : "flex-1 flex-nowrap overflow-hidden",
               )}
             >
               <TooltipIconButton
@@ -1648,17 +1650,9 @@ export const ChatComposer: FC<{
                   }
                 }}
               />
-              <ChatTokenMeter />
-              {controlsLayout === "narrow" ? (
-                <div data-testid="composer-send" className="ml-auto shrink-0">
-                  {sendButton}
-                </div>
-              ) : null}
-            </div>
-            {controlsLayout === "wide" ? (
               <div
                 data-testid="composer-controls-model"
-                className="flex min-w-0 flex-1 justify-end overflow-hidden"
+                className="flex min-w-0 max-w-full flex-1 overflow-hidden"
               >
                 <ComposerModelChip
                   buttonRef={modelButtonRef}
@@ -1670,22 +1664,23 @@ export const ChatComposer: FC<{
                   onClick={() => setModelPickerOpen((open) => !open)}
                 />
               </div>
-            ) : null}
+              {controlsLayout === "narrow" ? (
+                <div data-testid="composer-send" className="ml-auto shrink-0">
+                  {sendButton}
+                </div>
+              ) : null}
+            </div>
+            <div
+              data-testid="composer-controls-context"
+              className="flex shrink-0"
+            >
+              <ChatTokenMeter />
+            </div>
             {controlsLayout === "wide" ? (
               <div data-testid="composer-send" className="shrink-0">
                 {sendButton}
               </div>
-            ) : (
-              <ComposerModelChip
-                buttonRef={modelButtonRef}
-                label={composerModelLabel}
-                effortLabel={composerEffortLabel}
-                modelId={composerModelId}
-                providerName={activeProviderName}
-                disabled={runtimeBusy}
-                onClick={() => setModelPickerOpen((open) => !open)}
-              />
-            )}
+            ) : null}
           </div>
         </div>
       )}

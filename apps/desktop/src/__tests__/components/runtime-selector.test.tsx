@@ -866,7 +866,7 @@ describe("ChatComposer provider wiring", () => {
     }
   });
 
-  it("truncates the model chip beside a fully reserved send button on a wide row", async () => {
+  it("truncates a long model chip at the wide breakpoint without clipping the context ring", async () => {
     const chatSnapshot = useClaudeChatStore.getState();
     const setupSnapshot = useClaudeSetupStore.getState();
     const documentSnapshot = useDocumentStore.getState();
@@ -881,7 +881,7 @@ describe("ChatComposer provider wiring", () => {
       observe(target: Element) {
         Object.defineProperty(target, "clientWidth", {
           configurable: true,
-          value: 640,
+          value: 480,
         });
         this.callback([], this);
       }
@@ -894,8 +894,8 @@ describe("ChatComposer provider wiring", () => {
     useProviderStore.setState({
       models: [
         {
-          id: "gpt-5.4-extra",
-          displayName: "GPT-5.4 Extra",
+          id: "gpt-5.6-luna-fast",
+          displayName: "GPT-5.6 Luna Fast",
           reasoningEfforts: ["low", "medium", "high"],
           isDefault: true,
         },
@@ -927,12 +927,173 @@ describe("ChatComposer provider wiring", () => {
           projectPath: "C:/project",
           runtime: "claude",
           chatPeer: "claude",
-          runtimeModel: "gpt-5.4-extra",
+          runtimeModel: "gpt-5.6-luna-fast",
           reasoningEffort: "high",
           providerKey: null,
         },
       ],
       activeTabId: "tab-wide",
+      activeProjectPath: "C:/project",
+      selectedModel: "gpt-5.6-luna-fast",
+      effortLevel: "high",
+      selectedProviderCredentialId: CLAUDE_CODE_PROVIDER_ID,
+      selectedProviderModels: {},
+      messages: [],
+      sessionId: null,
+      isStreaming: false,
+    });
+    (
+      globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+
+    try {
+      await act(async () => {
+        root.render(
+          <TooltipProvider>
+            <ChatComposer />
+          </TooltipProvider>,
+        );
+        await Promise.resolve();
+      });
+
+      const controls = container.querySelector(
+        '[data-testid="composer-controls"]',
+      );
+      const leading = container.querySelector(
+        '[data-testid="composer-controls-leading"]',
+      );
+      const modelSlot = container.querySelector(
+        '[data-testid="composer-controls-model"]',
+      );
+      const contextSlot = container.querySelector(
+        '[data-testid="composer-controls-context"]',
+      );
+      const sendSlot = container.querySelector('[data-testid="composer-send"]');
+      const trigger = container.querySelector(
+        '[data-testid="composer-model-trigger"]',
+      );
+      const meter = container.querySelector(
+        '[data-testid="chat-token-meter-trigger"]',
+      );
+      expect(controls?.getAttribute("data-layout")).toBe("wide");
+      expect(controls?.className).toContain("flex-row");
+      expect(controls?.className).not.toContain("flex-col");
+      expect(leading?.className.split(/\s+/)).toEqual(
+        expect.arrayContaining(["min-w-0", "flex-1", "overflow-hidden"]),
+      );
+      expect(leading?.className).not.toContain("shrink-0");
+      expect(leading?.contains(modelSlot ?? null)).toBe(true);
+      expect(leading?.contains(trigger ?? null)).toBe(true);
+      expect(leading?.contains(meter ?? null)).toBe(false);
+      expect(modelSlot?.className.split(/\s+/)).toEqual(
+        expect.arrayContaining([
+          "min-w-0",
+          "max-w-full",
+          "flex-1",
+          "overflow-hidden",
+        ]),
+      );
+      expect(modelSlot?.contains(trigger ?? null)).toBe(true);
+      expect(contextSlot?.className.split(/\s+/).filter(Boolean)).toEqual([
+        "flex",
+        "shrink-0",
+      ]);
+      expect(contextSlot?.className).not.toContain("flex-1");
+      expect(contextSlot?.className).not.toContain("overflow-hidden");
+      expect(contextSlot?.contains(meter ?? null)).toBe(true);
+      expect(meter?.className.split(/\s+/)).toContain("size-6");
+      expect(sendSlot?.className).toContain("shrink-0");
+      expect(sendSlot?.previousElementSibling).toBe(contextSlot);
+      expect(contextSlot?.previousElementSibling).toBe(leading);
+      const triggerClasses = trigger?.className.split(/\s+/) ?? [];
+      expect(triggerClasses).toContain("max-w-full");
+      expect(triggerClasses).toContain("min-w-0");
+      expect(triggerClasses).toContain("overflow-hidden");
+      expect(triggerClasses).toContain("shrink");
+      expect(triggerClasses).not.toContain("shrink-0");
+      expect(trigger?.querySelector("span")?.className.split(/\s+/)).toContain(
+        "truncate",
+      );
+      expect(trigger?.textContent).toContain("GPT-5.6 Luna Fast");
+      expect(trigger?.textContent).toContain("High");
+    } finally {
+      globalThis.ResizeObserver = OriginalResizeObserver;
+      await act(async () => root.unmount());
+      container.remove();
+      resetProviderStoreForTests();
+      useClaudeChatStore.setState(chatSnapshot, true);
+      useClaudeSetupStore.setState(setupSnapshot, true);
+      useDocumentStore.setState(documentSnapshot, true);
+      useRuntimeStore.setState(runtimeSnapshot, true);
+    }
+  });
+
+  it("stacks the context ring under a truncating model chip on a narrow row", async () => {
+    const chatSnapshot = useClaudeChatStore.getState();
+    const setupSnapshot = useClaudeSetupStore.getState();
+    const documentSnapshot = useDocumentStore.getState();
+    const runtimeSnapshot = useRuntimeStore.getState();
+    const baseTab = chatSnapshot.tabs[0];
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const OriginalResizeObserver = globalThis.ResizeObserver;
+    class NarrowResizeObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(target: Element) {
+        Object.defineProperty(target, "clientWidth", {
+          configurable: true,
+          value: 360,
+        });
+        this.callback([], this);
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+    globalThis.ResizeObserver =
+      NarrowResizeObserver as unknown as typeof ResizeObserver;
+    seedClaudeProvider();
+    useProviderStore.setState({
+      models: [
+        {
+          id: "gpt-5.4-extra",
+          displayName: "GPT-5.4 Extra",
+          reasoningEfforts: ["low", "medium", "high"],
+          isDefault: true,
+        },
+      ],
+    });
+    useDocumentStore.setState({ projectRoot: "C:/project" });
+    useClaudeSetupStore.setState({
+      status: "ready",
+      providerKind: "claude-code",
+      claudeProviderConfigured: true,
+      openAiCredentials: [],
+      activeOpenAiCredentialId: null,
+    });
+    useRuntimeStore.setState({
+      accounts: {
+        claude: runtimeAccount("claude", true),
+        codex: runtimeAccount("codex", true),
+      },
+      models: { claude: [], codex: [] },
+      loading: {},
+      login: {},
+    });
+    useClaudeChatStore.setState({
+      tabs: [
+        {
+          ...baseTab,
+          id: "tab-narrow",
+          projectPath: "C:/project",
+          runtime: "claude",
+          chatPeer: "claude",
+          runtimeModel: "gpt-5.4-extra",
+          reasoningEffort: "high",
+          providerKey: null,
+        },
+      ],
+      activeTabId: "tab-narrow",
       activeProjectPath: "C:/project",
       selectedModel: "gpt-5.4-extra",
       effortLevel: "high",
@@ -965,35 +1126,28 @@ describe("ChatComposer provider wiring", () => {
       const modelSlot = container.querySelector(
         '[data-testid="composer-controls-model"]',
       );
+      const contextSlot = container.querySelector(
+        '[data-testid="composer-controls-context"]',
+      );
       const sendSlot = container.querySelector('[data-testid="composer-send"]');
-      const trigger = container.querySelector(
-        '[data-testid="composer-model-trigger"]',
-      );
-      expect(controls?.getAttribute("data-layout")).toBe("wide");
-      expect(leading?.className).toContain("min-w-0");
-      expect(leading?.className).toContain("max-w-full");
-      expect(leading?.className).toContain("flex-wrap");
-      expect(leading?.className).not.toContain("shrink-0");
-      expect(
-        leading?.querySelector('[data-testid="composer-model-trigger"]'),
-      ).toBeNull();
+      expect(controls?.getAttribute("data-layout")).toBe("narrow");
+      expect(controls?.className).toContain("flex-col");
+      expect(leading?.contains(modelSlot ?? null)).toBe(true);
+      expect(leading?.contains(sendSlot ?? null)).toBe(true);
+      expect(leading?.contains(contextSlot ?? null)).toBe(false);
       expect(modelSlot?.className.split(/\s+/)).toEqual(
-        expect.arrayContaining(["min-w-0", "flex-1", "overflow-hidden"]),
+        expect.arrayContaining([
+          "min-w-0",
+          "max-w-full",
+          "flex-1",
+          "overflow-hidden",
+        ]),
       );
-      expect(modelSlot?.contains(trigger ?? null)).toBe(true);
-      expect(sendSlot?.className).toContain("shrink-0");
-      expect(sendSlot?.previousElementSibling).toBe(modelSlot);
-      const triggerClasses = trigger?.className.split(/\s+/) ?? [];
-      expect(triggerClasses).toContain("max-w-full");
-      expect(triggerClasses).toContain("min-w-0");
-      expect(triggerClasses).toContain("overflow-hidden");
-      expect(triggerClasses).toContain("shrink");
-      expect(triggerClasses).not.toContain("shrink-0");
-      expect(trigger?.querySelector("span")?.className.split(/\s+/)).toContain(
-        "truncate",
-      );
-      expect(trigger?.textContent).toContain("GPT-5.4 Extra");
-      expect(trigger?.textContent).toContain("High");
+      expect(contextSlot?.className).not.toContain("flex-1");
+      expect(leading?.nextElementSibling).toBe(contextSlot);
+      expect(
+        contextSlot?.querySelector('[data-testid="chat-token-meter-trigger"]'),
+      ).not.toBeNull();
     } finally {
       globalThis.ResizeObserver = OriginalResizeObserver;
       await act(async () => root.unmount());
