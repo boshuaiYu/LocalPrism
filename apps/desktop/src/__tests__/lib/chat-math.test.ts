@@ -63,6 +63,18 @@ describe("normalizeChatMath", () => {
     expect(normalizeChatMath(source)).toBe(source);
   });
 
+  it("does not rewrite brackets already inside $ or $$", () => {
+    const samples = [
+      "$[\\alpha, \\beta]$",
+      "$\\left[\\frac{a}{b}\\right]$",
+      "$\\left[0,1\\right]$",
+      "$$[\\frac{a}{b}]$$",
+    ];
+    for (const source of samples) {
+      expect(normalizeChatMath(source)).toBe(source);
+    }
+  });
+
   it("turns the screenshot bracket display formula into display math", () => {
     const formula = "x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}";
     const source = `独立公式：[ ${formula} ]`;

@@ -139,16 +139,16 @@ function rewriteExplicitTex(text: string): string {
 }
 
 function rewriteBareTex(text: string): string {
-  const brackets = text.replace(
+  const hidden = protectMath(text);
+  const brackets = hidden.text.replace(
     BARE_BRACKET_RE,
     (full, inner: string, offset: number) => {
       if (!isSafeMathFragment(inner) || isProse(inner)) return full;
-      return displayMathAt(text, offset, inner);
+      return displayMathAt(hidden.text, offset, inner);
     },
   );
-  const hidden = protectMath(brackets);
   return hidden.restore(
-    hidden.text.replace(BARE_PAREN_RE, (full, inner: string) => {
+    brackets.replace(BARE_PAREN_RE, (full, inner: string) => {
       if (!isSafeMathFragment(inner) || isProse(inner)) return full;
       return `$${inner.trim()}$`;
     }),
