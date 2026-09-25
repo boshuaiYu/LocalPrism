@@ -313,10 +313,13 @@ function ThirdPartySection({
 
   const applyPreset = (next: ThirdPartyPreset) => {
     setPresetId(next.id);
-    setName(next.name === "Custom" ? "" : next.name);
+    setName(next.id === "custom" ? "" : next.name);
     setBaseUrl(next.baseUrl);
     setModel(next.model);
   };
+
+  const presetLabel = (item: ThirdPartyPreset) =>
+    item.nameKey ? t(item.nameKey) : item.name;
 
   return (
     <section className="lp-panel rounded-xl border p-4">
@@ -356,7 +359,9 @@ function ThirdPartySection({
               onChange={(event) => setModel(event.target.value)}
             />
           </div>
-          {preset.note && <p className="text-lp-meta text-xs">{preset.note}</p>}
+          {preset.note && (
+            <p className="text-lp-meta text-xs">{t(preset.note)}</p>
+          )}
           <Button
             size="sm"
             disabled={
@@ -425,7 +430,7 @@ function ThirdPartySection({
                     {item.name.slice(0, 1)}
                   </span>
                 )}
-                <span className="truncate text-sm">{item.name}</span>
+                <span className="truncate text-sm">{presetLabel(item)}</span>
               </button>
             );
           })}
