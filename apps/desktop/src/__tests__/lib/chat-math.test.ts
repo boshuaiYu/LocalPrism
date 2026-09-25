@@ -59,7 +59,114 @@ describe("normalizeChatMath", () => {
   });
 
   it("does not rewrite math that is already delimited", () => {
-    const source = "Inline $E=mc^2$ and \\[ \\sum_i x_i \\].";
+    const source = "Inline $E=mc^2$ and $$\\sum_i x_i$$.";
+    expect(normalizeChatMath(source)).toBe(source);
+  });
+
+  it("does not rewrite brackets already inside $ or $$", () => {
+    const samples = [
+      "$[\\alpha, \\beta]$",
+      "$\\left[\\frac{a}{b}\\right]$",
+      "$\\left[0,1\\right]$",
+      "$$[\\frac{a}{b}]$$",
+    ];
+    for (const source of samples) {
+      expect(normalizeChatMath(source)).toBe(source);
+    }
+  });
+
+  it("keeps parentheses inside a new bracket display as one region", () => {
+    const samples = [
+      "[ \\min_w (w + \\frac{1}{2}) ]",
+      "[ \\log(1 + \\frac{x}{y}) ]",
+      "[ \\left( \\frac{a}{b} \\right) ]",
+      "[ f\\left(x\\right) = \\frac{a}{b} ]",
+      "[ x = (\\frac{a}{b}) + 1 ]",
+    ];
+    for (const source of samples) {
+      const normalized = normalizeChatMath(source);
+      expect(normalized.match(/\$\$/g)).toHaveLength(2);
+      const body = normalized.replace(/^\$\$\n?/, "").replace(/\n?\$\$$/, "");
+      expect(body).not.toContain("$");
+      expect(body).toContain("\\frac");
+    }
+  });
+
+  it("does not rewrite \\[ or \\( already inside $ or $$", () => {
+    const samples = [
+      "$$\n\\[ x = \\frac{a}{b} \\]\n$$",
+      "$$\\[ \\frac{a}{b} \\]$$",
+      "Let $x = \\(a \\frac{1}{2}\\)$",
+      "$\\[ \\alpha \\]$",
+      "$$ x = \\( a \\frac{1}{2} \\) $$",
+    ];
+    for (const source of samples) {
+      expect(normalizeChatMath(source)).toBe(source);
+    }
+  });
+
+  it("does not shred \\left, \\right, or probability parentheses", () => {
+    const samples = [
+      "f\\left(x\\right) = \\frac{a}{b}",
+      "\\left[0,1\\right]",
+      "P(A \\mid B) = \\frac{P(B \\mid A)P(A)}{P(B)}",
+    ];
+    for (const source of samples) {
+      const normalized = normalizeChatMath(source);
+      const wrapped = normalized.match(/^\$\$\n([\s\S]*)\n\$\$$/);
+      if (wrapped) {
+        expect(wrapped[1]).toBe(source);
+        expect(wrapped[1]).not.toContain("$");
+      } else {
+        expect(normalized).toBe(source);
+      }
+    }
+  });
+
+  it("turns the screenshot bracket display formula into display math", () => {
+    const formula = "x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}";
+    const source = `独立公式：[ ${formula} ]`;
+    const normalized = normalizeChatMath(source);
+    expect(normalized).toContain("$$");
+    expect(normalized).toContain(formula);
+    expect(normalized).not.toContain(`[ ${formula} ]`);
+  });
+
+  it("turns \\[...\\] display math into $$ so markdown cannot strip the delimiter", () => {
+    const formula = "x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}";
+    const source = `独立公式：\\[ ${formula} \\]`;
+    const normalized = normalizeChatMath(source);
+    expect(normalized).toContain("$$");
+    expect(normalized).toContain(formula);
+    expect(normalized).not.toContain("\\[");
+    expect(normalized).not.toContain("\\]");
+  });
+
+  it("keeps $$ display math and converts \\(...\\) inline math", () => {
+    const display = "$$\nx = \\frac{-b}{2a}\n$$";
+    expect(normalizeChatMath(display)).toBe(display);
+    expect(normalizeChatMath("行内 \\(E=mc^2\\) 结束")).toBe(
+      "行内 $E=mc^2$ 结束",
+    );
+    expect(normalizeChatMath("行内 $E=mc^2$ 结束")).toBe("行内 $E=mc^2$ 结束");
+  });
+
+  it("turns bare parentheses that contain TeX into inline math", () => {
+    const source = "其中 (E=mc^2) 与 (a \\neq 0)。";
+    const normalized = normalizeChatMath(source);
+    expect(normalized).toContain("$E=mc^2$");
+    expect(normalized).toContain("$a \\neq 0$");
+    expect(normalized).not.toContain("(E=mc^2)");
+  });
+
+  it("does not turn links, lists, or citation brackets into math", () => {
+    const source = [
+      "See [Nature](https://doi.org/10.1038/s41586-023-00000) and \\[1\\].",
+      "- [ ] todo",
+      "1. item",
+      "Recent work [1] is not a formula.",
+      "The vector is [1, 2, 3].",
+    ].join("\n");
     expect(normalizeChatMath(source)).toBe(source);
   });
 

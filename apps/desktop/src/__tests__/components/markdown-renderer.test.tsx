@@ -230,6 +230,40 @@ describe("MarkdownRenderer links", () => {
     expect(container.querySelector(".chat-markdown-code")).toBeNull();
   });
 
+  it("renders screenshot bracket display math and \\[...\\] with KaTeX", async () => {
+    const formula = "x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}";
+    await act(async () => {
+      root.render(
+        <MarkdownRenderer
+          content={[
+            "行内 $E=mc^2$ 与 \\(a \\neq 0\\)。",
+            "",
+            `独立公式：[ ${formula} ]`,
+            "",
+            `\\[ ${formula} \\]`,
+            "",
+            "$$",
+            "y = \\frac{1}{x}",
+            "$$",
+          ].join("\n")}
+        />,
+      );
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        container.querySelectorAll(".katex-display").length,
+      ).toBeGreaterThanOrEqual(3);
+    });
+    const html = Array.from(container.querySelectorAll(".katex-html"))
+      .map((node) => node.textContent ?? "")
+      .join("");
+    expect(html).not.toContain("\\frac");
+    expect(html).not.toContain("\\sqrt");
+    expect(container.textContent).not.toContain(`[ ${formula} ]`);
+    expect(container.querySelector(".katex")).toBeTruthy();
+  });
+
   it("keeps a non-formula latex document as insertable source", async () => {
     await act(async () => {
       root.render(

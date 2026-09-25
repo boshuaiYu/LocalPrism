@@ -103,6 +103,132 @@ function toDisplayMath(inner: string, trailing = ""): string {
   return punct ? `$$\n${body}\n$$${punct}` : `$$\n${body}\n$$`;
 }
 
+const TEX_DISPLAY_RE = /\\\[([\s\S]+?)\\\]/g;
+const TEX_INLINE_RE = /\\\(([\s\S]+?)\\\)/g;
+// `\left[` / `\right(` are sized delimiters; `(?<!\\)` only sees the last letter.
+const NOT_SIZED_DELIM = String.raw`(?<!\\(?:left|right))`;
+// Markdown links are `[label](url)` / `[label][id]`. Images start with `!`.
+const BARE_BRACKET_RE = new RegExp(
+  `${NOT_SIZED_DELIM}(?<![\\\\!])\\[([^\\]\\n]+)\\](?!\\s*[[(:])`,
+  "g",
+);
+const BARE_PAREN_RE = new RegExp(
+  `${NOT_SIZED_DELIM}(?<!\\\\)\\(([^)\\n]+)\\)`,
+  "g",
+);
+const DOLLAR_MATH_RE = /\$\$[\s\S]+?\$\$|\$[^$\n]+\$/g;
+const DOLLAR_PLACEHOLDER = "\u0000DOLLAR";
+
+function replaceOutsideInlineCode(
+  text: string,
+  replacer: (chunk: string) => string,
+): string {
+  return text
+    .split(/(`+[^`\n]*`+)/g)
+    .map((chunk, index) => (index % 2 === 1 ? chunk : replacer(chunk)))
+    .join("");
+}
+
+function displayMathAt(text: string, offset: number, inner: string): string {
+  const block = toDisplayMath(inner);
+  const lineStart = offset === 0 || text[offset - 1] === "\n";
+  return lineStart ? block : `\n\n${block}`;
+}
+
+/** remark-math only tokenizes `$` / `$$`. `\[` `\]` survive as escaped brackets. */
+function rewriteExplicitTex(text: string): string {
+  TEX_DISPLAY_RE.lastIndex = 0;
+  TEX_INLINE_RE.lastIndex = 0;
+  return text
+    .replace(TEX_DISPLAY_RE, (full, inner: string, offset: number) => {
+      if (!isSafeMathFragment(inner)) return full;
+      return displayMathAt(text, offset, inner);
+    })
+    .replace(TEX_INLINE_RE, (full, inner: string) => {
+      if (!isSafeMathFragment(inner)) return full;
+      return `$${inner.trim()}$`;
+    });
+}
+
+function protectDollarMath(source: string): {
+  text: string;
+  restore: (value: string) => string;
+} {
+  const stash: string[] = [];
+  DOLLAR_MATH_RE.lastIndex = 0;
+  const text = source.replace(DOLLAR_MATH_RE, (match) => {
+    stash.push(match);
+    return `${DOLLAR_PLACEHOLDER}${stash.length - 1}\u0000`;
+  });
+  return {
+    text,
+    restore: (value) =>
+      value.replace(
+        new RegExp(`${DOLLAR_PLACEHOLDER}(\\d+)\u0000`, "g"),
+        (_match, index: string) => stash[Number(index)] ?? "",
+      ),
+  };
+}
+
+/** `\[` / `\(` inside an existing `$` / `$$` span must stay literal. */
+function rewriteExplicitOutsideDollars(text: string): string {
+  const hidden = protectDollarMath(text);
+  return hidden.restore(rewriteExplicitTex(hidden.text));
+}
+
+function lineHasTexOutside(line: string, start: number, end: number): boolean {
+  const outside = `${line.slice(0, start)} ${line.slice(end)}`.replace(
+    /\([^)\n]*\)/g,
+    " ",
+  );
+  return /\\[a-zA-Z]+/.test(outside);
+}
+
+function rewriteBareBrackets(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      if (isStandaloneMathLine(line)) return line;
+      BARE_BRACKET_RE.lastIndex = 0;
+      return line.replace(
+        BARE_BRACKET_RE,
+        (full, inner: string, offset: number) => {
+          if (!isSafeMathFragment(inner) || isProse(inner)) return full;
+          if (lineHasTexOutside(line, offset, offset + full.length))
+            return full;
+          return displayMathAt(line, offset, inner);
+        },
+      );
+    })
+    .join("\n");
+}
+
+function rewriteBareParens(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      if (isStandaloneMathLine(line)) return line;
+      BARE_PAREN_RE.lastIndex = 0;
+      return line.replace(
+        BARE_PAREN_RE,
+        (full, inner: string, offset: number) => {
+          if (!isSafeMathFragment(inner) || isProse(inner)) return full;
+          if (lineHasTexOutside(line, offset, offset + full.length))
+            return full;
+          return `$${inner.trim()}$`;
+        },
+      );
+    })
+    .join("\n");
+}
+
+function rewriteBareTex(text: string): string {
+  const hiddenBrackets = protectDollarMath(text);
+  const brackets = rewriteBareBrackets(hiddenBrackets.text);
+  const hiddenParens = protectDollarMath(hiddenBrackets.restore(brackets));
+  return hiddenParens.restore(rewriteBareParens(hiddenParens.text));
+}
+
 function transformMathLines(text: string): string {
   const lines = text.split("\n");
   const out: string[] = [];
@@ -226,7 +352,10 @@ function protectMathEnvironments(source: string): {
 
 function normalizeChunk(chunk: string): string {
   const withInline = convertInlineMathCode(chunk);
-  const protectedMath = protectMath(withInline);
+  const rewritten = replaceOutsideInlineCode(withInline, (part) =>
+    rewriteBareTex(rewriteExplicitOutsideDollars(part)),
+  );
+  const protectedMath = protectMath(rewritten);
   const protectedEnv = protectMathEnvironments(protectedMath.text);
   return protectedMath.restore(
     protectedEnv.restore(transformMathLines(protectedEnv.text)),
@@ -314,7 +443,8 @@ function splitStreamingTail(source: string): {
 
 /**
  * Rewrite common model math mistakes into remark-math delimiters.
- * Fenced code, existing `$` / `$$` / `\(\)` / `\[\]` math, citations, and prose stay put.
+ * Fenced code, existing `$` / `$$`, citations, links, and prose stay put.
+ * `\[...\]` / `\(...\)` become `$$` / `$` because remark-math does not read them.
  */
 function normalizeClosed(markdown: string): string {
   const parts: string[] = [];
