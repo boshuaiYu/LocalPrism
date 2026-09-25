@@ -26,6 +26,26 @@ function assistant(text: string, extra: Partial<ClaudeStreamMessage> = {}) {
 }
 
 describe("chat rewind", () => {
+  it("matches a saved transcript prompt to the visible user text", () => {
+    const stored = [
+      "[Reply mode: academic-polish. Follow this speaking style for this turn only. Do not rewrite earlier messages.]",
+      "你是一个学术 LaTeX 论文润色的智能体。",
+      "",
+      "[Currently open file: main.tex. Location only — do not read this file unless the user asked to use the document. File tools must use paths relative to the current working directory, such as main.tex.]",
+      "[Selection: @main.tex:4:1-4:8]",
+      "[Selected text:",
+      "Hello abstract",
+      "]",
+      "",
+      "请回复 OK",
+    ].join("\n");
+    expect(rewindMatchText(stored)).toBe("请回复 OK");
+    expect(rewindMatchText("@main.tex:4:1-4:8\n请回复 OK")).toBe("请回复 OK");
+    expect(
+      rewindTextsMatch(rewindMatchText(stored), rewindMatchText("请回复 OK")),
+    ).toBe(true);
+  });
+
   it("strips editor context so a displayed prompt matches the stored prompt", () => {
     expect(rewindMatchText("@main.tex:4:1-4:8\nRewrite the abstract")).toBe(
       "Rewrite the abstract",
