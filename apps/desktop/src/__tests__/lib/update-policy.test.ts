@@ -252,7 +252,7 @@ describe("beta update detection", () => {
         betas: [],
         allowPrerelease: false,
       }),
-    ).toMatchObject({ action: "download", version: "1.0.8" });
+    ).toEqual({ action: "none" });
 
     expect(
       chooseUpdateOffer({
@@ -261,15 +261,42 @@ describe("beta update detection", () => {
         betas: [],
         allowPrerelease: false,
       }),
-    ).toMatchObject({
-      action: "download",
-      version: "1.0.8",
-      notes: "stable",
-    });
+    ).toEqual({ action: "none" });
 
     expect(
       chooseUpdateOffer({
         currentVersion: "1.0.8beta4",
+        stable: { version: "1.0.8" },
+        betas: [],
+        allowPrerelease: false,
+      }),
+    ).toEqual({ action: "none" });
+
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.8-6",
+        stable: { version: "1.0.8" },
+        betas: [],
+        allowPrerelease: false,
+      }),
+    ).toEqual({ action: "none" });
+
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.8-6",
+        stable: { version: "1.0.9", notes: "next stable" },
+        betas: [],
+        allowPrerelease: false,
+      }),
+    ).toMatchObject({
+      action: "download",
+      version: "1.0.9",
+      notes: "next stable",
+    });
+
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.8-beta.2",
         stable: { version: "1.0.8" },
         betas: [],
         allowPrerelease: false,
