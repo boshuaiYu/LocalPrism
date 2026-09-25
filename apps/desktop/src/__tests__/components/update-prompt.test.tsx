@@ -178,10 +178,10 @@ describe("AppStatusBar updates", () => {
     expect(container.textContent).not.toContain("1.0.8beta2");
   });
 
-  it("offers stable 1.0.8 when Beta is turned off on 1.0.8-4", async () => {
+  it("does not offer stable 1.0.8 when Beta is turned off on 1.0.8-6", async () => {
     const update = updateFixture();
     update.version = "1.0.8";
-    vi.mocked(getVersion).mockResolvedValue("1.0.8-4");
+    vi.mocked(getVersion).mockResolvedValue("1.0.8-6");
     vi.mocked(check).mockResolvedValue(update as never);
     useSettingsStore.setState({ joinBetaChannel: true });
 
@@ -201,11 +201,14 @@ describe("AppStatusBar updates", () => {
 
     expect(useSettingsStore.getState().joinBetaChannel).toBe(false);
     expect(check).toHaveBeenLastCalledWith({ allowDowngrades: true });
-    expect(update.download).toHaveBeenCalledOnce();
+    expect(update.download).not.toHaveBeenCalled();
+    expect(update.close).toHaveBeenCalled();
+    const flash = container.querySelector("[data-testid='update-flash']");
+    expect(flash?.textContent).toBe(translate("en", "updates.flashCurrent"));
     expect(container.textContent).not.toContain(
-      translate("en", "updates.flashError"),
+      translate("en", "updates.manual", { version: "1.0.8" }),
     );
-    expect(container.textContent).toMatch(/1\.0\.8/);
+    expect(container.textContent).not.toMatch(/Restart 1\.0\.8/);
   });
 
   it("discovers v1.0.8beta3 from the tag manifest when Beta is on", async () => {

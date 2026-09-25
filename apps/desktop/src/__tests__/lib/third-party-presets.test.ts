@@ -13,19 +13,26 @@ describe("third-party presets", () => {
       "qwen",
       "glm",
       "siliconflow",
-      "cursor",
+      "gemini",
+      "ollama",
+      "openai",
       "custom",
     ]);
+    expect(ids).not.toContain("cursor");
     expect(
-      THIRD_PARTY_PRESETS.filter((preset) => preset.id !== "cursor").every(
-        (preset) => preset.apiFormat === "anthropic",
-      ),
+      THIRD_PARTY_PRESETS.filter(
+        (preset) => !["gemini", "ollama", "openai"].includes(preset.id),
+      ).every((preset) => preset.apiFormat === "anthropic"),
     ).toBe(true);
-    expect(thirdPartyPresetById("cursor")).toMatchObject({
-      name: "Cursor",
+    expect(thirdPartyPresetById("openai")).toMatchObject({
+      name: "OpenAI",
       apiFormat: "openai_chat",
-      model: "composer-2.5",
+      baseUrl: "https://api.openai.com/v1",
+      model: "gpt-4o-mini",
+      editBaseUrl: true,
     });
+    expect(thirdPartyPresetById("gemini")?.apiFormat).toBe("openai_chat");
+    expect(thirdPartyPresetById("ollama")?.apiFormat).toBe("openai_chat");
   });
 
   it("looks up a preset by id", () => {

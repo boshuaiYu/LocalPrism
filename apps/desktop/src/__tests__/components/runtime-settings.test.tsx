@@ -102,7 +102,10 @@ describe("RuntimeSettings", () => {
     });
 
     expect(container.textContent).toContain("Kimi");
-    expect(container.textContent).toContain("Cursor");
+    expect(container.textContent).toContain("OpenAI");
+    expect(container.textContent).toContain("Gemini");
+    expect(container.textContent).toContain("Ollama");
+    expect(container.textContent).not.toContain("Cursor");
     expect(container.textContent).not.toContain("Sign in to Claude Official");
 
     const officialToggle = Array.from(

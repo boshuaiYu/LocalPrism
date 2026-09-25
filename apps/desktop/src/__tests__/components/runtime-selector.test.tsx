@@ -866,7 +866,7 @@ describe("ChatComposer provider wiring", () => {
     }
   });
 
-  it("truncates the model chip beside a fully reserved send button on a wide row", async () => {
+  it("truncates a long model chip at the wide breakpoint without clipping the context ring", async () => {
     const chatSnapshot = useClaudeChatStore.getState();
     const setupSnapshot = useClaudeSetupStore.getState();
     const documentSnapshot = useDocumentStore.getState();
@@ -881,7 +881,7 @@ describe("ChatComposer provider wiring", () => {
       observe(target: Element) {
         Object.defineProperty(target, "clientWidth", {
           configurable: true,
-          value: 640,
+          value: 480,
         });
         this.callback([], this);
       }
@@ -894,8 +894,8 @@ describe("ChatComposer provider wiring", () => {
     useProviderStore.setState({
       models: [
         {
-          id: "gpt-5.4-extra",
-          displayName: "GPT-5.4 Extra",
+          id: "gpt-5.6-luna-fast",
+          displayName: "GPT-5.6 Luna Fast",
           reasoningEfforts: ["low", "medium", "high"],
           isDefault: true,
         },
@@ -927,14 +927,14 @@ describe("ChatComposer provider wiring", () => {
           projectPath: "C:/project",
           runtime: "claude",
           chatPeer: "claude",
-          runtimeModel: "gpt-5.4-extra",
+          runtimeModel: "gpt-5.6-luna-fast",
           reasoningEffort: "high",
           providerKey: null,
         },
       ],
       activeTabId: "tab-wide",
       activeProjectPath: "C:/project",
-      selectedModel: "gpt-5.4-extra",
+      selectedModel: "gpt-5.6-luna-fast",
       effortLevel: "high",
       selectedProviderCredentialId: CLAUDE_CODE_PROVIDER_ID,
       selectedProviderModels: {},
@@ -976,23 +976,35 @@ describe("ChatComposer provider wiring", () => {
         '[data-testid="chat-token-meter-trigger"]',
       );
       expect(controls?.getAttribute("data-layout")).toBe("wide");
-      expect(leading?.className).toContain("min-w-0");
-      expect(leading?.className).toContain("max-w-full");
-      expect(leading?.className).toContain("flex-wrap");
+      expect(controls?.className).toContain("flex-row");
+      expect(controls?.className).not.toContain("flex-col");
+      expect(leading?.className.split(/\s+/)).toEqual(
+        expect.arrayContaining(["min-w-0", "flex-1", "overflow-hidden"]),
+      );
       expect(leading?.className).not.toContain("shrink-0");
       expect(leading?.contains(modelSlot ?? null)).toBe(true);
       expect(leading?.contains(trigger ?? null)).toBe(true);
       expect(leading?.contains(meter ?? null)).toBe(false);
       expect(modelSlot?.className.split(/\s+/)).toEqual(
-        expect.arrayContaining(["min-w-0", "max-w-full", "overflow-hidden"]),
+        expect.arrayContaining([
+          "min-w-0",
+          "max-w-full",
+          "flex-1",
+          "overflow-hidden",
+        ]),
       );
       expect(modelSlot?.contains(trigger ?? null)).toBe(true);
-      expect(contextSlot?.className.split(/\s+/)).toEqual(
-        expect.arrayContaining(["min-w-0", "flex-1", "overflow-hidden"]),
-      );
+      expect(contextSlot?.className.split(/\s+/).filter(Boolean)).toEqual([
+        "flex",
+        "shrink-0",
+      ]);
+      expect(contextSlot?.className).not.toContain("flex-1");
+      expect(contextSlot?.className).not.toContain("overflow-hidden");
       expect(contextSlot?.contains(meter ?? null)).toBe(true);
+      expect(meter?.className.split(/\s+/)).toContain("size-6");
       expect(sendSlot?.className).toContain("shrink-0");
       expect(sendSlot?.previousElementSibling).toBe(contextSlot);
+      expect(contextSlot?.previousElementSibling).toBe(leading);
       const triggerClasses = trigger?.className.split(/\s+/) ?? [];
       expect(triggerClasses).toContain("max-w-full");
       expect(triggerClasses).toContain("min-w-0");
@@ -1002,7 +1014,7 @@ describe("ChatComposer provider wiring", () => {
       expect(trigger?.querySelector("span")?.className.split(/\s+/)).toContain(
         "truncate",
       );
-      expect(trigger?.textContent).toContain("GPT-5.4 Extra");
+      expect(trigger?.textContent).toContain("GPT-5.6 Luna Fast");
       expect(trigger?.textContent).toContain("High");
     } finally {
       globalThis.ResizeObserver = OriginalResizeObserver;

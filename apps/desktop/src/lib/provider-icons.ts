@@ -5,6 +5,7 @@ import moonshotIcon from "@/assets/providers/moonshot.svg";
 import ollamaIcon from "@/assets/providers/ollama.svg";
 import openaiIcon from "@/assets/providers/openai.svg";
 import qwenIcon from "@/assets/providers/qwen.svg";
+import siliconflowIcon from "@/assets/providers/siliconflow.svg";
 import zhipuIcon from "@/assets/providers/zhipu-color.svg";
 
 interface ProviderIconInput {
@@ -51,14 +52,6 @@ export function getProviderDisplayName(input: ProviderIconInput): string {
 
   if (haystack.includes("deepseek")) {
     return "DeepSeek";
-  }
-
-  if (
-    haystack.includes("cursor") ||
-    haystack.includes("composer-2") ||
-    haystack.includes("composer-1")
-  ) {
-    return "Cursor";
   }
 
   if (haystack.includes("siliconflow")) {
@@ -140,24 +133,8 @@ export function getProviderIconSrc(input: ProviderIconInput): string | null {
     return deepseekIcon;
   }
 
-  if (
-    haystack.includes("cursor") ||
-    haystack.includes("composer-2") ||
-    haystack.includes("composer-1")
-  ) {
-    return openaiIcon;
-  }
-
   if (haystack.includes("siliconflow")) {
-    return openaiIcon;
-  }
-
-  if (
-    haystack.includes("xiaomimimo") ||
-    haystack.includes("xiaomi mimo") ||
-    haystack.includes("xiaomi")
-  ) {
-    return openaiIcon;
+    return siliconflowIcon;
   }
 
   if (

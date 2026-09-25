@@ -68,10 +68,8 @@ import { PermissionModePicker } from "@/components/runtime/permission-mode-picke
 import { AgentSelector } from "@/components/agents/agent-selector";
 import {
   agentFlashAttribute,
-  replyModeForAgent,
   requestPresetAgentFlash,
   shouldFlashPresetAgentSwitch,
-  type ReplyMode,
 } from "@/lib/reply-mode";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
@@ -257,35 +255,6 @@ function ComposerModelChip({
       <span className="sr-only">{providerName}</span>
       <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
     </button>
-  );
-}
-
-const REPLY_MODE_LABEL: Record<
-  ReplyMode,
-  | "chat.replyMode.custom"
-  | "chat.replyMode.academic-polish"
-  | "chat.replyMode.de-ai"
-  | "chat.replyMode.peer-review"
-> = {
-  custom: "chat.replyMode.custom",
-  "academic-polish": "chat.replyMode.academic-polish",
-  "de-ai": "chat.replyMode.de-ai",
-  "peer-review": "chat.replyMode.peer-review",
-};
-
-function ReplyModePill({ agentId }: { agentId: string | null }) {
-  const { t } = useI18n();
-  const mode = replyModeForAgent(agentId);
-  const label = t(REPLY_MODE_LABEL[mode]);
-  return (
-    <span
-      data-testid="reply-mode"
-      data-reply-mode={mode}
-      title={t("chat.replyMode")}
-      className="flex h-7 min-w-0 max-w-28 shrink items-center overflow-hidden rounded-full px-2 text-muted-foreground text-xs"
-    >
-      <span className="min-w-0 truncate">{label}</span>
-    </span>
   );
 }
 
@@ -1636,8 +1605,10 @@ export const ChatComposer: FC<{
             <div
               data-testid="composer-controls-leading"
               className={cn(
-                "flex min-w-0 max-w-full flex-wrap items-center gap-1.5",
-                controlsLayout === "narrow" ? "w-full" : "shrink",
+                "flex min-w-0 max-w-full items-center gap-1.5",
+                controlsLayout === "narrow"
+                  ? "w-full flex-wrap"
+                  : "flex-1 flex-nowrap overflow-hidden",
               )}
             >
               <TooltipIconButton
@@ -1679,13 +1650,9 @@ export const ChatComposer: FC<{
                   }
                 }}
               />
-              <ReplyModePill agentId={activeTabMeta.agentId ?? null} />
               <div
                 data-testid="composer-controls-model"
-                className={cn(
-                  "flex min-w-0 max-w-full overflow-hidden",
-                  controlsLayout === "narrow" && "flex-1",
-                )}
+                className="flex min-w-0 max-w-full flex-1 overflow-hidden"
               >
                 <ComposerModelChip
                   buttonRef={modelButtonRef}
@@ -1705,11 +1672,7 @@ export const ChatComposer: FC<{
             </div>
             <div
               data-testid="composer-controls-context"
-              className={cn(
-                "flex shrink-0",
-                controlsLayout === "wide" &&
-                  "min-w-0 flex-1 justify-end overflow-hidden",
-              )}
+              className="flex shrink-0"
             >
               <ChatTokenMeter />
             </div>
