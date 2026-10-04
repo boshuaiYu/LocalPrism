@@ -841,6 +841,7 @@ pub fn run() {
             zotero::zotero_complete_oauth,
             zotero::zotero_cancel_oauth,
             zotero::zotero_api_request,
+            zotero::zotero_local_connector_ready,
             history::history_init,
             history::history_snapshot,
             history::history_list,

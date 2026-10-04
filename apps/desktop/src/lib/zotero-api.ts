@@ -76,6 +76,34 @@ export async function cancelOAuth(): Promise<void> {
 
 type ZoteroSource = "web" | "local";
 
+const LOCAL_CONNECTOR_TTL_MS = 2_000;
+let localConnectorCache: { ready: boolean; expiresAt: number } | null = null;
+
+export function resetLocalZoteroProbeCache(): void {
+  localConnectorCache = null;
+}
+
+export async function canUseLocalZotero(): Promise<boolean> {
+  const now = Date.now();
+  if (localConnectorCache && now < localConnectorCache.expiresAt) {
+    return localConnectorCache.ready;
+  }
+  try {
+    const ready = await invoke<boolean>("zotero_local_connector_ready");
+    localConnectorCache = {
+      ready: Boolean(ready),
+      expiresAt: now + LOCAL_CONNECTOR_TTL_MS,
+    };
+    return localConnectorCache.ready;
+  } catch {
+    localConnectorCache = {
+      ready: false,
+      expiresAt: now + LOCAL_CONNECTOR_TTL_MS,
+    };
+    return false;
+  }
+}
+
 interface ZoteroProxyResponse {
   status: number;
   headers: Record<string, string>;
@@ -425,9 +453,9 @@ export async function fetchCollections(
   userID: string,
 ): Promise<ZoteroCollection[]> {
   const web = await fetchCollectionsFromSource(apiKey, userID, "web");
-  const local = await fetchCollectionsFromSource(apiKey, userID, "local").catch(
-    () => [],
-  );
+  const local = (await canUseLocalZotero())
+    ? await fetchCollectionsFromSource(apiKey, userID, "local").catch(() => [])
+    : [];
   return mergeCollectionsByKey(web, local);
 }
 
@@ -515,10 +543,13 @@ async function importItemsFromPath(
   basePath: string,
   onProgress?: (loaded: number, total: number) => void,
 ): Promise<ItemImportBatch> {
-  const settled = await Promise.allSettled([
+  const sources: Promise<ItemImportBatch>[] = [
     importItemsFromSource(apiKey, basePath, "web", onProgress),
-    importItemsFromSource(apiKey, basePath, "local", onProgress),
-  ]);
+  ];
+  if (await canUseLocalZotero()) {
+    sources.push(importItemsFromSource(apiKey, basePath, "local", onProgress));
+  }
+  const settled = await Promise.allSettled(sources);
   const batches = settled.flatMap((result) =>
     result.status === "fulfilled" ? [result.value] : [],
   );

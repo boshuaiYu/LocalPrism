@@ -19,11 +19,19 @@ use self::responses::{
 use self::stream::{sse_response, stream_openai_sse_to_anthropic};
 use self::transformers::ProxyTransformerChain;
 use crate::providers::openai_oauth::OPENAI_CODEX_API_ENDPOINT;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+const MAX_PROXY_CONNECTIONS: usize = 8;
+const MAX_PROXY_HEADER_BYTES: usize = 1024 * 1024;
+const MAX_PROXY_BODY_BYTES: usize = 32 * 1024 * 1024;
+const PROXY_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug)]
 pub(crate) struct OpenAiProxyCredential {
@@ -34,9 +42,27 @@ pub(crate) struct OpenAiProxyCredential {
     pub(crate) model_transformers: Vec<String>,
 }
 
+pub(crate) fn proxy_capability_token(proxy_url: &str) -> Option<String> {
+    let parsed = url::Url::parse(proxy_url).ok()?;
+    parsed
+        .path_segments()?
+        .next()
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
+}
+
+fn new_proxy_capability() -> String {
+    crate::providers::crypto::random_hex(32)
+}
+
+fn proxy_listen_url(addr: SocketAddr, token: &str) -> String {
+    format!("http://{addr}/{token}/")
+}
+
 pub(crate) async fn start_openai_anthropic_proxy(
     credential: OpenAiProxyCredential,
 ) -> Result<String, String> {
+    crate::providers::ensure_secure_provider_base_url(&credential.base_url)?;
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
         .map_err(|err| format!("Failed to start local provider proxy: {}", err))?;
@@ -44,22 +70,30 @@ pub(crate) async fn start_openai_anthropic_proxy(
         .local_addr()
         .map_err(|err| format!("Failed to read local provider proxy address: {}", err))?;
     let credential = Arc::new(credential);
+    let token = new_proxy_capability();
+    let slots = Arc::new(Semaphore::new(MAX_PROXY_CONNECTIONS));
+    let listen_token = token.clone();
 
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 break;
             };
+            let Some((permit, stream)) = acquire_proxy_slot(&slots, stream).await else {
+                continue;
+            };
             let credential = Arc::clone(&credential);
+            let token = listen_token.clone();
             tokio::spawn(async move {
-                if let Err(err) = handle_connection(stream, credential).await {
+                let _permit = permit;
+                if let Err(err) = handle_connection(stream, credential, &token).await {
                     eprintln!("[anthropic-proxy] request failed: {}", err);
                 }
             });
         }
     });
 
-    Ok(format!("http://{}", addr))
+    Ok(proxy_listen_url(addr, &token))
 }
 
 /// Forward Anthropic `/v1/messages` after folding mid-transcript system
@@ -69,6 +103,7 @@ pub(crate) async fn start_openai_anthropic_proxy(
 pub(crate) async fn start_anthropic_passthrough_proxy(
     credential: OpenAiProxyCredential,
 ) -> Result<String, String> {
+    crate::providers::ensure_secure_provider_base_url(&credential.base_url)?;
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
         .map_err(|err| format!("Failed to start local Anthropic proxy: {}", err))?;
@@ -76,29 +111,42 @@ pub(crate) async fn start_anthropic_passthrough_proxy(
         .local_addr()
         .map_err(|err| format!("Failed to read local Anthropic proxy address: {}", err))?;
     let credential = Arc::new(credential);
+    let token = new_proxy_capability();
+    let slots = Arc::new(Semaphore::new(MAX_PROXY_CONNECTIONS));
+    let listen_token = token.clone();
 
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 break;
             };
+            let Some((permit, stream)) = acquire_proxy_slot(&slots, stream).await else {
+                continue;
+            };
             let credential = Arc::clone(&credential);
+            let token = listen_token.clone();
             tokio::spawn(async move {
-                if let Err(err) = handle_anthropic_passthrough_connection(stream, credential).await {
+                let _permit = permit;
+                if let Err(err) =
+                    handle_anthropic_passthrough_connection(stream, credential, &token).await
+                {
                     eprintln!("[anthropic-passthrough] request failed: {}", err);
                 }
             });
         }
     });
 
-    Ok(format!("http://{}", addr))
+    Ok(proxy_listen_url(addr, &token))
 }
 
 async fn handle_anthropic_passthrough_connection(
     mut stream: TcpStream,
     credential: Arc<OpenAiProxyCredential>,
+    token: &str,
 ) -> Result<(), String> {
-    let request = read_http_request(&mut stream).await?;
+    let Some(request) = accept_proxy_request(&mut stream, token).await? else {
+        return Ok(());
+    };
     let path = request_path_without_query(&request.path);
     if request.method == "POST" && (is_messages_path(path) || is_count_tokens_path(path)) {
         match handle_anthropic_passthrough(&request, path, &credential, &mut stream).await {
@@ -154,10 +202,15 @@ async fn handle_anthropic_passthrough(
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
-        .build()
-        .map_err(|err| format!("Failed to create Anthropic provider client: {err}"))?;
+    crate::providers::ensure_secure_provider_base_url(&credential.base_url)?;
+    let client = crate::providers::bypass_system_proxy_for_loopback(
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .redirect(reqwest::redirect::Policy::none()),
+        &credential.base_url,
+    )
+    .build()
+    .map_err(|err| format!("Failed to create Anthropic provider client: {err}"))?;
     let url = if is_count_tokens_path(path) {
         anthropic_count_tokens_url(&credential.base_url)
     } else {
@@ -283,29 +336,40 @@ pub(crate) async fn start_codex_responses_proxy(
         .local_addr()
         .map_err(|err| format!("Failed to read Codex Responses proxy address: {}", err))?;
     let credential = Arc::new(credential);
+    let token = new_proxy_capability();
+    let slots = Arc::new(Semaphore::new(MAX_PROXY_CONNECTIONS));
+    let listen_token = token.clone();
 
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 break;
             };
+            let Some((permit, stream)) = acquire_proxy_slot(&slots, stream).await else {
+                continue;
+            };
             let credential = Arc::clone(&credential);
+            let token = listen_token.clone();
             tokio::spawn(async move {
-                if let Err(err) = handle_codex_connection(stream, credential).await {
+                let _permit = permit;
+                if let Err(err) = handle_codex_connection(stream, credential, &token).await {
                     eprintln!("[codex-responses-proxy] request failed: {}", err);
                 }
             });
         }
     });
 
-    Ok(format!("http://{}", addr))
+    Ok(proxy_listen_url(addr, &token))
 }
 
 async fn handle_codex_connection(
     mut stream: TcpStream,
     credential: Arc<CodexProxyCredential>,
+    token: &str,
 ) -> Result<(), String> {
-    let request = read_http_request(&mut stream).await?;
+    let Some(request) = accept_proxy_request(&mut stream, token).await? else {
+        return Ok(());
+    };
     let path = request_path_without_query(&request.path);
     if request.method == "POST" && is_messages_path(path) {
         match handle_codex_messages(&request, &credential, &mut stream).await {
@@ -359,11 +423,15 @@ async fn handle_codex_messages(
     let anthropic_request: Value = serde_json::from_slice(&request.body)
         .map_err(|err| format!("Claude Code sent invalid Anthropic JSON: {err}"))?;
     let body = anthropic_to_codex_responses(&anthropic_request, credential)?;
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(15))
-        .timeout(std::time::Duration::from_secs(180))
-        .build()
-        .map_err(|err| format!("Failed to create Codex Responses client: {err}"))?;
+    let client = crate::providers::bypass_system_proxy_for_loopback(
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(180))
+            .redirect(reqwest::redirect::Policy::none()),
+        OPENAI_CODEX_API_ENDPOINT,
+    )
+    .build()
+    .map_err(|err| format!("Failed to create Codex Responses client: {err}"))?;
     let mut credential = credential.clone();
     let mut retried_auth = false;
     let mut response = loop {
@@ -492,8 +560,11 @@ async fn write_proxy_sse(stream: &mut TcpStream, payload: &str) -> Result<(), St
 async fn handle_connection(
     mut stream: TcpStream,
     credential: Arc<OpenAiProxyCredential>,
+    token: &str,
 ) -> Result<(), String> {
-    let request = read_http_request(&mut stream).await?;
+    let Some(request) = accept_proxy_request(&mut stream, token).await? else {
+        return Ok(());
+    };
     let path = request_path_without_query(&request.path);
     if request.method == "POST" && is_messages_path(path) {
         match handle_messages_to_stream(&request, &credential, &mut stream).await {
@@ -538,7 +609,92 @@ struct HttpRequest {
     body: Vec<u8>,
 }
 
-async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
+async fn acquire_proxy_slot(
+    slots: &Arc<Semaphore>,
+    mut stream: TcpStream,
+) -> Option<(OwnedSemaphorePermit, TcpStream)> {
+    match slots.clone().try_acquire_owned() {
+        Ok(permit) => Some((permit, stream)),
+        Err(_) => {
+            let _ = write_proxy_error(
+                &mut stream,
+                503,
+                "Too many concurrent proxy connections",
+            )
+            .await;
+            None
+        }
+    }
+}
+
+async fn accept_proxy_request(
+    stream: &mut TcpStream,
+    token: &str,
+) -> Result<Option<HttpRequest>, String> {
+    let parsed = match tokio::time::timeout(PROXY_READ_TIMEOUT, read_http_headers(stream)).await {
+        Ok(Ok(parsed)) => parsed,
+        Ok(Err(err)) if err == "payload too large" => {
+            write_proxy_error(stream, 413, "Proxy request body is too large").await?;
+            return Ok(None);
+        }
+        Ok(Err(err)) => return Err(err),
+        Err(_) => {
+            write_proxy_error(stream, 408, "Proxy request timed out").await?;
+            return Ok(None);
+        }
+    };
+    if parsed.content_length > MAX_PROXY_BODY_BYTES {
+        write_proxy_error(stream, 413, "Proxy request body is too large").await?;
+        return Ok(None);
+    }
+    let mut request = HttpRequest {
+        method: parsed.method,
+        path: parsed.path,
+        headers: parsed.headers,
+        body: Vec::new(),
+    };
+    match authorize_proxy_request(&request, token) {
+        Some(logical_path) => request.path = logical_path,
+        None if request_forwards_stored_credentials(&request) => {
+            write_proxy_error(
+                stream,
+                401,
+                "Proxy request is missing a valid session capability",
+            )
+            .await?;
+            return Ok(None);
+        }
+        None => {}
+    }
+    request.body = match tokio::time::timeout(
+        PROXY_READ_TIMEOUT,
+        read_http_body(stream, parsed.leftover, parsed.content_length),
+    )
+    .await
+    {
+        Ok(Ok(body)) => body,
+        Ok(Err(err)) if err == "payload too large" => {
+            write_proxy_error(stream, 413, "Proxy request body is too large").await?;
+            return Ok(None);
+        }
+        Ok(Err(err)) => return Err(err),
+        Err(_) => {
+            write_proxy_error(stream, 408, "Proxy request timed out").await?;
+            return Ok(None);
+        }
+    };
+    Ok(Some(request))
+}
+
+struct ParsedHttpHeaders {
+    method: String,
+    path: String,
+    headers: Vec<(String, String)>,
+    content_length: usize,
+    leftover: Vec<u8>,
+}
+
+async fn read_http_headers(stream: &mut TcpStream) -> Result<ParsedHttpHeaders, String> {
     let mut buffer = Vec::new();
     let mut temp = [0_u8; 8192];
     let header_end = loop {
@@ -553,7 +709,7 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String
         if let Some(index) = find_header_end(&buffer) {
             break index;
         }
-        if buffer.len() > 1024 * 1024 {
+        if buffer.len() > MAX_PROXY_HEADER_BYTES {
             return Err("Proxy request headers are too large".to_string());
         }
     };
@@ -582,27 +738,162 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String
         .find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
         .and_then(|(_, value)| value.parse::<usize>().ok())
         .unwrap_or(0);
+    if content_length > MAX_PROXY_BODY_BYTES {
+        return Err("payload too large".to_string());
+    }
 
     let body_start = header_end + 4;
-    let mut body = buffer.get(body_start..).unwrap_or_default().to_vec();
+    Ok(ParsedHttpHeaders {
+        method,
+        path,
+        headers,
+        content_length,
+        leftover: buffer.get(body_start..).unwrap_or_default().to_vec(),
+    })
+}
+
+async fn read_http_body(
+    stream: &mut TcpStream,
+    leftover: Vec<u8>,
+    content_length: usize,
+) -> Result<Vec<u8>, String> {
+    if leftover.len() > MAX_PROXY_BODY_BYTES || content_length > MAX_PROXY_BODY_BYTES {
+        return Err("payload too large".to_string());
+    }
+    let mut body = leftover;
+    if body.len() > content_length {
+        body.truncate(content_length);
+    }
+    let mut temp = [0_u8; 8192];
     while body.len() < content_length {
+        let remaining = content_length - body.len();
+        let to_read = remaining.min(temp.len());
         let n = stream
-            .read(&mut temp)
+            .read(&mut temp[..to_read])
             .await
             .map_err(|err| format!("Failed to read proxy request body: {}", err))?;
         if n == 0 {
             break;
         }
         body.extend_from_slice(&temp[..n]);
+        if body.len() > MAX_PROXY_BODY_BYTES {
+            return Err("payload too large".to_string());
+        }
     }
     body.truncate(content_length);
+    Ok(body)
+}
 
-    Ok(HttpRequest {
-        method,
-        path,
-        headers,
-        body,
-    })
+fn request_forwards_stored_credentials(request: &HttpRequest) -> bool {
+    if !request.method.eq_ignore_ascii_case("POST") {
+        return false;
+    }
+    let path = request_path_without_query(&request.path);
+    is_messages_path(path) || is_count_tokens_path(path)
+}
+
+fn authorize_proxy_request(request: &HttpRequest, token: &str) -> Option<String> {
+    let path = request_path_without_query(&request.path);
+    if let Some(logical) = strip_capability_prefix(path, token) {
+        return Some(logical.to_string());
+    }
+    if header_matches_capability(request, token) {
+        return Some(path.to_string());
+    }
+    None
+}
+
+fn header_matches_capability(request: &HttpRequest, token: &str) -> bool {
+    if request_header(request, "x-api-key")
+        .is_some_and(|value| constant_time_eq(value.as_bytes(), token.as_bytes()))
+    {
+        return true;
+    }
+    if bearer_token(request)
+        .is_some_and(|value| constant_time_eq(value.as_bytes(), token.as_bytes()))
+    {
+        return true;
+    }
+    basic_auth_user(request)
+        .is_some_and(|value| constant_time_eq(value.as_bytes(), token.as_bytes()))
+}
+
+fn strip_capability_prefix<'a>(path: &'a str, token: &str) -> Option<&'a str> {
+    let rest = path.strip_prefix('/')?;
+    let (head, tail) = match rest.split_once('/') {
+        Some((head, tail)) => (head, Some(tail)),
+        None => (rest, None),
+    };
+    if !constant_time_eq(head.as_bytes(), token.as_bytes()) {
+        return None;
+    }
+    match tail {
+        None | Some("") => Some("/"),
+        Some(_) => path.get(1 + token.len()..),
+    }
+}
+
+fn bearer_token(request: &HttpRequest) -> Option<&str> {
+    let value = request_header(request, "authorization")?;
+    if value.len() >= 7 && value[..7].eq_ignore_ascii_case("bearer ") {
+        let token = value[7..].trim();
+        if token.is_empty() {
+            None
+        } else {
+            Some(token)
+        }
+    } else {
+        None
+    }
+}
+
+fn basic_auth_user(request: &HttpRequest) -> Option<String> {
+    let value = request_header(request, "authorization")?;
+    let encoded = value
+        .strip_prefix("Basic ")
+        .or_else(|| value.strip_prefix("basic "))?
+        .trim();
+    let decoded = BASE64.decode(encoded).ok()?;
+    let text = String::from_utf8(decoded).ok()?;
+    let user = text.split(':').next()?.trim();
+    if user.is_empty() {
+        None
+    } else {
+        Some(user.to_string())
+    }
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right.iter())
+        .fold(0_u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
+}
+
+async fn write_proxy_error(
+    stream: &mut TcpStream,
+    status: u16,
+    message: &str,
+) -> Result<(), String> {
+    let response = json_response(
+        status,
+        &json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": message,
+            },
+        }),
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .map_err(|err| format!("Failed to write proxy error response: {err}"))?;
+    let _ = stream.shutdown().await;
+    Ok(())
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
@@ -690,10 +981,15 @@ async fn handle_messages_to_stream(
         ));
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
-        .build()
-        .map_err(|err| format!("Failed to create provider client: {}", err))?;
+    crate::providers::ensure_secure_provider_base_url(&credential.base_url)?;
+    let client = crate::providers::bypass_system_proxy_for_loopback(
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .redirect(reqwest::redirect::Policy::none()),
+        &credential.base_url,
+    )
+    .build()
+    .map_err(|err| format!("Failed to create provider client: {}", err))?;
     let request = client
         .post(openai_chat_completions_url(&credential.base_url))
         .header("Content-Type", "application/json")
@@ -827,8 +1123,12 @@ fn http_response(status: u16, content_type: &str, body: &str) -> String {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
         404 => "Not Found",
+        408 => "Request Timeout",
+        413 => "Payload Too Large",
         502 => "Bad Gateway",
+        503 => "Service Unavailable",
         _ => "Internal Server Error",
     };
     format!(
@@ -857,6 +1157,8 @@ fn _assert_local_addr(_: SocketAddr) {}
 mod tests {
     use super::transformers::ProxyTransformerChain;
     use super::*;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn recognizes_anthropic_messages_paths_with_query_strings() {
@@ -1059,5 +1361,306 @@ mod tests {
         assert_eq!(converted["stop_reason"], "tool_use");
         assert_eq!(converted["content"][0]["type"], "tool_use");
         assert_eq!(converted["content"][0]["input"]["pattern"], "FastVID");
+    }
+
+    fn test_credential(base_url: &str) -> OpenAiProxyCredential {
+        OpenAiProxyCredential {
+            api_key: "sk-test".to_string(),
+            base_url: base_url.to_string(),
+            model: "test-model".to_string(),
+            transformers: Vec::new(),
+            model_transformers: Vec::new(),
+        }
+    }
+
+    fn request_with(path: &str, headers: Vec<(&str, &str)>) -> HttpRequest {
+        HttpRequest {
+            method: "POST".into(),
+            path: path.into(),
+            headers: headers
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+            body: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn strips_session_capability_from_proxy_path() {
+        assert_eq!(
+            strip_capability_prefix("/abc123/v1/messages", "abc123"),
+            Some("/v1/messages")
+        );
+        assert_eq!(strip_capability_prefix("/abc123", "abc123"), Some("/"));
+        assert_eq!(strip_capability_prefix("/abc123/v1/messages", "zzz"), None);
+        assert_eq!(strip_capability_prefix("/v1/messages", "abc123"), None);
+    }
+
+    #[test]
+    fn accepts_capability_from_path_or_session_header() {
+        let path_request = request_with("/secret-token/v1/messages", vec![]);
+        assert_eq!(
+            authorize_proxy_request(&path_request, "secret-token").as_deref(),
+            Some("/v1/messages")
+        );
+
+        let header_request = request_with(
+            "/v1/messages",
+            vec![("x-api-key", "secret-token")],
+        );
+        assert_eq!(
+            authorize_proxy_request(&header_request, "secret-token").as_deref(),
+            Some("/v1/messages")
+        );
+
+        let bearer_request = request_with(
+            "/v1/messages",
+            vec![("Authorization", "Bearer secret-token")],
+        );
+        assert_eq!(
+            authorize_proxy_request(&bearer_request, "secret-token").as_deref(),
+            Some("/v1/messages")
+        );
+
+        let unknown = request_with("/v1/messages", vec![("x-api-key", "guess")]);
+        assert_eq!(authorize_proxy_request(&unknown, "secret-token"), None);
+
+        let infer = request_with("/v1/messages", vec![]);
+        assert!(request_forwards_stored_credentials(&infer));
+        let health = HttpRequest {
+            method: "GET".into(),
+            path: "/".into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        assert!(!request_forwards_stored_credentials(&health));
+    }
+
+    #[test]
+    fn extracts_capability_token_from_listen_url() {
+        assert_eq!(
+            proxy_capability_token("http://127.0.0.1:9/session-secret/").as_deref(),
+            Some("session-secret")
+        );
+        assert_eq!(
+            proxy_capability_token("http://127.0.0.1:9/session-secret").as_deref(),
+            Some("session-secret")
+        );
+        assert_eq!(proxy_capability_token("http://127.0.0.1:9/"), None);
+    }
+
+    #[test]
+    fn rejects_content_length_above_body_limit() {
+        assert!(MAX_PROXY_BODY_BYTES < usize::MAX);
+        assert!(MAX_PROXY_CONNECTIONS > 0);
+        assert!(PROXY_READ_TIMEOUT > Duration::from_secs(0));
+    }
+
+    #[tokio::test]
+    async fn start_proxy_rejects_remote_cleartext_base_url() {
+        let error = start_openai_anthropic_proxy(test_credential("http://evil.example/v1"))
+            .await
+            .expect_err("remote HTTP must not start a credential proxy");
+        assert!(error.contains("HTTPS"));
+    }
+
+    #[tokio::test]
+    async fn start_proxy_allows_localhost_http_for_local_models() {
+        let url = start_openai_anthropic_proxy(test_credential("http://127.0.0.1:11434/v1"))
+            .await
+            .expect("localhost HTTP should remain available for local models");
+        assert!(url.contains("127.0.0.1"));
+        assert!(url.ends_with('/'));
+    }
+
+    #[tokio::test]
+    async fn loopback_proxy_requires_session_capability_for_inference() {
+        let url = start_openai_anthropic_proxy(test_credential("https://api.example.com/v1"))
+            .await
+            .expect("proxy should start");
+        let parsed = url::Url::parse(&url).unwrap();
+        let origin = format!(
+            "http://{}:{}",
+            parsed.host_str().unwrap(),
+            parsed.port().unwrap()
+        );
+        let client = reqwest::Client::new();
+
+        let health = client.get(format!("{origin}/")).send().await.unwrap();
+        assert_eq!(health.status().as_u16(), 200);
+
+        let unauthorized = client
+            .post(format!("{origin}/v1/messages"))
+            .header("content-type", "application/json")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status().as_u16(), 401);
+
+        let authorized = client.get(&url).send().await.unwrap();
+        assert_eq!(authorized.status().as_u16(), 200);
+        let body = authorized.text().await.unwrap();
+        assert!(body.contains("claude-prism-anthropic-proxy"));
+    }
+
+    async fn start_recording_openai_mock() -> (String, Arc<std::sync::Mutex<Option<String>>>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let seen_task = Arc::clone(&seen);
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buffer = Vec::new();
+            let mut temp = [0_u8; 8192];
+            let header_end = loop {
+                let Ok(n) = stream.read(&mut temp).await else {
+                    return;
+                };
+                if n == 0 {
+                    return;
+                }
+                buffer.extend_from_slice(&temp[..n]);
+                if let Some(index) = find_header_end(&buffer) {
+                    break index;
+                }
+                if buffer.len() > MAX_PROXY_HEADER_BYTES {
+                    return;
+                }
+            };
+            let header_text = String::from_utf8_lossy(&buffer[..header_end]);
+            let auth = header_text.lines().find_map(|line| {
+                line.split_once(':').and_then(|(name, value)| {
+                    name.eq_ignore_ascii_case("authorization")
+                        .then(|| value.trim().to_string())
+                })
+            });
+            *seen_task.lock().unwrap() = auth;
+            let content_length = header_text
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                })
+                .unwrap_or(0);
+            let body_start = header_end + 4;
+            while buffer.len().saturating_sub(body_start) < content_length {
+                let Ok(n) = stream.read(&mut temp).await else {
+                    return;
+                };
+                if n == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&temp[..n]);
+            }
+            let body = json!({
+                "id": "chatcmpl_1",
+                "choices": [{
+                    "message": { "role": "assistant", "content": "hello" },
+                    "finish_reason": "stop"
+                }],
+                "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+            })
+            .to_string();
+            let _ = stream
+                .write_all(http_response(200, "application/json", &body).as_bytes())
+                .await;
+        });
+        (format!("http://{addr}/v1"), seen)
+    }
+
+    #[tokio::test]
+    async fn authorized_inference_forwards_stored_provider_key() {
+        let (upstream_url, seen_auth) = start_recording_openai_mock().await;
+        let url = start_openai_anthropic_proxy(test_credential(&upstream_url))
+            .await
+            .expect("proxy should start");
+        let response = reqwest::Client::new()
+            .post(format!("{url}v1/messages"))
+            .header("content-type", "application/json")
+            .json(&json!({
+                "model": "claude-sonnet-4",
+                "max_tokens": 16,
+                "messages": [{ "role": "user", "content": "hi" }],
+                "stream": false
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let body = response.text().await.unwrap();
+        assert!(
+            body.contains("hello"),
+            "proxy should return translated assistant text, got {body}"
+        );
+        assert_eq!(
+            seen_auth.lock().unwrap().as_deref(),
+            Some("Bearer sk-test")
+        );
+    }
+
+    #[tokio::test]
+    async fn ninth_concurrent_connection_is_rejected() {
+        let url = start_openai_anthropic_proxy(test_credential("https://api.example.com/v1"))
+            .await
+            .expect("proxy should start");
+        let parsed = url::Url::parse(&url).unwrap();
+        let addr = format!(
+            "{}:{}",
+            parsed.host_str().unwrap(),
+            parsed.port().unwrap()
+        );
+        let mut held = Vec::new();
+        for _ in 0..MAX_PROXY_CONNECTIONS {
+            let mut stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
+            stream.write_all(b"GET / HTTP/1.1\r\n").await.unwrap();
+            held.push(stream);
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let mut ninth = tokio::net::TcpStream::connect(&addr).await.unwrap();
+        ninth
+            .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        ninth.read_to_end(&mut response).await.unwrap();
+        let text = String::from_utf8_lossy(&response);
+        assert!(
+            text.contains("503") || text.contains("Too many"),
+            "expected 503 after saturating proxy slots, got {text}"
+        );
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn loopback_proxy_rejects_oversized_content_length() {
+        let url = start_openai_anthropic_proxy(test_credential("https://api.example.com/v1"))
+            .await
+            .expect("proxy should start");
+        let parsed = url::Url::parse(&url).unwrap();
+        let addr = format!(
+            "{}:{}",
+            parsed.host_str().unwrap(),
+            parsed.port().unwrap()
+        );
+        let token = parsed.path_segments().unwrap().next().unwrap();
+        let mut stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
+        let request = format!(
+            "POST /{token}/v1/messages HTTP/1.1\r\nHost: {addr}\r\nContent-Length: {}\r\n\r\n",
+            MAX_PROXY_BODY_BYTES + 1
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        let text = String::from_utf8_lossy(&response);
+        assert!(
+            text.contains("413") || text.contains("too large"),
+            "unexpected response: {text}"
+        );
     }
 }
