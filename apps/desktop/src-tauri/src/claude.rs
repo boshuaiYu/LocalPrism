@@ -2380,113 +2380,58 @@ pub async fn install_claude_cli(window: WebviewWindow) -> Result<bool, String> {
         ensure_local_dirs(&window).await?;
     }
 
-    #[cfg(not(target_os = "windows"))]
-    let mut cmd = {
-        let mut c = tokio::process::Command::new("bash");
-        c.args(["-c", "curl -fsSL https://claude.ai/install.sh | bash"]);
-        c
+    let dest_dir = match dirs::home_dir() {
+        Some(home) => home.join(".local").join("bin"),
+        None => {
+            let message = "Could not locate the home directory for Claude CLI.".to_string();
+            let _ = window.emit("install-error", &message);
+            let _ = window.emit("install-complete", false);
+            return Err(message);
+        }
     };
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = tokio::process::Command::new("powershell");
-        c.creation_flags(CREATE_NO_WINDOW);
-        c.args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            "irm https://claude.ai/install.ps1 | iex",
-        ]);
-        c
+
+    let success = match tokio::time::timeout(
+        std::time::Duration::from_secs(600),
+        install_pinned_claude_cli(&window, &dest_dir),
+    )
+    .await
+    {
+        Ok(Ok(())) => true,
+        Ok(Err(err)) => {
+            let _ = window.emit("install-error", &err);
+            false
+        }
+        Err(_) => {
+            let _ = window.emit(
+                "install-error",
+                "Claude Code installer timed out after 10 minutes.",
+            );
+            false
+        }
     };
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    cmd.stdin(std::process::Stdio::null());
 
-    // On Linux AppImage, restore original environment so curl/bash work correctly
-    #[cfg(target_os = "linux")]
-    sanitize_appimage_env(&mut cmd);
-
-    // Inherit essential environment variables, ensuring ~/.local/bin is in PATH
-    #[cfg(target_os = "windows")]
-    let path_sep = ";";
-    #[cfg(not(target_os = "windows"))]
-    let path_sep = ":";
-    for (key, value) in std::env::vars() {
-        if key.eq_ignore_ascii_case("PATH") {
-            // Prepend ~/.local/bin so the installer sees it in PATH
-            if let Some(home) = dirs::home_dir() {
-                let local_bin = home.join(".local").join("bin");
-                let local_bin_str = local_bin.to_string_lossy();
-                if !value.contains(local_bin_str.as_ref()) {
-                    cmd.env("PATH", format!("{}{}{}", local_bin_str, path_sep, value));
-                } else {
-                    cmd.env("PATH", &value);
-                }
-            } else {
-                cmd.env("PATH", &value);
-            }
-        } else if is_essential_env_var(&key) {
-            cmd.env(&key, &value);
-        }
-    }
-    apply_proxy_env_to_command(&mut cmd, Some(&window));
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to run installer: {}", e))?;
-
-    let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
-    let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
-
-    let stdout_reader = BufReader::new(stdout);
-    let stderr_reader = BufReader::new(stderr);
-
-    // Stream stdout
-    let win_stdout = window.clone();
-    let stdout_task = tokio::spawn(async move {
-        let mut lines = stdout_reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let clean = strip_ansi(&line);
-            let _ = win_stdout.emit("install-output", clean.as_ref());
-        }
-    });
-
-    // Stream stderr
-    let win_stderr = window.clone();
-    let stderr_task = tokio::spawn(async move {
-        let mut lines = stderr_reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let clean = strip_ansi(&line);
-            let _ = win_stderr.emit("install-error", clean.as_ref());
-        }
-    });
-
-    let success =
-        match tokio::time::timeout(std::time::Duration::from_secs(600), child.wait()).await {
-            Ok(Ok(status)) => status.success(),
-            Ok(Err(err)) => {
-                let _ = window.emit(
-                    "install-error",
-                    format!("Claude Code installer failed to exit cleanly: {}", err),
-                );
-                false
-            }
-            Err(_) => {
-                let _ = window.emit(
-                    "install-error",
-                    "Claude Code installer timed out after 10 minutes.",
-                );
-                let _ = child.kill().await;
-                false
-            }
-        };
-
-    let _ = stdout_task.await;
-    let _ = stderr_task.await;
     let _ = window.emit("install-complete", success);
-
     Ok(success)
+}
+
+async fn install_pinned_claude_cli(window: &WebviewWindow, dest_dir: &Path) -> Result<(), String> {
+    let asset = pinned_install::claude_asset(
+        pinned_install::current_os(),
+        pinned_install::current_arch(),
+    )?;
+    let emit = |line: String| {
+        let _ = window.emit("install-output", line);
+    };
+    emit(format!("Downloading Claude Code {}...", asset.version));
+    let archive = pinned_install::download_verified_archive(&asset, emit).await?;
+    emit("Installing CLI to ~/.local/bin".to_string());
+    let dest = pinned_install::install_verified_archive(&asset, &archive, dest_dir)?;
+    emit(format!(
+        "Claude Code {} installed successfully at {}",
+        asset.version,
+        dest.display()
+    ));
+    Ok(())
 }
 
 #[tauri::command]

@@ -50,6 +50,7 @@ describe("AppStatusBar updates", () => {
     vi.mocked(invoke).mockImplementation(async (command) => {
       if (command === "update_install_channel") return "native";
       if (command === "download_manifest_update") return "1.0.8beta3";
+      if (command === "verify_bound_updater_manifest") return "9.9.9";
       if (command === "clear_prepared_update") return undefined;
       return undefined;
     });

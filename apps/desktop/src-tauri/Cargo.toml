@@ -46,6 +46,7 @@ fs2 = "0.4"
 sha2 = "0.10"
 toml_edit = { version = "0.22", features = ["serde"] }
 beta-manifest = { path = "beta-manifest" }
+pinned-install = { path = "pinned-install" }
 
 [lints.clippy]
 unwrap_used = "deny"
