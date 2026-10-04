@@ -270,12 +270,28 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, ()> {
     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, input).map_err(|_| ())
 }
 
+fn decode_minisign_signature(signature: &str) -> Result<minisign_verify::Signature, String> {
+    let trimmed = signature.trim();
+    if let Ok(decoded) = minisign_verify::Signature::decode(trimmed) {
+        return Ok(decoded);
+    }
+    // `tauri signer sign` writes the same base64 envelope used for artifact
+    // signatures in latest.json, not raw minisign text.
+    if let Ok(raw) = base64_decode(trimmed) {
+        if let Ok(text) = String::from_utf8(raw) {
+            if let Ok(decoded) = minisign_verify::Signature::decode(text.trim()) {
+                return Ok(decoded);
+            }
+        }
+    }
+    Err("Updater manifest signature is invalid: Invalid encoding in minisign data".to_string())
+}
+
 fn verify_minisign(pubkey: &str, data: &[u8], signature: &str) -> Result<(), String> {
     let key_line = decode_updater_pubkey(pubkey)?;
     let public_key = minisign_verify::PublicKey::from_base64(&key_line)
         .map_err(|err| format!("Updater public key is invalid: {err}"))?;
-    let decoded = minisign_verify::Signature::decode(signature)
-        .map_err(|err| format!("Updater manifest signature is invalid: {err}"))?;
+    let decoded = decode_minisign_signature(signature)?;
     public_key
         .verify(data, &decoded, true)
         .map_err(|_| "Updater manifest signature does not match the signed identity.".to_string())

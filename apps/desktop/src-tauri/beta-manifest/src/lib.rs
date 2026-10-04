@@ -672,6 +672,50 @@ mod tests {
     }
 
     #[test]
+    fn bind_accepts_a_tauri_base64_manifest_attestation() {
+        let pubkey = include_str!("fixtures/throwaway-updater.pub");
+        let signature = include_str!("fixtures/throwaway-attestation.sig").trim();
+        let raw = json!({
+            "version": "1.0.8",
+            "channel": "stable",
+            "tag": "v1.0.8",
+            "platforms": {
+                "linux-x86_64": {
+                    "url": "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8/LocalPrism-Linux.AppImage",
+                    "signature": "artifact-sig",
+                    "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                }
+            },
+            "manifest_signature": signature,
+        })
+        .to_string();
+        let bound = bind_updater_manifest(&raw, pubkey).expect("tauri attestation");
+        assert_eq!(bound.version, "1.0.8");
+        assert_eq!(bound.tag, "v1.0.8");
+
+        let raw_minisign = String::from_utf8(
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, signature)
+                .expect("base64"),
+        )
+        .expect("utf8");
+        let raw = json!({
+            "version": "1.0.8",
+            "channel": "stable",
+            "tag": "v1.0.8",
+            "platforms": {
+                "linux-x86_64": {
+                    "url": "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8/LocalPrism-Linux.AppImage",
+                    "signature": "artifact-sig",
+                    "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                }
+            },
+            "manifest_signature": raw_minisign.trim(),
+        })
+        .to_string();
+        bind_updater_manifest(&raw, pubkey).expect("raw minisign attestation");
+    }
+
+    #[test]
     fn canonical_attestation_is_stable() {
         let mut platforms = BTreeMap::new();
         platforms.insert(
