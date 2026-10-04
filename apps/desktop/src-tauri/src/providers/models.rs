@@ -295,6 +295,7 @@ async fn live_claude_models() -> Result<Vec<ProviderModel>, String> {
 }
 
 async fn live_third_party_models(provider: &SavedProvider) -> Result<Vec<ProviderModel>, String> {
+    super::ensure_secure_provider_base_url(&provider.base_url)?;
     let headers = third_party_headers(provider);
     let mut last_error = "Third-party models request failed".to_string();
     for url in candidate_model_urls(&provider.base_url) {
@@ -415,6 +416,7 @@ async fn fetch_json(
     url: &str,
     headers: &[(String, String)],
 ) -> Result<serde_json::Value, String> {
+    super::ensure_secure_provider_base_url(url)?;
     let client = reqwest::Client::builder()
         .use_rustls_tls()
         .timeout(Duration::from_secs(8))

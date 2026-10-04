@@ -1,5 +1,5 @@
 mod claude_oauth;
-mod crypto;
+pub(crate) mod crypto;
 mod env;
 mod models;
 mod oauth_listen;
@@ -7,6 +7,7 @@ pub(crate) mod openai_oauth;
 pub(crate) mod paths;
 mod store;
 mod types;
+mod url_guard;
 
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
@@ -27,6 +28,7 @@ pub use types::{
     is_legacy_claude_alias, workspace_ready, ProviderCard, ProviderKind, ProviderModel,
     ProviderWorkspaceStatus, SavedProvider, CHATGPT_OFFICIAL_ID, CLAUDE_OFFICIAL_ID,
 };
+pub use url_guard::ensure_secure_provider_base_url;
 
 use store::{delete_oauth, load_index, load_oauth, save_index, OAuthKind};
 use types::{is_official_id, ProviderIndex};
@@ -98,6 +100,7 @@ pub async fn provider_upsert_third_party(
     if provider.api_key.trim().is_empty() {
         return Err("API key is required".into());
     }
+    ensure_secure_provider_base_url(&provider.base_url)?;
     let mut index = load_index()?;
     let id = if provider.id.trim().is_empty() {
         uuid::Uuid::new_v4().to_string()
@@ -342,9 +345,11 @@ pub async fn apply_managed_provider(
                 effort,
             })
             .await?;
+            attach_proxy_capability(&mut values, &proxy);
             values.push(("ANTHROPIC_BASE_URL".into(), proxy));
         }
         Some(ProxyKind::OpenaiChat(provider)) => {
+            ensure_secure_provider_base_url(&provider.base_url)?;
             let proxy = start_openai_anthropic_proxy(OpenAiProxyCredential {
                 api_key: provider.api_key,
                 base_url: provider.base_url,
@@ -353,9 +358,11 @@ pub async fn apply_managed_provider(
                 model_transformers: Vec::new(),
             })
             .await?;
+            attach_proxy_capability(&mut values, &proxy);
             values.push(("ANTHROPIC_BASE_URL".into(), proxy));
         }
         Some(ProxyKind::AnthropicNative(provider)) => {
+            ensure_secure_provider_base_url(&provider.base_url)?;
             let proxy = start_anthropic_passthrough_proxy(OpenAiProxyCredential {
                 api_key: provider.api_key,
                 base_url: provider.base_url,
@@ -364,6 +371,7 @@ pub async fn apply_managed_provider(
                 model_transformers: Vec::new(),
             })
             .await?;
+            attach_proxy_capability(&mut values, &proxy);
             values.push(("ANTHROPIC_BASE_URL".into(), proxy));
         }
         None => {}
@@ -374,14 +382,103 @@ pub async fn apply_managed_provider(
     Ok(())
 }
 
+fn attach_proxy_capability(values: &mut Vec<(String, String)>, proxy_url: &str) {
+    let Some(token) = crate::anthropic_proxy::proxy_capability_token(proxy_url) else {
+        return;
+    };
+    values.retain(|(key, _)| key != "ANTHROPIC_API_KEY" && key != "ANTHROPIC_AUTH_TOKEN");
+    values.push(("ANTHROPIC_API_KEY".into(), token.clone()));
+    values.push(("ANTHROPIC_AUTH_TOKEN".into(), token));
+}
+
 #[cfg(test)]
 mod tests {
     use super::types::workspace_ready;
+    use super::*;
+    use crate::providers::store::save_index;
+    use crate::providers::types::{ApiFormat, ProviderIndex, ProviderModels, SavedProvider};
+    use tempfile::TempDir;
+
+    fn isolate() -> (TempDir, std::sync::MutexGuard<'static, ()>) {
+        let guard = crate::providers::paths::lock_provider_env();
+        let dir = TempDir::new().unwrap();
+        std::env::set_var("LOCALPRISM_PROVIDERS_DIR", dir.path());
+        std::env::set_var(
+            "LOCALPRISM_LEGACY_ANTHROPIC_AUTH",
+            dir.path().join("missing-legacy.json"),
+        );
+        (dir, guard)
+    }
+
+    fn sample_provider(base_url: &str) -> SavedProvider {
+        SavedProvider {
+            id: String::new(),
+            name: "Custom".into(),
+            api_key: "sk-test".into(),
+            base_url: base_url.into(),
+            api_format: ApiFormat::OpenaiChat,
+            models: ProviderModels {
+                main: "llama3.2".into(),
+                haiku: None,
+                sonnet: None,
+                opus: None,
+            },
+        }
+    }
 
     #[test]
     fn ready_requires_engine_and_active_provider() {
         assert!(!workspace_ready(false, true));
         assert!(!workspace_ready(true, false));
         assert!(workspace_ready(true, true));
+    }
+
+    #[tokio::test]
+    async fn upsert_rejects_remote_cleartext_http() {
+        let (_dir, _guard) = isolate();
+        save_index(&ProviderIndex::default()).unwrap();
+        let error = provider_upsert_third_party(
+            sample_provider("http://evil.example/v1"),
+            true,
+        )
+        .await
+        .expect_err("remote HTTP must be rejected");
+        assert!(error.contains("HTTPS"));
+    }
+
+    #[tokio::test]
+    async fn upsert_allows_localhost_http_for_local_models() {
+        let (_dir, _guard) = isolate();
+        save_index(&ProviderIndex::default()).unwrap();
+        let status = provider_upsert_third_party(
+            sample_provider("http://127.0.0.1:11434/v1"),
+            true,
+        )
+        .await
+        .expect("loopback HTTP should stay allowed");
+        assert!(status.active_authenticated);
+    }
+
+    #[test]
+    fn proxy_capability_replaces_placeholder_tokens() {
+        let mut values = vec![
+            ("ANTHROPIC_API_KEY".into(), "localprism-chat-proxy".into()),
+            ("ANTHROPIC_MODEL".into(), "llama3.2".into()),
+        ];
+        attach_proxy_capability(&mut values, "http://127.0.0.1:9/session-secret");
+        assert_eq!(
+            values
+                .iter()
+                .find(|(key, _)| key == "ANTHROPIC_API_KEY")
+                .map(|(_, value)| value.as_str()),
+            Some("session-secret")
+        );
+        assert_eq!(
+            values
+                .iter()
+                .find(|(key, _)| key == "ANTHROPIC_AUTH_TOKEN")
+                .map(|(_, value)| value.as_str()),
+            Some("session-secret")
+        );
     }
 }

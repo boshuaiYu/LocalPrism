@@ -7,10 +7,12 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import {
+  canUseLocalZotero,
   childZoteroCollections,
   descendantCollectionKeys,
   fetchCollections,
   importCollection,
+  resetLocalZoteroProbeCache,
   rootZoteroCollections,
   syncCollection,
 } from "@/lib/zotero-api";
@@ -53,6 +55,7 @@ describe("zotero-api latest library fetch", () => {
   beforeEach(() => {
     fetchMock.mockReset();
     invokeMock.mockReset();
+    resetLocalZoteroProbeCache();
     invokeMock.mockRejectedValue(
       new Error("zotero_api_request unused in test"),
     );
@@ -296,9 +299,12 @@ describe("zotero-api latest library fetch", () => {
 
   it("merges local desktop items with the web library so unsynced newest rows appear", async () => {
     invokeMock.mockImplementation(
-      async (_command: unknown, args: { source?: string; path: string }) => {
-        if (!String(args.path).includes("/items")) {
-          throw new Error(`unexpected path ${args.path}`);
+      async (command: unknown, args?: { source?: string; path: string }) => {
+        if (command === "zotero_local_connector_ready") {
+          return true;
+        }
+        if (!args || !String(args.path).includes("/items")) {
+          throw new Error(`unexpected path ${args?.path}`);
         }
         if (args.source === "local") {
           return {
@@ -414,9 +420,12 @@ describe("zotero-api latest library fetch", () => {
 
   it("keeps web parentKey when local rows omit nesting", async () => {
     invokeMock.mockImplementation(
-      async (_command: unknown, args: { source?: string; path: string }) => {
-        if (!String(args.path).includes("/collections")) {
-          throw new Error(`unexpected path ${args.path}`);
+      async (command: unknown, args?: { source?: string; path: string }) => {
+        if (command === "zotero_local_connector_ready") {
+          return true;
+        }
+        if (!args || !String(args.path).includes("/collections")) {
+          throw new Error(`unexpected path ${args?.path}`);
         }
         const isChildEndpoint = /\/collections\/[^/?]+\/collections/.test(
           args.path,
@@ -485,5 +494,34 @@ describe("zotero-api latest library fetch", () => {
       "PARENT",
     );
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not send the cloud key to loopback when the local connector is not Zotero", async () => {
+    invokeMock.mockImplementation(async (command: unknown) => {
+      if (command === "zotero_local_connector_ready") {
+        return false;
+      }
+      throw new Error(`unexpected command ${String(command)}`);
+    });
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/collections?") && !url.includes("/items")) {
+        return jsonResponse([], { "Total-Results": "0" });
+      }
+      if (/\/collections\/[^/?]+\/collections/.test(url)) {
+        return jsonResponse([], { "Total-Results": "0" });
+      }
+      throw new Error(`Unexpected URL ${url}`);
+    });
+
+    expect(await canUseLocalZotero()).toBe(false);
+    await fetchCollections("cloud-secret-key", "123");
+    expect(
+      invokeMock.mock.calls.some(
+        ([command, args]) =>
+          command === "zotero_api_request" &&
+          (args as { source?: string } | undefined)?.source === "local",
+      ),
+    ).toBe(false);
   });
 });

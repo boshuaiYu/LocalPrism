@@ -3,6 +3,7 @@ use hmac::{Hmac, Mac};
 use serde::Serialize;
 use sha1::Sha1;
 use std::collections::HashMap;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -376,6 +377,8 @@ pub async fn zotero_cancel_oauth(state: tauri::State<'_, ZoteroOAuthState>) -> R
 
 const ZOTERO_WEB_API: &str = "https://api.zotero.org";
 const ZOTERO_LOCAL_API: &str = "http://127.0.0.1:23119/api";
+const ZOTERO_LOCAL_PORT: u16 = 23119;
+const ZOTERO_CONNECTOR_PING: &str = "http://127.0.0.1:23119/connector/ping";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -426,6 +429,293 @@ fn should_skip_forwarded_header(name: &str) -> bool {
     )
 }
 
+pub(crate) fn is_zotero_process_name(name: &str) -> bool {
+    let file = name.rsplit(['/', '\\']).next().unwrap_or(name).trim();
+    let stem = file
+        .strip_suffix(".exe")
+        .or_else(|| file.strip_suffix(".EXE"))
+        .unwrap_or(file);
+    matches!(stem.to_ascii_lowercase().as_str(), "zotero" | "zotero-bin")
+}
+
+pub(crate) fn looks_like_zotero_connector_ping(
+    headers: &HashMap<String, String>,
+    body: &str,
+) -> bool {
+    if headers
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("x-zotero-version"))
+    {
+        return true;
+    }
+    let trimmed = body.trim();
+    if trimmed.eq_ignore_ascii_case("zotero is running")
+        || trimmed.eq_ignore_ascii_case("zotero connector server is available")
+    {
+        return true;
+    }
+    serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()
+        .and_then(|value| value.get("prefs").cloned())
+        .is_some()
+}
+
+pub(crate) fn should_trust_local_zotero_connector(
+    process_name: Option<&str>,
+    ping_looks_like_zotero: bool,
+) -> bool {
+    match process_name {
+        Some(name) if is_zotero_process_name(name) => true,
+        Some(_) => false,
+        None => ping_looks_like_zotero,
+    }
+}
+
+pub(crate) fn parse_hex_ipv4_socket(addr: &str) -> Option<(Ipv4Addr, u16)> {
+    let (ip, port) = addr.split_once(':')?;
+    let raw = u32::from_str_radix(ip, 16).ok()?;
+    let port = u16::from_str_radix(port, 16).ok()?;
+    Some((Ipv4Addr::from(raw.to_le_bytes()), port))
+}
+
+pub(crate) fn parse_hex_ipv6_socket(addr: &str) -> Option<(Ipv6Addr, u16)> {
+    let (ip, port) = addr.split_once(':')?;
+    if ip.len() != 32 {
+        return None;
+    }
+    let port = u16::from_str_radix(port, 16).ok()?;
+    let mut bytes = [0_u8; 16];
+    for (index, chunk) in ip.as_bytes().chunks(8).enumerate() {
+        let word = std::str::from_utf8(chunk).ok()?;
+        let value = u32::from_str_radix(word, 16).ok()?;
+        let start = index.checked_mul(4)?;
+        let end = start.checked_add(4)?;
+        bytes.get_mut(start..end)?.copy_from_slice(&value.to_le_bytes());
+    }
+    Some((Ipv6Addr::from(bytes), port))
+}
+
+pub(crate) fn parse_proc_net_listen_inodes(table: &str, port: u16, ipv6: bool) -> Vec<u64> {
+    let mut inodes = Vec::new();
+    for line in table.lines().skip(1) {
+        let columns: Vec<&str> = line.split_whitespace().collect();
+        if columns.len() < 10 {
+            continue;
+        }
+        let local = columns[1];
+        let state = columns[3];
+        let inode = columns[9];
+        if !state.eq_ignore_ascii_case("0A") {
+            continue;
+        }
+        let matches_port = if ipv6 {
+            parse_hex_ipv6_socket(local).is_some_and(|(_, found)| found == port)
+        } else {
+            parse_hex_ipv4_socket(local).is_some_and(|(_, found)| found == port)
+        };
+        if !matches_port {
+            continue;
+        }
+        if let Ok(inode) = inode.parse::<u64>() {
+            inodes.push(inode);
+        }
+    }
+    inodes
+}
+
+pub(crate) fn parse_lsof_command_names(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix('c'))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+pub(crate) fn local_address_has_port(local: &str, port: u16) -> bool {
+    local
+        .rsplit_once(':')
+        .and_then(|(_, found)| found.parse::<u16>().ok())
+        .is_some_and(|found| found == port)
+}
+
+pub(crate) fn parse_netstat_listening_pids(stdout: &str, port: u16) -> Vec<u32> {
+    let mut pids = Vec::new();
+    for line in stdout.lines() {
+        let columns: Vec<&str> = line.split_whitespace().collect();
+        if columns.len() < 4 {
+            continue;
+        }
+        let state = columns
+            .get(3)
+            .or_else(|| columns.get(4))
+            .copied()
+            .unwrap_or("");
+        if !state.eq_ignore_ascii_case("LISTENING") && !state.eq_ignore_ascii_case("LISTEN") {
+            continue;
+        }
+        let local = columns[1];
+        if !local_address_has_port(local, port) {
+            continue;
+        }
+        if let Ok(pid) = columns[columns.len() - 1].parse::<u32>() {
+            pids.push(pid);
+        }
+    }
+    pids
+}
+
+pub(crate) fn parse_tasklist_image_name(stdout: &str) -> Option<String> {
+    let line = stdout.lines().find(|row| row.contains(','))?;
+    let first = line.split(',').next()?.trim();
+    let name = first.trim_matches('"').trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+fn listener_process_name(port: u16) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        return linux_listener_process_name(port);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return macos_listener_process_name(port);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return windows_listener_process_name(port);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = port;
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_listener_process_name(port: u16) -> Option<String> {
+    let mut inodes = Vec::new();
+    if let Ok(table) = std::fs::read_to_string("/proc/net/tcp") {
+        inodes.extend(parse_proc_net_listen_inodes(&table, port, false));
+    }
+    if let Ok(table) = std::fs::read_to_string("/proc/net/tcp6") {
+        inodes.extend(parse_proc_net_listen_inodes(&table, port, true));
+    }
+    inodes
+        .into_iter()
+        .find_map(linux_process_name_for_socket_inode)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_name_for_socket_inode(inode: u64) -> Option<String> {
+    let needle = format!("socket:[{inode}]");
+    let proc = std::fs::read_dir("/proc").ok()?;
+    for entry in proc {
+        let entry = entry.ok()?;
+        let pid = entry.file_name();
+        if pid.to_str()?.parse::<u32>().is_err() {
+            continue;
+        }
+        let fd_dir = std::fs::read_dir(entry.path().join("fd"));
+        let Ok(fds) = fd_dir else {
+            continue;
+        };
+        for fd in fds {
+            let Ok(fd) = fd else {
+                continue;
+            };
+            let Ok(target) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
+            if target == std::path::Path::new(&needle) {
+                return std::fs::read_to_string(entry.path().join("comm"))
+                    .ok()
+                    .map(|name| name.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn macos_listener_process_name(port: u16) -> Option<String> {
+    let output = std::process::Command::new("lsof")
+        .args([
+            "-nP",
+            &format!("-iTCP:{port}"),
+            "-sTCP:LISTEN",
+            "-F",
+            "c",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_lsof_command_names(&String::from_utf8_lossy(&output.stdout))
+        .into_iter()
+        .next()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_listener_process_name(port: u16) -> Option<String> {
+    let netstat = std::process::Command::new("netstat")
+        .args(["-ano", "-p", "TCP"])
+        .output()
+        .ok()?;
+    if !netstat.status.success() {
+        return None;
+    }
+    let pid = parse_netstat_listening_pids(&String::from_utf8_lossy(&netstat.stdout), port)
+        .into_iter()
+        .next()?;
+    let tasklist = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .ok()?;
+    if !tasklist.status.success() {
+        return None;
+    }
+    parse_tasklist_image_name(&String::from_utf8_lossy(&tasklist.stdout))
+}
+
+async fn ping_local_zotero_connector() -> Option<(HashMap<String, String>, String)> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_millis(800))
+        .timeout(Duration::from_secs(2))
+        .pool_max_idle_per_host(0)
+        .build()
+        .ok()?;
+    let response = client
+        .get(ZOTERO_CONNECTOR_PING)
+        .header("User-Agent", "LocalPrism/1.0.8-7")
+        .send()
+        .await
+        .ok()?;
+    let headers = zotero_response_headers(&response);
+    let body = response.text().await.ok()?;
+    Some((headers, body))
+}
+
+async fn local_zotero_connector_is_trusted() -> bool {
+    let process_name = listener_process_name(ZOTERO_LOCAL_PORT);
+    let ping = ping_local_zotero_connector().await;
+    let ping_ok = ping
+        .as_ref()
+        .is_some_and(|(headers, body)| looks_like_zotero_connector_ping(headers, body));
+    should_trust_local_zotero_connector(process_name.as_deref(), ping_ok)
+}
+
+#[tauri::command]
+pub async fn zotero_local_connector_ready() -> Result<bool, String> {
+    Ok(local_zotero_connector_is_trusted().await)
+}
+
 async fn fetch_zotero_source(
     base: &str,
     path: &str,
@@ -444,11 +734,15 @@ async fn fetch_zotero_source(
 
     let mut request = client
         .get(&url)
-        .header("Zotero-API-Key", api_key)
         .header("Zotero-API-Version", "3")
         .header("Cache-Control", "no-cache, no-store")
         .header("Pragma", "no-cache")
         .header("User-Agent", "LocalPrism/1.0.8-7");
+    // Local reads do not need the cloud key, but a verified Zotero listener
+    // may still accept it. Never reach this path for an untrusted binder.
+    if !api_key.is_empty() {
+        request = request.header("Zotero-API-Key", api_key);
+    }
 
     for (key, value) in extra_headers {
         if should_skip_forwarded_header(key) {
@@ -489,6 +783,9 @@ pub async fn zotero_api_request(
 
     match source.as_str() {
         "local" => {
+            if !local_zotero_connector_is_trusted().await {
+                return Err("Zotero local connector is not available".into());
+            }
             fetch_zotero_source(
                 ZOTERO_LOCAL_API,
                 &path,
@@ -511,18 +808,20 @@ pub async fn zotero_api_request(
             .await
         }
         _ => {
-            if let Ok(local) = fetch_zotero_source(
-                ZOTERO_LOCAL_API,
-                &path,
-                &api_key,
-                &extra_headers,
-                Duration::from_secs(2),
-                "local",
-            )
-            .await
-            {
-                if (200..300).contains(&local.status) {
-                    return Ok(local);
+            if local_zotero_connector_is_trusted().await {
+                if let Ok(local) = fetch_zotero_source(
+                    ZOTERO_LOCAL_API,
+                    &path,
+                    &api_key,
+                    &extra_headers,
+                    Duration::from_secs(2),
+                    "local",
+                )
+                .await
+                {
+                    if (200..300).contains(&local.status) {
+                        return Ok(local);
+                    }
                 }
             }
             fetch_zotero_source(
@@ -673,5 +972,71 @@ mod tests {
         assert!(validate_zotero_api_path("https://api.zotero.org/users/1/items").is_err());
         assert!(validate_zotero_api_path("/users/../keys/current").is_err());
         assert!(validate_zotero_api_path("/settings/keys").is_err());
+    }
+
+    #[test]
+    fn recognizes_only_real_zotero_process_names() {
+        assert!(is_zotero_process_name("zotero"));
+        assert!(is_zotero_process_name("Zotero.exe"));
+        assert!(is_zotero_process_name("/Applications/Zotero.app/Contents/MacOS/zotero"));
+        assert!(is_zotero_process_name("zotero-bin"));
+        assert!(!is_zotero_process_name("zotero-attacker"));
+        assert!(!is_zotero_process_name("python"));
+        assert!(!is_zotero_process_name("nc"));
+    }
+
+    #[test]
+    fn ping_fingerprint_requires_zotero_markers() {
+        let mut headers = HashMap::new();
+        headers.insert("X-Zotero-Version".into(), "7.0.15".into());
+        assert!(looks_like_zotero_connector_ping(&headers, "ignored"));
+        assert!(looks_like_zotero_connector_ping(
+            &HashMap::new(),
+            "Zotero is running"
+        ));
+        assert!(looks_like_zotero_connector_ping(
+            &HashMap::new(),
+            r#"{"prefs":{"automaticSnapshots":true}}"#
+        ));
+        assert!(!looks_like_zotero_connector_ping(
+            &HashMap::new(),
+            r#"{"ok":true}"#
+        ));
+    }
+
+    #[test]
+    fn local_connector_trusts_real_zotero_even_if_one_signal_is_missing() {
+        assert!(should_trust_local_zotero_connector(Some("zotero"), true));
+        assert!(should_trust_local_zotero_connector(Some("zotero"), false));
+        assert!(should_trust_local_zotero_connector(None, true));
+        assert!(!should_trust_local_zotero_connector(Some("python"), true));
+        assert!(!should_trust_local_zotero_connector(None, false));
+    }
+
+    #[test]
+    fn parses_proc_net_tcp_listen_inodes() {
+        let table = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 0100007F:5A4F 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 12345 1 0000000000000000 100 0 0 10 0\n";
+        assert_eq!(parse_hex_ipv4_socket("0100007F:5A4F").unwrap().1, 23119);
+        assert_eq!(parse_proc_net_listen_inodes(table, 23119, false), vec![12345]);
+        assert!(parse_proc_net_listen_inodes(table, 80, false).is_empty());
+    }
+
+    #[test]
+    fn parses_proc_net_tcp6_loopback() {
+        let parsed = parse_hex_ipv6_socket("00000000000000000000000001000000:5A4F").unwrap();
+        assert_eq!(parsed.0, Ipv6Addr::LOCALHOST);
+        assert_eq!(parsed.1, 23119);
+    }
+
+    #[test]
+    fn parses_netstat_and_tasklist_output() {
+        let netstat = "  TCP    127.0.0.1:23119        0.0.0.0:0              LISTENING       4560\r\n";
+        assert_eq!(parse_netstat_listening_pids(netstat, 23119), vec![4560]);
+        assert_eq!(
+            parse_tasklist_image_name("\"Zotero.exe\",\"4560\",\"Console\",\"1\",\"12,345 K\"\r\n")
+                .as_deref(),
+            Some("Zotero.exe")
+        );
+        assert_eq!(parse_lsof_command_names("p4560\ncZotero\n"), vec!["Zotero"]);
     }
 }
