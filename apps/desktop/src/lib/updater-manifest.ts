@@ -14,6 +14,8 @@ export interface ArtifactFile {
   path: string;
   /** UTF-8 contents. Required for `.sig` files. */
   text?: string;
+  /** SHA-256 hex of the file bytes. Required for updater binaries. */
+  sha256?: string;
 }
 
 export interface ReleaseFileCopy {
@@ -24,18 +26,23 @@ export interface ReleaseFileCopy {
 export interface UpdaterPlatformEntry {
   signature: string;
   url: string;
+  digest: string;
 }
 
 export interface LatestManifest {
   version: string;
   notes: string;
   pub_date: string;
+  channel: "stable" | "beta";
+  tag: string;
   platforms: Record<string, UpdaterPlatformEntry>;
+  manifest_signature?: string;
 }
 
 export interface UpdaterReleasePlan {
   manifest: LatestManifest;
   copies: ReleaseFileCopy[];
+  attestation: string;
 }
 
 export type UpdaterReleaseResult =
@@ -134,11 +141,39 @@ function normalizeSignature(text: string | undefined): string {
   return (text ?? "").trim();
 }
 
+export function updaterChannelForVersion(version: string): "stable" | "beta" {
+  const trimmed = version.trim();
+  if (/^v?\d+\.\d+\.\d+beta\d+$/i.test(trimmed) || trimmed.includes("-")) {
+    return "beta";
+  }
+  return "stable";
+}
+
+export function canonicalUpdaterAttestation(input: {
+  version: string;
+  channel: string;
+  tag: string;
+  platforms: Record<string, Pick<UpdaterPlatformEntry, "digest" | "url">>;
+}): string {
+  const lines = [
+    "localprism-updater-manifest-v1",
+    `channel=${input.channel}`,
+    `tag=${input.tag}`,
+    `version=${input.version}`,
+  ];
+  for (const name of Object.keys(input.platforms).sort()) {
+    const platform = input.platforms[name];
+    if (!platform) continue;
+    lines.push(`${name} digest=${platform.digest} url=${platform.url}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 function signingHint(detail: string): string {
   return [
     detail,
     `Refusing to publish latest.json with an empty or incomplete platforms object.`,
-    `Set the ${UPDATER_SIGNING_SECRET} secret (and TAURI_SIGNING_PRIVATE_KEY_PASSWORD when the key is encrypted) so tauri build writes updater bundles and .sig files.`,
+    `Set the ${UPDATER_SIGNING_SECRET} secret (and TAURI_SIGNING_PRIVATE_KEY_PASSWORD when the key is encrypted) on the dedicated sign-updater job so release artifacts are signed after untrusted build steps.`,
     "Expected signatures: desktop-windows/*-setup.exe.sig, desktop-macos/*.app.tar.gz.sig, desktop-macos-intel/*.app.tar.gz.sig, desktop-linux/*.AppImage.sig.",
   ].join(" ");
 }
@@ -189,12 +224,20 @@ export function planUpdaterRelease(input: {
         ),
       };
     }
+    const digestHex = signed.sha256?.trim().toLowerCase() ?? "";
+    if (!/^[0-9a-f]{64}$/.test(digestHex)) {
+      return {
+        ok: false,
+        error: `Found ${target.platform} updater binary without a SHA-256 digest: ${signed.path}.`,
+      };
+    }
     const signature = normalizeSignature(
       byPath.get(`${signed.path}.sig`)?.text,
     );
     const entry = {
       signature,
       url: `${baseUrl}/${target.uploadName}`,
+      digest: `sha256:${digestHex}`,
     };
     platforms[target.platform] = entry;
     for (const alias of target.aliases) {
@@ -231,6 +274,13 @@ export function planUpdaterRelease(input: {
     copies.push({ sourcePath: match.path, uploadName: extra.uploadName });
   }
 
+  const channel = updaterChannelForVersion(version);
+  const attestation = canonicalUpdaterAttestation({
+    version,
+    channel,
+    tag,
+    platforms,
+  });
   return {
     ok: true,
     plan: {
@@ -238,9 +288,12 @@ export function planUpdaterRelease(input: {
         version,
         notes: `LocalPrism ${tag}`,
         pub_date: input.pubDate,
+        channel,
+        tag,
         platforms,
       },
       copies,
+      attestation,
     },
   };
 }

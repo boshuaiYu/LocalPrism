@@ -1,0 +1,17 @@
+[package]
+name = "pinned-install"
+version = "0.1.0"
+description = "Download pinned Claude CLI and uv release assets with digest checks"
+edition = "2021"
+publish = false
+
+[dependencies]
+flate2 = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "system-proxy", "socks"] }
+sha2 = "0.10"
+tar = "0.4"
+tokio = { version = "1", features = ["io-util", "macros"] }
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3"

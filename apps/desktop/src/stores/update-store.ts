@@ -14,6 +14,7 @@ import {
   chooseUpdateOffer,
   GITHUB_RELEASES_API,
   releasePageUrl,
+  STABLE_UPDATER_ENDPOINT,
   updateApplyMode,
   type ReleaseCandidate,
   type UpdateApplyMode,
@@ -271,6 +272,12 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
         }
 
         const stableUpdate = stableResult.ok ? stableResult.value : null;
+        if (stableUpdate) {
+          await invoke("verify_bound_updater_manifest", {
+            manifestUrl: STABLE_UPDATER_ENDPOINT,
+            expectedVersion: stableUpdate.version,
+          });
+        }
         const currentVersion = await currentAppVersion(stableUpdate);
         const offer: UpdateOffer = chooseUpdateOffer({
           currentVersion,

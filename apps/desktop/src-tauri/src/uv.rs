@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 use tauri::{Emitter, WebviewWindow};
-use tokio::io::{AsyncBufReadExt, BufReader};
 
 /// Windows CREATE_NO_WINDOW flag to prevent console windows from flashing
 /// when spawning child processes (e.g. uv, powershell, python).
@@ -415,84 +414,35 @@ pub async fn check_uv_status() -> Result<UvStatus, String> {
 #[tauri::command]
 pub async fn install_uv(window: WebviewWindow) -> Result<(), String> {
     let layout = ensure_uv_layout()?;
-
-    #[cfg(not(target_os = "windows"))]
-    let mut cmd = {
-        let mut c = tokio::process::Command::new("bash");
-        c.args(["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"]);
-        c
-    };
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = tokio::process::Command::new("powershell");
-        c.creation_flags(CREATE_NO_WINDOW);
-        c.args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            "irm https://astral.sh/uv/install.ps1 | iex",
-        ]);
-        c
-    };
-
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-
-    // Inherit essential environment variables (shared helper handles case-insensitive matching)
-    for (key, value) in std::env::vars() {
-        if key.eq_ignore_ascii_case("PATH") || crate::claude::is_essential_env_var(&key) {
-            cmd.env(&key, &value);
-        }
-    }
-    crate::claude::apply_proxy_env_to_command(&mut cmd, Some(&window));
-    apply_uv_runtime_env(&mut cmd, None);
-    cmd.env("UV_UNMANAGED_INSTALL", &layout.bin);
-    cmd.env("UV_NO_MODIFY_PATH", "1");
-    cmd.env("INSTALLER_NO_MODIFY_PATH", "1");
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to run uv installer: {}", e))?;
-
-    let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
-    let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
-
-    let stdout_reader = BufReader::new(stdout);
-    let stderr_reader = BufReader::new(stderr);
-
-    // Stream stdout
-    let win_stdout = window.clone();
-    let stdout_task = tokio::spawn(async move {
-        let mut lines = stdout_reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let _ = win_stdout.emit("uv-install-output", &line);
-        }
-    });
-
-    // Stream stderr
-    let win_stderr = window.clone();
-    let stderr_task = tokio::spawn(async move {
-        let mut lines = stderr_reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let _ = win_stderr.emit("uv-install-output", &line);
-        }
-    });
-
-    // Wait for completion
-    let win_complete = window;
+    let dest = layout.bin.clone();
     tokio::spawn(async move {
-        let _ = stdout_task.await;
-        let _ = stderr_task.await;
-
-        let success = match child.wait().await {
-            Ok(status) => status.success(),
-            Err(_) => false,
+        let success = match install_pinned_uv(&window, &dest).await {
+            Ok(()) => true,
+            Err(err) => {
+                let _ = window.emit("uv-install-output", err);
+                false
+            }
         };
-
-        let _ = win_complete.emit("uv-install-complete", success);
+        let _ = window.emit("uv-install-complete", success);
     });
+    Ok(())
+}
 
+async fn install_pinned_uv(window: &WebviewWindow, dest_dir: &Path) -> Result<(), String> {
+    let asset =
+        pinned_install::uv_asset(pinned_install::current_os(), pinned_install::current_arch())?;
+    let emit = |line: String| {
+        let _ = window.emit("uv-install-output", line);
+    };
+    emit(format!("Downloading uv {}...", asset.version));
+    let archive = pinned_install::download_verified_archive(&asset, emit).await?;
+    emit(format!("Installing uv to {}", dest_dir.display()));
+    let dest = pinned_install::install_verified_archive(&asset, &archive, dest_dir)?;
+    emit(format!(
+        "uv {} installed successfully at {}",
+        asset.version,
+        dest.display()
+    ));
     Ok(())
 }
 

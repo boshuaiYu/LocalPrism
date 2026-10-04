@@ -474,6 +474,22 @@ fn update_install_channel() -> String {
     )
 }
 
+const STABLE_UPDATER_ENDPOINT: &str =
+    "https://github.com/boshuaiYu/LocalPrism/releases/latest/download/latest.json";
+
+fn updater_pubkey() -> Result<String, String> {
+    let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+        .map_err(|err| format!("Could not read the updater public key: {err}"))?;
+    conf.get("plugins")
+        .and_then(|plugins| plugins.get("updater"))
+        .and_then(|updater| updater.get("pubkey"))
+        .and_then(|key| key.as_str())
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| "Updater public key is missing from tauri.conf.json.".to_string())
+}
+
 /// Beta manifests are the `latest.json` asset on a release tag.
 /// `releases/latest` stays the stable channel and is rejected here.
 pub fn beta_manifest_endpoint(raw: &str) -> Result<String, String> {
@@ -543,25 +559,18 @@ async fn download_manifest_update(
         }
     }
 
-    let gated = if beta_manifest::manifest_needs_version_gate(&endpoint) {
-        Some(fetch_gated_beta_manifest(&endpoint, &app.package_info().version.to_string()).await?)
-    } else {
-        None
-    };
-    let root_pem = gated.as_ref().map(|item| item.root_pem.clone());
-    let check_url = gated
-        .as_ref()
-        .map(|item| item.url.as_str())
-        .unwrap_or(&endpoint);
-    let parsed = url::Url::parse(check_url).map_err(|err| err.to_string())?;
+    let gated = fetch_bound_manifest(&endpoint, &app.package_info().version.to_string()).await?;
+    let root_pem = gated.root_pem.clone();
+    let check_url = gated.url.clone();
+    let parsed = url::Url::parse(&check_url).map_err(|err| err.to_string())?;
     let mut builder = app
         .updater_builder()
         .endpoints(vec![parsed])
         .map_err(|err| err.to_string())?;
     if let Some(pem) = root_pem {
-        // The updater uses this client for the loopback manifest and for the
-        // GitHub binary. Merge only the loopback CA. Platform roots still
-        // verify GitHub; certificate checks stay on.
+        // Compact tags still need the loopback gate. Hyphenated semver
+        // betas keep the published GitHub endpoint so that path stays
+        // the same as today's working updater.
         let certificate = updater_reqwest::Certificate::from_pem(pem.as_bytes())
             .map_err(|err| format!("Could not load the loopback update certificate: {err}"))?;
         builder = builder.configure_client(move |client| {
@@ -574,10 +583,8 @@ async fn download_manifest_update(
         .await
         .map_err(|err| err.to_string())?
         .ok_or_else(|| "That beta is not newer than this install.".to_string())?;
-    let version = gated
-        .as_ref()
-        .map(|item| item.display_version.clone())
-        .unwrap_or_else(|| update.version.clone());
+    let version = gated.display_version.clone();
+    let bound = gated.bound.clone();
     // Stop the localhost manifest before the signed binary is downloaded.
     drop(gated);
     let app_emit = app.clone();
@@ -595,6 +602,7 @@ async fn download_manifest_update(
         )
         .await
         .map_err(|err| err.to_string())?;
+    bound.verify_artifact_bytes(&bytes)?;
 
     let state = app.state::<PreparedManifestUpdateState>();
     let mut guard = state.0.lock().map_err(|err| err.to_string())?;
@@ -605,19 +613,12 @@ async fn download_manifest_update(
 struct GatedBetaManifest {
     url: String,
     display_version: String,
-    root_pem: String,
-    _server: beta_manifest::LocalManifest,
+    root_pem: Option<String>,
+    bound: beta_manifest::BoundManifest,
+    _server: Option<beta_manifest::LocalManifest>,
 }
 
-/// `v1.0.8beta3` is not semver, so Tauri cannot read that manifest.
-/// Fetch it over normal TLS, rewrite only `version` to a newer gate,
-/// and serve the copy on a one-shot localhost certificate. The binary
-/// URL and signature stay the published ones. The UI still sees
-/// `1.0.8beta3`.
-async fn fetch_gated_beta_manifest(
-    endpoint: &str,
-    current_version: &str,
-) -> Result<GatedBetaManifest, String> {
+async fn fetch_updater_manifest_body(endpoint: &str) -> Result<String, String> {
     let client = reqwest::Client::builder()
         .user_agent("LocalPrism")
         .timeout(Duration::from_secs(20))
@@ -630,22 +631,69 @@ async fn fetch_gated_beta_manifest(
         .map_err(|err| err.to_string())?;
     if !response.status().is_success() {
         return Err(format!(
-            "Beta manifest request failed ({}).",
+            "Updater manifest request failed ({}).",
             response.status()
         ));
     }
-    let body = response.text().await.map_err(|err| err.to_string())?;
-    let rewritten = beta_manifest::rewrite_compact_manifest(&body, current_version)?;
-    if !beta_manifest::compact_release_is_newer(&rewritten.display_version, current_version)? {
-        return Err("That beta is not newer than this install.".to_string());
+    response.text().await.map_err(|err| err.to_string())
+}
+
+/// Bind version/tag/URL before the updater runs. Compact tags still get a
+/// local semver gate. Other published manifests stay on their GitHub URL.
+async fn fetch_bound_manifest(
+    endpoint: &str,
+    current_version: &str,
+) -> Result<GatedBetaManifest, String> {
+    let body = fetch_updater_manifest_body(endpoint).await?;
+    let pubkey = updater_pubkey()?;
+    if beta_manifest::manifest_needs_version_gate(endpoint) {
+        let rewritten = beta_manifest::rewrite_compact_manifest(&body, current_version, &pubkey)?;
+        if !beta_manifest::compact_release_is_newer(&rewritten.display_version, current_version)? {
+            return Err("That beta is not newer than this install.".to_string());
+        }
+        let server = beta_manifest::serve_local_manifest(rewritten.json).await?;
+        return Ok(GatedBetaManifest {
+            url: server.url.clone(),
+            display_version: rewritten.display_version,
+            root_pem: Some(server.root_pem.clone()),
+            bound: rewritten.bound,
+            _server: Some(server),
+        });
     }
-    let server = beta_manifest::serve_local_manifest(rewritten.json).await?;
+    let bound = beta_manifest::bind_updater_manifest(&body, &pubkey)?;
     Ok(GatedBetaManifest {
-        url: server.url.clone(),
-        display_version: rewritten.display_version,
-        root_pem: server.root_pem.clone(),
-        _server: server,
+        url: endpoint.to_string(),
+        display_version: bound.version.clone(),
+        root_pem: None,
+        bound,
+        _server: None,
     })
+}
+
+fn allowed_remote_manifest_url(raw: &str) -> Result<String, String> {
+    let url = raw.trim();
+    if url == STABLE_UPDATER_ENDPOINT {
+        return Ok(url.to_string());
+    }
+    beta_manifest_endpoint(url)
+}
+
+#[tauri::command]
+async fn verify_bound_updater_manifest(
+    manifest_url: String,
+    expected_version: String,
+) -> Result<String, String> {
+    let endpoint = allowed_remote_manifest_url(&manifest_url)?;
+    let body = fetch_updater_manifest_body(&endpoint).await?;
+    let bound = beta_manifest::bind_updater_manifest(&body, &updater_pubkey()?)?;
+    if bound.version != expected_version.trim() {
+        return Err(format!(
+            "Updater version {} does not match the signed manifest version {}.",
+            expected_version.trim(),
+            bound.version
+        ));
+    }
+    Ok(bound.version)
 }
 
 #[tauri::command]
@@ -881,6 +929,7 @@ pub fn run() {
             update_install_channel,
             clear_prepared_update,
             download_manifest_update,
+            verify_bound_updater_manifest,
             install_prepared_update,
             open_debug_window,
         ])
@@ -1074,5 +1123,17 @@ mod update_channel_tests {
             "https://github.com/boshuaiYu/LocalPrism/releases/download/latest/latest.json"
         )
         .is_err());
+    }
+
+    #[test]
+    fn updater_pubkey_matches_tauri_conf() {
+        let pubkey = super::updater_pubkey().expect("pubkey");
+        assert!(beta_manifest::decode_updater_pubkey(&pubkey).is_ok());
+        assert_eq!(
+            super::allowed_remote_manifest_url(super::STABLE_UPDATER_ENDPOINT)
+                .ok()
+                .as_deref(),
+            Some(super::STABLE_UPDATER_ENDPOINT)
+        );
     }
 }

@@ -3,6 +3,17 @@
 //! the minisign signature. This crate rewrites only the `version` field
 //! to a gate semver and serves that JSON once on localhost so the
 //! existing updater can download the original signed asset.
+//!
+//! Acceptance first binds version, channel, tag, URL, and digest to a
+//! minisign attestation so a rewritten version cannot ride on another
+//! release's signed URL.
+
+mod bind;
+
+pub use bind::{
+    bind_updater_manifest, canonical_attestation, channel_for_version, decode_updater_pubkey,
+    sha256_digest, tag_for_version, version_requires_signed_identity, BoundManifest, BoundPlatform,
+};
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -21,6 +32,7 @@ pub struct RewrittenManifest {
     pub json: String,
     pub display_version: String,
     pub gate_version: String,
+    pub bound: BoundManifest,
 }
 
 pub struct LocalManifest {
@@ -81,30 +93,42 @@ pub fn compact_release_is_newer(candidate: &str, current: &str) -> Result<bool, 
 pub fn rewrite_compact_manifest(
     raw: &str,
     current_version: &str,
+    pubkey: &str,
 ) -> Result<RewrittenManifest, String> {
-    let mut value: Value =
-        serde_json::from_str(raw).map_err(|err| format!("Beta manifest is not JSON: {err}"))?;
-    let display_version = value
-        .get("version")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "Beta manifest has no version.".to_string())?
-        .trim()
-        .to_string();
-    if !is_compact_beta_version(&display_version) {
+    let bound = bind_updater_manifest(raw, pubkey)?;
+    if !is_compact_beta_version(&bound.version) {
         return Err(
             "Beta manifest version is not a compact prerelease such as 1.0.8beta3.".to_string(),
         );
     }
+    let mut value: Value =
+        serde_json::from_str(raw).map_err(|err| format!("Beta manifest is not JSON: {err}"))?;
+    let original_platforms = value
+        .get("platforms")
+        .cloned()
+        .ok_or_else(|| "Beta manifest has no platforms.".to_string())?;
     let gate_version = updater_gate_version(current_version)?;
     if let Some(object) = value.as_object_mut() {
         object.insert("version".to_string(), Value::String(gate_version.clone()));
+    }
+    if value.get("platforms") != Some(&original_platforms) {
+        return Err("Beta rewrite must not change signed artifact URLs.".to_string());
+    }
+    for platform in bound.platforms.values() {
+        let url = platform.url.as_str();
+        if !url.contains(&format!("/{}/", bound.tag)) {
+            return Err(
+                "Beta rewrite cannot attach a gate version to another release URL.".to_string(),
+            );
+        }
     }
     let json = serde_json::to_string(&value)
         .map_err(|err| format!("Could not rewrite the beta manifest: {err}"))?;
     Ok(RewrittenManifest {
         json,
-        display_version,
+        display_version: bound.version.clone(),
         gate_version,
+        bound,
     })
 }
 
@@ -404,9 +428,13 @@ async fn write_json(
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_release_is_newer, is_compact_beta_version, manifest_needs_version_gate,
-        rewrite_compact_manifest, serve_local_manifest, updater_gate_version,
+        bind_updater_manifest, canonical_attestation, compact_release_is_newer,
+        is_compact_beta_version, manifest_needs_version_gate, rewrite_compact_manifest,
+        serve_local_manifest, sha256_digest, updater_gate_version,
+        version_requires_signed_identity, BoundPlatform,
     };
+    use serde_json::{json, Value};
+    use std::collections::BTreeMap;
 
     #[test]
     fn compact_tags_need_a_gate_and_hyphen_tags_do_not() {
@@ -469,16 +497,266 @@ mod tests {
         assert!(super::compare_release(&wix, &word) > 0);
     }
 
+    fn compact_manifest(url: &str) -> String {
+        json!({
+            "version": "1.0.8beta3",
+            "notes": "beta",
+            "channel": "beta",
+            "tag": "v1.0.8beta3",
+            "platforms": {
+                "darwin-aarch64": {
+                    "url": url,
+                    "signature": "artifact-sig",
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                }
+            },
+        })
+        .to_string()
+    }
+
+    fn updater_pubkey() -> String {
+        let conf: Value =
+            serde_json::from_str(include_str!("../../tauri.conf.json")).expect("tauri.conf.json");
+        conf["plugins"]["updater"]["pubkey"]
+            .as_str()
+            .expect("pubkey")
+            .to_string()
+    }
+
     #[test]
     fn rewrite_changes_only_the_version_field() {
-        let raw = r#"{"version":"1.0.8beta3","notes":"beta","platforms":{"darwin-aarch64":{"url":"https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8beta3/app.tar.gz","signature":"sig"}}}"#;
-        let rewritten = rewrite_compact_manifest(raw, "1.0.8-2").expect("rewrite");
+        let url = "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8beta3/LocalPrism-macOS.app.tar.gz";
+        let raw = compact_manifest(url);
+        let rewritten = rewrite_compact_manifest(&raw, "1.0.8-2", "unused").expect("rewrite");
         assert_eq!(rewritten.display_version, "1.0.8beta3");
         assert_eq!(rewritten.gate_version, "1.0.9-beta.0");
         assert!(rewritten.json.contains("\"version\":\"1.0.9-beta.0\""));
-        assert!(rewritten.json.contains("v1.0.8beta3/app.tar.gz"));
+        assert!(rewritten.json.contains(url));
+        assert!(rewritten.json.contains("\"signature\":\"artifact-sig\""));
+        assert_eq!(rewritten.bound.tag, "v1.0.8beta3");
+        let rewritten_value: Value = serde_json::from_str(&rewritten.json).expect("json");
+        assert_eq!(
+            rewritten_value.get("platforms"),
+            serde_json::from_str::<Value>(&raw)
+                .ok()
+                .as_ref()
+                .and_then(|value| value.get("platforms"))
+        );
+    }
+
+    #[test]
+    fn bind_rejects_a_rewritten_version_on_another_release_url() {
+        let raw = json!({
+            "version": "9.9.9beta1",
+            "channel": "beta",
+            "tag": "v9.9.9beta1",
+            "platforms": {
+                "darwin-aarch64": {
+                    "url": "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8beta3/LocalPrism-macOS.app.tar.gz",
+                    "signature": "artifact-sig",
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                }
+            },
+        })
+        .to_string();
+        let error = bind_updater_manifest(&raw, "unused").expect_err("url tag mismatch");
+        assert!(error.contains("does not match manifest tag"));
+    }
+
+    #[test]
+    fn bind_rejects_unsigned_manifests_newer_than_the_published_ceiling() {
+        assert!(!version_requires_signed_identity("1.0.8"));
+        assert!(!version_requires_signed_identity("1.0.8beta7"));
+        assert!(!version_requires_signed_identity("1.0.8-7"));
+        assert!(version_requires_signed_identity("1.0.9"));
+        let raw = r#"{"version":"1.0.9","notes":"next","platforms":{"linux-x86_64":{"url":"https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.9/LocalPrism-Linux.AppImage","signature":"sig"}}}"#;
+        let error = bind_updater_manifest(raw, "unused").expect_err("unsigned newer");
+        assert!(error.contains("manifest_signature"), "{error}");
+    }
+
+    #[test]
+    fn bind_accepts_published_latest_json_without_attestation() {
+        let raw = r#"{"version":"1.0.8beta7","notes":"beta","pub_date":"2026-01-01T00:00:00Z","platforms":{"darwin-aarch64":{"url":"https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8beta7/LocalPrism-macOS.app.tar.gz","signature":"sig"},"linux-x86_64":{"url":"https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8beta7/LocalPrism-Linux.AppImage","signature":"sig"}}}"#;
+        let bound = bind_updater_manifest(raw, "unused").expect("legacy beta");
+        assert_eq!(bound.version, "1.0.8beta7");
+        assert_eq!(bound.tag, "v1.0.8beta7");
+        assert_eq!(bound.channel, "beta");
+        bound
+            .verify_artifact_bytes(b"any-bytes-are-ok-without-digest")
+            .expect("legacy digest");
+
+        let stable = r#"{"version":"1.0.8","notes":"stable","platforms":{"darwin-aarch64":{"url":"https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8/LocalPrism-macOS.app.tar.gz","signature":"sig"}}}"#;
+        let bound = bind_updater_manifest(stable, "unused").expect("legacy stable");
+        assert_eq!(bound.version, "1.0.8");
+        assert_eq!(bound.channel, "stable");
+        assert_eq!(bound.tag, "v1.0.8");
+    }
+
+    #[test]
+    fn rewrite_keeps_published_compact_betas_usable() {
+        let raw = r#"{"version":"1.0.8beta3","notes":"beta","pub_date":"2026-01-01T00:00:00Z","platforms":{"windows-x86_64-nsis":{"url":"https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8beta3/LocalPrism-Windows-setup.exe","signature":"sig"},"windows-x86_64":{"url":"https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8beta3/LocalPrism-Windows-setup.exe","signature":"sig"},"darwin-aarch64":{"url":"https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8beta3/LocalPrism-macOS.app.tar.gz","signature":"sig"},"darwin-x86_64":{"url":"https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8beta3/LocalPrism-macOS-Intel.app.tar.gz","signature":"sig"},"linux-x86_64":{"url":"https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8beta3/LocalPrism-Linux.AppImage","signature":"sig"}}}"#;
+        let rewritten = rewrite_compact_manifest(raw, "1.0.8-2", "unused").expect("rewrite");
+        assert_eq!(rewritten.display_version, "1.0.8beta3");
+        assert_eq!(rewritten.gate_version, "1.0.9-beta.0");
+        assert_eq!(rewritten.bound.platforms.len(), 5);
+        assert!(rewritten
+            .json
+            .contains("v1.0.8beta3/LocalPrism-macOS.app.tar.gz"));
+        assert!(rewritten
+            .json
+            .contains("v1.0.8beta3/LocalPrism-Windows-setup.exe"));
         assert!(rewritten.json.contains("\"signature\":\"sig\""));
-        assert!(!rewritten.json.contains("1.0.8beta3\",\"notes"));
+    }
+
+    #[test]
+    fn bind_accepts_published_five_platform_stable_latest_json() {
+        let raw = r#"{"version":"1.0.8","notes":"LocalPrism v1.0.8","pub_date":"2026-01-01T00:00:00Z","platforms":{"windows-x86_64-nsis":{"url":"https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8/LocalPrism-Windows-setup.exe","signature":"sig"},"windows-x86_64":{"url":"https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8/LocalPrism-Windows-setup.exe","signature":"sig"},"darwin-aarch64":{"url":"https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8/LocalPrism-macOS.app.tar.gz","signature":"sig"},"darwin-x86_64":{"url":"https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8/LocalPrism-macOS-Intel.app.tar.gz","signature":"sig"},"linux-x86_64":{"url":"https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8/LocalPrism-Linux.AppImage","signature":"sig"}}}"#;
+        let bound = bind_updater_manifest(raw, "unused").expect("published stable");
+        assert_eq!(bound.version, "1.0.8");
+        assert_eq!(bound.channel, "stable");
+        assert_eq!(bound.tag, "v1.0.8");
+        assert_eq!(bound.platforms.len(), 5);
+    }
+
+    #[test]
+    fn bind_rejects_channel_that_does_not_match_version() {
+        let raw = json!({
+            "version": "1.0.8",
+            "channel": "beta",
+            "tag": "v1.0.8",
+            "platforms": {
+                "darwin-aarch64": {
+                    "url": "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8/LocalPrism-macOS.app.tar.gz",
+                    "signature": "artifact-sig",
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                }
+            },
+        })
+        .to_string();
+        let error = bind_updater_manifest(&raw, "unused").expect_err("channel");
+        assert!(error.contains("channel"));
+    }
+
+    #[test]
+    fn artifact_bytes_must_match_a_signed_digest() {
+        let bytes = b"localprism-update-bytes";
+        let digest = sha256_digest(bytes);
+        let raw = json!({
+            "version": "1.0.8beta3",
+            "channel": "beta",
+            "tag": "v1.0.8beta3",
+            "platforms": {
+                "darwin-aarch64": {
+                    "url": "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8beta3/LocalPrism-macOS.app.tar.gz",
+                    "signature": "artifact-sig",
+                    "digest": digest,
+                }
+            },
+        })
+        .to_string();
+        let bound = bind_updater_manifest(&raw, "unused").expect("bound");
+        bound.verify_artifact_bytes(bytes).expect("digest");
+        assert!(bound.verify_artifact_bytes(b"other").is_err());
+    }
+
+    #[test]
+    fn bind_rejects_an_invalid_manifest_attestation() {
+        let raw = json!({
+            "version": "1.0.8",
+            "channel": "stable",
+            "tag": "v1.0.8",
+            "platforms": {
+                "linux-x86_64": {
+                    "url": "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8/LocalPrism-Linux.AppImage",
+                    "signature": "artifact-sig",
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                }
+            },
+            "manifest_signature": "not-a-minisign-signature",
+        })
+        .to_string();
+        let error = bind_updater_manifest(&raw, &updater_pubkey()).expect_err("bad attestation");
+        assert!(
+            error.contains("signature")
+                || error.contains("minisign")
+                || error.contains("public key")
+        );
+    }
+
+    #[test]
+    fn bind_accepts_a_tauri_base64_manifest_attestation() {
+        let pubkey = include_str!("fixtures/throwaway-updater.pub");
+        let signature = include_str!("fixtures/throwaway-attestation.sig").trim();
+        let raw = json!({
+            "version": "1.0.8",
+            "channel": "stable",
+            "tag": "v1.0.8",
+            "platforms": {
+                "linux-x86_64": {
+                    "url": "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8/LocalPrism-Linux.AppImage",
+                    "signature": "artifact-sig",
+                    "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                }
+            },
+            "manifest_signature": signature,
+        })
+        .to_string();
+        let bound = bind_updater_manifest(&raw, pubkey).expect("tauri attestation");
+        assert_eq!(bound.version, "1.0.8");
+        assert_eq!(bound.tag, "v1.0.8");
+
+        let raw_minisign = String::from_utf8(
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, signature)
+                .expect("base64"),
+        )
+        .expect("utf8");
+        let raw = json!({
+            "version": "1.0.8",
+            "channel": "stable",
+            "tag": "v1.0.8",
+            "platforms": {
+                "linux-x86_64": {
+                    "url": "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8/LocalPrism-Linux.AppImage",
+                    "signature": "artifact-sig",
+                    "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                }
+            },
+            "manifest_signature": raw_minisign.trim(),
+        })
+        .to_string();
+        bind_updater_manifest(&raw, pubkey).expect("raw minisign attestation");
+    }
+
+    #[test]
+    fn canonical_attestation_is_stable() {
+        let mut platforms = BTreeMap::new();
+        platforms.insert(
+            "linux-x86_64".to_string(),
+            BoundPlatform {
+                url: "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8/LocalPrism-Linux.AppImage".to_string(),
+                digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                signature: "sig".to_string(),
+            },
+        );
+        platforms.insert(
+            "darwin-aarch64".to_string(),
+            BoundPlatform {
+                url: "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8/LocalPrism-macOS.app.tar.gz".to_string(),
+                digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                signature: "sig".to_string(),
+            },
+        );
+        assert_eq!(
+            canonical_attestation("1.0.8", "stable", "v1.0.8", &platforms),
+            "\
+localprism-updater-manifest-v1
+channel=stable
+tag=v1.0.8
+version=1.0.8
+darwin-aarch64 digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa url=https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8/LocalPrism-macOS.app.tar.gz
+linux-x86_64 digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb url=https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8/LocalPrism-Linux.AppImage
+"
+        );
     }
 
     #[tokio::test]

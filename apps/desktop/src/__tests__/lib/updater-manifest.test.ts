@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { planUpdaterRelease, type ArtifactFile } from "@/lib/updater-manifest";
+import {
+  canonicalUpdaterAttestation,
+  planUpdaterRelease,
+  type ArtifactFile,
+} from "@/lib/updater-manifest";
 
 const SIG =
   "untrusted comment: signature from tauri secret key\nRWTTESTSIGNATURE=\n";
+const SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-function file(path: string, text?: string): ArtifactFile {
-  return text === undefined ? { path } : { path, text };
+function file(path: string, text?: string, sha256 = SHA): ArtifactFile {
+  return text === undefined ? { path, sha256 } : { path, text, sha256 };
 }
 
 function signedTree(): ArtifactFile[] {
@@ -39,10 +44,18 @@ describe("planUpdaterRelease", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.plan.manifest.version).toBe("1.0.5");
+    expect(result.plan.manifest.channel).toBe("stable");
+    expect(result.plan.manifest.tag).toBe("v1.0.5");
     expect(result.plan.manifest.platforms["windows-x86_64-nsis"]).toEqual({
       signature: SIG.trim(),
       url: "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.5/LocalPrism-Windows-setup.exe",
+      digest: `sha256:${SHA}`,
     });
+    expect(result.plan.attestation).toContain("localprism-updater-manifest-v1");
+    expect(result.plan.attestation).toContain("channel=stable");
+    expect(result.plan.attestation).toContain(
+      `windows-x86_64-nsis digest=sha256:${SHA} url=https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.5/LocalPrism-Windows-setup.exe`,
+    );
     expect(result.plan.manifest.platforms["windows-x86_64"]).toEqual(
       result.plan.manifest.platforms["windows-x86_64-nsis"],
     );
@@ -103,5 +116,60 @@ describe("planUpdaterRelease", () => {
     if (result.ok) return;
     expect(result.error).toContain("windows-x86_64-nsis");
     expect(result.error).toContain("without a signature");
+  });
+
+  it("fails when a signed updater binary has no digest", () => {
+    const result = planUpdaterRelease({
+      files: [
+        { path: "desktop-linux/appimage/LocalPrism.AppImage" },
+        file("desktop-linux/appimage/LocalPrism.AppImage.sig", SIG),
+      ],
+      tag: "v1.0.5",
+      repository: "boshuaiYu/LocalPrism",
+      pubDate: "2026-09-23T00:00:00Z",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain("without a SHA-256 digest");
+  });
+
+  it("emits the same attestation bytes as the Rust binder", () => {
+    const attestation = canonicalUpdaterAttestation({
+      version: "1.0.8",
+      channel: "stable",
+      tag: "v1.0.8",
+      platforms: {
+        "linux-x86_64": {
+          digest:
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          url: "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8/LocalPrism-Linux.AppImage",
+        },
+        "darwin-aarch64": {
+          digest:
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          url: "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8/LocalPrism-macOS.app.tar.gz",
+        },
+      },
+    });
+    expect(attestation).toBe(`localprism-updater-manifest-v1
+channel=stable
+tag=v1.0.8
+version=1.0.8
+darwin-aarch64 digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa url=https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8/LocalPrism-macOS.app.tar.gz
+linux-x86_64 digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb url=https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8/LocalPrism-Linux.AppImage
+`);
+  });
+
+  it("marks compact and hyphenated versions as the beta channel", () => {
+    const compact = planUpdaterRelease({
+      files: signedTree(),
+      tag: "v1.0.8beta3",
+      repository: "boshuaiYu/LocalPrism",
+      pubDate: "2026-09-23T00:00:00Z",
+    });
+    expect(compact.ok).toBe(true);
+    if (!compact.ok) return;
+    expect(compact.plan.manifest.channel).toBe("beta");
+    expect(compact.plan.attestation).toContain("version=1.0.8beta3");
   });
 });

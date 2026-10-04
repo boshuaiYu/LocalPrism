@@ -14,10 +14,6 @@ on:
 permissions:
   contents: write
 
-env:
-  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-
 jobs:
   # ──────────────────────────────────────────────
   # Windows
@@ -84,6 +80,10 @@ jobs:
           cache: pnpm
 
       - run: pnpm install
+
+      - name: Create ephemeral updater key
+        shell: bash
+        run: bash scripts/ci-ephemeral-updater-key.sh
 
       - name: Build Tauri app
         shell: bash
@@ -206,6 +206,9 @@ jobs:
           cache: pnpm
 
       - run: pnpm install
+
+      - name: Create ephemeral updater key
+        run: bash scripts/ci-ephemeral-updater-key.sh
 
       - name: Build Tauri app
         env:
@@ -358,6 +361,9 @@ jobs:
 
       - run: pnpm install
 
+      - name: Create ephemeral updater key
+        run: bash scripts/ci-ephemeral-updater-key.sh
+
       - name: Build Tauri app
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -443,6 +449,9 @@ jobs:
 
       - run: pnpm install
 
+      - name: Create ephemeral updater key
+        run: bash scripts/ci-ephemeral-updater-key.sh
+
       - name: Build Tauri app
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -478,7 +487,56 @@ jobs:
           if-no-files-found: warn
 
   # ──────────────────────────────────────────────
-  # Publish: generate latest.json & upload to release
+  # Sign: the release updater key is available only here.
+  # Build jobs use a throwaway key so vcpkg, pnpm, and unpinned
+  # checkouts never see TAURI_SIGNING_PRIVATE_KEY.
+  # ──────────────────────────────────────────────
+  sign-updater:
+    needs: [build-windows, build-macos, build-macos-intel, build-linux]
+    runs-on: ubuntu-latest
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pinned Tauri CLI
+        run: npm install --global @tauri-apps/cli@2.10.0
+
+      - name: Determine tag
+        id: tag
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ inputs.release_tag }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Sign updater artifacts
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: bash scripts/ci-sign-updater-artifacts.sh
+
+      - name: Upload signed release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-signed
+          path: signed-upload/**
+          if-no-files-found: error
+
+  # ──────────────────────────────────────────────
+  # Publish: upload the already-signed latest.json and bundles.
   # Signatures are read from .sig artifacts. Job outputs cannot carry
   # multiline minisign files, which previously published platforms: {}.
   # Stable updates read releases/latest/download/latest.json. Publish a
@@ -486,7 +544,7 @@ jobs:
   # The app then reads releases/download/<tag>/latest.json and asks first.
   # ──────────────────────────────────────────────
   publish:
-    needs: [build-windows, build-macos, build-macos-intel, build-linux]
+    needs: [sign-updater]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
 
@@ -502,22 +560,32 @@ jobs:
             echo "tag=${{ inputs.release_tag }}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Download all artifacts
+      - name: Download signed release files
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          name: desktop-signed
+          path: upload
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Generate latest.json from updater artifacts
-        env:
-          TAG: ${{ steps.tag.outputs.tag }}
+      - name: Require a signed latest.json
         run: |
-          node --experimental-strip-types --disable-warning=ExperimentalWarning apps/desktop/scripts/generate-latest-json.ts \
-            --artifacts artifacts \
-            --upload upload
+          if [ ! -f upload/latest.json ]; then
+            echo "sign-updater did not produce latest.json" >&2
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          import sys
+
+          with open("upload/latest.json", encoding="utf-8") as handle:
+              data = json.load(handle)
+          signature = data.get("manifest_signature")
+          if not isinstance(signature, str) or not signature.strip():
+              print(
+                  "latest.json is missing a non-empty manifest_signature",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          PY
 
       - name: Create draft release
         env:
