@@ -123,7 +123,7 @@ pub(crate) fn skill_redirect_policy() -> reqwest::redirect::Policy {
         if attempt.previous().len() >= MAX_SKILL_REDIRECTS {
             return attempt.error("too many redirects");
         }
-        match validate_skill_fetch_url(attempt.url()) {
+        match validate_skill_redirect_target(attempt.url()) {
             Ok(()) => attempt.follow(),
             Err(error) => attempt.error(error),
         }
@@ -173,6 +173,14 @@ pub(crate) fn public_only_resolver() -> Arc<PublicOnlyResolver> {
 }
 
 pub(crate) fn validate_skill_fetch_url(url: &reqwest::Url) -> Result<(), String> {
+    validate_skill_url_parts(url, true)
+}
+
+pub(crate) fn validate_skill_redirect_target(url: &reqwest::Url) -> Result<(), String> {
+    validate_skill_url_parts(url, false)
+}
+
+fn validate_skill_url_parts(url: &reqwest::Url, resolve_host: bool) -> Result<(), String> {
     if url.scheme() != "http" && url.scheme() != "https" {
         return Err("Skill URL must use http or https".into());
     }
@@ -188,6 +196,9 @@ pub(crate) fn validate_skill_fetch_url(url: &reqwest::Url) -> Result<(), String>
             }
             if let Ok(ip) = domain.parse::<IpAddr>() {
                 return reject_blocked_skill_ip(ip);
+            }
+            if !resolve_host {
+                return Ok(());
             }
             let port = url.port_or_known_default().unwrap_or(80);
             validate_resolved_skill_host(domain, port)
@@ -291,6 +302,7 @@ fn is_blocked_ipv4(ip: Ipv4Addr) -> bool {
         || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
         || (octets[0] == 198 && (18..=19).contains(&octets[1]))
         || octets[0] >= 240
+        || ip == Ipv4Addr::new(168, 63, 129, 16)
 }
 
 fn is_blocked_ipv6(ip: Ipv6Addr) -> bool {
@@ -330,6 +342,7 @@ mod tests {
             "http://[64:ff9b::7f00:1]/x",
             "http://100.64.0.1/x",
             "http://100.100.100.200/x",
+            "http://168.63.129.16/",
             "http://0.0.0.0/x",
             "http://255.255.255.255/x",
             "http://localhost/x",
@@ -369,6 +382,22 @@ mod tests {
                 Err(error) => panic!("blocked public GitHub URL {url}: {error}"),
             }
         }
+    }
+
+    #[test]
+    fn redirect_target_skips_dns_but_still_blocks_literals() {
+        validate_skill_redirect_target(&parse_url(
+            "https://this-name-does-not-exist.invalid/skill.md",
+        ))
+        .unwrap();
+        assert!(validate_skill_fetch_url(&parse_url(
+            "https://this-name-does-not-exist.invalid/skill.md",
+        ))
+        .unwrap_err()
+        .contains("Failed to resolve"));
+        assert!(validate_skill_redirect_target(&parse_url("http://127.0.0.1/x")).is_err());
+        assert!(validate_skill_redirect_target(&parse_url("http://168.63.129.16/")).is_err());
+        assert!(validate_skill_redirect_target(&parse_url("file:///etc/passwd")).is_err());
     }
 
     #[test]
