@@ -25,8 +25,7 @@ pub fn ensure_secure_provider_base_url(base_url: &str) -> Result<(), String> {
 fn host_is_loopback(url: &url::Url) -> bool {
     match url.host() {
         Some(url::Host::Domain(domain)) => {
-            let domain = domain.trim_end_matches('.').to_ascii_lowercase();
-            domain == "localhost" || domain.ends_with(".localhost")
+            domain.trim_end_matches('.').eq_ignore_ascii_case("localhost")
         }
         Some(url::Host::Ipv4(addr)) => addr.is_loopback(),
         Some(url::Host::Ipv6(addr)) => ipv6_is_loopback(addr),
@@ -57,6 +56,7 @@ mod tests {
         assert!(ensure_secure_provider_base_url("http://127.0.0.1:8080/v1").is_ok());
         assert!(ensure_secure_provider_base_url("http://[::1]:11434/v1").is_ok());
         assert!(ensure_secure_provider_base_url("http://127.1.2.3:9000").is_ok());
+        assert!(ensure_secure_provider_base_url("http://evil.localhost/v1").is_err());
     }
 
     #[test]

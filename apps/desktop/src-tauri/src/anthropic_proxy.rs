@@ -205,6 +205,7 @@ async fn handle_anthropic_passthrough(
     crate::providers::ensure_secure_provider_base_url(&credential.base_url)?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|err| format!("Failed to create Anthropic provider client: {err}"))?;
     let url = if is_count_tokens_path(path) {
@@ -422,6 +423,7 @@ async fn handle_codex_messages(
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(180))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|err| format!("Failed to create Codex Responses client: {err}"))?;
     let mut credential = credential.clone();
@@ -976,6 +978,7 @@ async fn handle_messages_to_stream(
     crate::providers::ensure_secure_provider_base_url(&credential.base_url)?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|err| format!("Failed to create provider client: {}", err))?;
     let request = client
@@ -1490,6 +1493,139 @@ mod tests {
         assert_eq!(authorized.status().as_u16(), 200);
         let body = authorized.text().await.unwrap();
         assert!(body.contains("claude-prism-anthropic-proxy"));
+    }
+
+    async fn start_recording_openai_mock() -> (String, Arc<std::sync::Mutex<Option<String>>>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let seen_task = Arc::clone(&seen);
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buffer = Vec::new();
+            let mut temp = [0_u8; 8192];
+            let header_end = loop {
+                let Ok(n) = stream.read(&mut temp).await else {
+                    return;
+                };
+                if n == 0 {
+                    return;
+                }
+                buffer.extend_from_slice(&temp[..n]);
+                if let Some(index) = find_header_end(&buffer) {
+                    break index;
+                }
+                if buffer.len() > MAX_PROXY_HEADER_BYTES {
+                    return;
+                }
+            };
+            let header_text = String::from_utf8_lossy(&buffer[..header_end]);
+            let auth = header_text.lines().find_map(|line| {
+                line.split_once(':').and_then(|(name, value)| {
+                    name.eq_ignore_ascii_case("authorization")
+                        .then(|| value.trim().to_string())
+                })
+            });
+            *seen_task.lock().unwrap() = auth;
+            let content_length = header_text
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                })
+                .unwrap_or(0);
+            let body_start = header_end + 4;
+            while buffer.len().saturating_sub(body_start) < content_length {
+                let Ok(n) = stream.read(&mut temp).await else {
+                    return;
+                };
+                if n == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&temp[..n]);
+            }
+            let body = json!({
+                "id": "chatcmpl_1",
+                "choices": [{
+                    "message": { "role": "assistant", "content": "hello" },
+                    "finish_reason": "stop"
+                }],
+                "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+            })
+            .to_string();
+            let _ = stream
+                .write_all(http_response(200, "application/json", &body).as_bytes())
+                .await;
+        });
+        (format!("http://{addr}/v1"), seen)
+    }
+
+    #[tokio::test]
+    async fn authorized_inference_forwards_stored_provider_key() {
+        let (upstream_url, seen_auth) = start_recording_openai_mock().await;
+        let url = start_openai_anthropic_proxy(test_credential(&upstream_url))
+            .await
+            .expect("proxy should start");
+        let response = reqwest::Client::new()
+            .post(format!("{url}v1/messages"))
+            .header("content-type", "application/json")
+            .json(&json!({
+                "model": "claude-sonnet-4",
+                "max_tokens": 16,
+                "messages": [{ "role": "user", "content": "hi" }],
+                "stream": false
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let body = response.text().await.unwrap();
+        assert!(
+            body.contains("hello"),
+            "proxy should return translated assistant text, got {body}"
+        );
+        assert_eq!(
+            seen_auth.lock().unwrap().as_deref(),
+            Some("Bearer sk-test")
+        );
+    }
+
+    #[tokio::test]
+    async fn ninth_concurrent_connection_is_rejected() {
+        let url = start_openai_anthropic_proxy(test_credential("https://api.example.com/v1"))
+            .await
+            .expect("proxy should start");
+        let parsed = url::Url::parse(&url).unwrap();
+        let addr = format!(
+            "{}:{}",
+            parsed.host_str().unwrap(),
+            parsed.port().unwrap()
+        );
+        let mut held = Vec::new();
+        for _ in 0..MAX_PROXY_CONNECTIONS {
+            let mut stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
+            stream.write_all(b"GET / HTTP/1.1\r\n").await.unwrap();
+            held.push(stream);
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let mut ninth = tokio::net::TcpStream::connect(&addr).await.unwrap();
+        ninth
+            .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        ninth.read_to_end(&mut response).await.unwrap();
+        let text = String::from_utf8_lossy(&response);
+        assert!(
+            text.contains("503") || text.contains("Too many"),
+            "expected 503 after saturating proxy slots, got {text}"
+        );
+        drop(held);
     }
 
     #[tokio::test]

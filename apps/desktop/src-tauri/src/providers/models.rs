@@ -419,6 +419,7 @@ async fn fetch_json(
     super::ensure_secure_provider_base_url(url)?;
     let client = reqwest::Client::builder()
         .use_rustls_tls()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(8))
         .build()
         .map_err(|err| format!("Failed to build models client: {err}"))?;

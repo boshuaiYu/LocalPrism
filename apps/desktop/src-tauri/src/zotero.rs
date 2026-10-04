@@ -4,7 +4,8 @@ use serde::Serialize;
 use sha1::Sha1;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -429,13 +430,26 @@ fn should_skip_forwarded_header(name: &str) -> bool {
     )
 }
 
-pub(crate) fn is_zotero_process_name(name: &str) -> bool {
+fn process_file_stem(name: &str) -> String {
     let file = name.rsplit(['/', '\\']).next().unwrap_or(name).trim();
-    let stem = file
-        .strip_suffix(".exe")
+    file.strip_suffix(".exe")
         .or_else(|| file.strip_suffix(".EXE"))
-        .unwrap_or(file);
-    matches!(stem.to_ascii_lowercase().as_str(), "zotero" | "zotero-bin")
+        .unwrap_or(file)
+        .to_ascii_lowercase()
+}
+
+pub(crate) fn is_zotero_process_name(name: &str) -> bool {
+    matches!(
+        process_file_stem(name).as_str(),
+        "zotero" | "zotero-bin" | "zotero.bin"
+    )
+}
+
+fn is_sandbox_wrapper_process_name(name: &str) -> bool {
+    matches!(
+        process_file_stem(name).as_str(),
+        "bwrap" | "flatpak" | "flatpak-bwrap" | "pressure-vessel"
+    )
 }
 
 pub(crate) fn looks_like_zotero_connector_ping(
@@ -449,26 +463,24 @@ pub(crate) fn looks_like_zotero_connector_ping(
         return true;
     }
     let trimmed = body.trim();
-    if trimmed.eq_ignore_ascii_case("zotero is running")
+    trimmed.eq_ignore_ascii_case("zotero is running")
         || trimmed.eq_ignore_ascii_case("zotero connector server is available")
-    {
-        return true;
-    }
-    serde_json::from_str::<serde_json::Value>(trimmed)
-        .ok()
-        .and_then(|value| value.get("prefs").cloned())
-        .is_some()
 }
 
 pub(crate) fn should_trust_local_zotero_connector(
     process_name: Option<&str>,
     ping_looks_like_zotero: bool,
 ) -> bool {
-    match process_name {
-        Some(name) if is_zotero_process_name(name) => true,
-        Some(_) => false,
-        None => ping_looks_like_zotero,
+    if process_name.is_some_and(|name| {
+        !is_zotero_process_name(name) && !is_sandbox_wrapper_process_name(name)
+    }) {
+        return false;
     }
+    ping_looks_like_zotero
+}
+
+fn should_attach_zotero_api_key(source: &str) -> bool {
+    source != "local"
 }
 
 pub(crate) fn parse_hex_ipv4_socket(addr: &str) -> Option<(Ipv4Addr, u16)> {
@@ -702,13 +714,27 @@ async fn ping_local_zotero_connector() -> Option<(HashMap<String, String>, Strin
     Some((headers, body))
 }
 
+static LOCAL_CONNECTOR_TRUST: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+const LOCAL_CONNECTOR_TRUST_TTL: Duration = Duration::from_secs(5);
+
 async fn local_zotero_connector_is_trusted() -> bool {
+    if let Ok(cache) = LOCAL_CONNECTOR_TRUST.lock() {
+        if let Some((checked_at, trusted)) = *cache {
+            if checked_at.elapsed() < LOCAL_CONNECTOR_TRUST_TTL {
+                return trusted;
+            }
+        }
+    }
     let process_name = listener_process_name(ZOTERO_LOCAL_PORT);
     let ping = ping_local_zotero_connector().await;
     let ping_ok = ping
         .as_ref()
         .is_some_and(|(headers, body)| looks_like_zotero_connector_ping(headers, body));
-    should_trust_local_zotero_connector(process_name.as_deref(), ping_ok)
+    let trusted = should_trust_local_zotero_connector(process_name.as_deref(), ping_ok);
+    if let Ok(mut cache) = LOCAL_CONNECTOR_TRUST.lock() {
+        *cache = Some((Instant::now(), trusted));
+    }
+    trusted
 }
 
 #[tauri::command]
@@ -728,6 +754,7 @@ async fn fetch_zotero_source(
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_millis(800))
         .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
         .pool_max_idle_per_host(0)
         .build()
         .map_err(|e| format!("Failed to build Zotero HTTP client: {e}"))?;
@@ -738,9 +765,7 @@ async fn fetch_zotero_source(
         .header("Cache-Control", "no-cache, no-store")
         .header("Pragma", "no-cache")
         .header("User-Agent", "LocalPrism/1.0.8-7");
-    // Local reads do not need the cloud key, but a verified Zotero listener
-    // may still accept it. Never reach this path for an untrusted binder.
-    if !api_key.is_empty() {
+    if should_attach_zotero_api_key(source) && !api_key.is_empty() {
         request = request.header("Zotero-API-Key", api_key);
     }
 
@@ -980,6 +1005,7 @@ mod tests {
         assert!(is_zotero_process_name("Zotero.exe"));
         assert!(is_zotero_process_name("/Applications/Zotero.app/Contents/MacOS/zotero"));
         assert!(is_zotero_process_name("zotero-bin"));
+        assert!(is_zotero_process_name("zotero.bin"));
         assert!(!is_zotero_process_name("zotero-attacker"));
         assert!(!is_zotero_process_name("python"));
         assert!(!is_zotero_process_name("nc"));
@@ -994,7 +1020,7 @@ mod tests {
             &HashMap::new(),
             "Zotero is running"
         ));
-        assert!(looks_like_zotero_connector_ping(
+        assert!(!looks_like_zotero_connector_ping(
             &HashMap::new(),
             r#"{"prefs":{"automaticSnapshots":true}}"#
         ));
@@ -1005,10 +1031,19 @@ mod tests {
     }
 
     #[test]
-    fn local_connector_trusts_real_zotero_even_if_one_signal_is_missing() {
+    fn local_requests_never_attach_the_cloud_api_key() {
+        assert!(!should_attach_zotero_api_key("local"));
+        assert!(should_attach_zotero_api_key("web"));
+        assert!(should_attach_zotero_api_key("auto"));
+    }
+
+    #[test]
+    fn local_connector_requires_zotero_ping_and_rejects_foreign_processes() {
         assert!(should_trust_local_zotero_connector(Some("zotero"), true));
-        assert!(should_trust_local_zotero_connector(Some("zotero"), false));
         assert!(should_trust_local_zotero_connector(None, true));
+        assert!(should_trust_local_zotero_connector(Some("bwrap"), true));
+        assert!(!should_trust_local_zotero_connector(Some("bwrap"), false));
+        assert!(!should_trust_local_zotero_connector(Some("zotero"), false));
         assert!(!should_trust_local_zotero_connector(Some("python"), true));
         assert!(!should_trust_local_zotero_connector(None, false));
     }
