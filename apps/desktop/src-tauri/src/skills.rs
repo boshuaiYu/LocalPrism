@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 use tauri::{Emitter, Manager, WebviewWindow};
@@ -856,6 +856,7 @@ fn unpack_tarball_with_limits(
 
     let mut extracted_files = 0usize;
     let mut seen_entries = 0usize;
+    let mut written_bytes = 0u64;
     let mut last_error: Option<String> = None;
     for entry in archive
         .entries()
@@ -870,16 +871,7 @@ fn unpack_tarball_with_limits(
             ));
         }
         let kind = entry.header().entry_type();
-        if kind.is_pax_global_extensions()
-            || kind.is_pax_local_extensions()
-            || kind.is_gnu_longname()
-            || kind.is_gnu_longlink()
-            || kind.is_symlink()
-            || kind.is_hard_link()
-            || kind.is_fifo()
-            || kind.is_block_special()
-            || kind.is_character_special()
-        {
+        if is_skipped_tar_entry_kind(kind) {
             continue;
         }
 
@@ -907,12 +899,27 @@ fn unpack_tarball_with_limits(
             continue;
         }
         let is_dir = kind.is_dir() || src_path.as_os_str().to_string_lossy().ends_with('/');
-        if !is_dir && !(kind.is_file() || kind.is_contiguous() || kind.is_gnu_sparse()) {
+        if !is_dir && !(kind.is_file() || kind.is_contiguous()) {
             continue;
         }
+        if !is_dir {
+            let logical = entry.size();
+            if written_bytes.saturating_add(logical) > limits.max_bytes {
+                return Err(format!(
+                    "Archive extraction exceeded the {} byte limit",
+                    limits.max_bytes
+                ));
+            }
+        }
 
-        match extract_tar_entry(&mut entry, &dest, is_dir) {
-            Ok(()) => {
+        match extract_tar_entry(
+            &mut entry,
+            &dest,
+            is_dir,
+            limits.max_bytes.saturating_sub(written_bytes),
+        ) {
+            Ok(copied) => {
+                written_bytes = written_bytes.saturating_add(copied);
                 if !is_dir {
                     extracted_files += 1;
                 }
@@ -953,20 +960,71 @@ fn unpack_tarball_with_limits(
     Ok(())
 }
 
+fn is_skipped_tar_entry_kind(kind: tar::EntryType) -> bool {
+    kind.is_pax_global_extensions()
+        || kind.is_pax_local_extensions()
+        || kind.is_gnu_longname()
+        || kind.is_gnu_longlink()
+        || kind.is_symlink()
+        || kind.is_hard_link()
+        || kind.is_fifo()
+        || kind.is_block_special()
+        || kind.is_character_special()
+        || kind.is_gnu_sparse()
+}
+
+struct LimitedWriter<W> {
+    inner: W,
+    remaining: u64,
+}
+
+impl<W: Write> Write for LimitedWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.remaining == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Archive extraction exceeded the write byte limit",
+            ));
+        }
+        let take = (buf.len() as u64).min(self.remaining) as usize;
+        let n = self.inner.write(&buf[..take])?;
+        self.remaining = self.remaining.saturating_sub(n as u64);
+        if n < buf.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Archive extraction exceeded the write byte limit",
+            ));
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 fn extract_tar_entry<R: Read>(
     entry: &mut tar::Entry<'_, R>,
     dest: &Path,
     is_dir: bool,
-) -> std::io::Result<()> {
+    remaining: u64,
+) -> std::io::Result<u64> {
     if is_dir {
-        return std::fs::create_dir_all(dest);
+        std::fs::create_dir_all(dest)?;
+        return Ok(0);
     }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut file = std::fs::File::create(dest)?;
-    std::io::copy(entry, &mut file)?;
-    Ok(())
+    let file = std::fs::File::create(dest)?;
+    let mut writer = LimitedWriter {
+        inner: file,
+        remaining,
+    };
+    std::io::copy(entry, &mut writer)
 }
 
 fn unpack_extract_prefixes(subpath: Option<&str>) -> Vec<String> {
@@ -2363,6 +2421,37 @@ mod tests {
         encoded
     }
 
+    fn gzip_gnu_sparse(path: &str, payload: &[u8], real_size: u64) -> Vec<u8> {
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::GNUSparse);
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o644);
+            {
+                let gnu = header.as_gnu_mut().expect("gnu header");
+                gnu.set_real_size(real_size);
+                let hole = real_size.saturating_sub(payload.len() as u64);
+                gnu.sparse[0].set_offset(hole);
+                gnu.sparse[0].set_length(payload.len() as u64);
+            }
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, payload)
+                .expect("append sparse tar data");
+            builder.finish().expect("finish sparse tar");
+        }
+        let mut encoded = Vec::new();
+        {
+            let mut encoder =
+                flate2::write::GzEncoder::new(&mut encoded, flate2::Compression::fast());
+            encoder.write_all(&tar_bytes).expect("gzip sparse tar");
+            encoder.finish().expect("finish sparse gzip");
+        }
+        encoded
+    }
+
     #[test]
     fn test_should_extract_tar_path_filters_to_subpath() {
         let skills = unpack_extract_prefixes(Some("dist/claude/skills"));
@@ -2556,6 +2645,110 @@ mod tests {
         assert!(
             error.contains("ratio") || error.contains("Failed to read tarball"),
             "{error}"
+        );
+    }
+
+    fn largest_extracted_file(root: &Path) -> u64 {
+        let mut max = 0u64;
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if let Ok(meta) = path.metadata() {
+                    max = max.max(meta.len());
+                }
+            }
+        }
+        max
+    }
+
+    #[test]
+    fn test_unpack_tarball_rejects_gnu_sparse_without_writing_huge_files() {
+        let real_size = 8 * 1024 * 1024;
+        let bytes = gzip_gnu_sparse("repo/skills/bomb/SKILL.md", b"#", real_size);
+        assert!(
+            bytes.len() < 8 * 1024,
+            "sparse archive should stay tiny, got {}",
+            bytes.len()
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let error = unpack_tarball_with_limits(
+            &bytes,
+            tmp.path(),
+            None,
+            ExtractLimits {
+                max_bytes: 1024,
+                ..ExtractLimits::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("usable files")
+                || error.contains("byte limit")
+                || error.contains("sparse"),
+            "{error}"
+        );
+        assert!(
+            largest_extracted_file(tmp.path()) < real_size / 2,
+            "sparse holes must not be materialized"
+        );
+    }
+
+    #[test]
+    fn test_unpack_tarball_keeps_regular_skill_and_skips_sparse_bomb() {
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            let skill = b"# Good\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(skill.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "repo/skills/good/SKILL.md", &skill[..])
+                .expect("append regular skill");
+
+            let payload = b"#";
+            let real_size = 8 * 1024 * 1024;
+            let mut sparse = tar::Header::new_gnu();
+            sparse.set_entry_type(tar::EntryType::GNUSparse);
+            sparse.set_size(payload.len() as u64);
+            sparse.set_mode(0o644);
+            {
+                let gnu = sparse.as_gnu_mut().expect("gnu header");
+                gnu.set_real_size(real_size);
+                gnu.sparse[0].set_offset(real_size - 1);
+                gnu.sparse[0].set_length(1);
+            }
+            sparse.set_cksum();
+            builder
+                .append_data(&mut sparse, "repo/skills/bomb/SKILL.md", &payload[..])
+                .expect("append sparse bomb");
+            builder.finish().expect("finish mixed tar");
+        }
+        let mut bytes = Vec::new();
+        {
+            let mut encoder =
+                flate2::write::GzEncoder::new(&mut bytes, flate2::Compression::fast());
+            encoder.write_all(&tar_bytes).expect("gzip mixed tar");
+            encoder.finish().expect("finish mixed gzip");
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        unpack_tarball(&bytes, tmp.path(), None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("repo/skills/good/SKILL.md")).unwrap(),
+            "# Good\n"
+        );
+        assert!(!tmp.path().join("repo/skills/bomb/SKILL.md").exists());
+        assert!(
+            largest_extracted_file(tmp.path()) < 64 * 1024,
+            "sparse bomb must not be written"
         );
     }
 
