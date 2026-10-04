@@ -32,21 +32,40 @@ fn history_path(project_root: &str) -> PathBuf {
         .join("history.git")
 }
 
-fn is_symlink(path: &Path) -> bool {
-    fs::symlink_metadata(path)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
+fn metadata_is_unsafe_link(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
-fn require_unlinked_dir(path: &Path, label: &str) -> Result<(), String> {
+fn require_unlinked_dir(project_root: &Path, path: &Path, label: &str) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("Failed to inspect {label}: {error}")),
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+        Ok(metadata) if metadata_is_unsafe_link(&metadata) => Err(format!(
             "Refusing to follow a linked {label}: {}",
             path.display()
         )),
-        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(metadata) if metadata.is_dir() => {
+            if path_is_inside(project_root, path)? {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Refusing to use a {label} outside the project: {}",
+                    path.display()
+                ))
+            }
+        }
         Ok(_) => Err(format!(
             "Refusing to use a non-directory {label}: {}",
             path.display()
@@ -54,15 +73,24 @@ fn require_unlinked_dir(path: &Path, label: &str) -> Result<(), String> {
     }
 }
 
-fn require_unlinked_file(path: &Path, label: &str) -> Result<(), String> {
+fn require_unlinked_file(project_root: &Path, path: &Path, label: &str) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("Failed to inspect {label}: {error}")),
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+        Ok(metadata) if metadata_is_unsafe_link(&metadata) => Err(format!(
             "Refusing to follow a linked {label}: {}",
             path.display()
         )),
-        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(metadata) if metadata.is_file() => {
+            if path_is_inside(project_root, path)? {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Refusing to use a {label} outside the project: {}",
+                    path.display()
+                ))
+            }
+        }
         Ok(_) => Err(format!(
             "Refusing to use a non-file {label}: {}",
             path.display()
@@ -71,7 +99,10 @@ fn require_unlinked_file(path: &Path, label: &str) -> Result<(), String> {
 }
 
 fn parse_git_pointer(content: &str, pointer_file: &Path) -> Option<PathBuf> {
-    let line = content.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let line = content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
     let raw = match (line.get(..7), line.get(7..)) {
         (Some(prefix), Some(rest)) if prefix.eq_ignore_ascii_case("gitdir:") => rest.trim(),
         _ => line,
@@ -92,7 +123,7 @@ fn refuse_external_git_pointer(
     project_root: &Path,
     label: &str,
 ) -> Result<(), String> {
-    require_unlinked_file(path, label)?;
+    require_unlinked_file(project_root, path, label)?;
     let Ok(content) = fs::read_to_string(path) else {
         return Ok(());
     };
@@ -112,15 +143,35 @@ fn assert_history_artifacts_are_local(project_root: &Path) -> Result<(), String>
     let claudeprism = project_root.join(".claudeprism");
     let git_dir = claudeprism.join("history.git");
     let nested_git = git_dir.join(".git");
-    require_unlinked_dir(&claudeprism, ".claudeprism directory")?;
-    require_unlinked_dir(&git_dir, "history.git repository")?;
-    require_unlinked_dir(&nested_git, "history gitdir")?;
-    require_unlinked_file(&git_dir.join("config"), "history.git config")?;
-    require_unlinked_file(&nested_git.join("config"), "history git config")?;
-    require_unlinked_file(&claudeprism.join("history-exclude"), "history-exclude file")?;
-    refuse_external_git_pointer(&git_dir.join("commondir"), project_root, "history commondir")?;
-    refuse_external_git_pointer(&nested_git.join("commondir"), project_root, "history commondir")?;
-    refuse_external_git_pointer(&git_dir.join("gitdir"), project_root, "history gitdir pointer")?;
+    require_unlinked_dir(project_root, &claudeprism, ".claudeprism directory")?;
+    require_unlinked_dir(project_root, &git_dir, "history.git repository")?;
+    require_unlinked_dir(project_root, &nested_git, "history gitdir")?;
+    require_unlinked_file(project_root, &git_dir.join("config"), "history.git config")?;
+    require_unlinked_file(
+        project_root,
+        &nested_git.join("config"),
+        "history git config",
+    )?;
+    require_unlinked_file(
+        project_root,
+        &claudeprism.join("history-exclude"),
+        "history-exclude file",
+    )?;
+    refuse_external_git_pointer(
+        &git_dir.join("commondir"),
+        project_root,
+        "history commondir",
+    )?;
+    refuse_external_git_pointer(
+        &nested_git.join("commondir"),
+        project_root,
+        "history commondir",
+    )?;
+    refuse_external_git_pointer(
+        &git_dir.join("gitdir"),
+        project_root,
+        "history gitdir pointer",
+    )?;
     refuse_external_git_pointer(
         &nested_git.join("gitdir"),
         project_root,
@@ -153,44 +204,59 @@ fn assert_opened_repo_is_local(project_root: &Path, repo: &Repository) -> Result
         ));
     }
     for config in [repo.path().join("config"), repo.commondir().join("config")] {
-        require_unlinked_file(&config, "history git config")?;
-        if fs::symlink_metadata(&config)
-            .map(|metadata| metadata.is_file())
-            .unwrap_or(false)
-            && !path_is_inside(project_root, &config)?
-        {
-            return Err(format!(
-                "Refusing to use a history git config outside the project: {}",
-                config.display()
-            ));
-        }
+        require_unlinked_file(project_root, &config, "history git config")?;
     }
     Ok(())
 }
 
-fn ensure_local_dir(path: &Path) -> Result<(), String> {
-    require_unlinked_dir(path, "directory")?;
+fn ensure_local_dir(project_root: &Path, path: &Path) -> Result<(), String> {
+    require_unlinked_dir(project_root, path, "directory")?;
     match fs::symlink_metadata(path) {
-        Ok(_) => Ok(()),
+        Ok(metadata) if metadata_is_unsafe_link(&metadata) => Err(format!(
+            "Refusing to follow a linked directory: {}",
+            path.display()
+        )),
+        Ok(metadata) if metadata.is_dir() => {
+            if path_is_inside(project_root, path)? {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Refusing to create history outside the project: {}",
+                    path.display()
+                ))
+            }
+        }
+        Ok(_) => Err(format!("Not a directory: {}", path.display())),
         Err(error) if error.kind() == ErrorKind::NotFound => {
             fs::create_dir_all(path)
                 .map_err(|error| format!("Failed to create {}: {error}", path.display()))?;
-            if is_symlink(path) {
-                return Err(format!(
+            match fs::symlink_metadata(path) {
+                Ok(metadata) if metadata_is_unsafe_link(&metadata) => Err(format!(
                     "Refusing to follow a linked directory: {}",
                     path.display()
-                ));
+                )),
+                Ok(metadata) if metadata.is_dir() => {
+                    if path_is_inside(project_root, path)? {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "Refusing to create history outside the project: {}",
+                            path.display()
+                        ))
+                    }
+                }
+                Ok(_) => Err(format!("Not a directory: {}", path.display())),
+                Err(error) => Err(format!("Failed to inspect {}: {error}", path.display())),
             }
-            Ok(())
         }
         Err(error) => Err(format!("Failed to inspect {}: {error}", path.display())),
     }
 }
 
-fn write_local_history_file(path: &Path, content: &str) -> Result<(), String> {
-    require_unlinked_file(path, "history file")?;
+fn write_local_history_file(project_root: &Path, path: &Path, content: &str) -> Result<(), String> {
+    require_unlinked_file(project_root, path, "history file")?;
     if let Some(parent) = path.parent() {
-        require_unlinked_dir(parent, "history parent directory")?;
+        require_unlinked_dir(project_root, parent, "history parent directory")?;
     }
 
     let tmp_name = format!(
@@ -203,9 +269,21 @@ fn write_local_history_file(path: &Path, content: &str) -> Result<(), String> {
         Some(parent) => parent.join(tmp_name),
         None => PathBuf::from(tmp_name),
     };
-    if is_symlink(&tmp) || tmp.exists() {
-        fs::remove_file(&tmp)
-            .map_err(|error| format!("Failed to replace temporary history file: {error}"))?;
+    match fs::symlink_metadata(&tmp) {
+        Ok(metadata) if metadata_is_unsafe_link(&metadata) || metadata.is_file() => {
+            fs::remove_file(&tmp)
+                .map_err(|error| format!("Failed to replace temporary history file: {error}"))?;
+        }
+        Ok(_) => {
+            return Err(format!(
+                "Refusing to use a non-file temporary history path: {}",
+                tmp.display()
+            ));
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!("Failed to inspect temporary history file: {error}"));
+        }
     }
 
     {
@@ -218,13 +296,36 @@ fn write_local_history_file(path: &Path, content: &str) -> Result<(), String> {
             .map_err(|error| format!("Failed to write temporary history file: {error}"))?;
     }
 
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata_is_unsafe_link(&metadata) => {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!(
+                "Refusing to follow a linked history file: {}",
+                path.display()
+            ));
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!(
+                "Refusing to use a non-file history path: {}",
+                path.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!("Failed to inspect history file: {error}"));
+        }
+    }
+
     fs::rename(&tmp, path).map_err(|error| {
         let _ = fs::remove_file(&tmp);
         format!("Failed to install history file: {error}")
     })?;
-    if is_symlink(path) {
+    if !path_is_inside(project_root, path)? {
         return Err(format!(
-            "Refusing to follow a linked history file: {}",
+            "Refusing to install a history file outside the project: {}",
             path.display()
         ));
     }
@@ -254,7 +355,7 @@ fn rebind_persisted_workdir_before_open(
     ]
     .into_iter()
     .map(|candidate| match fs::symlink_metadata(&candidate) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+        Ok(metadata) if metadata_is_unsafe_link(&metadata) => Err(format!(
             "Refusing to follow a linked history git config: {}",
             candidate.display()
         )),
@@ -404,7 +505,7 @@ Thumbs.db
 .prism/
 "#;
     match fs::symlink_metadata(&excludes_path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
+        Ok(metadata) if metadata_is_unsafe_link(&metadata) => {
             return Err(format!(
                 "Refusing to follow a linked history-exclude file: {}",
                 excludes_path.display()
@@ -413,12 +514,12 @@ Thumbs.db
         Ok(metadata) if metadata.is_file() => {
             if let Ok(existing) = fs::read_to_string(&excludes_path) {
                 if !existing.contains(".prism/") {
-                    write_local_history_file(&excludes_path, content)?;
+                    write_local_history_file(project, &excludes_path, content)?;
                 }
             }
         }
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            write_local_history_file(&excludes_path, content)?;
+            write_local_history_file(project, &excludes_path, content)?;
         }
         Err(error) => {
             return Err(format!("Failed to inspect history-exclude file: {error}"));
@@ -446,6 +547,12 @@ pub fn history_init(project_root: String) -> Result<(), String> {
     let git_dir = history_path(&project_root);
 
     match fs::symlink_metadata(&git_dir) {
+        Ok(metadata) if metadata_is_unsafe_link(&metadata) => {
+            return Err(format!(
+                "Refusing to follow a linked history.git repository: {}",
+                git_dir.display()
+            ));
+        }
         Ok(metadata) if metadata.is_dir() => {
             // Already initialized — verify and ensure excludes
             let repo = open_repo(&project_root)?;
@@ -465,7 +572,7 @@ pub fn history_init(project_root: String) -> Result<(), String> {
     }
 
     let claudeprism_dir = project.join(".claudeprism");
-    ensure_local_dir(&claudeprism_dir)?;
+    ensure_local_dir(project, &claudeprism_dir)?;
 
     // Init a bare repo with workdir pointing to project root
     let mut opts = RepositoryInitOptions::new();
@@ -899,6 +1006,30 @@ mod tests {
         }
     }
 
+    fn is_symlink(path: &Path) -> bool {
+        fs::symlink_metadata(path)
+            .map(|metadata| metadata_is_unsafe_link(&metadata))
+            .unwrap_or(false)
+    }
+
+    #[cfg(windows)]
+    fn create_directory_junction(target: &Path, link: &Path) -> std::io::Result<()> {
+        let status = std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &link.to_string_lossy(),
+                &target.to_string_lossy(),
+            ])
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other("mklink /J failed"))
+        }
+    }
+
     fn history_git_config(project: &Path) -> PathBuf {
         project
             .join(".claudeprism")
@@ -1227,6 +1358,36 @@ mod tests {
         assert!(
             leftover.is_empty(),
             "linked .claudeprism target must stay empty, found {leftover:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_history_init_does_not_create_history_through_claudeprism_junction() {
+        let outside = TempDir::new().unwrap();
+        let dir = setup_project(&[("main.tex", "doc")]);
+        create_directory_junction(outside.path(), &dir.path().join(".claudeprism")).unwrap();
+
+        let result = history_init(root(&dir));
+        assert!(
+            result.is_err(),
+            "init must refuse a junctioned .claudeprism directory, got {result:?}"
+        );
+        assert!(
+            !outside.path().join("history.git").exists(),
+            "history.git must not be created outside the project"
+        );
+        assert!(
+            !outside.path().join("history-exclude").exists(),
+            "history-exclude must not be written outside the project"
+        );
+        let leftover: Vec<_> = fs::read_dir(outside.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "junctioned .claudeprism target must stay empty, found {leftover:?}"
         );
     }
 
