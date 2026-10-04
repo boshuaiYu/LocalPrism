@@ -125,6 +125,9 @@ fn extract_command_info(file_path: &Path, base_path: &Path) -> Option<(String, O
 }
 
 fn load_command_from_file(file_path: &Path, base_path: &Path, scope: &str) -> Option<SlashCommand> {
+    if !crate::project_path_guard::is_confirmed_inside_root(base_path, file_path) {
+        return None;
+    }
     let content = fs::read_to_string(file_path).ok()?;
     let (frontmatter, body) = parse_markdown_with_frontmatter(&content);
     let (name, namespace) = extract_command_info(file_path, base_path)?;
@@ -168,7 +171,14 @@ fn load_command_from_file(file_path: &Path, base_path: &Path, scope: &str) -> Op
 }
 
 fn find_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    find_markdown_files_inside(dir, dir, files);
+}
+
+fn find_markdown_files_inside(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) {
     if !dir.exists() {
+        return;
+    }
+    if crate::project_path_guard::resolved_path_inside_root(root, dir) == Some(false) {
         return;
     }
 
@@ -186,14 +196,34 @@ fn find_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) {
             }
         }
 
-        if path.is_dir() {
-            find_markdown_files(&path, files);
-        } else if path.is_file() {
-            if let Some(ext) = path.extension() {
-                if ext == "md" {
-                    files.push(path);
-                }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() || file_type.is_dir() {
+            if !crate::project_path_guard::is_confirmed_inside_root(root, &path) {
+                continue;
             }
+            if path
+                .canonicalize()
+                .ok()
+                .is_some_and(|resolved| resolved.is_dir())
+            {
+                find_markdown_files_inside(root, &path, files);
+            } else if path
+                .canonicalize()
+                .ok()
+                .is_some_and(|resolved| resolved.is_file())
+                && path.extension().is_some_and(|ext| ext == "md")
+            {
+                files.push(path);
+            }
+            continue;
+        }
+        if file_type.is_file()
+            && path.extension().is_some_and(|ext| ext == "md")
+            && crate::project_path_guard::is_confirmed_inside_root(root, &path)
+        {
+            files.push(path);
         }
     }
 }
@@ -286,9 +316,18 @@ fn truncate_skill_list_content(text: &str) -> String {
 }
 
 fn find_skill_md(skill_dir: &Path) -> Option<PathBuf> {
+    find_skill_md_inside(skill_dir, skill_dir)
+}
+
+fn find_skill_md_inside(containment: &Path, skill_dir: &Path) -> Option<PathBuf> {
     for name in ["SKILL.md", "skill.md"] {
         let candidate = skill_dir.join(name);
-        if candidate.is_file() {
+        if crate::project_path_guard::is_confirmed_inside_root(containment, &candidate)
+            && candidate
+                .canonicalize()
+                .ok()
+                .is_some_and(|resolved| resolved.is_file())
+        {
             return Some(candidate);
         }
     }
@@ -296,7 +335,11 @@ fn find_skill_md(skill_dir: &Path) -> Option<PathBuf> {
     let entries = fs::read_dir(skill_dir).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_file()
+        if crate::project_path_guard::is_confirmed_inside_root(containment, &path)
+            && path
+                .canonicalize()
+                .ok()
+                .is_some_and(|resolved| resolved.is_file())
             && path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -310,7 +353,11 @@ fn find_skill_md(skill_dir: &Path) -> Option<PathBuf> {
 }
 
 fn collect_skill_dirs(root: &Path, output: &mut Vec<PathBuf>) {
-    if find_skill_md(root).is_some() {
+    collect_skill_dirs_inside(root, root, output);
+}
+
+fn collect_skill_dirs_inside(containment: &Path, root: &Path, output: &mut Vec<PathBuf>) {
+    if find_skill_md_inside(containment, root).is_some() {
         output.push(root.to_path_buf());
         return;
     }
@@ -326,16 +373,15 @@ fn collect_skill_dirs(root: &Path, output: &mut Vec<PathBuf>) {
         if file_type.is_symlink() || !file_type.is_dir() {
             continue;
         }
-        collect_skill_dirs(&entry.path(), output);
+        let path = entry.path();
+        if !crate::project_path_guard::is_confirmed_inside_root(containment, &path) {
+            continue;
+        }
+        collect_skill_dirs_inside(containment, &path, output);
     }
 }
 
-fn builtin_slash_command(
-    id: &str,
-    name: &str,
-    description: &str,
-    content: &str,
-) -> SlashCommand {
+fn builtin_slash_command(id: &str, name: &str, description: &str, content: &str) -> SlashCommand {
     SlashCommand {
         id: format!("default-{id}"),
         name: name.to_string(),
@@ -477,7 +523,9 @@ fn official_command_search_roots(root: &Path) -> Vec<PathBuf> {
 
 fn is_safe_command_relpath(path: &Path) -> bool {
     !path.as_os_str().is_empty()
-        && path.components().all(|component| matches!(component, Component::Normal(_)))
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 /// Copy official skill-pack slash files into `claude-home/slash` using upstream names
@@ -490,7 +538,10 @@ pub fn import_user_slash_commands_from_source(
     fs::create_dir_all(&slash_dir)
         .map_err(|error| format!("Failed to create {}: {error}", slash_dir.display()))?;
     let commands_dir = crate::providers::paths::localprism_home()
-        .map(|home| home.join(crate::providers::paths::CLAUDE_HOME_DIRNAME).join("commands"))
+        .map(|home| {
+            home.join(crate::providers::paths::CLAUDE_HOME_DIRNAME)
+                .join("commands")
+        })
         .ok();
 
     let mut files = Vec::new();
@@ -517,7 +568,10 @@ pub fn import_user_slash_commands_from_source(
     let mut imported = 0usize;
     let mut seen = HashSet::new();
     for (source, rel) in files {
-        let key = rel.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        let key = rel
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase();
         if !seen.insert(key) {
             continue;
         }
@@ -526,9 +580,8 @@ pub fn import_user_slash_commands_from_source(
             continue;
         }
         if let Some(parent) = dest_slash.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                format!("Failed to create {}: {error}", parent.display())
-            })?;
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("Failed to create {}: {error}", parent.display()))?;
         }
         fs::copy(&source, &dest_slash).map_err(|error| {
             format!(
@@ -1113,6 +1166,71 @@ mod tests {
     }
 
     #[test]
+    fn test_find_markdown_files_skips_links_outside_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("commands");
+        fs::create_dir_all(&root).unwrap();
+        let outside = dir.path().join("outside.md");
+        fs::write(&outside, "SECRET").unwrap();
+        fs::write(root.join("visible.md"), "ok").unwrap();
+        let link = root.join("leak.md");
+        match create_file_link(&outside, &link) {
+            Ok(()) => {}
+            Err(error) if link_creation_is_not_permitted(&error) => return,
+            Err(error) => panic!("failed to create test symlink: {error}"),
+        }
+
+        let mut files = Vec::new();
+        find_markdown_files(&root, &mut files);
+        let names: Vec<String> = files
+            .iter()
+            .map(|file| file.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["visible.md".to_string()]);
+        assert!(load_command_from_file(&link, &root, "project").is_none());
+        assert!(load_command_from_file(&root.join("visible.md"), &root, "project").is_some());
+    }
+
+    #[test]
+    fn test_load_skills_skips_skill_md_links_outside_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills_root = dir.path().join("skills");
+        fs::create_dir_all(&skills_root).unwrap();
+        let outside = dir.path().join("secret.md");
+        fs::write(
+            &outside,
+            "---\nname: leak\ndescription: secret\n---\nSECRET",
+        )
+        .unwrap();
+        let skill_dir = skills_root.join("writer");
+        fs::create_dir_all(&skill_dir).unwrap();
+        let link = skill_dir.join("SKILL.md");
+        match create_file_link(&outside, &link) {
+            Ok(()) => {}
+            Err(error) if link_creation_is_not_permitted(&error) => return,
+            Err(error) => panic!("failed to create test symlink: {error}"),
+        }
+
+        let skills = load_skills_from_dir(&skills_root, "skill");
+        assert!(skills.is_empty());
+    }
+
+    #[cfg(unix)]
+    fn create_file_link(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_file_link(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+
+    fn link_creation_is_not_permitted(error: &std::io::Error) -> bool {
+        error.kind() == std::io::ErrorKind::PermissionDenied
+            || matches!(error.raw_os_error(), Some(5 | 1314))
+    }
+
+    #[test]
     fn test_find_markdown_files_recursive() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("top.md"), "top").unwrap();
@@ -1189,11 +1307,7 @@ mod tests {
             "---\nname: ars-plan\ndescription: ARS plan mode\n---\nTrigger academic-paper plan.\n",
         )
         .unwrap();
-        fs::write(
-            source.join("commands/README.md"),
-            "ignore\n",
-        )
-        .unwrap();
+        fs::write(source.join("commands/README.md"), "ignore\n").unwrap();
         fs::write(
             source.join("dist/claude/commands/paperspine.md"),
             "---\ndescription: Start PaperSpine\n---\nStart PaperSpine.\n",
@@ -1311,11 +1425,7 @@ mod tests {
         assert_eq!(cmd.allowed_tools, vec!["Bash", "Read"]);
 
         // Verify frontmatter in file
-        let file = dir
-            .path()
-            .join(".localprism")
-            .join("slash")
-            .join("lint.md");
+        let file = dir.path().join(".localprism").join("slash").join("lint.md");
         let content = fs::read_to_string(&file).unwrap();
         assert!(content.starts_with("---\n"));
         assert!(content.contains("description: Lint all files"));

@@ -12,7 +12,7 @@
 //! absolute path is normalized before the inside-project check.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::{json, Value};
 
@@ -451,7 +451,7 @@ fn bind_path(root: &ProjectRoot, allow: &[ProjectRoot], raw: &str) -> PathBind {
         let rest = trimmed
             .trim_start_matches('~')
             .trim_start_matches(['/', '\\']);
-        return render_joined(root, &split_parts(rest));
+        return confine_resolved(root, allow, render_joined(root, &split_parts(rest)));
     }
     match parse_absolute(trimmed) {
         Some((prefix, prefix_display, parts)) => {
@@ -471,32 +471,146 @@ fn bind_path(root: &ProjectRoot, allow: &[ProjectRoot], raw: &str) -> PathBind {
                     &normalized,
                 );
                 if same_location(raw, &displayed, root.ignore_case()) {
-                    return PathBind::Inside(raw.to_string());
+                    return confine_resolved(root, allow, PathBind::Inside(raw.to_string()));
                 }
-                return PathBind::Inside(displayed);
+                return confine_resolved(root, allow, PathBind::Inside(displayed));
             }
             for allowed in allow {
                 if prefixes_match(&allowed.prefix, &prefix)
                     && starts_with_parts(&normalized, &allowed.parts, allowed.ignore_case())
                 {
-                    return PathBind::Inside(display_absolute(
-                        &allowed.sep.to_string(),
-                        if allowed.prefix_display.is_empty() {
-                            &prefix_display
-                        } else {
-                            &allowed.prefix_display
-                        },
-                        &normalized,
-                    ));
+                    return confine_resolved(
+                        root,
+                        allow,
+                        PathBind::Inside(display_absolute(
+                            &allowed.sep.to_string(),
+                            if allowed.prefix_display.is_empty() {
+                                &prefix_display
+                            } else {
+                                &allowed.prefix_display
+                            },
+                            &normalized,
+                        )),
+                    );
                 }
             }
             match strip_placeholder_home(&prefix, &normalized) {
-                Some(rest) => render_joined(root, &trim_copied_project_prefix(&root.parts, &rest)),
+                Some(rest) => confine_resolved(
+                    root,
+                    allow,
+                    render_joined(root, &trim_copied_project_prefix(&root.parts, &rest)),
+                ),
                 None => PathBind::Deny,
             }
         }
-        None => render_joined(root, &split_parts(&trimmed.replace('\\', "/"))),
+        None => confine_resolved(
+            root,
+            allow,
+            render_joined(root, &split_parts(&trimmed.replace('\\', "/"))),
+        ),
     }
+}
+
+fn confine_resolved(root: &ProjectRoot, allow: &[ProjectRoot], bound: PathBind) -> PathBind {
+    let PathBind::Inside(displayed) = bound else {
+        return bound;
+    };
+    if resolved_display_escapes(root, allow, &displayed) {
+        return PathBind::Deny;
+    }
+    PathBind::Inside(displayed)
+}
+
+fn resolved_display_escapes(root: &ProjectRoot, allow: &[ProjectRoot], displayed: &str) -> bool {
+    let Some(root_path) = os_path_from_project_root(root) else {
+        return false;
+    };
+    if !root_path.is_absolute() {
+        return false;
+    }
+    let candidate = Path::new(displayed);
+    match resolved_path_inside_root(&root_path, candidate) {
+        Some(true) => false,
+        Some(false) => !allow.iter().any(|allowed| {
+            os_path_from_project_root(allowed)
+                .filter(|path| path.is_absolute())
+                .is_some_and(|path| resolved_path_inside_root(&path, candidate) == Some(true))
+        }),
+        None => false,
+    }
+}
+
+fn os_path_from_project_root(root: &ProjectRoot) -> Option<PathBuf> {
+    if root.parts.is_empty() && root.prefix.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(display_absolute(
+        &root.sep.to_string(),
+        &root.prefix_display,
+        &root.parts,
+    )))
+}
+
+/// Whether `path` stays inside `root` after resolving links and junctions.
+///
+/// `None` means this process cannot evaluate the pair (the root is not a
+/// real absolute path here, or it cannot be canonicalized). Lexical callers
+/// should keep their existing decision. Discovery should treat `None` as
+/// unconfirmed and skip the entry.
+pub fn resolved_path_inside_root(root: &Path, path: &Path) -> Option<bool> {
+    if !root.is_absolute() {
+        return None;
+    }
+    let canonical_root = root.canonicalize().ok()?;
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => match path.canonicalize() {
+            Ok(resolved) => Some(canonical_is_inside(&resolved, &canonical_root)),
+            Err(_) => Some(false),
+        },
+        Err(_) => walk_nonexistent_path(&canonical_root, root, path),
+    }
+}
+
+/// True only when the resolved path is confirmed to stay inside `root`.
+pub fn is_confirmed_inside_root(root: &Path, path: &Path) -> bool {
+    resolved_path_inside_root(root, path) == Some(true)
+}
+
+fn canonical_is_inside(path: &Path, root: &Path) -> bool {
+    path.starts_with(root)
+}
+
+fn walk_nonexistent_path(canonical_root: &Path, lexical_root: &Path, path: &Path) -> Option<bool> {
+    let relative = path.strip_prefix(lexical_root).ok()?;
+    let mut current = canonical_root.to_path_buf();
+    for component in relative.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                current.pop();
+                if !canonical_is_inside(&current, canonical_root) {
+                    return Some(false);
+                }
+            }
+            Component::Normal(name) => {
+                current.push(name);
+                match std::fs::symlink_metadata(&current) {
+                    Ok(_) => match current.canonicalize() {
+                        Ok(resolved) => {
+                            if !canonical_is_inside(&resolved, canonical_root) {
+                                return Some(false);
+                            }
+                            current = resolved;
+                        }
+                        Err(_) => return Some(false),
+                    },
+                    Err(_) => {}
+                }
+            }
+            Component::Prefix(_) | Component::RootDir => return Some(false),
+        }
+    }
+    Some(true)
 }
 
 fn render_joined(root: &ProjectRoot, extra: &[String]) -> PathBind {
@@ -1451,5 +1565,107 @@ mod tests {
         )
         .unwrap();
         assert!(spec["project"].as_str().unwrap().contains("paper$(id)"));
+    }
+
+    #[test]
+    fn denies_a_project_symlink_that_resolves_outside_for_reads_and_edits() {
+        let temp = scratch_dir();
+        let project = temp.join("paper");
+        let secret = temp.join("secret.txt");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(&secret, "outside").unwrap();
+        let link = project.join("notes.tex");
+        match create_file_link(&secret, &link) {
+            Ok(()) => {}
+            Err(error) if link_creation_is_not_permitted(&error) => return,
+            Err(error) => panic!("failed to create test symlink: {error}"),
+        }
+
+        let root = project.to_string_lossy().into_owned();
+        for tool in ["Read", "Edit", "Write"] {
+            let decision =
+                bind_tool_input(&root, tool, json!({ "file_path": link.to_string_lossy() }));
+            assert!(
+                matches!(decision, ToolPathDecision::Deny(_)),
+                "expected deny for {tool} through an escaping link, got {decision:?}"
+            );
+        }
+
+        let inside = project.join("main.tex");
+        std::fs::write(&inside, "ok").unwrap();
+        let decision = bind_tool_input(
+            &root,
+            "Read",
+            json!({ "file_path": inside.to_string_lossy() }),
+        );
+        assert_eq!(
+            decision,
+            ToolPathDecision::Keep(json!({ "file_path": inside.to_string_lossy() }))
+        );
+        let relative = bind_tool_input(&root, "Edit", json!({ "file_path": "main.tex" }));
+        assert_eq!(
+            relative,
+            ToolPathDecision::Rewrite(json!({ "file_path": inside.to_string_lossy() }))
+        );
+    }
+
+    #[test]
+    fn denies_a_write_through_a_parent_directory_link_outside_the_project() {
+        let temp = scratch_dir();
+        let project = temp.join("paper");
+        let outside = temp.join("outside");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let linked = project.join("build");
+        match create_directory_link(&outside, &linked) {
+            Ok(()) => {}
+            Err(error) if link_creation_is_not_permitted(&error) => return,
+            Err(error) => panic!("failed to create test directory link: {error}"),
+        }
+
+        let root = project.to_string_lossy().into_owned();
+        let target = linked.join("out.pdf");
+        let decision = bind_tool_input(
+            &root,
+            "Write",
+            json!({ "file_path": target.to_string_lossy() }),
+        );
+        assert!(matches!(decision, ToolPathDecision::Deny(_)));
+        assert_eq!(resolved_path_inside_root(&project, &linked), Some(false));
+        assert_eq!(
+            resolved_path_inside_root(&project, &project.join("main.tex")),
+            Some(true)
+        );
+    }
+
+    #[cfg(unix)]
+    fn create_file_link(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_file_link(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+
+    #[cfg(unix)]
+    fn create_directory_link(
+        target: &std::path::Path,
+        link: &std::path::Path,
+    ) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_directory_link(
+        target: &std::path::Path,
+        link: &std::path::Path,
+    ) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_dir(target, link)
+    }
+
+    fn link_creation_is_not_permitted(error: &std::io::Error) -> bool {
+        error.kind() == std::io::ErrorKind::PermissionDenied
+            || matches!(error.raw_os_error(), Some(5 | 1314))
     }
 }

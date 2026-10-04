@@ -57,11 +57,7 @@ pub fn classify_claude_stdout_line(
     }
 }
 
-fn classify_control_request(
-    value: &Value,
-    tab_id: &str,
-    attempt_id: &str,
-) -> ClaudeStdoutControl {
+fn classify_control_request(value: &Value, tab_id: &str, attempt_id: &str) -> ClaudeStdoutControl {
     let Some(request_id) = value.get("request_id").and_then(Value::as_str) else {
         return ClaudeStdoutControl::NotControl;
     };
@@ -120,7 +116,7 @@ fn classify_control_request(
 
 pub fn tool_command_summary(tool_name: &str, input: &Value) -> Option<String> {
     match tool_name {
-        "Bash" => input
+        "Bash" | "PowerShell" => input
             .get("command")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
@@ -159,7 +155,10 @@ pub fn control_allow_line(
         "updatedInput": crate::anthropic_proxy::tools::sanitize_tool_input(input.clone()),
     });
     if session {
-        response["updatedPermissions"] = session_permission_updates(tool_name, suggestions);
+        let updates = session_permission_updates(tool_name, suggestions, input);
+        if updates.as_array().is_some_and(|items| !items.is_empty()) {
+            response["updatedPermissions"] = updates;
+        }
     }
     control_success_line(request_id, response)
 }
@@ -175,9 +174,80 @@ pub fn control_deny_line(request_id: &str, message: &str, interrupt: bool) -> St
     control_success_line(request_id, response)
 }
 
-fn session_permission_updates(tool_name: &str, suggestions: &Value) -> Value {
-    if suggestions.as_array().is_some_and(|items| !items.is_empty()) {
-        return suggestions.clone();
+fn session_permission_updates(tool_name: &str, suggestions: &Value, input: &Value) -> Value {
+    let filtered = filter_session_suggestions(suggestions);
+    if filtered.as_array().is_some_and(|items| !items.is_empty()) {
+        return filtered;
+    }
+    synthesize_session_rule(tool_name, input)
+}
+
+fn filter_session_suggestions(suggestions: &Value) -> Value {
+    let Some(items) = suggestions.as_array() else {
+        return json!([]);
+    };
+    let mut kept_items = Vec::new();
+    for item in items {
+        if item.get("type").and_then(Value::as_str) != Some("addRules") {
+            kept_items.push(item.clone());
+            continue;
+        }
+        let Some(rules) = item.get("rules").and_then(Value::as_array) else {
+            continue;
+        };
+        let kept_rules: Vec<Value> = rules
+            .iter()
+            .filter(|rule| rule_is_safe_for_session(rule))
+            .cloned()
+            .collect();
+        if kept_rules.is_empty() {
+            continue;
+        }
+        let mut next = item.clone();
+        next["rules"] = Value::Array(kept_rules);
+        kept_items.push(next);
+    }
+    Value::Array(kept_items)
+}
+
+fn rule_is_safe_for_session(rule: &Value) -> bool {
+    let tool = rule.get("toolName").and_then(Value::as_str).unwrap_or("");
+    if !is_shell_tool_name(tool) {
+        return true;
+    }
+    rule.get("ruleContent")
+        .and_then(Value::as_str)
+        .is_some_and(is_scoped_shell_rule_content)
+}
+
+pub fn is_shell_tool_name(tool_name: &str) -> bool {
+    matches!(
+        tool_name.trim().to_ascii_lowercase().as_str(),
+        "bash" | "powershell"
+    )
+}
+
+pub fn is_scoped_shell_rule_content(content: &str) -> bool {
+    let trimmed = content.trim();
+    !trimmed.is_empty() && trimmed != "*" && trimmed != "**"
+}
+
+fn synthesize_session_rule(tool_name: &str, input: &Value) -> Value {
+    if is_shell_tool_name(tool_name) {
+        let Some(command) = input
+            .get("command")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+        else {
+            return json!([]);
+        };
+        return json!([{
+            "type": "addRules",
+            "rules": [{ "toolName": tool_name, "ruleContent": command }],
+            "behavior": "allow",
+            "destination": "session"
+        }]);
     }
     json!([{
         "type": "addRules",
@@ -290,6 +360,74 @@ mod tests {
         assert_eq!(
             parsed["response"]["response"]["updatedPermissions"][0]["rules"][0]["toolName"],
             "WebSearch"
+        );
+    }
+
+    #[test]
+    fn session_allow_for_shell_scopes_to_the_approved_command() {
+        let line = control_allow_line(
+            "req_1",
+            &json!({ "command": "git status" }),
+            true,
+            "Bash",
+            &json!([]),
+        );
+        let parsed: Value = serde_json::from_str(line.trim()).unwrap();
+        let rule = &parsed["response"]["response"]["updatedPermissions"][0]["rules"][0];
+        assert_eq!(rule["toolName"], "Bash");
+        assert_eq!(rule["ruleContent"], "git status");
+        assert!(rule.get("ruleContent").and_then(Value::as_str).is_some());
+    }
+
+    #[test]
+    fn session_allow_does_not_grant_tool_wide_shell_without_a_command() {
+        let line = control_allow_line("req_1", &json!({}), true, "PowerShell", &json!([]));
+        let parsed: Value = serde_json::from_str(line.trim()).unwrap();
+        assert!(parsed["response"]["response"]
+            .get("updatedPermissions")
+            .is_none());
+    }
+
+    #[test]
+    fn session_allow_drops_unscoped_shell_suggestions() {
+        let suggestions = json!([{
+            "type": "addRules",
+            "rules": [{ "toolName": "Bash" }],
+            "behavior": "allow",
+            "destination": "session"
+        }]);
+        let line = control_allow_line(
+            "req_1",
+            &json!({ "command": "ls -la" }),
+            true,
+            "Bash",
+            &suggestions,
+        );
+        let parsed: Value = serde_json::from_str(line.trim()).unwrap();
+        let rule = &parsed["response"]["response"]["updatedPermissions"][0]["rules"][0];
+        assert_eq!(rule["toolName"], "Bash");
+        assert_eq!(rule["ruleContent"], "ls -la");
+    }
+
+    #[test]
+    fn session_allow_keeps_scoped_shell_suggestions() {
+        let suggestions = json!([{
+            "type": "addRules",
+            "rules": [{ "toolName": "Bash", "ruleContent": "npm test" }],
+            "behavior": "allow",
+            "destination": "session"
+        }]);
+        let line = control_allow_line(
+            "req_1",
+            &json!({ "command": "npm test --watch" }),
+            true,
+            "Bash",
+            &suggestions,
+        );
+        let parsed: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(
+            parsed["response"]["response"]["updatedPermissions"][0]["rules"][0]["ruleContent"],
+            "npm test"
         );
     }
 
