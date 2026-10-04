@@ -203,11 +203,14 @@ async fn handle_anthropic_passthrough(
         .unwrap_or(false);
 
     crate::providers::ensure_secure_provider_base_url(&credential.base_url)?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|err| format!("Failed to create Anthropic provider client: {err}"))?;
+    let client = crate::providers::bypass_system_proxy_for_loopback(
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .redirect(reqwest::redirect::Policy::none()),
+        &credential.base_url,
+    )
+    .build()
+    .map_err(|err| format!("Failed to create Anthropic provider client: {err}"))?;
     let url = if is_count_tokens_path(path) {
         anthropic_count_tokens_url(&credential.base_url)
     } else {
@@ -420,12 +423,15 @@ async fn handle_codex_messages(
     let anthropic_request: Value = serde_json::from_slice(&request.body)
         .map_err(|err| format!("Claude Code sent invalid Anthropic JSON: {err}"))?;
     let body = anthropic_to_codex_responses(&anthropic_request, credential)?;
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(15))
-        .timeout(std::time::Duration::from_secs(180))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|err| format!("Failed to create Codex Responses client: {err}"))?;
+    let client = crate::providers::bypass_system_proxy_for_loopback(
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(180))
+            .redirect(reqwest::redirect::Policy::none()),
+        OPENAI_CODEX_API_ENDPOINT,
+    )
+    .build()
+    .map_err(|err| format!("Failed to create Codex Responses client: {err}"))?;
     let mut credential = credential.clone();
     let mut retried_auth = false;
     let mut response = loop {
@@ -976,11 +982,14 @@ async fn handle_messages_to_stream(
     }
 
     crate::providers::ensure_secure_provider_base_url(&credential.base_url)?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|err| format!("Failed to create provider client: {}", err))?;
+    let client = crate::providers::bypass_system_proxy_for_loopback(
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .redirect(reqwest::redirect::Policy::none()),
+        &credential.base_url,
+    )
+    .build()
+    .map_err(|err| format!("Failed to create provider client: {}", err))?;
     let request = client
         .post(openai_chat_completions_url(&credential.base_url))
         .header("Content-Type", "application/json")

@@ -417,12 +417,15 @@ async fn fetch_json(
     headers: &[(String, String)],
 ) -> Result<serde_json::Value, String> {
     super::ensure_secure_provider_base_url(url)?;
-    let client = reqwest::Client::builder()
-        .use_rustls_tls()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(8))
-        .build()
-        .map_err(|err| format!("Failed to build models client: {err}"))?;
+    let client = super::bypass_system_proxy_for_loopback(
+        reqwest::Client::builder()
+            .use_rustls_tls()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(8)),
+        url,
+    )
+    .build()
+    .map_err(|err| format!("Failed to build models client: {err}"))?;
     let mut request = client.get(url);
     for (key, value) in headers {
         request = request.header(key, value);

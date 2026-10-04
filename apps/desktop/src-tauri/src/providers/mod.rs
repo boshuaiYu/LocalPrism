@@ -28,7 +28,7 @@ pub use types::{
     is_legacy_claude_alias, workspace_ready, ProviderCard, ProviderKind, ProviderModel,
     ProviderWorkspaceStatus, SavedProvider, CHATGPT_OFFICIAL_ID, CLAUDE_OFFICIAL_ID,
 };
-pub use url_guard::ensure_secure_provider_base_url;
+pub use url_guard::{bypass_system_proxy_for_loopback, ensure_secure_provider_base_url};
 
 use store::{delete_oauth, load_index, load_oauth, save_index, OAuthKind};
 use types::{is_official_id, ProviderIndex};

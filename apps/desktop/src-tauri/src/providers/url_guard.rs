@@ -22,6 +22,25 @@ pub fn ensure_secure_provider_base_url(base_url: &str) -> Result<(), String> {
     }
 }
 
+/// Loopback HTTP stays allowed for local models, but must not be sent through
+/// `HTTP_PROXY` / `ALL_PROXY`. Remote HTTPS can still use the system proxy.
+pub fn bypass_system_proxy_for_loopback(
+    builder: reqwest::ClientBuilder,
+    url: &str,
+) -> reqwest::ClientBuilder {
+    if url_targets_loopback(url) {
+        builder.no_proxy()
+    } else {
+        builder
+    }
+}
+
+pub fn url_targets_loopback(url: &str) -> bool {
+    url::Url::parse(url.trim())
+        .ok()
+        .is_some_and(|parsed| host_is_loopback(&parsed))
+}
+
 fn host_is_loopback(url: &url::Url) -> bool {
     match url.host() {
         Some(url::Host::Domain(domain)) => {
@@ -42,7 +61,7 @@ fn ipv6_is_loopback(addr: Ipv6Addr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_secure_provider_base_url;
+    use super::{ensure_secure_provider_base_url, url_targets_loopback};
 
     #[test]
     fn accepts_https_remote_origins() {
@@ -56,7 +75,12 @@ mod tests {
         assert!(ensure_secure_provider_base_url("http://127.0.0.1:8080/v1").is_ok());
         assert!(ensure_secure_provider_base_url("http://[::1]:11434/v1").is_ok());
         assert!(ensure_secure_provider_base_url("http://127.1.2.3:9000").is_ok());
+        assert!(ensure_secure_provider_base_url("http://[::ffff:127.0.0.1]:11434/v1").is_ok());
         assert!(ensure_secure_provider_base_url("http://evil.localhost/v1").is_err());
+        assert!(url_targets_loopback("http://127.0.0.1:11434/v1"));
+        assert!(url_targets_loopback("http://[::ffff:127.0.0.1]/v1"));
+        assert!(!url_targets_loopback("https://api.openai.com/v1"));
+        assert!(!url_targets_loopback("http://evil.localhost/v1"));
     }
 
     #[test]

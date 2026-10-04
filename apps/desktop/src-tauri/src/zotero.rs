@@ -425,6 +425,8 @@ fn should_skip_forwarded_header(name: &str) -> bool {
             | "if-none-match"
             | "if-modified-since"
             | "zotero-api-key"
+            | "authorization"
+            | "x-api-key"
             | "host"
             | "content-length"
     )
@@ -521,9 +523,11 @@ pub(crate) fn parse_proc_net_listen_inodes(table: &str, port: u16, ipv6: bool) -
             continue;
         }
         let matches_port = if ipv6 {
-            parse_hex_ipv6_socket(local).is_some_and(|(_, found)| found == port)
+            parse_hex_ipv6_socket(local)
+                .is_some_and(|(addr, found)| found == port && ipv6_listen_is_local(addr))
         } else {
-            parse_hex_ipv4_socket(local).is_some_and(|(_, found)| found == port)
+            parse_hex_ipv4_socket(local)
+                .is_some_and(|(addr, found)| found == port && ipv4_listen_is_local(addr))
         };
         if !matches_port {
             continue;
@@ -545,11 +549,38 @@ pub(crate) fn parse_lsof_command_names(stdout: &str) -> Vec<String> {
         .collect()
 }
 
+fn ipv4_listen_is_local(addr: Ipv4Addr) -> bool {
+    addr.is_loopback() || addr.is_unspecified()
+}
+
+fn ipv6_listen_is_local(addr: Ipv6Addr) -> bool {
+    addr.is_loopback()
+        || addr.is_unspecified()
+        || addr.to_ipv4_mapped().is_some_and(ipv4_listen_is_local)
+}
+
 pub(crate) fn local_address_has_port(local: &str, port: u16) -> bool {
     local
         .rsplit_once(':')
         .and_then(|(_, found)| found.parse::<u16>().ok())
         .is_some_and(|found| found == port)
+}
+
+pub(crate) fn local_address_is_loopback_or_unspecified(local: &str) -> bool {
+    let host = local
+        .rsplit_once(':')
+        .map(|(host, _)| host.trim_matches(['[', ']']))
+        .unwrap_or(local);
+    if host == "*" || host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    if let Ok(addr) = host.parse::<Ipv4Addr>() {
+        return ipv4_listen_is_local(addr);
+    }
+    if let Ok(addr) = host.parse::<Ipv6Addr>() {
+        return ipv6_listen_is_local(addr);
+    }
+    false
 }
 
 pub(crate) fn parse_netstat_listening_pids(stdout: &str, port: u16) -> Vec<u32> {
@@ -568,7 +599,8 @@ pub(crate) fn parse_netstat_listening_pids(stdout: &str, port: u16) -> Vec<u32> 
             continue;
         }
         let local = columns[1];
-        if !local_address_has_port(local, port) {
+        if !local_address_has_port(local, port) || !local_address_is_loopback_or_unspecified(local)
+        {
             continue;
         }
         if let Ok(pid) = columns[columns.len() - 1].parse::<u32>() {
@@ -628,9 +660,14 @@ fn linux_process_name_for_socket_inode(inode: u64) -> Option<String> {
     let needle = format!("socket:[{inode}]");
     let proc = std::fs::read_dir("/proc").ok()?;
     for entry in proc {
-        let entry = entry.ok()?;
+        let Ok(entry) = entry else {
+            continue;
+        };
         let pid = entry.file_name();
-        if pid.to_str()?.parse::<u32>().is_err() {
+        let Some(pid) = pid.to_str() else {
+            continue;
+        };
+        if pid.parse::<u32>().is_err() {
             continue;
         }
         let fd_dir = std::fs::read_dir(entry.path().join("fd"));
@@ -700,6 +737,8 @@ async fn ping_local_zotero_connector() -> Option<(HashMap<String, String>, Strin
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_millis(800))
         .timeout(Duration::from_secs(2))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .pool_max_idle_per_host(0)
         .build()
         .ok()?;
@@ -709,6 +748,9 @@ async fn ping_local_zotero_connector() -> Option<(HashMap<String, String>, Strin
         .send()
         .await
         .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
     let headers = zotero_response_headers(&response);
     let body = response.text().await.ok()?;
     Some((headers, body))
@@ -751,11 +793,15 @@ async fn fetch_zotero_source(
     source: &str,
 ) -> Result<ZoteroApiResponse, String> {
     let url = format!("{base}{path}");
-    let client = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_millis(800))
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
-        .pool_max_idle_per_host(0)
+        .pool_max_idle_per_host(0);
+    if source == "local" {
+        builder = builder.no_proxy();
+    }
+    let client = builder
         .build()
         .map_err(|e| format!("Failed to build Zotero HTTP client: {e}"))?;
 
@@ -1054,6 +1100,8 @@ mod tests {
         assert_eq!(parse_hex_ipv4_socket("0100007F:5A4F").unwrap().1, 23119);
         assert_eq!(parse_proc_net_listen_inodes(table, 23119, false), vec![12345]);
         assert!(parse_proc_net_listen_inodes(table, 80, false).is_empty());
+        let remote = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 0A01A8C0:5A4F 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 999 1 0000000000000000 100 0 0 10 0\n";
+        assert!(parse_proc_net_listen_inodes(remote, 23119, false).is_empty());
     }
 
     #[test]
@@ -1067,6 +1115,10 @@ mod tests {
     fn parses_netstat_and_tasklist_output() {
         let netstat = "  TCP    127.0.0.1:23119        0.0.0.0:0              LISTENING       4560\r\n";
         assert_eq!(parse_netstat_listening_pids(netstat, 23119), vec![4560]);
+        let remote = "  TCP    192.168.1.10:23119     0.0.0.0:0              LISTENING       99\r\n";
+        assert!(parse_netstat_listening_pids(remote, 23119).is_empty());
+        assert!(local_address_is_loopback_or_unspecified("0.0.0.0:23119"));
+        assert!(local_address_is_loopback_or_unspecified("[::1]:23119"));
         assert_eq!(
             parse_tasklist_image_name("\"Zotero.exe\",\"4560\",\"Console\",\"1\",\"12,345 K\"\r\n")
                 .as_deref(),
