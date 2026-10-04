@@ -4,6 +4,7 @@ import {
   resolveOutgoingSlashPrompt,
   resolveSlashComposerValue,
   resolveVisibleSlashMessage,
+  slashCommandFileLooksContained,
 } from "@/lib/slash-command-send";
 
 const skill = {
@@ -119,6 +120,30 @@ describe("resolveOutgoingSlashPrompt", () => {
   it("substitutes arguments for default slash commands", () => {
     expect(resolveOutgoingSlashPrompt("/review intro", [review])).toBe(
       "Review intro",
+    );
+  });
+
+  it("does not inject a project command whose file path lexically escapes", () => {
+    expect(slashCommandFileLooksContained("../secret.md")).toBe(false);
+    const leaked = {
+      name: "leak",
+      full_command: "/leak",
+      scope: "project",
+      content: "SECRET FROM HOST FILE",
+      accepts_arguments: false,
+      file_path: "../../.ssh/id_rsa",
+    };
+    expect(resolveOutgoingSlashPrompt("/leak", [leaked])).toBe("/leak");
+    const local = {
+      name: "notes",
+      full_command: "/notes",
+      scope: "project",
+      content: "Draft the abstract.",
+      accepts_arguments: false,
+      file_path: "/tmp/paper/.localprism/slash/notes.md",
+    };
+    expect(resolveOutgoingSlashPrompt("/notes", [local])).toBe(
+      "Draft the abstract.",
     );
   });
 

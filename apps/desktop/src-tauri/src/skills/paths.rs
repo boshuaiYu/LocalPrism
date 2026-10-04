@@ -130,7 +130,7 @@ pub fn prepare_isolated_claude_home(
 ) -> Result<PathBuf, SkillPathError> {
     let claude_home = crate::providers::paths::claude_config_dir()
         .map_err(|_| SkillPathError::HomeDirectoryUnavailable)?;
-    ensure_claude_home_layout(&claude_home, project_path)?;
+    ensure_claude_home_layout(&claude_home)?;
 
     let runtime = allocate_runtime_dir(&claude_home)?;
     // Session transcripts stay shared. Agents and slash commands do not:
@@ -176,10 +176,7 @@ pub fn prepare_isolated_claude_home(
     Ok(runtime)
 }
 
-fn ensure_claude_home_layout(
-    config_dir: &Path,
-    project_path: Option<&Path>,
-) -> Result<(), SkillPathError> {
+fn ensure_claude_home_layout(config_dir: &Path) -> Result<(), SkillPathError> {
     for name in ["skills", "agents", "slash", "commands", "projects"] {
         let path = config_dir.join(name);
         std::fs::create_dir_all(&path).map_err(|error| SkillPathError::PathResolution {
@@ -194,13 +191,13 @@ fn ensure_claude_home_layout(
         // Migrate leftover skill folders into the library. Do not publish them
         // into the Claude-scanned directory.
         let _ = crate::providers::paths::user_skills_dir();
-        let user_agents = crate::providers::paths::user_agents_dir()
-            .unwrap_or_else(|_| dest_agents.clone());
+        let user_agents =
+            crate::providers::paths::user_agents_dir().unwrap_or_else(|_| dest_agents.clone());
         if user_agents != dest_agents {
             overlay_missing_children(&user_agents, &dest_agents)?;
         }
-        let user_slash = crate::providers::paths::user_slash_dir()
-            .unwrap_or_else(|_| dest_slash.clone());
+        let user_slash =
+            crate::providers::paths::user_slash_dir().unwrap_or_else(|_| dest_slash.clone());
         if user_slash != dest_slash {
             overlay_missing_children(&user_slash, &dest_slash)?;
         }
@@ -213,17 +210,6 @@ fn ensure_claude_home_layout(
                 overlay_missing_children(&leftover, &dest_agents)?;
             }
         }
-    }
-
-    if let Some(project) = project_path.filter(|path| path.is_absolute()) {
-        overlay_missing_children(
-            &project.join(".localprism").join("agents"),
-            &dest_agents,
-        )?;
-        overlay_missing_children(
-            &crate::providers::paths::project_slash_dir(project),
-            &dest_commands,
-        )?;
     }
     Ok(())
 }
@@ -295,11 +281,7 @@ fn unlink_symlink_only(path: &Path) {
     }
 }
 
-fn link_runtime_tree(
-    runtime: &Path,
-    claude_home: &Path,
-    name: &str,
-) -> Result<(), SkillPathError> {
+fn link_runtime_tree(runtime: &Path, claude_home: &Path, name: &str) -> Result<(), SkillPathError> {
     let target = claude_home.join(name);
     std::fs::create_dir_all(&target).map_err(|error| SkillPathError::PathResolution {
         path: target.clone(),
@@ -307,11 +289,9 @@ fn link_runtime_tree(
     })?;
     let link = runtime.join(name);
     let relative = Path::new("..").join("..").join(name);
-    symlink_directory(&relative, &target, &link).map_err(|message| {
-        SkillPathError::PathResolution {
-            path: link,
-            message,
-        }
+    symlink_directory(&relative, &target, &link).map_err(|message| SkillPathError::PathResolution {
+        path: link,
+        message,
     })
 }
 
@@ -393,13 +373,17 @@ fn publish_active_agent(
     let file_name = format!("{slug}.md");
     let project = project_path.filter(|path| path.is_absolute());
     let source = project
-        .map(|path| path.join(".localprism").join("agents").join(&file_name))
-        .filter(|path| path.is_file())
+        .and_then(|path| {
+            let candidate = path.join(".localprism").join("agents").join(&file_name);
+            usable_agent_source(path, &candidate).then_some(candidate)
+        })
         .or_else(|| {
             crate::providers::paths::user_agents_dir()
                 .ok()
-                .map(|root| root.join(&file_name))
-                .filter(|path| path.is_file())
+                .and_then(|root| {
+                    let candidate = root.join(&file_name);
+                    usable_agent_source(&root, &candidate).then_some(candidate)
+                })
         });
     let Some(source) = source else {
         return Ok(());
@@ -422,6 +406,10 @@ fn publish_active_agent(
         })?;
     }
     Ok(())
+}
+
+fn usable_agent_source(root: &Path, path: &Path) -> bool {
+    path.is_file() && crate::project_path_guard::is_confirmed_inside_root(root, path)
 }
 
 /// One session entry for the scientific-agent-skills tree. Claude lists this
@@ -451,9 +439,7 @@ fn sync_exposed_skills(
     let mut seen = HashSet::new();
     for folder in &exposure.folders {
         let trimmed = folder.trim();
-        if trimmed.is_empty()
-            || crate::skills::paperspine::is_host_bound_skill_folder(trimmed)
-        {
+        if trimmed.is_empty() || crate::skills::paperspine::is_host_bound_skill_folder(trimmed) {
             continue;
         }
         if !seen.insert(trimmed.to_ascii_lowercase()) {
@@ -502,8 +488,11 @@ fn sync_exposed_skills(
         if seen.contains(&key) {
             continue;
         }
-        if !list_skill_directly(&skill, scientific_tree, sources.get(&key).map(String::as_str))
-        {
+        if !list_skill_directly(
+            &skill,
+            scientific_tree,
+            sources.get(&key).map(String::as_str),
+        ) {
             deferred.push(skill);
             continue;
         }
@@ -616,7 +605,10 @@ fn list_skill_directly(
     !scientific_tree
 }
 
-fn write_scientific_catalog(dest: &Path, skills: &[InstalledSkillDir]) -> Result<(), SkillPathError> {
+fn write_scientific_catalog(
+    dest: &Path,
+    skills: &[InstalledSkillDir],
+) -> Result<(), SkillPathError> {
     let dir = dest.join(SCIENTIFIC_CATALOG_FOLDER);
     std::fs::create_dir_all(&dir).map_err(|error| SkillPathError::PathResolution {
         path: dir.clone(),
@@ -710,7 +702,11 @@ fn claude_abs_rule_path(dir: &Path) -> String {
     let mut path = dir.to_string_lossy().replace('\\', "/");
     if let Some((drive, rest)) = path.split_once(':') {
         if drive.len() == 1 && drive.chars().all(|c| c.is_ascii_alphabetic()) {
-            path = format!("/{}/{}", drive.to_ascii_lowercase(), rest.trim_start_matches('/'));
+            path = format!(
+                "/{}/{}",
+                drive.to_ascii_lowercase(),
+                rest.trim_start_matches('/')
+            );
         }
     }
     if !path.starts_with('/') {
@@ -787,7 +783,10 @@ fn write_install_folder_read_allows(config_dir: &Path) -> Result<(), SkillPathEr
         return Ok(());
     };
     for rule in rules {
-        if !allow.iter().any(|value| value.as_str() == Some(rule.as_str())) {
+        if !allow
+            .iter()
+            .any(|value| value.as_str() == Some(rule.as_str()))
+        {
             allow.push(serde_json::Value::String(rule));
         }
     }
@@ -833,6 +832,9 @@ fn overlay_missing_children(source: &Path, destination: &Path) -> Result<(), Ski
         if dest.exists() {
             continue;
         }
+        if crate::project_path_guard::resolved_path_inside_root(source, &src) != Some(true) {
+            continue;
+        }
         copy_path_recursive(&src, &dest)?;
     }
     Ok(())
@@ -842,10 +844,11 @@ fn strip_host_bound_skill_overlays(skills_dir: &Path) -> Result<(), SkillPathErr
     if !skills_dir.is_dir() {
         return Ok(());
     }
-    let entries = std::fs::read_dir(skills_dir).map_err(|error| SkillPathError::PathResolution {
-        path: skills_dir.to_path_buf(),
-        message: error.to_string(),
-    })?;
+    let entries =
+        std::fs::read_dir(skills_dir).map_err(|error| SkillPathError::PathResolution {
+            path: skills_dir.to_path_buf(),
+            message: error.to_string(),
+        })?;
     for entry in entries.flatten() {
         let path = entry.path();
         let name = match path.file_name().and_then(|value| value.to_str()) {
@@ -855,10 +858,12 @@ fn strip_host_bound_skill_overlays(skills_dir: &Path) -> Result<(), SkillPathErr
         if !crate::skills::paperspine::is_host_bound_skill_folder(name) {
             continue;
         }
-        let metadata = path.symlink_metadata().map_err(|error| SkillPathError::PathResolution {
-            path: path.clone(),
-            message: error.to_string(),
-        })?;
+        let metadata = path
+            .symlink_metadata()
+            .map_err(|error| SkillPathError::PathResolution {
+                path: path.clone(),
+                message: error.to_string(),
+            })?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             std::fs::remove_file(&path).map_err(|error| SkillPathError::PathResolution {
                 path: path.clone(),
@@ -875,11 +880,22 @@ fn strip_host_bound_skill_overlays(skills_dir: &Path) -> Result<(), SkillPathErr
 }
 
 fn copy_path_recursive(source: &Path, destination: &Path) -> Result<(), SkillPathError> {
-    let metadata = std::fs::metadata(source).map_err(|error| SkillPathError::PathResolution {
-        path: source.to_path_buf(),
-        message: error.to_string(),
-    })?;
+    let metadata =
+        std::fs::symlink_metadata(source).map_err(|error| SkillPathError::PathResolution {
+            path: source.to_path_buf(),
+            message: error.to_string(),
+        })?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
     if metadata.is_dir() {
+        if let (Ok(resolved), Some(parent)) = (source.canonicalize(), source.parent()) {
+            if let Ok(parent_canon) = parent.canonicalize() {
+                if !resolved.starts_with(&parent_canon) {
+                    return Ok(());
+                }
+            }
+        }
         std::fs::create_dir_all(destination).map_err(|error| SkillPathError::PathResolution {
             path: destination.to_path_buf(),
             message: error.to_string(),
@@ -1372,14 +1388,124 @@ mod tests {
         assert!(settings.contains("claude-home/agents/**"));
         assert!(settings.contains("--bind-project-path"));
         assert!(settings.contains("path-guard.json"));
-        let spec: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(config.join("path-guard.json")).unwrap(),
-        )
-        .unwrap();
+        let spec: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(config.join("path-guard.json")).unwrap())
+                .unwrap();
         assert_eq!(
             spec["project"].as_str(),
             Some(project.to_string_lossy().as_ref())
         );
+    }
+
+    #[test]
+    fn preparing_a_turn_does_not_copy_project_agents_into_the_user_library() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("lp-home");
+        let project = temp.path().join("paper");
+        let project_agents = project.join(".localprism").join("agents");
+        std::fs::create_dir_all(&project_agents).unwrap();
+        std::fs::write(
+            project_agents.join("reviewer.md"),
+            "---\nname: Reviewer\ndescription: Reviews\n---\nBe thorough.\n",
+        )
+        .unwrap();
+        let outside = temp.path().join("host-secret.md");
+        std::fs::write(
+            &outside,
+            "---\nname: leak\ndescription: secret\n---\nSECRET\n",
+        )
+        .unwrap();
+        let leak = project_agents.join("leak.md");
+        match create_file_link(&outside, &leak) {
+            Ok(()) => {}
+            Err(error) if link_creation_is_not_permitted(&error) => {}
+            Err(error) => panic!("failed to create test symlink: {error}"),
+        }
+
+        let previous = std::env::var("LOCALPRISM_HOME").ok();
+        std::env::set_var("LOCALPRISM_HOME", &home);
+        let selected = super::SessionSkillExposure {
+            folders: Vec::new(),
+            agent_id: Some("reviewer".into()),
+        };
+        let runtime = super::prepare_isolated_claude_home(Some(&project), &selected).unwrap();
+        let leaked = super::SessionSkillExposure {
+            folders: Vec::new(),
+            agent_id: Some("leak".into()),
+        };
+        let leaked_runtime = super::prepare_isolated_claude_home(Some(&project), &leaked).unwrap();
+        if let Some(value) = previous {
+            std::env::set_var("LOCALPRISM_HOME", value);
+        } else {
+            std::env::remove_var("LOCALPRISM_HOME");
+        }
+
+        let global_agents = home.join("claude-home").join("agents");
+        assert!(
+            !global_agents.join("reviewer.md").exists(),
+            "project agents must not be persisted into the user-global library"
+        );
+        assert!(!global_agents.join("leak.md").exists());
+        assert!(runtime.join("agents").join("reviewer.md").exists());
+        assert!(!leaked_runtime.join("agents").join("leak.md").exists());
+    }
+
+    #[test]
+    fn publishes_a_user_agent_when_the_open_project_has_no_copy() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("lp-home");
+        let project = temp.path().join("paper");
+        let user_agents = home.join("claude-home").join("agents");
+        std::fs::create_dir_all(&user_agents).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            user_agents.join("de-ai.md"),
+            "---\nname: De-AI\ndescription: Revise prose\n---\nRevise.\n",
+        )
+        .unwrap();
+
+        let previous = std::env::var("LOCALPRISM_HOME").ok();
+        std::env::set_var("LOCALPRISM_HOME", &home);
+        let missing = super::prepare_isolated_claude_home(
+            Some(&project),
+            &super::SessionSkillExposure {
+                folders: Vec::new(),
+                agent_id: Some("no-such-agent".into()),
+            },
+        )
+        .unwrap();
+        let runtime = super::prepare_isolated_claude_home(
+            Some(&project),
+            &super::SessionSkillExposure {
+                folders: Vec::new(),
+                agent_id: Some("de-ai".into()),
+            },
+        )
+        .unwrap();
+        if let Some(value) = previous {
+            std::env::set_var("LOCALPRISM_HOME", value);
+        } else {
+            std::env::remove_var("LOCALPRISM_HOME");
+        }
+
+        assert_eq!(
+            missing.join("agents").read_dir().unwrap().flatten().count(),
+            0
+        );
+        assert!(runtime.join("agents").join("de-ai.md").exists());
+        assert!(user_agents.join("de-ai.md").is_file());
+    }
+
+    #[cfg(unix)]
+    fn create_file_link(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_file_link(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_file(target, link)
     }
 
     #[test]
@@ -1403,7 +1529,8 @@ mod tests {
         let previous = std::env::var("LOCALPRISM_HOME").ok();
         std::env::set_var("LOCALPRISM_HOME", &home);
         let config =
-            super::prepare_isolated_claude_home(None, &super::SessionSkillExposure::none()).unwrap();
+            super::prepare_isolated_claude_home(None, &super::SessionSkillExposure::none())
+                .unwrap();
         if let Some(value) = previous {
             std::env::set_var("LOCALPRISM_HOME", value);
         } else {
@@ -1434,12 +1561,7 @@ mod tests {
             .join("keep.md")
             .exists());
         assert_eq!(
-            config
-                .join("agents")
-                .read_dir()
-                .unwrap()
-                .flatten()
-                .count(),
+            config.join("agents").read_dir().unwrap().flatten().count(),
             0,
             "a turn with no agent must not publish the agent roster"
         );
@@ -1532,7 +1654,11 @@ mod tests {
             .join("paper-spine")
             .join("SKILL.md")
             .exists());
-        assert!(config.join("skills").join("writer").join("SKILL.md").exists());
+        assert!(config
+            .join("skills")
+            .join("writer")
+            .join("SKILL.md")
+            .exists());
         assert!(!config.join("skills").join("paper-spine").exists());
         assert!(!config.join("skills").join("paper-spine-intake").exists());
     }

@@ -42,7 +42,31 @@ fn yaml_string_list(value: &Value) -> Vec<String> {
     }
 }
 
+fn agent_containment_root(path: &Path, scope: SkillScope) -> Option<PathBuf> {
+    match scope {
+        SkillScope::Project => path.parent()?.parent()?.parent().map(Path::to_path_buf),
+        SkillScope::User => path.parent().map(Path::to_path_buf),
+    }
+}
+
+fn agent_file_is_in_scope(path: &Path, scope: SkillScope) -> bool {
+    let Some(containment) = agent_containment_root(path, scope) else {
+        return false;
+    };
+    crate::project_path_guard::is_confirmed_inside_root(&containment, path)
+}
+
 pub fn parse_claude_agent(path: &Path, scope: SkillScope) -> Result<AgentProfile, AgentError> {
+    if !agent_file_is_in_scope(path, scope) {
+        return Err(AgentError::from(format!(
+            "Agent file {} is outside the {} library",
+            path.display(),
+            match scope {
+                SkillScope::Project => "project",
+                SkillScope::User => "user",
+            }
+        )));
+    }
     let content = fs::read_to_string(path)
         .map_err(|error| AgentError::from(format!("Failed to read {}: {error}", path.display())))?;
     let (frontmatter, body) = split_frontmatter(&content);

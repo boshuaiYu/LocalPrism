@@ -9,7 +9,17 @@ export type SlashCommandLike = {
   content: string;
   accepts_arguments: boolean;
   description?: string | null;
+  file_path?: string | null;
+  filePath?: string | null;
 };
+
+/** Discovery must confirm containment; refuse lexical escapes here as well. */
+export function slashCommandFileLooksContained(
+  filePath: string | null | undefined,
+): boolean {
+  if (!filePath) return true;
+  return !filePath.replace(/\\/g, "/").split("/").includes("..");
+}
 
 function knownSlashNames(commands: SlashCommandLike[]): string[] {
   return Array.from(
@@ -175,7 +185,14 @@ export function resolveOutgoingSlashPrompt(
 
   // Skills stay as /name so Claude can use the Skill tool. PaperSpine is
   // rewritten later in Rust so the hostile host orchestrator is never injected.
-  if (command.scope === "skill" || isSkillInstructionDump(command.content)) {
+  // Project discovery must not follow links out of the project; a leftover
+  // `..` file path is also refused here so its body never enters the prompt.
+  const filePath = command.file_path ?? command.filePath;
+  if (
+    command.scope === "skill" ||
+    isSkillInstructionDump(command.content) ||
+    !slashCommandFileLooksContained(filePath)
+  ) {
     return visibleSlashLabel(command, args);
   }
 

@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  canPersistSessionApproval,
   DEFAULT_PERMISSION_MODE,
+  isScopedShellRuleContent,
+  isShellToolName,
   normalizePermissionMode,
   PERMISSION_MODE_OPTIONS,
   PERMISSION_MODES,
+  toolNameFromApprovalTitle,
 } from "@/lib/permission-mode";
 
 describe("normalizePermissionMode", () => {
@@ -44,5 +48,51 @@ describe("PERMISSION_MODE_OPTIONS", () => {
     );
     expect(option?.description.toLowerCase()).toMatch(/ask you|approval/);
     expect(option?.description.toLowerCase()).not.toMatch(/cannot show/);
+  });
+});
+
+describe("session approval persistence", () => {
+  it("recognizes shell tools and Allow titles", () => {
+    expect(isShellToolName("Bash")).toBe(true);
+    expect(isShellToolName("PowerShell")).toBe(true);
+    expect(isShellToolName("Read")).toBe(false);
+    expect(toolNameFromApprovalTitle("Allow Bash?")).toBe("Bash");
+    expect(isScopedShellRuleContent("git status")).toBe(true);
+    expect(isScopedShellRuleContent("*")).toBe(false);
+  });
+
+  it("keeps session persistence for the approved shell command", () => {
+    expect(
+      canPersistSessionApproval({
+        title: "Allow Bash?",
+        command: "git status",
+        permissions: [],
+      }),
+    ).toBe(true);
+    expect(
+      canPersistSessionApproval({
+        title: "Allow WebSearch?",
+        command: "papers",
+        permissions: [],
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects a shell session when there is no command or scoped rule", () => {
+    expect(
+      canPersistSessionApproval({
+        title: "Allow Bash?",
+        command: "",
+        permissions: [{ type: "addRules", rules: [{ toolName: "Bash" }] }],
+      }),
+    ).toBe(false);
+    expect(
+      canPersistSessionApproval({
+        title: "Allow PowerShell?",
+        command: null,
+        permissions: [],
+        details: {},
+      }),
+    ).toBe(false);
   });
 });

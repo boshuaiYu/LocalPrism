@@ -98,5 +98,21 @@ describe("ApprovalDialog tab isolation", () => {
     expect(dialog?.getAttribute("data-tab-id")).toBe("tab-old");
     expect(container.textContent).toContain("PowerShell");
     expect(container.textContent).toContain("Join-Path");
+    expect(container.textContent).toContain("Allow for session");
+  });
+
+  it("hides Allow for session when a shell prompt has no command to pin", async () => {
+    useApprovalStore.getState().enqueue(
+      request("req-shell", "tab-new", {
+        title: "Allow Bash?",
+        command: "",
+        permissions: [],
+        details: {},
+      }),
+    );
+
+    await act(async () => root.render(<ApprovalDialog />));
+    expect(container.textContent).toContain("Allow Bash?");
+    expect(container.textContent).not.toContain("Allow for session");
   });
 });

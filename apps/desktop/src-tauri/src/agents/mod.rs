@@ -188,12 +188,26 @@ fn list_scope(
     if !root.exists() {
         return Ok(Vec::new());
     }
+    let containment = match scope {
+        SkillScope::Project => project_path.unwrap_or(root.as_path()),
+        SkillScope::User => root.as_path(),
+    };
+    if crate::project_path_guard::resolved_path_inside_root(containment, &root) == Some(false) {
+        return Ok(Vec::new());
+    }
     let mut agents = Vec::new();
     let entries = fs::read_dir(&root)
         .map_err(|error| AgentError::from(format!("Failed to read {}: {error}", root.display())))?;
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_file() {
+        if !crate::project_path_guard::is_confirmed_inside_root(containment, &path) {
+            continue;
+        }
+        if !path
+            .canonicalize()
+            .ok()
+            .is_some_and(|resolved| resolved.is_file())
+        {
             continue;
         }
         let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
@@ -358,11 +372,11 @@ fn skill_matches_assignment(
     skill_id: &str,
     profile: &AgentProfile,
 ) -> bool {
-    let id_ok =
-        skill.folder == skill_id || skill.id == skill_id || skill.name == skill_id;
-    let target_ok = skill.targets.iter().any(|target| {
-        target.runtime == profile.runtime && target.scope == profile.scope
-    });
+    let id_ok = skill.folder == skill_id || skill.id == skill_id || skill.name == skill_id;
+    let target_ok = skill
+        .targets
+        .iter()
+        .any(|target| target.runtime == profile.runtime && target.scope == profile.scope);
     id_ok && target_ok
 }
 
@@ -644,7 +658,9 @@ mod tests {
             .collect();
         assert!(names.contains(&"research_architect_agent.md"));
         assert!(names.contains(&"socratic_mentor_agent.md"));
-        assert!(!names.iter().any(|name| name.eq_ignore_ascii_case("AGENTS.md")));
+        assert!(!names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case("AGENTS.md")));
         assert!(!names.contains(&"not-an-agent.md"));
         assert!(!names.contains(&"also-not-an-agent.md"));
     }
@@ -732,5 +748,53 @@ mod tests {
         let ids: Vec<_> = listed.iter().map(|agent| agent.id.as_str()).collect();
         assert_eq!(ids, vec!["yixiu"]);
         assert!(agents_dir.join("research_architect_agent.md").is_file());
+    }
+
+    #[test]
+    fn project_listing_skips_links_that_resolve_outside_the_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("paper");
+        let outside = temp.path().join("host-secret.md");
+        let agents = project.join(".localprism").join("agents");
+        fs::create_dir_all(&agents).unwrap();
+        fs::write(
+            &outside,
+            "---\nname: leak\ndescription: secret\n---\nSECRET\n",
+        )
+        .unwrap();
+        fs::write(
+            agents.join("reviewer.md"),
+            "---\nname: Reviewer\ndescription: Reviews\n---\nBe thorough.\n",
+        )
+        .unwrap();
+        let link = agents.join("leak.md");
+        match create_file_link(&outside, &link) {
+            Ok(()) => {}
+            Err(error) if link_creation_is_not_permitted(&error) => return,
+            Err(error) => panic!("failed to create test symlink: {error}"),
+        }
+
+        let listed = list_scope(RuntimeKind::Claude, SkillScope::Project, Some(&project)).unwrap();
+        let ids: Vec<_> = listed.iter().map(|agent| agent.id.as_str()).collect();
+        assert_eq!(ids, vec!["reviewer"]);
+        assert!(claude::parse_claude_agent(&link, SkillScope::Project).is_err());
+        assert!(
+            claude::parse_claude_agent(&agents.join("reviewer.md"), SkillScope::Project).is_ok()
+        );
+    }
+
+    #[cfg(unix)]
+    fn create_file_link(target: &Path, link: &Path) -> io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_file_link(target: &Path, link: &Path) -> io::Result<()> {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+
+    fn link_creation_is_not_permitted(error: &io::Error) -> bool {
+        error.kind() == io::ErrorKind::PermissionDenied
+            || matches!(error.raw_os_error(), Some(5 | 1314))
     }
 }

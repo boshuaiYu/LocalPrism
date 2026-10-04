@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useApprovalStore, firstPendingForTab } from "@/stores/approval-store";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import type { RuntimeRequest } from "@/runtime/types";
+import { canPersistSessionApproval } from "@/lib/permission-mode";
 import { useI18n } from "@/lib/use-i18n";
 
 export function ApprovalDialog() {
@@ -121,7 +122,7 @@ export function ApprovalDialog() {
           >
             {t("approvals.cancelTurn")}
           </button>
-          {!isUserInput && (
+          {!isUserInput && canPersistSessionApproval(request) && (
             <button
               type="button"
               className="rounded-md border border-border px-3 py-1.5 text-xs"
