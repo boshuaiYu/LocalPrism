@@ -70,19 +70,62 @@ fn require_unlinked_file(path: &Path, label: &str) -> Result<(), String> {
     }
 }
 
+fn parse_git_pointer(content: &str, pointer_file: &Path) -> Option<PathBuf> {
+    let line = content.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let raw = match (line.get(..7), line.get(7..)) {
+        (Some(prefix), Some(rest)) if prefix.eq_ignore_ascii_case("gitdir:") => rest.trim(),
+        _ => line,
+    };
+    if raw.is_empty() {
+        return None;
+    }
+    let target = PathBuf::from(raw);
+    Some(if target.is_absolute() {
+        target
+    } else {
+        pointer_file.parent().unwrap_or(Path::new(".")).join(target)
+    })
+}
+
+fn refuse_external_git_pointer(
+    path: &Path,
+    project_root: &Path,
+    label: &str,
+) -> Result<(), String> {
+    require_unlinked_file(path, label)?;
+    let Ok(content) = fs::read_to_string(path) else {
+        return Ok(());
+    };
+    let Some(target) = parse_git_pointer(&content, path) else {
+        return Ok(());
+    };
+    match path_is_inside(project_root, &target) {
+        Ok(true) => Ok(()),
+        Ok(false) | Err(_) => Err(format!(
+            "Refusing to follow a {label} outside the project: {}",
+            target.display()
+        )),
+    }
+}
+
 fn assert_history_artifacts_are_local(project_root: &Path) -> Result<(), String> {
     let claudeprism = project_root.join(".claudeprism");
+    let git_dir = claudeprism.join("history.git");
+    let nested_git = git_dir.join(".git");
     require_unlinked_dir(&claudeprism, ".claudeprism directory")?;
-    require_unlinked_dir(&claudeprism.join("history.git"), "history.git repository")?;
-    require_unlinked_dir(
-        &claudeprism.join("history.git").join(".git"),
-        "history gitdir",
-    )?;
-    require_unlinked_file(
-        &claudeprism.join("history.git").join(".git").join("config"),
-        "history git config",
-    )?;
+    require_unlinked_dir(&git_dir, "history.git repository")?;
+    require_unlinked_dir(&nested_git, "history gitdir")?;
+    require_unlinked_file(&git_dir.join("config"), "history.git config")?;
+    require_unlinked_file(&nested_git.join("config"), "history git config")?;
     require_unlinked_file(&claudeprism.join("history-exclude"), "history-exclude file")?;
+    refuse_external_git_pointer(&git_dir.join("commondir"), project_root, "history commondir")?;
+    refuse_external_git_pointer(&nested_git.join("commondir"), project_root, "history commondir")?;
+    refuse_external_git_pointer(&git_dir.join("gitdir"), project_root, "history gitdir pointer")?;
+    refuse_external_git_pointer(
+        &nested_git.join("gitdir"),
+        project_root,
+        "history gitdir pointer",
+    )?;
     Ok(())
 }
 
@@ -102,6 +145,25 @@ fn assert_opened_repo_is_local(project_root: &Path, repo: &Repository) -> Result
             "Refusing to use a history repository outside the project: {}",
             repo.path().display()
         ));
+    }
+    if !path_is_inside(project_root, repo.commondir())? {
+        return Err(format!(
+            "Refusing to use a history commondir outside the project: {}",
+            repo.commondir().display()
+        ));
+    }
+    for config in [repo.path().join("config"), repo.commondir().join("config")] {
+        require_unlinked_file(&config, "history git config")?;
+        if fs::symlink_metadata(&config)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
+            && !path_is_inside(project_root, &config)?
+        {
+            return Err(format!(
+                "Refusing to use a history git config outside the project: {}",
+                config.display()
+            ));
+        }
     }
     Ok(())
 }
@@ -186,17 +248,31 @@ fn rebind_persisted_workdir_before_open(
     // leaves that absolute path pointing at the old, now-missing directory.
     // Repair only the persisted worktree entry in our known internal layout so
     // the normal open + live-handle binding below can proceed.
-    let config_path = repo_root.join(".git").join("config");
-    match fs::symlink_metadata(&config_path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(format!(
-                "Refusing to follow a linked history git config: {}",
-                config_path.display()
-            ));
-        }
-        Ok(metadata) if metadata.is_file() => {}
-        _ => return Ok(()),
-    }
+    let config_path = [
+        repo_root.join(".git").join("config"),
+        repo_root.join("config"),
+    ]
+    .into_iter()
+    .map(|candidate| match fs::symlink_metadata(&candidate) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+            "Refusing to follow a linked history git config: {}",
+            candidate.display()
+        )),
+        Ok(metadata) if metadata.is_file() => Ok(Some(candidate)),
+        Ok(_) => Err(format!(
+            "Refusing to use a non-file history git config: {}",
+            candidate.display()
+        )),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("Failed to inspect history git config: {error}")),
+    })
+    .collect::<Result<Vec<_>, _>>()?
+    .into_iter()
+    .flatten()
+    .next();
+    let Some(config_path) = config_path else {
+        return Ok(());
+    };
     if !path_is_inside(project_root, &config_path)? {
         return Err(format!(
             "Refusing to rewrite a history git config outside the project: {}",
@@ -831,6 +907,19 @@ mod tests {
             .join("config")
     }
 
+    fn copy_dir(src: &Path, dst: &Path) {
+        fs::create_dir_all(dst).unwrap();
+        for entry in fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let dest = dst.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir(&entry.path(), &dest);
+            } else {
+                fs::copy(entry.path(), dest).unwrap();
+            }
+        }
+    }
+
     fn assert_external_path_untouched(path: &Path, original: &str) {
         assert_eq!(
             fs::read_to_string(path).unwrap(),
@@ -1180,6 +1269,70 @@ mod tests {
 
         let result = history_snapshot(root(&attacker), "should not touch victim".into());
         assert!(result.is_err(), "snapshot must refuse a linked history.git");
+        assert_eq!(
+            fs::read_to_string(history_git_config(victim.path())).unwrap(),
+            config_before
+        );
+    }
+
+    #[test]
+    fn test_history_init_does_not_rebind_through_gitdir_root_config_symlink() {
+        let victim = setup_project(&[("secret.tex", "classified")]);
+        history_init(root(&victim)).unwrap();
+        let victim_gitdir = victim
+            .path()
+            .join(".claudeprism")
+            .join("history.git")
+            .join(".git");
+        let config_before = fs::read_to_string(history_git_config(victim.path())).unwrap();
+
+        let attacker = setup_project(&[("main.tex", "attack")]);
+        let planted = attacker.path().join(".claudeprism").join("history.git");
+        copy_dir(&victim_gitdir, &planted);
+        fs::remove_file(planted.join("config")).unwrap();
+        symlink_path(&victim_gitdir.join("config"), &planted.join("config"));
+
+        let result = history_init(root(&attacker));
+        assert!(
+            result.is_err(),
+            "init must refuse a linked gitdir-root config, got {result:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(history_git_config(victim.path())).unwrap(),
+            config_before
+        );
+    }
+
+    #[test]
+    fn test_history_init_does_not_rebind_through_external_commondir() {
+        let victim = setup_project(&[("secret.tex", "classified")]);
+        history_init(root(&victim)).unwrap();
+        let victim_gitdir = victim
+            .path()
+            .join(".claudeprism")
+            .join("history.git")
+            .join(".git");
+        let config_before = fs::read_to_string(history_git_config(victim.path())).unwrap();
+
+        let attacker = setup_project(&[("main.tex", "attack")]);
+        let fake_git = attacker
+            .path()
+            .join(".claudeprism")
+            .join("history.git")
+            .join(".git");
+        fs::create_dir_all(&fake_git).unwrap();
+        fs::write(fake_git.join("HEAD"), "ref: refs/heads/master\n").unwrap();
+        fs::write(
+            fake_git.join("commondir"),
+            format!("{}\n", victim_gitdir.display()),
+        )
+        .unwrap();
+
+        let result = history_init(root(&attacker));
+        assert!(
+            result.is_err(),
+            "init must refuse an external commondir pointer, got {result:?}"
+        );
         assert_eq!(
             fs::read_to_string(history_git_config(victim.path())).unwrap(),
             config_before
