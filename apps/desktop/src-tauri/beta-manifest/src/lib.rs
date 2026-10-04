@@ -12,7 +12,7 @@ mod bind;
 
 pub use bind::{
     bind_updater_manifest, canonical_attestation, channel_for_version, decode_updater_pubkey,
-    sha256_digest, tag_for_version, BoundManifest, BoundPlatform,
+    sha256_digest, tag_for_version, version_requires_signed_identity, BoundManifest, BoundPlatform,
 };
 
 use std::net::{Ipv4Addr, SocketAddr};
@@ -430,7 +430,8 @@ mod tests {
     use super::{
         bind_updater_manifest, canonical_attestation, compact_release_is_newer,
         is_compact_beta_version, manifest_needs_version_gate, rewrite_compact_manifest,
-        serve_local_manifest, sha256_digest, updater_gate_version, BoundPlatform,
+        serve_local_manifest, sha256_digest, updater_gate_version,
+        version_requires_signed_identity, BoundPlatform,
     };
     use serde_json::{json, Value};
     use std::collections::BTreeMap;
@@ -560,6 +561,17 @@ mod tests {
         .to_string();
         let error = bind_updater_manifest(&raw, "unused").expect_err("url tag mismatch");
         assert!(error.contains("does not match manifest tag"));
+    }
+
+    #[test]
+    fn bind_rejects_unsigned_manifests_newer_than_the_published_ceiling() {
+        assert!(!version_requires_signed_identity("1.0.8"));
+        assert!(!version_requires_signed_identity("1.0.8beta7"));
+        assert!(!version_requires_signed_identity("1.0.8-7"));
+        assert!(version_requires_signed_identity("1.0.9"));
+        let raw = r#"{"version":"1.0.9","notes":"next","platforms":{"linux-x86_64":{"url":"https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.9/LocalPrism-Linux.AppImage","signature":"sig"}}}"#;
+        let error = bind_updater_manifest(raw, "unused").expect_err("unsigned newer");
+        assert!(error.contains("manifest_signature"), "{error}");
     }
 
     #[test]

@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 flate2 = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "system-proxy", "socks"] }
 sha2 = "0.10"
 tar = "0.4"
 tokio = { version = "1", features = ["io-util", "macros"] }

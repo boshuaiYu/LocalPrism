@@ -10,11 +10,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   planUpdaterRelease,
   type ArtifactFile,
   type LatestManifest,
+  type UpdaterReleasePlan,
 } from "../src/lib/updater-manifest.ts";
 
 function walk(root: string, dir = root): ArtifactFile[] {
@@ -39,14 +41,14 @@ function walk(root: string, dir = root): ArtifactFile[] {
   return files;
 }
 
-function argValue(name: string): string | undefined {
+function argValue(argv: string[], name: string): string | undefined {
   const flag = `--${name}`;
-  const index = process.argv.indexOf(flag);
+  const index = argv.indexOf(flag);
   if (index === -1) return undefined;
-  return process.argv[index + 1];
+  return argv[index + 1];
 }
 
-function signAttestation(canonical: string): string {
+export function signAttestation(canonical: string): string {
   if (!process.env.TAURI_SIGNING_PRIVATE_KEY?.trim()) {
     throw new Error(
       "TAURI_SIGNING_PRIVATE_KEY is required to sign latest.json in the sign-updater job.",
@@ -65,51 +67,84 @@ function signAttestation(canonical: string): string {
         `tauri signer sign failed: ${signed.stderr || signed.stdout || "unknown error"}`,
       );
     }
-    return readFileSync(`${file}.sig`, "utf8").trim();
+    const signature = readFileSync(`${file}.sig`, "utf8").trim();
+    if (!signature) {
+      throw new Error(
+        "tauri signer sign produced an empty manifest_signature.",
+      );
+    }
+    return signature;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-const artifactsDir = argValue("artifacts") ?? "artifacts";
-const uploadDir = argValue("upload") ?? "upload";
-const tag = process.env.TAG?.trim() ?? "";
-const repository = process.env.GITHUB_REPOSITORY?.trim() ?? "";
-const pubDate = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-
-const result = planUpdaterRelease({
-  files: walk(artifactsDir),
-  tag,
-  repository,
-  pubDate,
-});
-
-if (!result.ok) {
-  console.error(result.error);
-  process.exit(1);
-}
-
-mkdirSync(uploadDir, { recursive: true });
-for (const copy of result.plan.copies) {
-  copyFileSync(
-    join(artifactsDir, copy.sourcePath),
-    join(uploadDir, copy.uploadName),
+export function writeSignedLatestManifest(input: {
+  plan: UpdaterReleasePlan;
+  artifactsDir: string;
+  uploadDir: string;
+  signAttestation?: (canonical: string) => string;
+}): LatestManifest {
+  const sign = input.signAttestation ?? signAttestation;
+  const manifestSignature = sign(input.plan.attestation).trim();
+  if (!manifestSignature) {
+    throw new Error(
+      "Attestation signing produced an empty manifest_signature.",
+    );
+  }
+  const manifest: LatestManifest = {
+    ...input.plan.manifest,
+    manifest_signature: manifestSignature,
+  };
+  mkdirSync(input.uploadDir, { recursive: true });
+  for (const copy of input.plan.copies) {
+    copyFileSync(
+      join(input.artifactsDir, copy.sourcePath),
+      join(input.uploadDir, copy.uploadName),
+    );
+  }
+  writeFileSync(
+    join(input.uploadDir, "latest.json"),
+    `${JSON.stringify(manifest, null, 2)}\n`,
   );
+  return manifest;
 }
 
-let manifestSignature: string | undefined;
-try {
-  manifestSignature = signAttestation(result.plan.attestation);
-} catch (error) {
-  const message = error instanceof Error ? error.message : String(error);
-  console.warn(
-    `Attestation signing failed; publishing version/tag/digest binding only: ${message}`,
-  );
+export function generateLatestJson(
+  argv: string[] = process.argv,
+  env: NodeJS.ProcessEnv = process.env,
+): LatestManifest {
+  const artifactsDir = argValue(argv, "artifacts") ?? "artifacts";
+  const uploadDir = argValue(argv, "upload") ?? "upload";
+  const tag = env.TAG?.trim() ?? "";
+  const repository = env.GITHUB_REPOSITORY?.trim() ?? "";
+  const pubDate = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+
+  const result = planUpdaterRelease({
+    files: walk(artifactsDir),
+    tag,
+    repository,
+    pubDate,
+  });
+
+  if (!result.ok) {
+    throw new Error(result.error);
+  }
+
+  return writeSignedLatestManifest({
+    plan: result.plan,
+    artifactsDir,
+    uploadDir,
+  });
 }
-const manifest: LatestManifest = {
-  ...result.plan.manifest,
-  ...(manifestSignature ? { manifest_signature: manifestSignature } : {}),
-};
-const manifestPath = join(uploadDir, "latest.json");
-writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-console.log(JSON.stringify(manifest, null, 2));
+
+function isDirectRun(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  return fileURLToPath(import.meta.url) === resolve(entry);
+}
+
+if (isDirectRun()) {
+  const manifest = generateLatestJson();
+  console.log(JSON.stringify(manifest, null, 2));
+}

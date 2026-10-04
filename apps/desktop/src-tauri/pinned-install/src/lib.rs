@@ -188,16 +188,26 @@ pub fn extract_named_files(
 
 const MAX_ARCHIVE_BYTES: usize = 200 * 1024 * 1024;
 
+/// Honor the OS proxy (Windows Internet Settings) and `HTTP(S)_PROXY` /
+/// `ALL_PROXY`, including SOCKS.
+pub fn download_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .user_agent("LocalPrism")
+        .timeout(std::time::Duration::from_secs(600))
+}
+
+pub fn download_client() -> Result<reqwest::Client, String> {
+    download_client_builder()
+        .build()
+        .map_err(|err| format!("Failed to start download: {err}"))
+}
+
 pub async fn download_verified_archive(
     asset: &PinnedAsset,
     mut on_progress: impl FnMut(String),
 ) -> Result<Vec<u8>, String> {
     on_progress(format!("Downloading {} {}...", asset.name, asset.version));
-    let client = reqwest::Client::builder()
-        .user_agent("LocalPrism")
-        .timeout(std::time::Duration::from_secs(600))
-        .build()
-        .map_err(|err| format!("Failed to start download: {err}"))?;
+    let client = download_client()?;
     let response = client
         .get(asset.url)
         .send()
@@ -405,6 +415,31 @@ mod tests {
             writer.finish().unwrap();
         }
         cursor.into_inner()
+    }
+
+    #[test]
+    fn download_client_uses_the_system_proxy() {
+        let cargo = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
+        assert!(
+            cargo.contains("\"system-proxy\""),
+            "reqwest must enable system-proxy so Windows Internet Settings apply"
+        );
+        assert!(
+            cargo.contains("\"socks\""),
+            "reqwest must enable socks so ALL_PROXY socks URLs still work"
+        );
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"));
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source");
+        assert!(production.contains("fn download_client_builder"));
+        assert!(production.contains("fn download_client"));
+        assert!(
+            !production.contains("no_proxy"),
+            "the download client must use the system proxy"
+        );
+        download_client().expect("download client");
     }
 
     #[test]

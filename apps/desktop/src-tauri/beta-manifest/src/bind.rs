@@ -10,6 +10,9 @@ use sha2::{Digest, Sha256};
 
 const ATTESTATION_VERSION: &str = "localprism-updater-manifest-v1";
 const RELEASE_HOST: &str = "https://github.com/boshuaiYu/LocalPrism/releases/download/";
+/// Published unsigned `latest.json` tops out at 1.0.8, including
+/// `1.0.8betaN` and `1.0.8-N`. Newer cores must attest identity.
+const UNSIGNED_MANIFEST_CEILING: (u64, u64, u64) = (1, 0, 8);
 
 const ALLOWED_FILES: &[&str] = &[
     "LocalPrism-Windows-setup.exe",
@@ -166,6 +169,22 @@ pub fn bind_updater_manifest(raw: &str, pubkey: &str) -> Result<BoundManifest, S
         );
     }
 
+    let requires_signed = version_requires_signed_identity(&version);
+    if requires_signed && attestation.is_none() {
+        return Err(
+            "Updater manifests newer than 1.0.8 must include a manifest_signature.".to_string(),
+        );
+    }
+    if requires_signed
+        && platforms
+            .values()
+            .any(|platform| platform.digest.is_empty())
+    {
+        return Err(
+            "Updater manifests newer than 1.0.8 must include an artifact digest on every platform."
+                .to_string(),
+        );
+    }
     if let Some(signature) = attestation {
         if platforms
             .values()
@@ -193,7 +212,10 @@ impl BoundManifest {
             .filter(|digest| !digest.is_empty())
             .collect();
         if expected.is_empty() {
-            // Published betas and stables only signed the artifact bytes.
+            if version_requires_signed_identity(&self.version) {
+                return Err("Downloaded update is missing a signed digest.".to_string());
+            }
+            // Published 1.0.8 / 1.0.8betaN only signed the artifact bytes.
             return Ok(());
         }
         let digest = sha256_digest(bytes);
@@ -202,6 +224,33 @@ impl BoundManifest {
         }
         Err("Downloaded update does not match the signed digest.".to_string())
     }
+}
+
+pub fn version_requires_signed_identity(version: &str) -> bool {
+    match version_core(version) {
+        Some(core) => core > UNSIGNED_MANIFEST_CEILING,
+        None => true,
+    }
+}
+
+fn version_core(version: &str) -> Option<(u64, u64, u64)> {
+    let trimmed = version.trim().trim_start_matches(['v', 'V']);
+    let before_beta = match trimmed.to_ascii_lowercase().find("beta") {
+        Some(index) => &trimmed[..index],
+        None => trimmed,
+    };
+    let core = before_beta
+        .split(['-', '+'])
+        .next()
+        .filter(|part| !part.is_empty())?;
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
 }
 
 fn optional_string(value: Option<&Value>) -> Option<String> {

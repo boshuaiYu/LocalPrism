@@ -29,5 +29,9 @@ describe("desktop release workflow secrets", () => {
     expect(workflow).toContain("needs: [sign-updater]");
     expect(publish).toContain("desktop-signed");
     expect(publish).toContain("latest.json");
+    expect(publish).toContain("manifest_signature");
+    expect(publish).toContain(
+      "latest.json is missing a non-empty manifest_signature",
+    );
   });
 });
