@@ -10,7 +10,7 @@ const workflow = readFileSync(
 describe("desktop release workflow secrets", () => {
   it("does not expose the updater signing key to every job", () => {
     expect(workflow).not.toMatch(
-      /^env:\n(?:  .*\n)*  TAURI_SIGNING_PRIVATE_KEY:/m,
+      /^env:\n(?: {2}.*\n)* {2}TAURI_SIGNING_PRIVATE_KEY:/m,
     );
     expect(workflow).toContain("sign-updater:");
     expect(workflow).toContain("ci-sign-updater-artifacts.sh");

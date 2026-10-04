@@ -7,8 +7,7 @@ import {
 
 const SIG =
   "untrusted comment: signature from tauri secret key\nRWTTESTSIGNATURE=\n";
-const SHA =
-  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 function file(path: string, text?: string, sha256 = SHA): ArtifactFile {
   return text === undefined ? { path, sha256 } : { path, text, sha256 };
