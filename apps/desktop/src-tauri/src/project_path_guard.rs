@@ -529,7 +529,7 @@ fn resolved_display_escapes(root: &ProjectRoot, allow: &[ProjectRoot], displayed
         return false;
     }
     let candidate = Path::new(displayed);
-    match resolved_path_inside_root(&root_path, candidate) {
+    match evaluate_displayed_containment(root, &root_path, displayed) {
         Some(true) => false,
         Some(false) => !allow.iter().any(|allowed| {
             os_path_from_project_root(allowed)
@@ -538,6 +538,33 @@ fn resolved_display_escapes(root: &ProjectRoot, allow: &[ProjectRoot], displayed
         }),
         None => false,
     }
+}
+
+/// Prefer the already-parsed relative parts so a Windows Keep that only
+/// differs by drive-letter case still walks junctions. `Path::strip_prefix`
+/// is case-sensitive and would otherwise return `None` (fail-open).
+fn evaluate_displayed_containment(
+    root: &ProjectRoot,
+    root_path: &Path,
+    displayed: &str,
+) -> Option<bool> {
+    if let Some(extra) = relative_parts_after_root(root, displayed) {
+        let canonical_root = root_path.canonicalize().ok()?;
+        return Some(walk_named_components(&canonical_root, &extra));
+    }
+    resolved_path_inside_root(root_path, Path::new(displayed))
+}
+
+fn relative_parts_after_root(root: &ProjectRoot, displayed: &str) -> Option<Vec<String>> {
+    let (prefix, _, parts) = parse_absolute(displayed)?;
+    if !prefixes_match(&root.prefix, &prefix) {
+        return None;
+    }
+    let normalized = normalize_parts(&parts)?;
+    if !starts_with_parts(&normalized, &root.parts, root.ignore_case()) {
+        return None;
+    }
+    Some(normalized[root.parts.len()..].to_vec())
 }
 
 fn os_path_from_project_root(root: &ProjectRoot) -> Option<PathBuf> {
@@ -584,7 +611,50 @@ fn canonical_is_inside(path: &Path, root: &Path) -> bool {
 }
 
 fn walk_nonexistent_path(canonical_root: &Path, lexical_root: &Path, path: &Path) -> Option<bool> {
-    let relative = path.strip_prefix(lexical_root).ok()?;
+    let relative = path_components_after_root(lexical_root, path)?;
+    Some(walk_relative_path(canonical_root, &relative))
+}
+
+fn path_components_after_root(root: &Path, path: &Path) -> Option<PathBuf> {
+    if let Ok(relative) = path.strip_prefix(root) {
+        return Some(relative.to_path_buf());
+    }
+    if !cfg!(windows) {
+        return None;
+    }
+    let root_comps: Vec<Component<'_>> = root.components().collect();
+    let path_comps: Vec<Component<'_>> = path.components().collect();
+    if path_comps.len() < root_comps.len() {
+        return None;
+    }
+    if !root_comps
+        .iter()
+        .zip(path_comps.iter())
+        .all(|(left, right)| os_components_equal(*left, *right))
+    {
+        return None;
+    }
+    let mut relative = PathBuf::new();
+    for component in path_comps.into_iter().skip(root_comps.len()) {
+        relative.push(component.as_os_str());
+    }
+    Some(relative)
+}
+
+fn os_components_equal(left: Component<'_>, right: Component<'_>) -> bool {
+    match (left, right) {
+        (Component::Normal(left), Component::Normal(right)) => left
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy()),
+        (Component::Prefix(left), Component::Prefix(right)) => left
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy()),
+        _ => left == right,
+    }
+}
+
+fn walk_relative_path(canonical_root: &Path, relative: &Path) -> bool {
     let mut current = canonical_root.to_path_buf();
     for component in relative.components() {
         match component {
@@ -592,28 +662,56 @@ fn walk_nonexistent_path(canonical_root: &Path, lexical_root: &Path, path: &Path
             Component::ParentDir => {
                 current.pop();
                 if !canonical_is_inside(&current, canonical_root) {
-                    return Some(false);
+                    return false;
                 }
             }
             Component::Normal(name) => {
                 current.push(name);
-                match std::fs::symlink_metadata(&current) {
-                    Ok(_) => match current.canonicalize() {
-                        Ok(resolved) => {
-                            if !canonical_is_inside(&resolved, canonical_root) {
-                                return Some(false);
-                            }
-                            current = resolved;
-                        }
-                        Err(_) => return Some(false),
-                    },
-                    Err(_) => {}
+                if !advance_existing_component(&mut current, canonical_root) {
+                    return false;
                 }
             }
-            Component::Prefix(_) | Component::RootDir => return Some(false),
+            Component::Prefix(_) | Component::RootDir => return false,
         }
     }
-    Some(true)
+    true
+}
+
+fn walk_named_components(canonical_root: &Path, names: &[String]) -> bool {
+    let mut current = canonical_root.to_path_buf();
+    for name in names {
+        if name == ".." {
+            current.pop();
+            if !canonical_is_inside(&current, canonical_root) {
+                return false;
+            }
+            continue;
+        }
+        if name == "." || name.is_empty() {
+            continue;
+        }
+        current.push(name);
+        if !advance_existing_component(&mut current, canonical_root) {
+            return false;
+        }
+    }
+    true
+}
+
+fn advance_existing_component(current: &mut PathBuf, canonical_root: &Path) -> bool {
+    match std::fs::symlink_metadata(&*current) {
+        Ok(_) => match current.canonicalize() {
+            Ok(resolved) => {
+                if !canonical_is_inside(&resolved, canonical_root) {
+                    return false;
+                }
+                *current = resolved;
+                true
+            }
+            Err(_) => false,
+        },
+        Err(_) => true,
+    }
 }
 
 fn render_joined(root: &ProjectRoot, extra: &[String]) -> PathBind {
@@ -1653,6 +1751,76 @@ mod tests {
             decision,
             ToolPathDecision::Keep(json!({ "file_path": created.to_string_lossy() }))
         );
+    }
+
+    #[test]
+    fn relative_parts_survive_windows_drive_letter_case() {
+        let root = ProjectRoot::parse(r"C:\Users\Foo\paper").expect("windows project");
+        assert_eq!(
+            relative_parts_after_root(&root, r"c:\Users\Foo\paper\build\out.pdf"),
+            Some(vec!["build".into(), "out.pdf".into()])
+        );
+        assert_eq!(
+            relative_parts_after_root(&root, r"C:\Users\Foo\paper\draft.tex"),
+            Some(vec!["draft.tex".into()])
+        );
+        assert_eq!(
+            relative_parts_after_root(&root, r"D:\Users\Foo\paper\draft.tex"),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn denies_a_case_mismatched_write_through_a_project_junction() {
+        let temp = scratch_dir();
+        let project = temp.join("paper");
+        let outside = temp.join("outside");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let linked = project.join("build");
+        match create_directory_link(&outside, &linked) {
+            Ok(()) => {}
+            Err(error) if link_creation_is_not_permitted(&error) => return,
+            Err(error) => panic!("failed to create test directory link: {error}"),
+        }
+
+        let root = project.to_string_lossy().into_owned();
+        let Some(flipped) = flip_drive_letter_case(&root) else {
+            panic!("expected a drive-letter project path, got {root}");
+        };
+        let target = format!("{flipped}\\build\\out.pdf");
+        let decision = bind_tool_input(&root, "Write", json!({ "file_path": target }));
+        assert!(
+            matches!(decision, ToolPathDecision::Deny(_)),
+            "expected deny for a case-mismatched write through a junction, got {decision:?}"
+        );
+
+        let draft = format!("{flipped}\\draft.tex");
+        let decision = bind_tool_input(&root, "Write", json!({ "file_path": draft }));
+        assert!(
+            matches!(
+                decision,
+                ToolPathDecision::Keep(_) | ToolPathDecision::Rewrite(_)
+            ),
+            "new in-project files must still write when only the drive letter case differs, got {decision:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    fn flip_drive_letter_case(path: &str) -> Option<String> {
+        let bytes = path.as_bytes();
+        if bytes.len() < 2 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
+            return None;
+        }
+        let mut chars = path.chars();
+        let first = chars.next()?;
+        let flipped = if first.is_ascii_uppercase() {
+            first.to_ascii_lowercase()
+        } else {
+            first.to_ascii_uppercase()
+        };
+        Some(format!("{flipped}{}", chars.as_str()))
     }
 
     #[cfg(unix)]
