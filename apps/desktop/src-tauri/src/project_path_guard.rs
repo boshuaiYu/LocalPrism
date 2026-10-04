@@ -571,9 +571,12 @@ pub fn resolved_path_inside_root(root: &Path, path: &Path) -> Option<bool> {
     }
 }
 
-/// True only when the resolved path is confirmed to stay inside `root`.
+/// True when `path` already exists and stays inside `root` after resolving links.
+///
+/// Missing paths are not confirmed. New in-project files still pass the
+/// write-time walk in [`resolved_path_inside_root`].
 pub fn is_confirmed_inside_root(root: &Path, path: &Path) -> bool {
-    resolved_path_inside_root(root, path) == Some(true)
+    std::fs::symlink_metadata(path).is_ok() && resolved_path_inside_root(root, path) == Some(true)
 }
 
 fn canonical_is_inside(path: &Path, root: &Path) -> bool {
@@ -1635,6 +1638,20 @@ mod tests {
         assert_eq!(
             resolved_path_inside_root(&project, &project.join("main.tex")),
             Some(true)
+        );
+        assert!(
+            !is_confirmed_inside_root(&project, &project.join("main.tex")),
+            "discovery must not treat a missing path as a usable in-project file"
+        );
+        let created = project.join("draft.tex");
+        let decision = bind_tool_input(
+            &root,
+            "Write",
+            json!({ "file_path": created.to_string_lossy() }),
+        );
+        assert_eq!(
+            decision,
+            ToolPathDecision::Keep(json!({ "file_path": created.to_string_lossy() }))
         );
     }
 

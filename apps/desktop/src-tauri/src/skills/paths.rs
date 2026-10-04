@@ -375,16 +375,14 @@ fn publish_active_agent(
     let source = project
         .and_then(|path| {
             let candidate = path.join(".localprism").join("agents").join(&file_name);
-            crate::project_path_guard::is_confirmed_inside_root(path, &candidate)
-                .then_some(candidate)
+            usable_agent_source(path, &candidate).then_some(candidate)
         })
         .or_else(|| {
             crate::providers::paths::user_agents_dir()
                 .ok()
                 .and_then(|root| {
                     let candidate = root.join(&file_name);
-                    crate::project_path_guard::is_confirmed_inside_root(&root, &candidate)
-                        .then_some(candidate)
+                    usable_agent_source(&root, &candidate).then_some(candidate)
                 })
         });
     let Some(source) = source else {
@@ -408,6 +406,10 @@ fn publish_active_agent(
         })?;
     }
     Ok(())
+}
+
+fn usable_agent_source(root: &Path, path: &Path) -> bool {
+    path.is_file() && crate::project_path_guard::is_confirmed_inside_root(root, path)
 }
 
 /// One session entry for the scientific-agent-skills tree. Claude lists this
@@ -1447,6 +1449,53 @@ mod tests {
         assert!(!global_agents.join("leak.md").exists());
         assert!(runtime.join("agents").join("reviewer.md").exists());
         assert!(!leaked_runtime.join("agents").join("leak.md").exists());
+    }
+
+    #[test]
+    fn publishes_a_user_agent_when_the_open_project_has_no_copy() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("lp-home");
+        let project = temp.path().join("paper");
+        let user_agents = home.join("claude-home").join("agents");
+        std::fs::create_dir_all(&user_agents).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            user_agents.join("de-ai.md"),
+            "---\nname: De-AI\ndescription: Revise prose\n---\nRevise.\n",
+        )
+        .unwrap();
+
+        let previous = std::env::var("LOCALPRISM_HOME").ok();
+        std::env::set_var("LOCALPRISM_HOME", &home);
+        let missing = super::prepare_isolated_claude_home(
+            Some(&project),
+            &super::SessionSkillExposure {
+                folders: Vec::new(),
+                agent_id: Some("no-such-agent".into()),
+            },
+        )
+        .unwrap();
+        let runtime = super::prepare_isolated_claude_home(
+            Some(&project),
+            &super::SessionSkillExposure {
+                folders: Vec::new(),
+                agent_id: Some("de-ai".into()),
+            },
+        )
+        .unwrap();
+        if let Some(value) = previous {
+            std::env::set_var("LOCALPRISM_HOME", value);
+        } else {
+            std::env::remove_var("LOCALPRISM_HOME");
+        }
+
+        assert_eq!(
+            missing.join("agents").read_dir().unwrap().flatten().count(),
+            0
+        );
+        assert!(runtime.join("agents").join("de-ai.md").exists());
+        assert!(user_agents.join("de-ai.md").is_file());
     }
 
     #[cfg(unix)]
