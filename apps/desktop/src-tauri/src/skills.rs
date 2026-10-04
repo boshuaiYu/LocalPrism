@@ -6,10 +6,17 @@ use tauri::{Emitter, Manager, WebviewWindow};
 
 pub mod domain;
 pub mod exposure;
+mod fetch;
 pub mod import;
 pub mod manifest;
 pub mod paperspine;
 pub mod paths;
+
+use fetch::{
+    append_download_chunk, is_extract_budget_error, public_only_resolver, reject_download_length,
+    skill_redirect_policy, validate_skill_fetch_url, BudgetReader, ExtractLimits,
+    MAX_SKILL_DOWNLOAD_BYTES, MAX_SKILL_MARKDOWN_BYTES,
+};
 
 const TARBALL_URLS: &[&str] = &[
     "https://github.com/K-Dense-AI/scientific-agent-skills/archive/refs/heads/main.tar.gz",
@@ -771,7 +778,9 @@ fn build_skills_http_client(
 ) -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(SKILLS_CONNECT_TIMEOUT_SECS))
-        .timeout(Duration::from_secs(timeout_secs));
+        .timeout(Duration::from_secs(timeout_secs))
+        .redirect(skill_redirect_policy())
+        .dns_resolver(public_only_resolver());
 
     configure_proxy_for_client(builder, window)?
         .build()
@@ -823,6 +832,15 @@ fn short_skill_temp_dir(prefix: &str) -> PathBuf {
 }
 
 fn unpack_tarball(bytes: &[u8], tmp_dir: &Path, subpath: Option<&str>) -> Result<(), String> {
+    unpack_tarball_with_limits(bytes, tmp_dir, subpath, ExtractLimits::default())
+}
+
+fn unpack_tarball_with_limits(
+    bytes: &[u8],
+    tmp_dir: &Path,
+    subpath: Option<&str>,
+    limits: ExtractLimits,
+) -> Result<(), String> {
     reset_download_workspace(tmp_dir);
 
     let raw_dir = tmp_dir.join("raw");
@@ -830,18 +848,27 @@ fn unpack_tarball(bytes: &[u8], tmp_dir: &Path, subpath: Option<&str>) -> Result
         .map_err(|e| format!("Failed to create extraction dir: {}", e))?;
 
     let decoder = flate2::read::GzDecoder::new(bytes);
-    let mut archive = tar::Archive::new(decoder);
+    let reader = BudgetReader::new(decoder, bytes.len() as u64, limits);
+    let mut archive = tar::Archive::new(reader);
     archive.set_overwrite(true);
     archive.set_preserve_permissions(false);
     archive.set_preserve_mtime(false);
 
     let mut extracted_files = 0usize;
+    let mut seen_entries = 0usize;
     let mut last_error: Option<String> = None;
     for entry in archive
         .entries()
         .map_err(|e| format!("Failed to read tarball: {e}"))?
     {
         let mut entry = entry.map_err(|e| format!("Failed to read tarball entry: {e}"))?;
+        seen_entries += 1;
+        if seen_entries > limits.max_entries {
+            return Err(format!(
+                "Archive extraction exceeded the {} entry limit",
+                limits.max_entries
+            ));
+        }
         let kind = entry.header().entry_type();
         if kind.is_pax_global_extensions()
             || kind.is_pax_local_extensions()
@@ -859,6 +886,12 @@ fn unpack_tarball(bytes: &[u8], tmp_dir: &Path, subpath: Option<&str>) -> Result
         let Some(src_path) = entry.path().ok().map(|path| path.into_owned()) else {
             continue;
         };
+        if tar_path_depth(&src_path) > limits.max_depth {
+            return Err(format!(
+                "Archive extraction exceeded the {} path depth limit",
+                limits.max_depth
+            ));
+        }
         if !should_extract_tar_path(&src_path, &unpack_extract_prefixes(subpath)) {
             continue;
         }
@@ -885,6 +918,9 @@ fn unpack_tarball(bytes: &[u8], tmp_dir: &Path, subpath: Option<&str>) -> Result
                 }
             }
             Err(error) => {
+                if is_extract_budget_error(&error) {
+                    return Err(format!("Failed to extract tarball: {error}"));
+                }
                 let message = format!("{} ({error})", dest.display());
                 last_error = Some(message.clone());
                 if is_required_skill_extract_path(&rel_path) {
@@ -897,9 +933,7 @@ fn unpack_tarball(bytes: &[u8], tmp_dir: &Path, subpath: Option<&str>) -> Result
     if extracted_files == 0 {
         return Err(last_error
             .map(|error| format!("Failed to extract tarball: {error}"))
-            .unwrap_or_else(|| {
-                "Failed to extract tarball: archive had no usable files".into()
-            }));
+            .unwrap_or_else(|| "Failed to extract tarball: archive had no usable files".into()));
     }
 
     let repo_source = find_extracted_repo_dir(&raw_dir)
@@ -967,6 +1001,12 @@ fn should_extract_tar_path(path: &Path, prefixes: &[String]) -> bool {
 
 fn tar_path_after_repo_root(path: &Path) -> PathBuf {
     path.components().skip(1).collect()
+}
+
+fn tar_path_depth(path: &Path) -> usize {
+    path.components()
+        .filter(|component| matches!(component, Component::Normal(_)))
+        .count()
 }
 
 fn safe_import_subpath(subpath: &str) -> Option<String> {
@@ -1060,6 +1100,9 @@ async fn download_tarball_once(
 ) -> Result<(), String> {
     reset_download_workspace(tmp_dir);
 
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("Invalid skill URL {url}: {e}"))?;
+    validate_skill_fetch_url(&parsed)?;
+
     let source_label = tarball_source_label(url);
     emit_log(window, &format!("Downloading from {}...", source_label));
 
@@ -1078,8 +1121,13 @@ async fn download_tarball_once(
     }
 
     let total_size = response.content_length();
-    let mut bytes =
-        Vec::with_capacity(total_size.unwrap_or_default().min(64 * 1024 * 1024) as usize);
+    reject_download_length(total_size, MAX_SKILL_DOWNLOAD_BYTES)?;
+    let mut bytes = Vec::with_capacity(
+        total_size
+            .unwrap_or_default()
+            .min(64 * 1024 * 1024)
+            .min(MAX_SKILL_DOWNLOAD_BYTES) as usize,
+    );
     let mut downloaded = 0_u64;
     let mut last_emitted_percent = 0_u64;
 
@@ -1089,7 +1137,7 @@ async fn download_tarball_once(
         .map_err(|e| format!("Failed to read download bytes: {}", e))?
     {
         downloaded += chunk.len() as u64;
-        bytes.extend_from_slice(&chunk);
+        append_download_chunk(&mut bytes, &chunk, MAX_SKILL_DOWNLOAD_BYTES)?;
 
         if let Some(total) = total_size {
             if total > 0 {
@@ -1553,7 +1601,11 @@ fn is_skill_markdown_url(url: &str) -> bool {
 async fn download_url_bytes(
     url: &str,
     app: Option<&tauri::AppHandle>,
+    max_bytes: u64,
 ) -> Result<Vec<u8>, String> {
+    let parsed =
+        reqwest::Url::parse(url).map_err(|error| format!("Invalid skill URL {url}: {error}"))?;
+    validate_skill_fetch_url(&parsed)?;
     let window = app.and_then(|handle| handle.get_webview_window("main"));
     let client = build_skills_http_client(SKILLS_DOWNLOAD_TIMEOUT_SECS, window.as_ref())?;
     if let Some(app) = app {
@@ -1576,8 +1628,13 @@ async fn download_url_bytes(
         ));
     }
     let total_size = response.content_length();
-    let mut bytes =
-        Vec::with_capacity(total_size.unwrap_or_default().min(64 * 1024 * 1024) as usize);
+    reject_download_length(total_size, max_bytes)?;
+    let mut bytes = Vec::with_capacity(
+        total_size
+            .unwrap_or_default()
+            .min(64 * 1024 * 1024)
+            .min(max_bytes) as usize,
+    );
     let mut downloaded = 0_u64;
     let mut last_emitted_percent = 0_u64;
     while let Some(chunk) = response
@@ -1586,7 +1643,7 @@ async fn download_url_bytes(
         .map_err(|error| format!("Failed to read {url}: {error}"))?
     {
         downloaded += chunk.len() as u64;
-        bytes.extend_from_slice(&chunk);
+        append_download_chunk(&mut bytes, &chunk, max_bytes)?;
         let Some(app) = app else {
             continue;
         };
@@ -1719,6 +1776,9 @@ pub async fn skill_import_url(
                 .into(),
         );
     }
+    let parsed_source =
+        reqwest::Url::parse(&source_url).map_err(|error| format!("Invalid skill URL: {error}"))?;
+    validate_skill_fetch_url(&parsed_source)?;
 
     let project = project_path.as_deref().map(Path::new);
     let skip_existing = skip_existing.unwrap_or(false);
@@ -1731,7 +1791,8 @@ pub async fn skill_import_url(
 
     let import_result = async {
         if is_skill_markdown_url(&source_url) {
-            let bytes = download_url_bytes(&source_url, Some(&app)).await?;
+            let bytes =
+                download_url_bytes(&source_url, Some(&app), MAX_SKILL_MARKDOWN_BYTES).await?;
             let text = String::from_utf8(bytes)
                 .map_err(|error| format!("SKILL.md is not valid UTF-8: {error}"))?;
             let folder = source_url
@@ -1764,7 +1825,7 @@ pub async fn skill_import_url(
             .and_then(safe_import_subpath);
         let mut last_error = None;
         for archive_url in archive_urls_for_import(&source_url) {
-            match download_url_bytes(&archive_url, Some(&app)).await {
+            match download_url_bytes(&archive_url, Some(&app), MAX_SKILL_DOWNLOAD_BYTES).await {
                 Ok(bytes) => match unpack_tarball(&bytes, &tmp_dir, subpath.as_deref()) {
                     Ok(()) => {
                         last_error = None;
@@ -1797,13 +1858,8 @@ pub async fn skill_import_url(
             );
         }
         emit_install_log(&app, "Copying skills...");
-        let imported = import_collected_skill_dirs(
-            skill_dirs,
-            &targets,
-            project,
-            source,
-            skip_existing,
-        )?;
+        let imported =
+            import_collected_skill_dirs(skill_dirs, &targets, project, source, skip_existing)?;
         let _ = crate::slash_commands::import_user_slash_commands_from_source(
             &tmp_dir.join("repo"),
             skip_existing,
@@ -1843,8 +1899,7 @@ pub async fn skill_auto_import_project(
     project_path: String,
 ) -> Result<Vec<domain::RuntimeSkill>, String> {
     let path = PathBuf::from(&project_path);
-    let imported =
-        import::auto_import_project_skills(&path).map_err(|error| error.to_string())?;
+    let imported = import::auto_import_project_skills(&path).map_err(|error| error.to_string())?;
     if !imported.is_empty() {
         emit_skills_changed(&app);
     }
@@ -2252,9 +2307,7 @@ mod tests {
             "https://github.com/acme/writer-skill"
         ));
         assert_eq!(
-            normalize_skill_import_url(
-                "git@github.com:crabin/paper-humanizer-skill.git"
-            ),
+            normalize_skill_import_url("git@github.com:crabin/paper-humanizer-skill.git"),
             "https://github.com/crabin/paper-humanizer-skill"
         );
         assert_eq!(
@@ -2419,9 +2472,97 @@ mod tests {
     }
 
     #[test]
+    fn test_unpack_tarball_rejects_too_many_entries() {
+        let files: Vec<(String, Vec<u8>)> = (0..5)
+            .map(|index| (format!("repo/file-{index}.txt"), b"x".to_vec()))
+            .collect();
+        let refs: Vec<(&str, &[u8])> = files
+            .iter()
+            .map(|(path, content)| (path.as_str(), content.as_slice()))
+            .collect();
+        let bytes = gzip_tar(&refs);
+        let tmp = tempfile::tempdir().unwrap();
+        let error = unpack_tarball_with_limits(
+            &bytes,
+            tmp.path(),
+            None,
+            ExtractLimits {
+                max_entries: 3,
+                ..ExtractLimits::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("entry limit"), "{error}");
+    }
+
+    #[test]
+    fn test_unpack_tarball_rejects_excessive_depth() {
+        let bytes = gzip_tar(&[("repo/a/b/c/d/e/SKILL.md", b"# Skill\n")]);
+        let tmp = tempfile::tempdir().unwrap();
+        let error = unpack_tarball_with_limits(
+            &bytes,
+            tmp.path(),
+            None,
+            ExtractLimits {
+                max_depth: 4,
+                ..ExtractLimits::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("depth limit"), "{error}");
+    }
+
+    #[test]
+    fn test_unpack_tarball_rejects_extracted_byte_budget() {
+        let payload = vec![b'a'; 64 * 1024];
+        let bytes = gzip_tar(&[("repo/skills/big/SKILL.md", payload.as_slice())]);
+        let tmp = tempfile::tempdir().unwrap();
+        let error = unpack_tarball_with_limits(
+            &bytes,
+            tmp.path(),
+            None,
+            ExtractLimits {
+                max_bytes: 1024,
+                ..ExtractLimits::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("byte limit") || error.contains("Failed to read tarball"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn test_unpack_tarball_rejects_high_compression_ratio() {
+        let payload = vec![0u8; 200 * 1024];
+        let bytes = gzip_tar(&[("repo/skills/bomb/SKILL.md", payload.as_slice())]);
+        assert!(
+            bytes.len() < 8 * 1024,
+            "test archive should stay highly compressible"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let error = unpack_tarball_with_limits(
+            &bytes,
+            tmp.path(),
+            None,
+            ExtractLimits {
+                max_ratio: 10,
+                ratio_floor: 1024,
+                ..ExtractLimits::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("ratio") || error.contains("Failed to read tarball"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn test_unpack_real_paperspine_tarball_if_present() {
-        let archive = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../.tmp/paperspine-main.tar.gz");
+        let archive =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../.tmp/paperspine-main.tar.gz");
         if !archive.is_file() {
             return;
         }
