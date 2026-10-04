@@ -8,20 +8,21 @@ use tokio::sync::{Mutex, Semaphore};
 const MAX_CONCURRENT: usize = 3;
 
 /// Wall-clock budget for one automatic compile, including bibliography and
-/// extra TeX passes. Large papers with three XeLaTeX passes plus biber finish
-/// in a few minutes; 15 minutes still leaves room for first-run package fetches.
-const LATEX_COMPILE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// extra TeX passes. Large papers with three XeLaTeX passes plus biber often
+/// finish in a few minutes; 30 minutes leaves room for first-run Tectonic
+/// package fetches and long TeX Live theses.
+const LATEX_COMPILE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Address-space / job-memory ceiling for the compiler process tree.
 /// Real theses with TikZ and large images can exceed 1 GiB.
-const LATEX_COMPILE_AS_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
+const LATEX_COMPILE_AS_LIMIT: u64 = 8 * 1024 * 1024 * 1024;
 
 /// Per-file output ceiling. A figure-heavy PDF can be hundreds of megabytes.
 #[cfg(unix)]
 const LATEX_COMPILE_FSIZE_LIMIT: u64 = 1024 * 1024 * 1024;
 
 /// CPU-time ceiling that matches the wall-clock compile deadline.
-const LATEX_COMPILE_CPU_LIMIT_SECS: u64 = 15 * 60;
+const LATEX_COMPILE_CPU_LIMIT_SECS: u64 = 30 * 60;
 
 /// Maximum processes inside the Windows compile job. Unix skips RLIMIT_NPROC
 /// because that limit is user-wide and would break a busy desktop session.
@@ -541,8 +542,25 @@ fn write_replacing_dest_symlink(dst: &Path, data: &[u8]) -> std::io::Result<()> 
 }
 
 fn resolved_is_inside(path: &Path, project_canon: &Path) -> bool {
-    path.canonicalize()
-        .is_ok_and(|resolved| resolved.starts_with(project_canon))
+    let Ok(resolved) = path.canonicalize() else {
+        return false;
+    };
+    if resolved.starts_with(project_canon) {
+        return true;
+    }
+    // Windows canonicalize may change drive-letter case; treat that as inside.
+    #[cfg(windows)]
+    {
+        let resolved_key = resolved.to_string_lossy().to_ascii_lowercase();
+        let project_key = project_canon.to_string_lossy().to_ascii_lowercase();
+        resolved_key == project_key
+            || resolved_key.starts_with(&format!("{project_key}\\"))
+            || resolved_key.starts_with(&format!("{project_key}/"))
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 /// Make `path` a real directory that resolves inside `project_canon`.
@@ -620,27 +638,16 @@ fn prepare_persistent_build_dir(project_dir: &str) -> Result<PathBuf, String> {
 }
 
 /// Remove a stale compile PDF only when its parent is a real directory.
-/// A dest symlink is unlinked (the target is left untouched).
-fn remove_stale_build_output(path: &Path) -> Result<(), String> {
+/// A dest symlink is unlinked (the target is left untouched). Locked or
+/// missing files are ignored so a viewer-held PDF cannot abort compile.
+fn remove_stale_build_output(path: &Path) {
     let Some(parent) = path.parent() else {
-        return Ok(());
+        return;
     };
-    match std::fs::symlink_metadata(parent) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(
-                "Refusing to remove a compile output through a build directory symlink".to_string(),
-            );
-        }
-        Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => return Err("Build directory is not a directory".to_string()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(format!("Failed to inspect build directory: {error}")),
+    if !is_real_dir(parent) {
+        return;
     }
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Failed to remove stale PDF: {error}")),
-    }
+    let _ = std::fs::remove_file(path);
 }
 
 /// Prepare the in-project build tree, copy or sync sources into it, and drop
@@ -661,7 +668,7 @@ fn prepare_compile_tree(
             .map_err(|error| format!("Failed to copy project: {error}"))?;
     }
     let pdf_path = work_dir.join(format!("{main_file_name}.pdf"));
-    remove_stale_build_output(&pdf_path)?;
+    remove_stale_build_output(&pdf_path);
     Ok((work_dir, is_reuse))
 }
 
@@ -708,7 +715,7 @@ fn isolate_compile_command(cmd: &mut std::process::Command) {
 
 #[cfg(unix)]
 fn apply_unix_compile_rlimits() {
-    fn set_limit(resource: libc::c_int, limit: u64) {
+    let set_limit = |resource, limit: u64| {
         let bounded = libc::rlim_t::try_from(limit).unwrap_or(libc::rlim_t::MAX);
         let rlim = libc::rlimit {
             rlim_cur: bounded,
@@ -716,7 +723,7 @@ fn apply_unix_compile_rlimits() {
         };
         // SAFETY: `rlim` is a valid rlimit and lives for the duration of the call.
         let _ = unsafe { libc::setrlimit(resource, &rlim) };
-    }
+    };
     set_limit(libc::RLIMIT_CPU, LATEX_COMPILE_CPU_LIMIT_SECS);
     set_limit(libc::RLIMIT_FSIZE, LATEX_COMPILE_FSIZE_LIMIT);
     set_limit(libc::RLIMIT_AS, LATEX_COMPILE_AS_LIMIT);
@@ -768,9 +775,7 @@ fn attach_compile_process_tree(child: &std::process::Child) -> Result<CompilePro
 
     #[cfg(unix)]
     {
-        let process_id = child
-            .id()
-            .ok_or_else(|| "compiler process id was unavailable".to_string())?;
+        let process_id = child.id();
         let process_group = i32::try_from(process_id)
             .ok()
             .and_then(std::num::NonZeroI32::new)
@@ -919,9 +924,7 @@ fn resume_suspended_compile_child(child: &std::process::Child) -> Result<(), Str
     };
     use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
 
-    let process_id = child
-        .id()
-        .ok_or_else(|| "compiler process id was unavailable for thread resume".to_string())?;
+    let process_id = child.id();
     // SAFETY: snapshot has no borrowed inputs; a successful handle is owned below.
     let snapshot_handle = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
     if snapshot_handle == INVALID_HANDLE_VALUE {
@@ -982,6 +985,26 @@ fn resume_suspended_compile_child(child: &std::process::Child) -> Result<(), Str
     }
 }
 
+fn terminate_compile_child(
+    child: &mut std::process::Child,
+    process_tree: Option<&mut CompileProcessTree>,
+) {
+    if let Some(tree) = process_tree {
+        let _ = tree.terminate();
+    } else {
+        #[cfg(unix)]
+        {
+            if let Some(process_group) = i32::try_from(child.id())
+                .ok()
+                .and_then(std::num::NonZeroI32::new)
+            {
+                let _ = terminate_unix_compile_group(process_group);
+            }
+        }
+    }
+    let _ = child.kill();
+}
+
 fn join_pipe_thread(handle: Option<std::thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
     handle
         .and_then(|joined| joined.join().ok())
@@ -999,11 +1022,20 @@ fn run_limited_command(
         .spawn()
         .map_err(|error| format!("Failed to spawn compiler process: {error}"))?;
     let mut process_tree = match attach_compile_process_tree(&child) {
-        Ok(tree) => tree,
+        Ok(tree) => Some(tree),
         Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
+            eprintln!("[latex] process isolation unavailable: {error}");
+            // Isolation is best-effort. A suspended Windows child must still be
+            // resumed so a real paper can compile without a job object.
+            #[cfg(target_os = "windows")]
+            {
+                if let Err(resume_error) = resume_suspended_compile_child(&child) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(resume_error);
+                }
+            }
+            None
         }
     };
 
@@ -1028,8 +1060,7 @@ fn run_limited_command(
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if started.elapsed() >= timeout {
-                    let _ = process_tree.terminate();
-                    let _ = child.kill();
+                    terminate_compile_child(&mut child, process_tree.as_mut());
                     let _ = child.wait();
                     let _ = join_pipe_thread(stdout);
                     let _ = join_pipe_thread(stderr);
@@ -1038,7 +1069,7 @@ fn run_limited_command(
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(error) => {
-                let _ = process_tree.terminate();
+                terminate_compile_child(&mut child, process_tree.as_mut());
                 return Err(format!("Failed to wait for compiler process: {error}"));
             }
         }
@@ -2620,14 +2651,14 @@ Postamble:
         #[cfg(windows)]
         std::os::windows::fs::symlink_file(&target, &pdf_link).unwrap();
 
-        remove_stale_build_output(&pdf_link).unwrap();
+        remove_stale_build_output(&pdf_link);
 
         assert!(!pdf_link.exists());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
     }
 
     #[test]
-    fn remove_stale_build_output_refuses_parent_symlink() {
+    fn remove_stale_build_output_skips_parent_symlink_without_deleting_target() {
         let project = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("main.pdf"), "keep").unwrap();
@@ -2635,12 +2666,33 @@ Postamble:
         let build_link = project.path().join(".prism").join("build");
         make_dir_symlink(outside.path(), &build_link);
 
-        let err = remove_stale_build_output(&build_link.join("main.pdf")).unwrap_err();
-        assert!(err.contains("symlink"), "{err}");
+        remove_stale_build_output(&build_link.join("main.pdf"));
         assert_eq!(
             std::fs::read_to_string(outside.path().join("main.pdf")).unwrap(),
             "keep"
         );
+    }
+
+    #[test]
+    fn prepare_compile_tree_creates_a_normal_in_project_build_dir() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("main.tex"), "hello").unwrap();
+        std::fs::write(project.path().join("refs.bib"), "bib").unwrap();
+
+        let (work_dir, is_reuse) = prepare_compile_tree(&project_path(&project), "main").unwrap();
+
+        assert!(!is_reuse);
+        assert_eq!(work_dir, project.path().join(".prism").join("build"));
+        assert!(is_real_dir(&work_dir));
+        assert_eq!(
+            std::fs::read_to_string(work_dir.join("main.tex")).unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            std::fs::read_to_string(work_dir.join("refs.bib")).unwrap(),
+            "bib"
+        );
+        assert!(!work_dir.join("main.pdf").exists());
     }
 
     #[test]
@@ -2740,8 +2792,7 @@ Postamble:
             cmd.args(["/C", "echo ok"]);
             cmd
         } else {
-            let mut cmd = std::process::Command::new("true");
-            cmd
+            std::process::Command::new("true")
         };
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
