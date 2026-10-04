@@ -2,9 +2,31 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
 
 const MAX_CONCURRENT: usize = 3;
+
+/// Wall-clock budget for one automatic compile, including bibliography and
+/// extra TeX passes. Large papers with three XeLaTeX passes plus biber finish
+/// in a few minutes; 15 minutes still leaves room for first-run package fetches.
+const LATEX_COMPILE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// Address-space / job-memory ceiling for the compiler process tree.
+/// Real theses with TikZ and large images can exceed 1 GiB.
+const LATEX_COMPILE_AS_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Per-file output ceiling. A figure-heavy PDF can be hundreds of megabytes.
+#[cfg(unix)]
+const LATEX_COMPILE_FSIZE_LIMIT: u64 = 1024 * 1024 * 1024;
+
+/// CPU-time ceiling that matches the wall-clock compile deadline.
+const LATEX_COMPILE_CPU_LIMIT_SECS: u64 = 15 * 60;
+
+/// Maximum processes inside the Windows compile job. Unix skips RLIMIT_NPROC
+/// because that limit is user-wide and would break a busy desktop session.
+#[cfg(target_os = "windows")]
+const LATEX_COMPILE_ACTIVE_PROCESS_LIMIT: u32 = 128;
 
 /// Windows CREATE_NO_WINDOW flag to prevent console windows from flashing
 /// when spawning TeXLive/Tectonic child processes from the GUI app.
@@ -13,6 +35,9 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 struct BuildInfo {
     work_dir: PathBuf,
@@ -100,8 +125,7 @@ enum TexEngine {
     LuaLaTeX,
 }
 
-const HIT_THESIS_NATBIB_OPTIONS: &str =
-    "\\PassOptionsToPackage{sort&compress,numbers}{natbib}";
+const HIT_THESIS_NATBIB_OPTIONS: &str = "\\PassOptionsToPackage{sort&compress,numbers}{natbib}";
 
 fn uses_hit_thesis_class(content: &str) -> bool {
     content.lines().any(|line| {
@@ -219,13 +243,17 @@ fn extra_tex_bin_dirs() -> Vec<PathBuf> {
                 }
             }
             for year in years {
-                dirs.push(PathBuf::from(format!(r"{drive}\texlive\{year}\bin\windows")));
+                dirs.push(PathBuf::from(format!(
+                    r"{drive}\texlive\{year}\bin\windows"
+                )));
                 dirs.push(PathBuf::from(format!(r"{drive}\texlive\{year}\bin\win32")));
             }
         }
 
         if let Ok(program_files) = std::env::var("ProgramFiles") {
-            dirs.push(PathBuf::from(format!(r"{program_files}\MiKTeX\miktex\bin\x64")));
+            dirs.push(PathBuf::from(format!(
+                r"{program_files}\MiKTeX\miktex\bin\x64"
+            )));
             dirs.push(PathBuf::from(format!(r"{program_files}\MiKTeX\miktex\bin")));
             for year in years {
                 dirs.push(PathBuf::from(format!(
@@ -242,8 +270,12 @@ fn extra_tex_bin_dirs() -> Vec<PathBuf> {
             dirs.push(PathBuf::from(format!(
                 r"{local_app_data}\Programs\MiKTeX\miktex\bin\x64"
             )));
-            dirs.push(PathBuf::from(format!(r"{local_app_data}\TinyTeX\bin\windows")));
-            dirs.push(PathBuf::from(format!(r"{local_app_data}\TinyTeX\bin\win32")));
+            dirs.push(PathBuf::from(format!(
+                r"{local_app_data}\TinyTeX\bin\windows"
+            )));
+            dirs.push(PathBuf::from(format!(
+                r"{local_app_data}\TinyTeX\bin\win32"
+            )));
         }
         if let Ok(app_data) = std::env::var("APPDATA") {
             dirs.push(PathBuf::from(format!(r"{app_data}\MiKTeX\miktex\bin\x64")));
@@ -344,9 +376,7 @@ fn find_texlive_binary(name: &str) -> Result<PathBuf, String> {
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    if !dst.exists() {
-        std::fs::create_dir_all(dst)?;
-    }
+    ensure_real_directory(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let src_path = entry.path();
@@ -359,7 +389,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
             }
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
-            std::fs::copy(&src_path, &dst_path)?;
+            copy_replacing_dest_symlink(&src_path, &dst_path)?;
         }
     }
     Ok(())
@@ -369,9 +399,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// Skips build artifacts (.aux, .log, .toc, .synctex.gz, etc.) to preserve them.
 /// Note: .pdf is NOT skipped — figure PDFs must be synced. The output PDF is managed by compile_latex.
 fn sync_source_files(src: &Path, dst: &Path) -> std::io::Result<()> {
-    if !dst.exists() {
-        std::fs::create_dir_all(dst)?;
-    }
+    ensure_real_directory(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let src_path = entry.path();
@@ -435,12 +463,12 @@ fn sync_source_files(src: &Path, dst: &Path) -> std::io::Result<()> {
                     // Attempt to materialize the file by reading it
                     let data = std::fs::read(&src_path)?;
                     if !data.is_empty() {
-                        std::fs::write(&dst_path, &data)?;
+                        write_replacing_dest_symlink(&dst_path, &data)?;
                     } else {
-                        std::fs::copy(&src_path, &dst_path)?;
+                        copy_replacing_dest_symlink(&src_path, &dst_path)?;
                     }
                 } else {
-                    std::fs::copy(&src_path, &dst_path)?;
+                    copy_replacing_dest_symlink(&src_path, &dst_path)?;
                 }
             }
         }
@@ -452,6 +480,575 @@ fn sync_source_files(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// Stored in `<project>/.prism/build/` — hidden from file tree (dot-prefix is filtered).
 fn persistent_build_dir(project_dir: &str) -> PathBuf {
     PathBuf::from(project_dir).join(".prism").join("build")
+}
+
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+}
+
+fn is_real_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+}
+
+/// Unlink a symlink or junction without following it. Never uses `remove_dir_all`.
+fn unlink_symlink(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) => match std::fs::remove_dir(path) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(error),
+        },
+    }
+}
+
+fn ensure_real_directory(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            unlink_symlink(path)?;
+            std::fs::create_dir(path)
+        }
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{} exists and is not a directory", path.display()),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match std::fs::create_dir(path) {
+                Ok(()) => Ok(()),
+                Err(create_error) if create_error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::create_dir_all(path)
+                }
+                Err(create_error) => Err(create_error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn copy_replacing_dest_symlink(src: &Path, dst: &Path) -> std::io::Result<u64> {
+    if is_symlink(dst) {
+        unlink_symlink(dst)?;
+    }
+    std::fs::copy(src, dst)
+}
+
+fn write_replacing_dest_symlink(dst: &Path, data: &[u8]) -> std::io::Result<()> {
+    if is_symlink(dst) {
+        unlink_symlink(dst)?;
+    }
+    std::fs::write(dst, data)
+}
+
+fn resolved_is_inside(path: &Path, project_canon: &Path) -> bool {
+    path.canonicalize()
+        .is_ok_and(|resolved| resolved.starts_with(project_canon))
+}
+
+/// Make `path` a real directory that resolves inside `project_canon`.
+///
+/// A project-controlled symlink or junction at `.prism` or `.prism/build` is
+/// replaced instead of followed, so compile output cannot land outside the
+/// project.
+fn confine_dir_to_project(path: &Path, project_canon: &Path) -> Result<(), String> {
+    if is_symlink(path) {
+        unlink_symlink(path).map_err(|error| {
+            format!(
+                "Failed to replace escaping build link {}: {error}",
+                path.display()
+            )
+        })?;
+    }
+    if path
+        .parent()
+        .is_some_and(|parent| !resolved_is_inside(parent, project_canon))
+    {
+        return Err("Refusing to create a build directory through a symlink".to_string());
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return Err(format!("{} exists and is not a directory", path.display()));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(path).map_err(|error| {
+                format!(
+                    "Failed to create build directory {}: {error}",
+                    path.display()
+                )
+            })?;
+        }
+        Err(error) => {
+            return Err(format!("Failed to inspect {}: {error}", path.display()));
+        }
+    }
+    if !is_real_dir(path) || !resolved_is_inside(path, project_canon) {
+        return Err(
+            "Refusing to use a build directory that resolves outside the project".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Resolve `<project>/.prism/build` to a real in-project directory.
+///
+/// If `.prism` or `.prism/build` is a symlink/junction, the link is replaced
+/// with a real directory so later copy/remove/compile never follow it.
+fn prepare_persistent_build_dir(project_dir: &str) -> Result<PathBuf, String> {
+    let project = Path::new(project_dir);
+    let project_canon = project
+        .canonicalize()
+        .map_err(|error| format!("Failed to resolve project directory: {error}"))?;
+    if !project_canon.is_dir() {
+        return Err("Project path is not a directory".to_string());
+    }
+
+    let prism = project.join(".prism");
+    confine_dir_to_project(&prism, &project_canon)?;
+    let build = prism.join("build");
+    confine_dir_to_project(&build, &project_canon)?;
+
+    let build_canon = build
+        .canonicalize()
+        .map_err(|error| format!("Failed to resolve build directory: {error}"))?;
+    if !build_canon.starts_with(&project_canon) {
+        return Err(
+            "Refusing to use a build directory that resolves outside the project".to_string(),
+        );
+    }
+    Ok(build)
+}
+
+/// Remove a stale compile PDF only when its parent is a real directory.
+/// A dest symlink is unlinked (the target is left untouched).
+fn remove_stale_build_output(path: &Path) -> Result<(), String> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    match std::fs::symlink_metadata(parent) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(
+                "Refusing to remove a compile output through a build directory symlink".to_string(),
+            );
+        }
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Err("Build directory is not a directory".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("Failed to inspect build directory: {error}")),
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Failed to remove stale PDF: {error}")),
+    }
+}
+
+/// Prepare the in-project build tree, copy or sync sources into it, and drop
+/// a stale output PDF. All three steps stay inside the project even when
+/// `.prism/build` started as a symlink to somewhere else.
+fn prepare_compile_tree(
+    project_dir: &str,
+    main_file_name: &str,
+) -> Result<(PathBuf, bool), String> {
+    let lexical = persistent_build_dir(project_dir);
+    let is_reuse = is_real_dir(&lexical);
+    let work_dir = prepare_persistent_build_dir(project_dir)?;
+    if is_reuse {
+        sync_source_files(Path::new(project_dir), &work_dir)
+            .map_err(|error| format!("Failed to sync project: {error}"))?;
+    } else {
+        copy_dir_recursive(Path::new(project_dir), &work_dir)
+            .map_err(|error| format!("Failed to copy project: {error}"))?;
+    }
+    let pdf_path = work_dir.join(format!("{main_file_name}.pdf"));
+    remove_stale_build_output(&pdf_path)?;
+    Ok((work_dir, is_reuse))
+}
+
+fn remaining_compile_budget(deadline: Instant) -> Result<Duration, String> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        Err(compile_timeout_message())
+    } else {
+        Ok(remaining)
+    }
+}
+
+fn compile_timeout_message() -> String {
+    format!(
+        "Compilation timed out after {} seconds",
+        LATEX_COMPILE_TIMEOUT.as_secs()
+    )
+}
+
+fn isolate_compile_command(cmd: &mut std::process::Command) {
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+        // SAFETY: runs in the child after fork and before exec. setrlimit only
+        // mutates the new process; a failure is ignored so an unsupported limit
+        // cannot prevent a legitimate compile.
+        unsafe {
+            cmd.pre_exec(|| {
+                apply_unix_compile_rlimits();
+                Ok(())
+            });
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
+    let _ = cmd;
+}
+
+#[cfg(unix)]
+fn apply_unix_compile_rlimits() {
+    fn set_limit(resource: libc::c_int, limit: u64) {
+        let bounded = libc::rlim_t::try_from(limit).unwrap_or(libc::rlim_t::MAX);
+        let rlim = libc::rlimit {
+            rlim_cur: bounded,
+            rlim_max: bounded,
+        };
+        // SAFETY: `rlim` is a valid rlimit and lives for the duration of the call.
+        let _ = unsafe { libc::setrlimit(resource, &rlim) };
+    }
+    set_limit(libc::RLIMIT_CPU, LATEX_COMPILE_CPU_LIMIT_SECS);
+    set_limit(libc::RLIMIT_FSIZE, LATEX_COMPILE_FSIZE_LIMIT);
+    set_limit(libc::RLIMIT_AS, LATEX_COMPILE_AS_LIMIT);
+}
+
+struct CompileProcessTree {
+    #[cfg(target_os = "windows")]
+    job: WindowsCompileJob,
+    #[cfg(unix)]
+    process_group: Option<std::num::NonZeroI32>,
+}
+
+impl CompileProcessTree {
+    fn terminate(&mut self) -> Result<(), String> {
+        #[cfg(target_os = "windows")]
+        {
+            self.job.terminate()
+        }
+
+        #[cfg(unix)]
+        {
+            let Some(process_group) = self.process_group.take() else {
+                return Ok(());
+            };
+            terminate_unix_compile_group(process_group)
+        }
+
+        #[cfg(not(any(unix, target_os = "windows")))]
+        {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for CompileProcessTree {
+    fn drop(&mut self) {
+        let _ = self.terminate();
+    }
+}
+
+fn attach_compile_process_tree(child: &std::process::Child) -> Result<CompileProcessTree, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let job = WindowsCompileJob::attach(child)?;
+        resume_suspended_compile_child(child)?;
+        Ok(CompileProcessTree { job })
+    }
+
+    #[cfg(unix)]
+    {
+        let process_id = child
+            .id()
+            .ok_or_else(|| "compiler process id was unavailable".to_string())?;
+        let process_group = i32::try_from(process_id)
+            .ok()
+            .and_then(std::num::NonZeroI32::new)
+            .ok_or_else(|| "compiler process group id was invalid".to_string())?;
+        Ok(CompileProcessTree {
+            process_group: Some(process_group),
+        })
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
+    {
+        let _ = child;
+        Ok(CompileProcessTree {})
+    }
+}
+
+#[cfg(unix)]
+fn terminate_unix_compile_group(process_group: std::num::NonZeroI32) -> Result<(), String> {
+    // SAFETY: getpgrp has no preconditions.
+    let current_process_group = unsafe { libc::getpgrp() };
+    if process_group.get() <= 0 {
+        return Err("process group id must be positive".into());
+    }
+    if process_group.get() == current_process_group {
+        return Err("refusing to terminate the desktop application's own process group".into());
+    }
+    // SAFETY: Negative pid addresses a process group. The stored PGID came from
+    // a child created with process_group(0) and is not our own group.
+    let result = if unsafe { libc::kill(-process_group.get(), libc::SIGKILL) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(()),
+        Err(error) => Err(format!("process group termination failed: {error}")),
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsOwnedHandle {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(target_os = "windows")]
+// SAFETY: the wrapper uniquely owns the kernel handle.
+unsafe impl Send for WindowsOwnedHandle {}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsOwnedHandle {
+    fn drop(&mut self) {
+        // SAFETY: Drop runs once for the uniquely owned handle.
+        let _ = unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsCompileJob {
+    handle: WindowsOwnedHandle,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsCompileJob {
+    fn attach(child: &std::process::Child) -> Result<Self, String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+            JOB_OBJECT_LIMIT_PROCESS_TIME,
+        };
+
+        // SAFETY: unnamed job with default security; the handle is checked.
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(format!(
+                "Windows job object creation failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let job = Self {
+            handle: WindowsOwnedHandle { handle },
+        };
+        let memory_limit = usize::try_from(LATEX_COMPILE_AS_LIMIT).unwrap_or(usize::MAX);
+        let process_time = i64::try_from(LATEX_COMPILE_CPU_LIMIT_SECS.saturating_mul(10_000_000))
+            .unwrap_or(i64::MAX);
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            | JOB_OBJECT_LIMIT_PROCESS_MEMORY
+            | JOB_OBJECT_LIMIT_JOB_MEMORY
+            | JOB_OBJECT_LIMIT_PROCESS_TIME
+            | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        limits.BasicLimitInformation.PerProcessUserTimeLimit = process_time;
+        limits.BasicLimitInformation.ActiveProcessLimit = LATEX_COMPILE_ACTIVE_PROCESS_LIMIT;
+        limits.ProcessMemoryLimit = memory_limit;
+        limits.JobMemoryLimit = memory_limit;
+        let information_size = u32::try_from(std::mem::size_of_val(&limits))
+            .map_err(|_| "Windows job object information was too large".to_string())?;
+        // SAFETY: `limits` matches JobObjectExtendedLimitInformation and stays live.
+        if unsafe {
+            SetInformationJobObject(
+                job.handle.handle,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&limits).cast(),
+                information_size,
+            )
+        } == 0
+        {
+            return Err(format!(
+                "Windows job object configuration failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let process_handle = child.as_raw_handle();
+        // SAFETY: Child owns the process handle for the duration of this call.
+        if unsafe { AssignProcessToJobObject(job.handle.handle, process_handle.cast()) } == 0 {
+            return Err(format!(
+                "Windows job object assignment failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(job)
+    }
+
+    fn terminate(&self) -> Result<(), String> {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+
+        // SAFETY: `self.handle` is a live owned job handle until Drop.
+        if unsafe { TerminateJobObject(self.handle.handle, 1) } == 0 {
+            return Err(format!(
+                "Windows job object termination failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn resume_suspended_compile_child(child: &std::process::Child) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    let process_id = child
+        .id()
+        .ok_or_else(|| "compiler process id was unavailable for thread resume".to_string())?;
+    // SAFETY: snapshot has no borrowed inputs; a successful handle is owned below.
+    let snapshot_handle = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot_handle == INVALID_HANDLE_VALUE {
+        return Err(format!(
+            "Windows thread snapshot failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let snapshot = WindowsOwnedHandle {
+        handle: snapshot_handle,
+    };
+    let mut entry = THREADENTRY32 {
+        dwSize: u32::try_from(std::mem::size_of::<THREADENTRY32>())
+            .map_err(|_| "Windows thread entry was too large".to_string())?,
+        ..THREADENTRY32::default()
+    };
+    // SAFETY: `entry` has the required size for these synchronous calls.
+    if unsafe { Thread32First(snapshot.handle, &mut entry) } == 0 {
+        return Err(format!(
+            "Windows thread enumeration failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    let mut resumed = false;
+    loop {
+        if entry.th32OwnerProcessID == process_id {
+            // SAFETY: the enumerated thread belongs to the newly created child.
+            let thread_handle = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+            if thread_handle.is_null() {
+                return Err(format!(
+                    "Windows child thread open failed: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let thread = WindowsOwnedHandle {
+                handle: thread_handle,
+            };
+            // SAFETY: `thread` has THREAD_SUSPEND_RESUME access.
+            if unsafe { ResumeThread(thread.handle) } == u32::MAX {
+                return Err(format!(
+                    "Windows child thread resume failed: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            resumed = true;
+        }
+        // SAFETY: snapshot and entry remain valid for the enumeration.
+        if unsafe { Thread32Next(snapshot.handle, &mut entry) } == 0 {
+            break;
+        }
+    }
+
+    if resumed {
+        Ok(())
+    } else {
+        Err("Windows child primary thread was unavailable for resume".into())
+    }
+}
+
+fn join_pipe_thread(handle: Option<std::thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
+    handle
+        .and_then(|joined| joined.join().ok())
+        .unwrap_or_default()
+}
+
+/// Spawn a compiler (or helper) with a deadline, process-group / job isolation,
+/// and resource quotas. On timeout the whole descendant tree is killed.
+fn run_limited_command(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    isolate_compile_command(&mut cmd);
+    let mut child = cmd
+        .spawn()
+        .map_err(|error| format!("Failed to spawn compiler process: {error}"))?;
+    let mut process_tree = match attach_compile_process_tree(&child) {
+        Ok(tree) => tree,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+
+    let stdout = child.stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut pipe, &mut bytes);
+            bytes
+        })
+    });
+    let stderr = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut pipe, &mut bytes);
+            bytes
+        })
+    });
+
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    let _ = process_tree.terminate();
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = join_pipe_thread(stdout);
+                    let _ = join_pipe_thread(stderr);
+                    return Err(compile_timeout_message());
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                let _ = process_tree.terminate();
+                return Err(format!("Failed to wait for compiler process: {error}"));
+            }
+        }
+    };
+
+    Ok(std::process::Output {
+        status,
+        stdout: join_pipe_thread(stdout),
+        stderr: join_pipe_thread(stderr),
+    })
 }
 
 // --- Thread priority ---
@@ -532,7 +1129,11 @@ pub(crate) fn compile_with_tectonic(work_dir: &Path, main_file: &str) -> Result<
 ///
 /// By spawning a subprocess, each compilation gets a fresh process with
 /// clean global state, and cleanup happens automatically on process exit.
-fn compile_with_tectonic_subprocess(work_dir: &Path, main_file: &str) -> Result<(), String> {
+fn compile_with_tectonic_subprocess(
+    work_dir: &Path,
+    main_file: &str,
+    deadline: Instant,
+) -> Result<(), String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("Failed to get current executable path: {}", e))?;
 
@@ -540,11 +1141,7 @@ fn compile_with_tectonic_subprocess(work_dir: &Path, main_file: &str) -> Result<
     cmd.args(["--tectonic-compile", &work_dir.to_string_lossy(), main_file])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Failed to spawn tectonic subprocess: {}", e))?;
+    let output = run_limited_command(cmd, remaining_compile_budget(deadline)?)?;
 
     if output.status.success() {
         Ok(())
@@ -588,6 +1185,7 @@ fn run_texlive_pass(
     args: &[&str],
     main_file: &Path,
     work_dir: &Path,
+    deadline: Instant,
 ) -> Result<(), String> {
     let mut cmd = std::process::Command::new(engine);
     cmd.args(args)
@@ -596,10 +1194,7 @@ fn run_texlive_pass(
         .env("PATH", texlive_env_path(engine))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let output = cmd
-        .output()
+    let output = run_limited_command(cmd, remaining_compile_budget(deadline)?)
         .map_err(|e| format!("Failed to launch {}: {}", engine.display(), e))?;
 
     // TeXLive returns non-zero on warnings too — don't fail here.
@@ -618,6 +1213,7 @@ fn compile_with_texlive(
     main_file: &str,
     engine: Option<TexEngine>,
     tex_content: &str,
+    deadline: Instant,
 ) -> Result<(), String> {
     let engine_name = match engine {
         Some(TexEngine::XeLaTeX) | None => "xelatex",
@@ -647,7 +1243,13 @@ fn compile_with_texlive(
     let main_file_path = Path::new(main_file);
 
     // Pass 1
-    run_texlive_pass(&engine_path, &common_args, main_file_path, work_dir)?;
+    run_texlive_pass(
+        &engine_path,
+        &common_args,
+        main_file_path,
+        work_dir,
+        deadline,
+    )?;
 
     // Bib pass (if needed)
     let main_stem = Path::new(main_file)
@@ -664,10 +1266,7 @@ fn compile_with_texlive(
                 .env("PATH", &env_path)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
-            #[cfg(target_os = "windows")]
-            cmd.creation_flags(CREATE_NO_WINDOW);
-            let output = cmd
-                .output()
+            let output = run_limited_command(cmd, remaining_compile_budget(deadline)?)
                 .map_err(|e| format!("Failed to run biber: {}", e))?;
             if !output.status.success() {
                 eprintln!(
@@ -685,10 +1284,7 @@ fn compile_with_texlive(
                 .env("PATH", &env_path)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
-            #[cfg(target_os = "windows")]
-            cmd.creation_flags(CREATE_NO_WINDOW);
-            let output = cmd
-                .output()
+            let output = run_limited_command(cmd, remaining_compile_budget(deadline)?)
                 .map_err(|e| format!("Failed to run bibtex: {}", e))?;
             if !output.status.success() {
                 eprintln!(
@@ -701,11 +1297,23 @@ fn compile_with_texlive(
     }
 
     // Pass 2: resolve references / TOC
-    run_texlive_pass(&engine_path, &common_args, &main_file_path, work_dir)?;
+    run_texlive_pass(
+        &engine_path,
+        &common_args,
+        &main_file_path,
+        work_dir,
+        deadline,
+    )?;
 
     // Pass 3: stabilize citations (only if bib was used)
     if !matches!(bib_tool, BibTool::None) {
-        run_texlive_pass(&engine_path, &common_args, &main_file_path, work_dir)?;
+        run_texlive_pass(
+            &engine_path,
+            &common_args,
+            &main_file_path,
+            work_dir,
+            deadline,
+        )?;
     }
 
     let pdf_path = work_dir.join(format!("{}.pdf", main_stem));
@@ -723,10 +1331,7 @@ fn compile_with_texlive(
                 .env("PATH", &env_path)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
-            #[cfg(target_os = "windows")]
-            cmd.creation_flags(CREATE_NO_WINDOW);
-            let output = cmd
-                .output()
+            let output = run_limited_command(cmd, remaining_compile_budget(deadline)?)
                 .map_err(|e| format!("Failed to launch xdvipdfmx: {}", e))?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -946,7 +1551,8 @@ pub async fn compile_latex(
     };
     let _project_guard = project_lock.lock().await;
 
-    let t0 = std::time::Instant::now();
+    let t0 = Instant::now();
+    let deadline = t0 + LATEX_COMPILE_TIMEOUT;
     let want_texlive = use_texlive.unwrap_or(false);
 
     let main_file_name = Path::new(&main_file)
@@ -955,27 +1561,16 @@ pub async fn compile_latex(
         .unwrap_or("document")
         .to_string();
 
-    // Set up build directory (offload blocking I/O to avoid starving the async runtime)
-    let work_dir = persistent_build_dir(&project_dir);
-    let is_reuse = work_dir.exists();
-
-    {
-        let work_dir = work_dir.clone();
-        let project_dir = project_dir.clone();
-        tokio::task::spawn_blocking(move || {
-            if is_reuse {
-                sync_source_files(Path::new(&project_dir), &work_dir)
-                    .map_err(|e| format!("Failed to sync project: {}", e))
-            } else {
-                std::fs::create_dir_all(&work_dir)
-                    .map_err(|e| format!("Failed to create build dir: {}", e))?;
-                copy_dir_recursive(Path::new(&project_dir), &work_dir)
-                    .map_err(|e| format!("Failed to copy project: {}", e))
-            }
-        })
-        .await
-        .map_err(|e| format!("File sync task panicked: {}", e))??;
-    }
+    // Set up an in-project build directory. A project-controlled symlink at
+    // `.prism/build` (or `.prism`) is replaced so copy/remove/compile cannot
+    // follow it outside the project.
+    let project_dir_for_prep = project_dir.clone();
+    let main_file_name_for_prep = main_file_name.clone();
+    let (work_dir, is_reuse) = tokio::task::spawn_blocking(move || {
+        prepare_compile_tree(&project_dir_for_prep, &main_file_name_for_prep)
+    })
+    .await
+    .map_err(|e| format!("File sync task panicked: {}", e))??;
 
     eprintln!(
         "[latex] +{:.0}ms {} ({}, backend={})",
@@ -989,9 +1584,7 @@ pub async fn compile_latex(
         if want_texlive { "texlive" } else { "tectonic" }
     );
 
-    // Remove stale PDF so a failed compile doesn't return the previous result.
     let pdf_path = work_dir.join(format!("{}.pdf", main_file_name));
-    let _ = std::fs::remove_file(&pdf_path);
 
     // Verify the main TeX file exists before attempting compilation
     let main_tex_path = work_dir.join(&main_file);
@@ -1006,7 +1599,9 @@ pub async fn compile_latex(
     let original_tex = std::fs::read_to_string(&main_tex_path).unwrap_or_default();
     let main_tex_content = ensure_hit_thesis_natbib_options(&original_tex);
     if main_tex_content != original_tex {
-        if let Err(error) = std::fs::write(&main_tex_path, &main_tex_content) {
+        if let Err(error) =
+            write_replacing_dest_symlink(&main_tex_path, main_tex_content.as_bytes())
+        {
             eprintln!("[latex] failed to patch HIT thesis natbib options: {error}");
         }
     }
@@ -1032,6 +1627,10 @@ pub async fn compile_latex(
         "Tectonic".to_string()
     };
 
+    if !is_real_dir(&work_dir) {
+        return Err("Refusing to compile through a build directory symlink".to_string());
+    }
+
     if !use_texlive {
         if let Some(TexEngine::LuaLaTeX) = engine {
             return Err(
@@ -1048,7 +1647,13 @@ pub async fn compile_latex(
         let main_file_clone = main_file.clone();
         let result = tokio::task::spawn_blocking(move || {
             lower_thread_priority();
-            compile_with_texlive(&work_dir_clone, &main_file_clone, engine, &main_tex_content)
+            compile_with_texlive(
+                &work_dir_clone,
+                &main_file_clone,
+                engine,
+                &main_tex_content,
+                deadline,
+            )
         })
         .await
         .map_err(|e| format!("Compilation task panicked: {}", e))?;
@@ -1064,7 +1669,7 @@ pub async fn compile_latex(
         let main_file_clone = main_file.clone();
         let result = tokio::task::spawn_blocking(move || {
             lower_thread_priority();
-            compile_with_tectonic_subprocess(&work_dir_clone, &main_file_clone)
+            compile_with_tectonic_subprocess(&work_dir_clone, &main_file_clone, deadline)
         })
         .await
         .map_err(|e| format!("Compilation task panicked: {}", e))?;
@@ -1100,7 +1705,7 @@ pub async fn compile_latex(
                         &content[..pos],
                         &content[pos..]
                     );
-                    let _ = std::fs::write(&main_tex, &modified);
+                    let _ = write_replacing_dest_symlink(&main_tex, modified.as_bytes());
                     return Ok(true);
                 }
             }
@@ -1111,7 +1716,7 @@ pub async fn compile_latex(
 
         if needs_retry {
             let retry_result = tokio::task::spawn_blocking(move || {
-                compile_with_tectonic_subprocess(&work_dir_clone, &main_file_clone)
+                compile_with_tectonic_subprocess(&work_dir_clone, &main_file_clone, deadline)
             })
             .await
             .map_err(|e| format!("Retry task panicked: {}", e))?;
@@ -1589,10 +2194,10 @@ Postamble:
             patched,
             "already-patched sources must stay unchanged"
         );
-        assert!(!ensure_hit_thesis_natbib_options(
-            "\\documentclass{article}\n"
-        )
-        .contains(HIT_THESIS_NATBIB_OPTIONS));
+        assert!(
+            !ensure_hit_thesis_natbib_options("\\documentclass{article}\n")
+                .contains(HIT_THESIS_NATBIB_OPTIONS)
+        );
         assert!(
             ensure_hit_thesis_natbib_options("\\documentclass[doctor]{hithesis}\n")
                 .contains(HIT_THESIS_NATBIB_OPTIONS)
@@ -1850,9 +2455,18 @@ Postamble:
             .map(|path| path.to_string_lossy().to_lowercase())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(joined.contains("miktex"), "search should include MiKTeX: {joined}");
-        assert!(joined.contains("texlive"), "search should include TeXLive: {joined}");
-        assert!(joined.contains("tinytex"), "search should include TinyTeX: {joined}");
+        assert!(
+            joined.contains("miktex"),
+            "search should include MiKTeX: {joined}"
+        );
+        assert!(
+            joined.contains("texlive"),
+            "search should include TeXLive: {joined}"
+        );
+        assert!(
+            joined.contains("tinytex"),
+            "search should include TinyTeX: {joined}"
+        );
     }
 
     #[test]
@@ -1865,5 +2479,273 @@ Postamble:
         let result = std::fs::remove_file(&pdf_path);
         // It's an error but we ignore it with let _ =
         assert!(result.is_err());
+    }
+
+    fn make_dir_symlink(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(target, link).unwrap();
+    }
+
+    fn project_path(dir: &tempfile::TempDir) -> String {
+        dir.path().to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn prepare_compile_tree_does_not_follow_escaping_build_symlink() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("main.tex"), "doc").unwrap();
+        std::fs::write(outside.path().join("main.pdf"), "do-not-delete").unwrap();
+        std::fs::write(outside.path().join("keep.txt"), "untouched").unwrap();
+        std::fs::create_dir_all(project.path().join(".prism")).unwrap();
+        make_dir_symlink(outside.path(), &project.path().join(".prism").join("build"));
+
+        let (work_dir, _) = prepare_compile_tree(&project_path(&project), "main").unwrap();
+
+        assert!(
+            work_dir.starts_with(project.path()),
+            "build dir must stay inside the project: {}",
+            work_dir.display()
+        );
+        assert!(
+            is_real_dir(&work_dir),
+            "build dir must be a real directory, not a symlink"
+        );
+        assert_eq!(
+            work_dir.canonicalize().unwrap(),
+            project
+                .path()
+                .join(".prism")
+                .join("build")
+                .canonicalize()
+                .unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(work_dir.join("main.tex")).unwrap(),
+            "doc"
+        );
+        assert!(!outside.path().join("main.tex").exists());
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("main.pdf")).unwrap(),
+            "do-not-delete"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("keep.txt")).unwrap(),
+            "untouched"
+        );
+        assert!(!work_dir.join("main.pdf").exists());
+    }
+
+    #[test]
+    fn prepare_compile_tree_does_not_follow_escaping_prism_symlink() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("chapter.tex"), "ch").unwrap();
+        std::fs::write(outside.path().join("main.pdf"), "do-not-delete").unwrap();
+        make_dir_symlink(outside.path(), &project.path().join(".prism"));
+
+        let (work_dir, _) = prepare_compile_tree(&project_path(&project), "main").unwrap();
+
+        assert!(is_real_dir(&project.path().join(".prism")));
+        assert!(is_real_dir(&work_dir));
+        assert!(work_dir.starts_with(project.path()));
+        assert_eq!(
+            std::fs::read_to_string(work_dir.join("chapter.tex")).unwrap(),
+            "ch"
+        );
+        assert!(!outside.path().join("chapter.tex").exists());
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("main.pdf")).unwrap(),
+            "do-not-delete"
+        );
+        assert!(!outside.path().join("build").exists());
+    }
+
+    #[test]
+    fn prepare_compile_tree_accepts_a_symlinked_project_root() {
+        let real = tempfile::tempdir().unwrap();
+        let link_parent = tempfile::tempdir().unwrap();
+        let link = link_parent.path().join("paper");
+        make_dir_symlink(real.path(), &link);
+        std::fs::write(real.path().join("main.tex"), "doc").unwrap();
+
+        let (work_dir, _) = prepare_compile_tree(link.to_str().unwrap(), "main").unwrap();
+
+        assert!(is_real_dir(&work_dir));
+        assert!(work_dir
+            .canonicalize()
+            .unwrap()
+            .starts_with(real.path().canonicalize().unwrap()));
+        assert_eq!(
+            std::fs::read_to_string(work_dir.join("main.tex")).unwrap(),
+            "doc"
+        );
+    }
+
+    #[test]
+    fn prepare_compile_tree_reuses_a_real_in_project_build_dir() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("main.tex"), "doc").unwrap();
+        let build = project.path().join(".prism").join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("main.aux"), "keep-aux-on-reuse").unwrap();
+
+        let (work_dir, is_reuse) = prepare_compile_tree(&project_path(&project), "main").unwrap();
+
+        assert!(is_reuse);
+        assert_eq!(work_dir, build);
+        assert_eq!(
+            std::fs::read_to_string(work_dir.join("main.tex")).unwrap(),
+            "doc"
+        );
+        assert_eq!(
+            std::fs::read_to_string(work_dir.join("main.aux")).unwrap(),
+            "keep-aux-on-reuse"
+        );
+    }
+
+    #[test]
+    fn remove_stale_build_output_unlinks_pdf_symlink_without_deleting_target() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let build = project.path().join(".prism").join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        let target = outside.path().join("notes.pdf");
+        std::fs::write(&target, "keep").unwrap();
+        let pdf_link = build.join("main.pdf");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &pdf_link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &pdf_link).unwrap();
+
+        remove_stale_build_output(&pdf_link).unwrap();
+
+        assert!(!pdf_link.exists());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+    }
+
+    #[test]
+    fn remove_stale_build_output_refuses_parent_symlink() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("main.pdf"), "keep").unwrap();
+        std::fs::create_dir_all(project.path().join(".prism")).unwrap();
+        let build_link = project.path().join(".prism").join("build");
+        make_dir_symlink(outside.path(), &build_link);
+
+        let err = remove_stale_build_output(&build_link.join("main.pdf")).unwrap_err();
+        assert!(err.contains("symlink"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("main.pdf")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn copy_dir_recursive_replaces_destination_symlink_instead_of_writing_through_it() {
+        let src = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let dst_parent = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.tex"), "a").unwrap();
+        std::fs::write(outside.path().join("keep.txt"), "keep").unwrap();
+        let dst = dst_parent.path().join("build");
+        make_dir_symlink(outside.path(), &dst);
+
+        copy_dir_recursive(src.path(), &dst).unwrap();
+
+        assert!(is_real_dir(&dst));
+        assert_eq!(std::fs::read_to_string(dst.join("a.tex")).unwrap(), "a");
+        assert!(!outside.path().join("a.tex").exists());
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("keep.txt")).unwrap(),
+            "keep"
+        );
+    }
+
+    fn hanging_compile_command() -> std::process::Command {
+        #[cfg(windows)]
+        {
+            let mut cmd = std::process::Command::new("ping");
+            cmd.args(["-n", "20", "127.0.0.1"]);
+            cmd.stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            cmd
+        }
+        #[cfg(not(windows))]
+        {
+            let mut cmd = std::process::Command::new("sleep");
+            cmd.arg("20");
+            cmd.stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            cmd
+        }
+    }
+
+    #[test]
+    fn run_limited_command_times_out_and_returns_quickly() {
+        let started = Instant::now();
+        let error =
+            run_limited_command(hanging_compile_command(), Duration::from_millis(200)).unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "timeout cleanup exceeded its bounded deadline: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_limited_command_kills_process_group_descendants() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let sentinel = temp.path().join("descendant-survived.txt");
+        let script = temp.path().join("compiler-with-descendant");
+        let escaped_sentinel = sentinel.to_string_lossy().replace('\'', "'\\''");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n(sleep 0.8; printf survived > '{}') &\nsleep 5\n",
+                escaped_sentinel
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut cmd = std::process::Command::new(&script);
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let started = Instant::now();
+        let error = run_limited_command(cmd, Duration::from_millis(150)).unwrap_err();
+        std::thread::sleep(Duration::from_millis(1_200));
+
+        assert!(error.contains("timed out"), "{error}");
+        assert!(
+            !sentinel.exists(),
+            "compiler descendant survived timeout cleanup"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "descendant cleanup exceeded its bounded deadline"
+        );
+    }
+
+    #[test]
+    fn run_limited_command_completes_a_successful_helper() {
+        let mut cmd = if cfg!(windows) {
+            let mut cmd = std::process::Command::new("cmd");
+            cmd.args(["/C", "echo ok"]);
+            cmd
+        } else {
+            let mut cmd = std::process::Command::new("true");
+            cmd
+        };
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let output = run_limited_command(cmd, Duration::from_secs(5)).unwrap();
+        assert!(output.status.success());
     }
 }
