@@ -15,13 +15,26 @@ describe("meaningfulChatTitle", () => {
     expect(meaningfulChatTitle("New Chat")).toBeNull();
     expect(meaningfulChatTitle("新对话")).toBeNull();
     expect(meaningfulChatTitle("Untitled")).toBeNull();
+    expect(meaningfulChatTitle("未命名对话")).toBeNull();
+    expect(meaningfulChatTitle("Untitled session")).toBeNull();
+    expect(meaningfulChatTitle("!!!")).toBeNull();
+    expect(meaningfulChatTitle("| |")).toBeNull();
+    expect(meaningfulChatTitle("¥€$")).toBeNull();
+    expect(meaningfulChatTitle("😀")).toBeNull();
   });
 
-  it("keeps a real title", () => {
+  it("keeps a real title, including symbols beside text", () => {
     expect(meaningfulChatTitle("你好")).toBe("你好");
     expect(meaningfulChatTitle("  Literature review  ")).toBe(
       "Literature review",
     );
+    expect(meaningfulChatTitle("$100")).toBe("$100");
+    expect(meaningfulChatTitle("E = mc²")).toBe("E = mc²");
+    expect(meaningfulChatTitle("C++")).toBe("C++");
+    expect(meaningfulChatTitle("∑x")).toBe("∑x");
+    expect(meaningfulChatTitle("你好 😀")).toBe("你好 😀");
+    expect(meaningfulChatTitle("价格：¥100")).toBe("价格：¥100");
+    expect(meaningfulChatTitle("⼀")).toBe("⼀");
   });
 });
 

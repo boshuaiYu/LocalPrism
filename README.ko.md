@@ -66,7 +66,7 @@ AI를 쓰면 프롬프트와 모델이 읽은 파일은 API로 갑니다. 원고
 
 ### 공유 Claude 프로필을 건드리지 않는 홈
 
-스킬, 커스텀 에이전트, 슬래시 명령은 LocalPrism 데이터 루트(`claude-home/`)에 둡니다. 설치 폴더가 쓰기 가능하면 실행 파일 옆, 아니면 `%APPDATA%/LocalPrism` 또는 OS 설정 디렉터리입니다. 논문마다 `.localprism/`도 쓸 수 있습니다. 평소 Claude Code 프로필은 그대로입니다.
+스킬, 커스텀 에이전트, 슬래시 명령은 LocalPrism 데이터 루트(`claude-home/`)에 둡니다. Windows에서는 쓰기 가능한 포터블 설치 폴더를 쓰고, 쓸 수 없으면 `%APPDATA%/LocalPrism`입니다. macOS 데이터 홈은 `~/Library/Application Support/LocalPrism`, Linux는 `~/.config/LocalPrism`입니다. 모든 플랫폼에서 `LOCALPRISM_HOME`으로 덮어쓸 수 있습니다. 논문마다 `.localprism/`도 쓸 수 있습니다. 평소 Claude Code 프로필은 그대로입니다.
 
 [uv](https://docs.astral.sh/uv/) Python도 LocalPrism 홈 아래에 설치됩니다.
 

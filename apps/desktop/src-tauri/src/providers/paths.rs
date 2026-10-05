@@ -31,14 +31,12 @@ const WRITABLE_PROBE_NAME: &str = ".localprism-writable";
 /// (`~/Library/Application Support/LocalPrism` or `~/.config/LocalPrism`).
 pub fn localprism_home() -> Result<PathBuf, String> {
     let override_dir = std::env::var("LOCALPRISM_HOME").ok();
+    if let Some(home) = override_home(override_dir.as_deref()) {
+        return Ok(home);
+    }
     let exe = std::env::current_exe().ok();
     let config_dir = dirs::config_dir().or_else(dirs::home_dir);
-    resolve_localprism_home(
-        override_dir.as_deref(),
-        exe.as_deref(),
-        config_dir.as_deref(),
-        host_platform(),
-    )
+    resolve_localprism_home(None, exe.as_deref(), config_dir.as_deref(), host_platform())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -595,31 +593,6 @@ mod tests {
         assert!(exe_dir.join("providers").join("providers.json").is_file());
     }
 
-    struct RestoreWritable {
-        path: PathBuf,
-    }
-
-    impl RestoreWritable {
-        fn lock_dir(path: &Path) -> Self {
-            let mut perms = std::fs::metadata(path).unwrap().permissions();
-            perms.set_readonly(true);
-            std::fs::set_permissions(path, perms).unwrap();
-            Self {
-                path: path.to_path_buf(),
-            }
-        }
-    }
-
-    impl Drop for RestoreWritable {
-        fn drop(&mut self) {
-            if let Ok(meta) = std::fs::metadata(&self.path) {
-                let mut perms = meta.permissions();
-                perms.set_readonly(false);
-                let _ = std::fs::set_permissions(&self.path, perms);
-            }
-        }
-    }
-
     fn assert_not_install_home(exe: &Path, config: &Path, platform: PlatformKind) {
         let mut probed = false;
         let home = resolve_localprism_home_with(None, Some(exe), Some(config), platform, |dir| {
@@ -726,11 +699,55 @@ mod tests {
         let root = TempDir::new().unwrap();
         let install = root.path().join("Program Files").join("LocalPrism");
         let exe = fake_exe(&install, "LocalPrism.exe");
-        let _readonly = RestoreWritable::lock_dir(&install);
         let config = root.path().join("AppData").join("Roaming");
-        let home = resolve_localprism_home(None, Some(&exe), Some(&config), PlatformKind::Windows)
-            .unwrap();
+        let home = resolve_localprism_home_with(
+            None,
+            Some(&exe),
+            Some(&config),
+            PlatformKind::Windows,
+            |_| false,
+        )
+        .unwrap();
         assert_eq!(home, config.join("LocalPrism"));
+    }
+
+    #[test]
+    fn blank_override_falls_back_to_portable_or_config_dir() {
+        let root = TempDir::new().unwrap();
+        let install = root.path().join("LocalPrism");
+        let exe = fake_exe(&install, "LocalPrism.exe");
+        let config = root.path().join("config");
+        for blank in ["", "   "] {
+            let windows = resolve_localprism_home_with(
+                Some(blank),
+                Some(&exe),
+                Some(&config),
+                PlatformKind::Windows,
+                |_| true,
+            )
+            .unwrap();
+            assert_eq!(windows, install, "blank override {blank:?} on Windows");
+
+            for platform in [
+                PlatformKind::Linux,
+                PlatformKind::Macos,
+                PlatformKind::Other,
+            ] {
+                let home = resolve_localprism_home_with(
+                    Some(blank),
+                    Some(&exe),
+                    Some(&config),
+                    platform,
+                    |_| true,
+                )
+                .unwrap();
+                assert_eq!(
+                    home,
+                    config.join("LocalPrism"),
+                    "blank override {blank:?} on {platform:?}"
+                );
+            }
+        }
     }
 
     #[test]

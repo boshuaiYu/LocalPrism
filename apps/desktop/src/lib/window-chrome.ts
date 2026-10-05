@@ -1,3 +1,5 @@
+import { isLinuxDesktop } from "@/lib/linux-runtime-deps";
+
 export type WindowChromeVariable = {
   name: string;
   value: string;
@@ -5,9 +7,8 @@ export type WindowChromeVariable = {
 
 /**
  * Windows caption buttons sit in the overlay titlebar, so the chat row is
- * padded down by `--titlebar-height` instead of reserving `--window-controls-inset`
- * beside the account label. The composer gutter is only raised on Linux, where
- * a dock can cover the bottom of the window.
+ * padded down by `--titlebar-height`. The composer gutter is only raised on
+ * Linux, where a dock can cover the bottom of the window.
  */
 export function windowChromeVariables(
   userAgent: string,
@@ -15,16 +16,12 @@ export function windowChromeVariables(
   if (userAgent.includes("Windows")) {
     return [
       { name: "--titlebar-height", value: "32px" },
-      { name: "--traffic-light-width", value: "0px" },
-      { name: "--window-controls-inset", value: "8.75rem" },
       { name: "--chat-bottom-gutter", value: "0px" },
     ];
   }
-  if (!userAgent.includes("Macintosh")) {
+  if (isLinuxDesktop(userAgent)) {
     return [
       { name: "--titlebar-height", value: "0px" },
-      { name: "--traffic-light-width", value: "0px" },
-      { name: "--window-controls-inset", value: "0px" },
       { name: "--chat-bottom-gutter", value: "3rem" },
     ];
   }

@@ -66,7 +66,7 @@ AI 利用時はプロンプトとモデルが読んだファイルが API に送
 
 ### 共有 Claude プロファイルを汚さないホーム
 
-スキル、カスタムエージェント、スラッシュコマンドは LocalPrism 自身のデータ根（`claude-home/`）に置きます。インストール先が書き込み可能なら実行ファイルの隣、そうでなければ `%APPDATA%/LocalPrism` や OS の設定ディレクトリです。論文ごとに `.localprism/` も使えます。普段の Claude Code プロファイルはそのままです。
+スキル、カスタムエージェント、スラッシュコマンドは LocalPrism 自身のデータ根（`claude-home/`）に置きます。Windows では書き込み可能なポータブルなインストール先を使い、書き込めない場合は `%APPDATA%/LocalPrism` です。macOS のデータホームは `~/Library/Application Support/LocalPrism`、Linux は `~/.config/LocalPrism` です。どのプラットフォームでも `LOCALPRISM_HOME` で上書きできます。論文ごとに `.localprism/` も使えます。普段の Claude Code プロファイルはそのままです。
 
 [uv](https://docs.astral.sh/uv/) の Python も LocalPrism ホーム配下に入ります。
 

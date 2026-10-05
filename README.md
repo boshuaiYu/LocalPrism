@@ -66,7 +66,7 @@ AI features still send prompts and the files the model reads to the provider API
 
 ### Isolated home, not a shared Claude profile
 
-Skills, custom agents, and slash commands live under LocalPrism’s own data root (`claude-home/`), next to the app when the install folder is writable, or under `%APPDATA%/LocalPrism` / the platform config dir. A paper can also keep project-only files in `.localprism/`. Your everyday Claude Code profile is left alone.
+Skills, custom agents, and slash commands live under LocalPrism’s own data root (`claude-home/`). On Windows, a writable portable install folder is that root, and a non-writable install uses `%APPDATA%/LocalPrism`. On macOS the data home is `~/Library/Application Support/LocalPrism`, and on Linux it is `~/.config/LocalPrism`. `LOCALPRISM_HOME` overrides the location on every platform. A paper can also keep project-only files in `.localprism/`. Your everyday Claude Code profile is left alone.
 
 Python via [uv](https://docs.astral.sh/uv/) is likewise installed under LocalPrism’s home, not mixed into a random global toolchain.
 

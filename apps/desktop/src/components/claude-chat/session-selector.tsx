@@ -24,6 +24,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { meaningfulChatTitle } from "@/lib/chat-tab-title";
 import { createLogger } from "@/lib/debug/logger";
 import {
   loadDismissedForeignSessionKeys,
@@ -41,13 +42,8 @@ import { useI18n } from "@/lib/use-i18n";
 const log = createLogger("session-selector");
 const IDLE_TABS: TabState[] = [];
 
-const GENERIC_TITLES = new Set([
-  "",
-  "new chat",
-  "untitled",
-  "untitled session",
-  "untitled chat",
-]);
+const SESSION_ID_TITLE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 type RecencyGroup = "today" | "yesterday" | "week" | "older";
 
@@ -111,12 +107,8 @@ export function recencyGroup(
   return "older";
 }
 
-function isGenericConversationTitle(title: string | null | undefined): boolean {
-  const trimmed = title?.trim() ?? "";
-  if (GENERIC_TITLES.has(trimmed.toLowerCase())) return true;
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-    trimmed,
-  );
+function isSessionIdTitle(title: string | null | undefined): boolean {
+  return SESSION_ID_TITLE.test(title?.trim() ?? "");
 }
 
 function firstUserLineFromMessages(
@@ -151,14 +143,19 @@ function firstUserLineFromMessages(
 export function displayConversationTitle(
   conversation: Pick<RuntimeConversation, "title" | "reference">,
   tabs: readonly TabState[],
+  placeholder: string,
 ): string {
-  if (!isGenericConversationTitle(conversation.title)) {
-    return conversation.title.trim();
-  }
+  const sanitized = isSessionIdTitle(conversation.title)
+    ? null
+    : meaningfulChatTitle(conversation.title);
+  if (sanitized) return sanitized;
   const matchingTab = tabs.find((tab) =>
     sameConversation(tabConversationReference(tab), conversation.reference),
   );
-  return firstUserLineFromMessages(matchingTab?.messages) ?? "Untitled chat";
+  return (
+    meaningfulChatTitle(firstUserLineFromMessages(matchingTab?.messages)) ??
+    placeholder
+  );
 }
 
 function conversationKey(reference: ConversationRef): string {
@@ -217,7 +214,7 @@ function localProjectConversations(projectPath: string): RuntimeConversation[] {
     return [
       {
         reference,
-        title: tab.title || "Untitled chat",
+        title: tab.title,
         status: "active" as const,
         updatedAt: Math.floor(Date.now() / 1000),
       },
@@ -390,7 +387,7 @@ export function SessionSelector() {
     const query = searchQuery.trim().toLowerCase();
     const decorated = conversations.map((conversation) => ({
       conversation,
-      title: displayConversationTitle(conversation, tabs),
+      title: displayConversationTitle(conversation, tabs, t("chat.newChat")),
     }));
     if (!query) return decorated;
     return decorated.filter(
@@ -398,7 +395,7 @@ export function SessionSelector() {
         title.toLowerCase().includes(query) ||
         conversation.title.toLowerCase().includes(query),
     );
-  }, [conversations, searchQuery, tabs]);
+  }, [conversations, searchQuery, t, tabs]);
 
   const handleSelectConversation = useCallback(
     (conversation: RuntimeConversation) => {
@@ -522,7 +519,7 @@ export function SessionSelector() {
     ? conversationKey(deleteTarget.reference)
     : null;
   const deleteDisplayTitle = deleteTarget
-    ? displayConversationTitle(deleteTarget, tabs)
+    ? displayConversationTitle(deleteTarget, tabs, t("chat.newChat"))
     : "this session";
 
   const renderConversation = (
