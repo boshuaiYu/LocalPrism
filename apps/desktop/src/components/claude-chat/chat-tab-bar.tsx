@@ -14,7 +14,10 @@ import {
   pendingApprovalTabKey,
   useApprovalStore,
 } from "@/stores/approval-store";
-import { useClaudeChatStore } from "@/stores/claude-chat-store";
+import {
+  displayedChatTabTitle,
+  useClaudeChatStore,
+} from "@/stores/claude-chat-store";
 import { tabsForProject } from "@/stores/chat-persistence";
 import { tabOpenedUnderOtherAccount } from "@/lib/provider-account";
 import { useI18n } from "@/lib/use-i18n";
@@ -29,8 +32,9 @@ export type AccountHeaderChrome = {
 };
 
 /**
- * Wide bars keep new-tab and history beside a truncating provider · model chip.
- * Mid bars drop those icons so the chip can show `SiliconFlow · Qw…`.
+ * Wide bars keep new-tab and history beside a provider · account label that
+ * uses the leftover width and ellipsizes only when that width runs out.
+ * Mid bars drop those icons so the label can show `SiliconFlow · Qw…`.
  * Very narrow bars keep the provider name only.
  */
 export function accountHeaderChrome(widthPx: number): AccountHeaderChrome {
@@ -87,7 +91,7 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
     (s) =>
       tabsForProject(s.tabs, s.activeProjectPath).map((tab) => ({
         id: tab.id,
-        title: tab.title,
+        title: displayedChatTabTitle(tab.title, tab.messages),
         isStreaming: tab.isStreaming,
         isStopping: (tab.cancelledAttempts?.length ?? 0) > 0,
         closableWhileBusy: tabOpenedUnderOtherAccount(tab, s),
@@ -190,56 +194,62 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
     <div
       ref={barRef}
       data-testid="chat-tab-bar"
-      className={cn(
-        "flex min-w-0 items-center overflow-hidden border-border/70 border-b bg-background",
-        "h-[calc(2.75rem+var(--titlebar-height))]",
-        "pt-[var(--titlebar-height)]",
-        "pr-[max(0px,var(--window-controls-inset,0px))]",
-      )}
+      className="flex min-w-0 flex-col overflow-hidden border-border/70 border-b bg-background"
     >
-      <div className={cn("shrink-0", chrome.hideLabel && "[&_span]:sr-only")}>
-        {leading}
-      </div>
+      {/* Caption buttons occupy this band. The row below is full width so
+          the account label is not inset by --window-controls-inset. */}
       <div
-        ref={scrollRef}
-        className="scrollbar-none flex min-w-0 flex-1 items-center self-stretch overflow-x-auto"
-      >
-        {tabs.map((tab) => (
-          <TabButton
-            key={tab.id}
-            tabId={tab.id}
-            title={tab.title === "New Chat" ? t("chat.newChat") : tab.title}
-            isActive={tab.id === activeTabId}
-            isStreaming={tab.isStreaming}
-            isStopping={tab.isStopping}
-            closableWhileBusy={tab.closableWhileBusy}
-            hasPendingApproval={pendingTabIds.has(tab.id)}
-            onClick={() => setActiveTab(tab.id)}
-            onClose={(e) => handleClose(e, tab.id)}
-          />
-        ))}
-      </div>
+        data-testid="chat-titlebar-band"
+        aria-hidden="true"
+        className="h-[var(--titlebar-height)] shrink-0"
+      />
       <div
-        data-testid="chat-account-cluster"
-        className={cn(
-          "flex items-center gap-1 overflow-hidden pr-2.5",
-          chrome.utilities ? "shrink-0" : "min-w-0 flex-1",
-          chrome.accountMin,
-        )}
+        data-testid="chat-tab-toolbar"
+        className="flex h-11 min-w-0 items-center"
       >
-        {chrome.utilities ? (
-          <button
-            type="button"
-            onClick={handleCreate}
-            className="flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            aria-label={t("chat.newTab")}
-          >
-            <PlusIcon className="size-3.5" />
-          </button>
-        ) : null}
-        {chrome.utilities ? <SessionSelector /> : null}
-        <div className="min-w-0 flex-1 overflow-hidden">
-          <WorkspaceAccountButton density={chrome.density} />
+        <div className={cn("shrink-0", chrome.hideLabel && "[&_span]:sr-only")}>
+          {leading}
+        </div>
+        <div
+          ref={scrollRef}
+          className="scrollbar-none flex min-w-[4.5rem] items-center self-stretch overflow-x-auto"
+        >
+          {tabs.map((tab) => (
+            <TabButton
+              key={tab.id}
+              tabId={tab.id}
+              title={tab.title || t("chat.newChat")}
+              isActive={tab.id === activeTabId}
+              isStreaming={tab.isStreaming}
+              isStopping={tab.isStopping}
+              closableWhileBusy={tab.closableWhileBusy}
+              hasPendingApproval={pendingTabIds.has(tab.id)}
+              onClick={() => setActiveTab(tab.id)}
+              onClose={(e) => handleClose(e, tab.id)}
+            />
+          ))}
+        </div>
+        <div
+          data-testid="chat-account-cluster"
+          className={cn(
+            "flex min-w-0 flex-1 items-center gap-1 overflow-hidden pr-2.5",
+            chrome.accountMin,
+          )}
+        >
+          {chrome.utilities ? (
+            <button
+              type="button"
+              onClick={handleCreate}
+              className="flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              aria-label={t("chat.newTab")}
+            >
+              <PlusIcon className="size-3.5" />
+            </button>
+          ) : null}
+          {chrome.utilities ? <SessionSelector /> : null}
+          <div className="min-w-0 flex-1 overflow-hidden">
+            <WorkspaceAccountButton density={chrome.density} />
+          </div>
         </div>
       </div>
     </div>
@@ -277,7 +287,7 @@ function TabButton({
       }
       onClick={onClick}
       className={cn(
-        "group relative flex h-full min-w-0 max-w-[11rem] items-center gap-1.5 border-b-2 px-3.5 text-xs transition-colors",
+        "group relative flex h-full max-w-[11rem] shrink-0 items-center gap-1.5 overflow-hidden border-b-2 px-3.5 text-xs transition-colors",
         isActive
           ? "border-primary/80 bg-muted/40 text-foreground"
           : "border-transparent text-muted-foreground hover:bg-muted/25 hover:text-foreground",
@@ -306,7 +316,9 @@ function TabButton({
           />
         </span>
       )}
-      <span className="truncate">{title}</span>
+      <span data-testid="chat-tab-title" className="min-w-0 truncate">
+        {title}
+      </span>
       {/* Close stays available for a session opened under another account. */}
       {(closableWhileBusy || (!isStreaming && !isStopping)) && (
         <span

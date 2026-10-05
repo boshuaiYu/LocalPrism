@@ -57,7 +57,8 @@ export function ClaudeChatDrawer() {
   return (
     // Rows: tab | thread (minmax(0,1fr)) | composer (minmax(0,auto)).
     // The composer may shrink with a short pane. Send stays in the card
-    // footer; a fixed bottom gutter keeps it above a Linux dock.
+    // footer. Bottom padding is the normal inset; Linux may raise
+    // --chat-bottom-gutter so a dock does not cover Send.
     <section
       data-testid="chat-pane"
       data-tour="tour-chat"

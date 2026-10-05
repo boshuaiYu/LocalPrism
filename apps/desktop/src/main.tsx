@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { initializeAppZoom } from "./lib/app-zoom";
+import { applyWindowChrome } from "./lib/window-chrome";
 import { createLogger } from "./lib/debug/logger";
 import { APP_VISIBILITY_RESTORED } from "./lib/debug/log-store";
 import "@/stores/runtime-store";
@@ -41,20 +42,10 @@ listen("window-focus-restored", () => {
   dispatchVisibilityRestored("window-focus-restored");
 });
 
-// Platform-specific titlebar height adjustments
-if (navigator.userAgent.includes("Windows")) {
-  document.documentElement.style.setProperty("--titlebar-height", "32px");
-  document.documentElement.style.setProperty("--traffic-light-width", "0px");
-  document.documentElement.style.setProperty(
-    "--window-controls-inset",
-    "8.75rem",
-  );
-} else if (!navigator.userAgent.includes("Macintosh")) {
-  // Linux and others: no overlay titlebar
-  document.documentElement.style.setProperty("--titlebar-height", "0px");
-  document.documentElement.style.setProperty("--traffic-light-width", "0px");
-  document.documentElement.style.setProperty("--window-controls-inset", "0px");
-}
+// Platform-specific titlebar height adjustments.
+applyWindowChrome(navigator.userAgent, (name, value) => {
+  document.documentElement.style.setProperty(name, value);
+});
 
 const rootEl = document.getElementById("root");
 if (!rootEl) throw new Error("Root element #root not found");

@@ -73,7 +73,7 @@ export function WorkspaceAccountButton({
         type="button"
         onClick={() => setOpen(true)}
         className={cn(
-          "flex h-8 w-full max-w-[14rem] items-center gap-1.5 overflow-hidden rounded-md px-2 text-left text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground",
+          "flex h-8 w-full min-w-0 max-w-full items-center gap-1.5 overflow-hidden rounded-md px-2 text-left text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground",
           density === "full" ? "min-w-[4.5rem]" : "min-w-0",
         )}
         aria-label={

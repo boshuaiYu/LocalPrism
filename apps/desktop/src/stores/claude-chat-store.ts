@@ -41,6 +41,7 @@ import {
   rewindUserResendPrompt,
   type RewindAnchor,
 } from "@/lib/chat-rewind";
+import { meaningfulChatTitle } from "@/lib/chat-tab-title";
 import { tabOpenedUnderOtherAccount } from "@/lib/provider-account";
 import { uiText } from "@/lib/use-i18n";
 import { sameProjectPath } from "./chat-persistence";
@@ -965,6 +966,16 @@ function titleForMessages(messages: ClaudeStreamMessage[]): string | undefined {
   return summarizeChatTitle(messageContentText(firstUser));
 }
 
+/** Tab label: a real title, else the first user message, else empty. */
+export function displayedChatTabTitle(
+  title: string,
+  messages: ClaudeStreamMessage[],
+): string {
+  const direct = meaningfulChatTitle(title);
+  if (direct) return direct;
+  return meaningfulChatTitle(titleForMessages(messages)) ?? "";
+}
+
 /**
  * Drop Thinking… / "No response requested." once a turn stops, including
  * cancel and error paths that set `isStreaming` false without `_setStreaming`.
@@ -1694,8 +1705,8 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     const isFirstMessage =
       activeTab && activeTab.messages.length === 0 && !keepTrailingUserMessage;
     const tabTitle = isFirstMessage
-      ? summarizeChatTitle(visiblePrompt)
-      : undefined;
+      ? meaningfulChatTitle(summarizeChatTitle(visiblePrompt) ?? "")
+      : null;
 
     set((s) => {
       const currentTab = s.tabs.find((t) => t.id === activeTabId);
@@ -3006,7 +3017,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     log.info(`Resuming ${reference.runtime} session`, {
       session: reference.sessionId.slice(0, 8),
     });
-    const sessionTitle = title?.trim() || undefined;
+    const sessionTitle = meaningfulChatTitle(title) ?? undefined;
     const projectPath = useDocumentStore.getState().projectRoot;
     if (
       !projectPath ||
@@ -3598,7 +3609,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
   },
 
   _setSessionTitle: (sessionId: string, title: string) => {
-    const cleanTitle = title.trim();
+    const cleanTitle = meaningfulChatTitle(title);
     if (!cleanTitle) return;
     set((state) => ({
       tabs: state.tabs.map((tab) =>
@@ -3611,7 +3622,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
   },
 
   _setConversationTitle: (reference: ConversationRef, title: string) => {
-    const cleanTitle = title.trim();
+    const cleanTitle = meaningfulChatTitle(title);
     if (!cleanTitle) return;
     set((state) => ({
       tabs: state.tabs.map((tab) => {

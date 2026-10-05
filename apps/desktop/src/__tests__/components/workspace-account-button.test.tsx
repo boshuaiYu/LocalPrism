@@ -81,6 +81,9 @@ describe("WorkspaceAccountButton", () => {
       "ChatGPT Official · writer@example.com",
     );
     expect(button?.className).toContain("min-w-[4.5rem]");
+    expect(button?.className).toContain("w-full");
+    expect(button?.className).toContain("max-w-full");
+    expect(button?.className).not.toContain("max-w-[14rem]");
     expect(button?.querySelector("span")?.className).toContain("min-w-0");
     expect(button?.className).toContain("overflow-hidden");
     expect(button?.querySelector("span")?.className).toContain("truncate");
