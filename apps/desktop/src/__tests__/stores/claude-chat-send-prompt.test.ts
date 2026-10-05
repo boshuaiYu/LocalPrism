@@ -666,6 +666,37 @@ describe("useClaudeChatStore.resumeSession", () => {
     expect(activeTab?.title).toBe("Please inspect this image");
   });
 
+  it("hides reply-mode instructions and ambient file context when restoring history", async () => {
+    const userText = "第二轮上下文测试，请只回复 B。";
+    const restoredPrompt = [
+      "[Reply mode: academic-polish. Follow this speaking style for this turn only. Do not rewrite earlier messages.]",
+      "保持原意、术语、数字、单位、统计量和论断强度。",
+      "原样保留 LaTeX：命令、环境、公式、标签。",
+      "",
+      "[Currently open file: main.tex. Location only — do not read this file unless the user asked to use the document. File tools must use paths relative to the current working directory, such as main.tex.]",
+      "",
+      userText,
+    ].join("\n");
+
+    vi.mocked(invoke).mockResolvedValueOnce(
+      claudeHistory("session-with-context", [
+        {
+          type: "user",
+          message: { content: restoredPrompt },
+        },
+      ]),
+    );
+
+    await useClaudeChatStore.getState().resumeSession("session-with-context");
+
+    const userContent = useClaudeChatStore.getState().messages[0].message
+      ?.content as unknown as string;
+    expect(userContent).toBe(userText);
+    expect(userContent).not.toContain("Currently open file");
+    expect(userContent).not.toContain("保持原意");
+    expect(userContent).not.toContain("Reply mode");
+  });
+
   it("does not repurpose a Codex tab while its stop is awaiting terminal completion", async () => {
     vi.mocked(invoke).mockResolvedValueOnce(
       claudeHistory("claude-session", [

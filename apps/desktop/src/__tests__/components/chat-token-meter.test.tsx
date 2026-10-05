@@ -63,9 +63,13 @@ describe("ChatTokenMeter", () => {
     expect(trigger).toBeInstanceOf(HTMLButtonElement);
     expect(trigger?.getAttribute("aria-expanded")).toBe("false");
     expect(trigger?.getAttribute("aria-label")).toMatch(/Context/i);
-    expect(
-      trigger?.querySelector('[data-testid="chat-token-meter-ring"]'),
-    ).not.toBeNull();
+    const ring = trigger?.querySelector(
+      '[data-testid="chat-token-meter-ring"]',
+    );
+    expect(ring).not.toBeNull();
+    expect(ring?.getAttribute("data-state")).toBe("used");
+    expect(ring?.querySelectorAll("circle")).toHaveLength(2);
+    expect(ring?.querySelector(".animate-spin")).toBeNull();
     expect(
       container.querySelector('[data-testid="chat-token-meter"]'),
     ).toBeNull();
@@ -139,5 +143,11 @@ describe("ChatTokenMeter", () => {
       '[data-testid="chat-token-meter-trigger"]',
     );
     expect(trigger?.getAttribute("aria-label")).toBe("Context 0%");
+    const ring = trigger?.querySelector(
+      '[data-testid="chat-token-meter-ring"]',
+    );
+    expect(ring?.getAttribute("data-state")).toBe("empty");
+    expect(ring?.querySelectorAll("circle")).toHaveLength(1);
+    expect(trigger?.querySelector(".animate-spin")).toBeNull();
   });
 });

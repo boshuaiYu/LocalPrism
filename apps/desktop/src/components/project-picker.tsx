@@ -15,6 +15,7 @@ import {
   GithubIcon,
   MonitorIcon,
   MoonIcon,
+  SettingsIcon,
   SunIcon,
 } from "lucide-react";
 import { useTheme } from "next-themes";
@@ -23,6 +24,9 @@ import { useDocumentStore } from "@/stores/document-store";
 import { getMupdfClient } from "@/lib/mupdf/mupdf-client";
 import { exists, join } from "@/lib/tauri/fs";
 import { AppStatusBar } from "@/components/app-status-cluster";
+import { SettingsDialog } from "@/components/settings/settings-dialog";
+import { OPEN_SETTINGS_EVENT } from "@/lib/settings-chrome";
+import { useI18n } from "@/lib/use-i18n";
 import { HomeEmptyState } from "@/components/home/home-empty-state";
 import { Button } from "@/components/ui/button";
 import {
@@ -79,9 +83,17 @@ export function ProjectPicker() {
   const defaultProjectsDiscoveredRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const { theme = "system", setTheme } = useTheme();
+  const { t } = useI18n();
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const searchShortcutLabel = useMemo(() => {
     if (typeof navigator === "undefined") return "Ctrl+K";
     return /Mac|iPhone|iPad/i.test(navigator.platform) ? "⌘K" : "Ctrl+K";
+  }, []);
+
+  useEffect(() => {
+    const openSettings = () => setSettingsOpen(true);
+    window.addEventListener(OPEN_SETTINGS_EVENT, openSettings);
+    return () => window.removeEventListener(OPEN_SETTINGS_EVENT, openSettings);
   }, []);
 
   const recentProjects = useProjectStore((s) => s.recentProjects);
@@ -200,7 +212,10 @@ export function ProjectPicker() {
 
   if (wizardMode) {
     return (
-      <ProjectWizard mode={wizardMode} onBack={() => setWizardMode(null)} />
+      <>
+        <ProjectWizard mode={wizardMode} onBack={() => setWizardMode(null)} />
+        <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      </>
     );
   }
 
@@ -217,6 +232,17 @@ export function ProjectPicker() {
         className="relative z-10 flex min-h-[calc(40px+var(--titlebar-height))] shrink-0 flex-wrap items-center justify-end gap-2 px-4 pt-[var(--titlebar-height)] pb-1"
       >
         <div className="flex shrink-0 items-center gap-2">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-8"
+            data-testid="chrome-settings"
+            title={t("chrome.settings")}
+            aria-label={t("chrome.openSettings")}
+            onClick={() => setSettingsOpen(true)}
+          >
+            <SettingsIcon className="size-4" />
+          </Button>
           <Button variant="ghost" size="icon" className="size-8" asChild>
             <a
               href="https://github.com/boshuaiYu/LocalPrism"
@@ -432,6 +458,7 @@ export function ProjectPicker() {
         </DialogContent>
       </Dialog>
       <AppStatusBar className="relative z-10 shrink-0 border-border bg-background" />
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
     </div>
   );
 }

@@ -975,8 +975,8 @@ describe("ChatComposer provider wiring", () => {
       const meter = container.querySelector(
         '[data-testid="chat-token-meter-trigger"]',
       );
-      expect(controls?.getAttribute("data-layout")).toBe("wide");
-      expect(controls?.className).toContain("flex-row");
+      expect(controls?.getAttribute("data-layout")).toBe("inline");
+      expect(controls?.className).toContain("flex-nowrap");
       expect(controls?.className).not.toContain("flex-col");
       expect(leading?.className.split(/\s+/)).toEqual(
         expect.arrayContaining(["min-w-0", "flex-1", "overflow-hidden"]),
@@ -1028,7 +1028,7 @@ describe("ChatComposer provider wiring", () => {
     }
   });
 
-  it("stacks the context ring under a truncating model chip on a narrow row", async () => {
+  it("keeps the context ring on the toolbar row when the composer is narrow", async () => {
     const chatSnapshot = useClaudeChatStore.getState();
     const setupSnapshot = useClaudeSetupStore.getState();
     const documentSnapshot = useDocumentStore.getState();
@@ -1130,10 +1130,11 @@ describe("ChatComposer provider wiring", () => {
         '[data-testid="composer-controls-context"]',
       );
       const sendSlot = container.querySelector('[data-testid="composer-send"]');
-      expect(controls?.getAttribute("data-layout")).toBe("narrow");
-      expect(controls?.className).toContain("flex-col");
+      expect(controls?.getAttribute("data-layout")).toBe("inline");
+      expect(controls?.className).toContain("flex-nowrap");
+      expect(controls?.className).not.toContain("flex-col");
       expect(leading?.contains(modelSlot ?? null)).toBe(true);
-      expect(leading?.contains(sendSlot ?? null)).toBe(true);
+      expect(leading?.contains(sendSlot ?? null)).toBe(false);
       expect(leading?.contains(contextSlot ?? null)).toBe(false);
       expect(modelSlot?.className.split(/\s+/)).toEqual(
         expect.arrayContaining([
@@ -1143,11 +1144,22 @@ describe("ChatComposer provider wiring", () => {
           "overflow-hidden",
         ]),
       );
+      expect(
+        modelSlot
+          ?.querySelector('[data-testid="composer-model-trigger"] span')
+          ?.className.split(/\s+/),
+      ).toContain("truncate");
       expect(contextSlot?.className).not.toContain("flex-1");
       expect(leading?.nextElementSibling).toBe(contextSlot);
+      expect(contextSlot?.nextElementSibling).toBe(sendSlot);
       expect(
         contextSlot?.querySelector('[data-testid="chat-token-meter-trigger"]'),
       ).not.toBeNull();
+      expect(
+        contextSlot
+          ?.querySelector('[data-testid="chat-token-meter-ring"]')
+          ?.getAttribute("data-state"),
+      ).toBe("empty");
     } finally {
       globalThis.ResizeObserver = OriginalResizeObserver;
       await act(async () => root.unmount());

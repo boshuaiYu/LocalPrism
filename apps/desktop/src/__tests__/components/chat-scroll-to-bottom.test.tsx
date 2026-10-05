@@ -342,8 +342,15 @@ describe("chat scroll to bottom", () => {
     ) as HTMLButtonElement | null;
     expect(compress).toBeTruthy();
     expect(compress?.className).not.toContain("rounded-full");
+    expect(compress?.className).not.toContain("sticky");
     expect(compress?.parentElement?.className).toContain("justify-end");
     expect(compress?.parentElement?.className).not.toContain("justify-center");
+    expect(compress?.parentElement?.className).not.toContain("sticky");
+    expect(
+      container
+        .querySelector('[data-testid="chat-transcript"]')
+        ?.contains(compress),
+    ).toBe(false);
 
     await act(async () => {
       compress?.click();

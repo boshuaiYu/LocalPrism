@@ -16,37 +16,48 @@ function meterTone(percent: number): string {
   return "stroke-foreground/80";
 }
 
-function ContextRing({ percent }: { percent: number }) {
+function ContextRing({
+  percent,
+  estimated,
+}: {
+  percent: number;
+  estimated: boolean;
+}) {
   const radius = 5.5;
   const circumference = 2 * Math.PI * radius;
   const clamped = Math.min(100, Math.max(0, percent));
+  const showProgress = !estimated && clamped > 0;
+  const filled = (clamped / 100) * circumference;
   return (
     <svg
       viewBox="0 0 16 16"
-      className="size-3.5"
+      className="size-3.5 text-muted-foreground"
       aria-hidden
       data-testid="chat-token-meter-ring"
+      data-state={showProgress ? "used" : "empty"}
     >
       <circle
         cx="8"
         cy="8"
         r={radius}
         fill="none"
-        className="stroke-muted-foreground/40"
+        stroke="currentColor"
+        className="opacity-40"
         strokeWidth="2"
       />
-      <circle
-        cx="8"
-        cy="8"
-        r={radius}
-        fill="none"
-        className={meterTone(clamped)}
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeDasharray={circumference}
-        strokeDashoffset={circumference * (1 - clamped / 100)}
-        transform="rotate(-90 8 8)"
-      />
+      {showProgress ? (
+        <circle
+          cx="8"
+          cy="8"
+          r={radius}
+          fill="none"
+          className={meterTone(clamped)}
+          strokeWidth="2"
+          strokeLinecap="butt"
+          strokeDasharray={`${filled} ${circumference}`}
+          transform="rotate(-90 8 8)"
+        />
+      ) : null}
     </svg>
   );
 }
@@ -157,7 +168,7 @@ export function ChatTokenMeter() {
         className="flex size-6 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         onClick={() => setOpen((value) => !value)}
       >
-        <ContextRing percent={meter.percent} />
+        <ContextRing percent={meter.percent} estimated={meter.estimated} />
       </button>
       {open
         ? createPortal(
