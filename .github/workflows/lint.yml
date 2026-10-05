@@ -22,3 +22,6 @@ jobs:
 
       - name: Biome CI
         run: pnpm exec biome ci
+
+      - name: Typecheck
+        run: pnpm --filter @claude-prism/desktop exec tsc -b

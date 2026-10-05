@@ -106,7 +106,7 @@ describe("ApprovalDialog tab isolation", () => {
       request("req-shell", "tab-new", {
         title: "Allow Bash?",
         command: "",
-        permissions: [],
+        permissions: null,
         details: {},
       }),
     );
