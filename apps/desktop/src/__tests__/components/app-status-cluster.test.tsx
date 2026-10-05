@@ -7,7 +7,7 @@ import { useSettingsStore } from "@/stores/settings-store";
 import { resetUpdateStoreForTests } from "@/stores/update-store";
 
 vi.mock("@tauri-apps/api/app", () => ({
-  getVersion: vi.fn(async () => "1.0.8-7"),
+  getVersion: vi.fn(async () => "1.0.8-8"),
 }));
 
 describe("AppStatusBar tour anchor", () => {
