@@ -2489,6 +2489,142 @@ describe("typed conversation resume", () => {
     expect(tab.title).toBe("Local draft");
     expect(tab.resumeRequestId).toBeNull();
   });
+
+  it("fills an empty preserved title from the first user line", async () => {
+    const reference = {
+      runtime: "codex" as const,
+      sessionId: "thread-empty-title",
+      projectPath,
+    };
+    const localMessage = {
+      type: "user" as const,
+      message: {
+        content: [{ type: "text" as const, text: "文献综述草稿" }],
+      },
+    };
+    resetStore(
+      makeTab({
+        runtime: "codex",
+        sessionId: reference.sessionId,
+        sessionRef: reference,
+        messages: [localMessage],
+        title: "",
+      }),
+    );
+    vi.mocked(invoke).mockResolvedValueOnce({ reference, items: [] });
+
+    await useClaudeChatStore.getState().resumeConversation(reference);
+
+    const tab = useClaudeChatStore.getState().tabs[0];
+    expect(tab.messages).toEqual([localMessage]);
+    expect(tab.title).toBe("文献综述草稿");
+  });
+
+  it("does not store a placeholder first line over an empty preserved title", async () => {
+    const reference = {
+      runtime: "codex" as const,
+      sessionId: "thread-placeholder-line",
+      projectPath,
+    };
+    const localMessage = {
+      type: "user" as const,
+      message: {
+        content: [{ type: "text" as const, text: "New Chat" }],
+      },
+    };
+    resetStore(
+      makeTab({
+        runtime: "codex",
+        sessionId: reference.sessionId,
+        sessionRef: reference,
+        messages: [localMessage],
+        title: "",
+      }),
+    );
+    vi.mocked(invoke).mockResolvedValueOnce({ reference, items: [] });
+
+    await useClaudeChatStore.getState().resumeConversation(reference);
+
+    expect(useClaudeChatStore.getState().tabs[0]?.title).toBe("");
+  });
+
+  it("does not store placeholder text taken from the first history line", async () => {
+    for (const line of ["New Chat", "未命名", "|"]) {
+      const reference = {
+        runtime: "claude" as const,
+        sessionId: `session-placeholder-${line.length}`,
+        projectPath,
+      };
+      resetStore();
+      vi.mocked(invoke).mockReset();
+      vi.mocked(invoke).mockResolvedValueOnce({
+        reference,
+        items: [
+          {
+            type: "user",
+            message: { content: [{ type: "text", text: line }] },
+          },
+        ],
+      });
+
+      await useClaudeChatStore.getState().resumeConversation(reference);
+
+      expect(tabBySession(reference.sessionId)?.title).toBe("");
+    }
+  });
+
+  it("stores a real first line when the resume title is missing", async () => {
+    const reference = {
+      runtime: "claude" as const,
+      sessionId: "session-derived",
+      projectPath,
+    };
+    vi.mocked(invoke).mockResolvedValueOnce({
+      reference,
+      items: [
+        {
+          type: "user",
+          message: {
+            content: [{ type: "text", text: "Tighten the abstract" }],
+          },
+        },
+      ],
+    });
+
+    await useClaudeChatStore.getState().resumeConversation(reference);
+
+    expect(tabBySession(reference.sessionId)?.title).toBe(
+      "Tighten the abstract",
+    );
+  });
+
+  it("does not keep a UUID title when resuming a conversation from history", async () => {
+    const sessionId = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+    const reference = {
+      runtime: "claude" as const,
+      sessionId,
+      projectPath,
+    };
+    vi.mocked(invoke).mockResolvedValueOnce({
+      reference,
+      items: [
+        {
+          type: "user",
+          message: {
+            content: [{ type: "text", text: "Tighten the abstract" }],
+          },
+        },
+      ],
+    });
+
+    await useClaudeChatStore
+      .getState()
+      .resumeConversation(reference, sessionId.toUpperCase());
+
+    expect(tabBySession(sessionId)?.title).toBe("Tighten the abstract");
+    expect(tabBySession(sessionId)?.title).not.toBe(sessionId);
+    expect(tabBySession(sessionId)?.title).not.toBe(sessionId.toUpperCase());
+  });
 });
 
 describe("changeTabRuntime", () => {
@@ -2848,5 +2984,33 @@ describe("updateTabRuntimeSelection", () => {
       ["tab-claude", "Claude title"],
       ["tab-codex", "Updated Codex"],
     ]);
+  });
+
+  it("does not apply a UUID session-id when history opens a conversation", () => {
+    const sessionId = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+    const reference = {
+      runtime: "claude" as const,
+      projectPath,
+      sessionId,
+    };
+    useClaudeChatStore.setState({
+      tabs: [
+        makeTab({
+          id: "tab-uuid",
+          title: "Keep this",
+          runtime: "claude",
+          sessionId,
+          sessionRef: reference,
+        }),
+      ],
+      activeTabId: "tab-uuid",
+      activeProjectPath: projectPath,
+    });
+
+    useClaudeChatStore
+      .getState()
+      ._setConversationTitle(reference, `  ${sessionId.toUpperCase()}  `);
+
+    expect(useClaudeChatStore.getState().tabs[0]?.title).toBe("Keep this");
   });
 });

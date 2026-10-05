@@ -17,9 +17,14 @@ export const STORED_CHAT_TITLE_PLACEHOLDER = "";
 const HAS_REAL_TITLE_TEXT =
   /[\p{L}\p{N}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 
+/** A history row sometimes uses the session id itself as the title. */
+const SESSION_ID_TITLE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
- * Titles that should not be shown in the tab strip.
- * Blank strings, localized placeholders such as "New Chat" / "新对话", and
+ * Titles that should not be shown in the tab strip or written back on resume.
+ * Blank strings, localized placeholders such as "New Chat" / "新对话",
+ * backend defaults such as "Untitled conversation", bare session UUIDs, and
  * values with no real title text (see HAS_REAL_TITLE_TEXT) collapse the tab.
  */
 export function meaningfulChatTitle(
@@ -28,6 +33,7 @@ export function meaningfulChatTitle(
   const cleaned = (title ?? "").replace(/\s+/g, " ").trim();
   if (!cleaned) return null;
   if (isPlaceholderChatTitle(cleaned)) return null;
+  if (SESSION_ID_TITLE.test(cleaned)) return null;
   if (!HAS_REAL_TITLE_TEXT.test(cleaned)) return null;
   return cleaned;
 }

@@ -3239,6 +3239,14 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         reference.runtime === "claude"
           ? claudeHistoryMessages(history.items)
           : messages;
+      // `??` treats "" as present, so an empty preserved title must not
+      // block the first user line. Placeholder lines are not stored.
+      const preservedTitle =
+        preservedLocal && rollbackTab.title?.trim()
+          ? rollbackTab.title
+          : undefined;
+      const derivedTitle =
+        meaningfulChatTitle(titleForMessages(titleMessages)) ?? undefined;
       const totals = usageTotalsForMessages(messages);
       const providerKey =
         reference.runtime === "claude"
@@ -3278,8 +3286,8 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
           ...runtimeUpdates,
           title:
             sessionTitle ??
-            (preservedLocal ? rollbackTab.title : undefined) ??
-            titleForMessages(titleMessages) ??
+            preservedTitle ??
+            derivedTitle ??
             STORED_CHAT_TITLE_PLACEHOLDER,
           totalInputTokens: totals.inputTokens,
           totalOutputTokens: totals.outputTokens,

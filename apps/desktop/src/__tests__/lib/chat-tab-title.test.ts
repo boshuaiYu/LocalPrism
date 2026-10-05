@@ -19,6 +19,14 @@ describe("meaningfulChatTitle", () => {
     expect(meaningfulChatTitle("未命名对话")).toBeNull();
     expect(meaningfulChatTitle("未命名会话")).toBeNull();
     expect(meaningfulChatTitle("Untitled session")).toBeNull();
+    expect(meaningfulChatTitle("Untitled conversation")).toBeNull();
+    expect(meaningfulChatTitle("UNTITLED CONVERSATION")).toBeNull();
+    expect(
+      meaningfulChatTitle("a1b2c3d4-e5f6-7890-abcd-ef1234567890"),
+    ).toBeNull();
+    expect(
+      meaningfulChatTitle("  A1B2C3D4-E5F6-7890-ABCD-EF1234567890  "),
+    ).toBeNull();
     expect(meaningfulChatTitle("!!!")).toBeNull();
     expect(meaningfulChatTitle("| |")).toBeNull();
     expect(meaningfulChatTitle("¥€$")).toBeNull();
@@ -39,6 +47,9 @@ describe("meaningfulChatTitle", () => {
     expect(meaningfulChatTitle("你好 😀")).toBe("你好 😀");
     expect(meaningfulChatTitle("价格：¥100")).toBe("价格：¥100");
     expect(meaningfulChatTitle("⼀")).toBe("⼀");
+    expect(
+      meaningfulChatTitle("Notes a1b2c3d4-e5f6-7890-abcd-ef1234567890"),
+    ).toBe("Notes a1b2c3d4-e5f6-7890-abcd-ef1234567890");
   });
 });
 
@@ -55,6 +66,10 @@ describe("displayedChatTabTitle", () => {
     );
     expect(displayedChatTabTitle("|", messages)).toBe("你好");
     expect(displayedChatTabTitle("New Chat", messages)).toBe("你好");
+    expect(displayedChatTabTitle("Untitled conversation", [])).toBe("");
+    expect(
+      displayedChatTabTitle("a1b2c3d4-e5f6-7890-abcd-ef1234567890", messages),
+    ).toBe("你好");
     expect(displayedChatTabTitle("", [])).toBe("");
   });
 
