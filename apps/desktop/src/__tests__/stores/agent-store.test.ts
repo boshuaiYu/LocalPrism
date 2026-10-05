@@ -6,7 +6,10 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invoke(...args),
 }));
 
-import { BUILTIN_AGENT_PRESET_SEED_VERSION } from "@/lib/agent-presets";
+import {
+  BUILTIN_AGENT_PRESET_SEED_VERSION,
+  buildPresetAgentProfile,
+} from "@/lib/agent-presets";
 import {
   emptyAgentProfile,
   resetBuiltinPresetSeedForTests,
@@ -290,6 +293,72 @@ describe("agent-store", () => {
     expect(useSettingsStore.getState().builtinAgentPresetsSeeded).toBe(false);
     expect(useSettingsStore.getState().builtinAgentPresetsSeedVersion).toBe(0);
     expect(useAgentStore.getState().error).toContain("disk full");
+  });
+
+  it("does not recreate deleted presets after the seed version is current", async () => {
+    useSettingsStore.setState({
+      builtinAgentPresetsSeedVersion: BUILTIN_AGENT_PRESET_SEED_VERSION,
+      builtinAgentPresetsSeeded: true,
+    });
+    invoke.mockImplementation((command: string) => {
+      if (command === "skill_list" || command === "list_agents") {
+        return Promise.resolve([]);
+      }
+      return Promise.reject(new Error(`unexpected ${command}`));
+    });
+
+    await useAgentStore.getState().ensureBuiltinPresets();
+
+    expect(
+      invoke.mock.calls.some(([command]) => command === "save_agent"),
+    ).toBe(false);
+    expect(useSettingsStore.getState().builtinAgentPresetsSeedVersion).toBe(
+      BUILTIN_AGENT_PRESET_SEED_VERSION,
+    );
+  });
+
+  it("attaches installed skills to an unedited builtin without rewriting copy", async () => {
+    useSettingsStore.setState({
+      builtinAgentPresetsSeedVersion: BUILTIN_AGENT_PRESET_SEED_VERSION,
+      builtinAgentPresetsSeeded: true,
+    });
+    const polish = {
+      ...buildPresetAgentProfile("academic-polish", []),
+      sourcePath: "/agents/academic-polish.md",
+    };
+    const saved: AgentProfile[] = [];
+    invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "skill_list") {
+        return Promise.resolve([
+          presetSkill("nature-polishing", "Nature polishing"),
+          presetSkill("nature-writing", "Nature writing"),
+          presetSkill("academic-paper", "Academic paper"),
+        ]);
+      }
+      if (command === "list_agents") {
+        return Promise.resolve([polish, ...saved]);
+      }
+      if (command === "save_agent") {
+        const payload = args as {
+          profile: AgentProfile;
+          overwrite: boolean;
+        };
+        expect(payload.overwrite).toBe(true);
+        expect(payload.profile.instructions).toBe(polish.instructions);
+        saved.push(payload.profile);
+        return Promise.resolve(payload.profile);
+      }
+      return Promise.resolve([]);
+    });
+
+    await useAgentStore.getState().ensureBuiltinPresets();
+
+    expect(saved).toHaveLength(1);
+    expect(saved[0]?.skillIds).toEqual([
+      "nature-polishing",
+      "nature-writing",
+      "academic-paper",
+    ]);
   });
 });
 

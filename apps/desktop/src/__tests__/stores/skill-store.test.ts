@@ -534,6 +534,32 @@ describe("skill-store", () => {
     expect(skipFlags.some((skipExisting) => skipExisting === false)).toBe(true);
   });
 
+  it("keeps every failed pack download visible for retry", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (
+        command === "skill_list" ||
+        command === "list_agents" ||
+        command === "slash_commands_list"
+      ) {
+        return [];
+      }
+      if (command === "skill_import_url") {
+        throw new Error(
+          "Could not download skills from https://github.com/example. network unreachable",
+        );
+      }
+      return [];
+    });
+
+    const results = await useSkillStore.getState().ensureDefaultSkillPacks();
+
+    expect(results.every((item) => item.status === "error")).toBe(true);
+    expect(useSkillStore.getState().error).toContain("Could not download");
+    expect(useSkillStore.getState().error?.split("\n")).toHaveLength(
+      results.length,
+    );
+  });
+
   it("keeps unmanaged skills visible and only deletes managed ids", async () => {
     const unmanaged = skill({
       id: "claude:user:legacy",

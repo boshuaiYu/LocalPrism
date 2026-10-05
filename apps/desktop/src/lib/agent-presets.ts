@@ -293,6 +293,30 @@ export function builtinPresetContentUpdate(
   };
 }
 
+/**
+ * Attach currently installed skills to an unedited builtin. Customized name,
+ * description, or instructions are left alone, and missing preset files are
+ * not recreated here.
+ */
+export function builtinPresetSkillSync(
+  agent: AgentProfile,
+  skills: RuntimeSkill[],
+): AgentProfile | null {
+  if (agent.runtime !== "claude" || agent.scope !== "user") return null;
+  if (!isBuiltinAgentPresetId(agent.id)) return null;
+  const preset = builtinAgentPreset(agent.id);
+  if (
+    agent.name !== preset.name ||
+    agent.description !== preset.description ||
+    agent.instructions !== preset.instructions
+  ) {
+    return null;
+  }
+  const skillIds = presetSkillAttachment(agent.id, skills).skillIds;
+  if (sameSkillIds(agent.skillIds, skillIds)) return null;
+  return { ...agent, skillIds };
+}
+
 export function builtinAgentPreset(
   id: BuiltinAgentPresetId,
 ): BuiltinAgentPreset {

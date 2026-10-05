@@ -844,6 +844,11 @@ pub fn run() {
         .manage(zotero::ZoteroOAuthState::default())
         .manage(PreparedManifestUpdateState::default())
         .setup(|app| {
+            // Default agents are local files. Install them before the webview
+            // so a new data home does not depend on GitHub or localStorage.
+            if let Err(error) = agents::ensure_default_user_agents() {
+                eprintln!("[localprism] default agents were not installed: {error}");
+            }
             // Safety net: force-show the main window after a timeout if the
             // frontend JS never calls `getCurrentWindow().show()`.
             // This prevents the window from staying permanently hidden when

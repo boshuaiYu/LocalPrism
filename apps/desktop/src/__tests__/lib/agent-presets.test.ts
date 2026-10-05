@@ -9,6 +9,7 @@ import {
   buildPresetAgentProfile,
   builtinPresetContentUpdate,
   builtinPresetProfilesToSeed,
+  builtinPresetSkillSync,
 } from "@/lib/agent-presets";
 import { emptyAgentProfile } from "@/stores/agent-store";
 import type { RuntimeSkill, SkillScope } from "@/runtime/types";
@@ -372,6 +373,27 @@ describe("builtin agent presets", () => {
       builtinPresetContentUpdate(updated!, [
         skill("academic-polish", "user"),
         skill("nature-writing", "user"),
+      ]),
+    ).toBeNull();
+  });
+
+  it("syncs skill attachments only when the builtin copy is unchanged", () => {
+    const polish = buildPresetAgentProfile("academic-polish", []);
+    const synced = builtinPresetSkillSync(polish, [
+      skill("nature-polishing", "user"),
+      skill("academic-paper", "user"),
+    ]);
+    expect(synced?.skillIds).toEqual(["nature-polishing", "academic-paper"]);
+    expect(synced?.instructions).toBe(polish.instructions);
+    expect(
+      builtinPresetSkillSync({ ...polish, instructions: "User rewrite" }, [
+        skill("nature-polishing", "user"),
+      ]),
+    ).toBeNull();
+    expect(
+      builtinPresetSkillSync(synced!, [
+        skill("nature-polishing", "user"),
+        skill("academic-paper", "user"),
       ]),
     ).toBeNull();
   });

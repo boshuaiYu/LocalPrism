@@ -82,7 +82,9 @@ import { Input } from "@/components/ui/input";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
+import { SKILLS_LIST_UPDATED_EVENT } from "@/lib/skills-refresh";
 import { useAgentStore } from "@/stores/agent-store";
+import { useSkillStore } from "@/stores/skill-store";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import { ProjectCloseButton } from "@/components/workspace/project-close-button";
 import { UvSetupDialog } from "@/components/uv-setup";
@@ -2186,16 +2188,21 @@ function EnvironmentSection({
 
   // ── Scientific Skills ──
   const [skillsStatus, setSkillsStatus] = useState<SkillsStatus | null>(null);
+  const [skillsCheckError, setSkillsCheckError] = useState<string | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const skillsOpenRef = useRef(showOnboarding);
   skillsOpenRef.current = showOnboarding;
 
   // ── Agents ──
   const agents = useAgentStore((state) => state.agents);
+  const agentError = useAgentStore((state) => state.error);
   const refreshAgents = useAgentStore((state) => state.refresh);
+  const skillError = useSkillStore((state) => state.error);
+  const skillLoading = useSkillStore((state) => state.loading);
 
   const checkSkillsStatus = useCallback(async () => {
     try {
+      // Same user library skill_import_url writes (`claude-home/skills`).
       const globalStatus = await invoke<SkillsStatus>(
         "check_skills_installed",
         {
@@ -2203,18 +2210,39 @@ function EnvironmentSection({
         },
       );
       setSkillsStatus(globalStatus);
-    } catch {
-      // Ignore errors silently
+      setSkillsCheckError(null);
+    } catch (error) {
+      setSkillsCheckError(
+        error instanceof Error ? error.message : String(error),
+      );
     }
   }, []);
 
   useEffect(() => {
-    checkSkillsStatus();
+    if (skillLoading) return;
+    void checkSkillsStatus();
+  }, [checkSkillsStatus, skillLoading]);
+
+  useEffect(() => {
+    const onSkillsUpdated = () => {
+      void checkSkillsStatus();
+    };
+    window.addEventListener(SKILLS_LIST_UPDATED_EVENT, onSkillsUpdated);
+    return () =>
+      window.removeEventListener(SKILLS_LIST_UPDATED_EVENT, onSkillsUpdated);
   }, [checkSkillsStatus]);
 
   useEffect(() => {
     void refreshAgents("claude");
   }, [refreshAgents]);
+
+  const retrySkills = useCallback(() => {
+    void (async () => {
+      await useSkillStore.getState().ensureDefaultSkillPacks();
+      await checkSkillsStatus();
+      await refreshAgents("claude");
+    })();
+  }, [checkSkillsStatus, refreshAgents]);
 
   useEffect(() => {
     const onTourCue = (event: Event) => {
@@ -2253,9 +2281,16 @@ function EnvironmentSection({
       : uvStatus === "ready"
         ? t("env.noVenv")
         : "";
+  const skillProblem =
+    skillsCheckError ?? (skillsStatus?.installed ? null : skillError);
   const skillsLabel = skillsStatus?.installed
     ? t("env.skillCount", { count: skillsStatus.skill_count })
-    : t("env.notInstalled");
+    : skillLoading
+      ? t("env.installing")
+      : skillProblem
+        ? t("env.installFailed")
+        : t("env.notInstalled");
+  const showSkillRetry = !skillsStatus?.installed || Boolean(skillProblem);
   const agentsLabel = t("env.agentCount", { count: agents.length });
 
   return (
@@ -2289,40 +2324,60 @@ function EnvironmentSection({
           </button>
           <div className="space-y-0.5">
             {/* Skills row — curated catalog (also available under Settings → Skills) */}
-            <button
-              className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-sidebar-accent/50"
-              data-tour="tour-skills"
-              onClick={() => setShowOnboarding(true)}
-              title={t("env.browseSkills")}
-            >
-              <FlaskConicalIcon
-                className={cn(
-                  "size-3.5 shrink-0",
-                  skillsStatus?.installed
-                    ? "text-foreground"
-                    : "text-muted-foreground",
-                )}
-              />
-              <span className="min-w-0 flex-1 truncate text-xs">
-                {t("settings.skills")}
-              </span>
-              <span
-                className={cn(
-                  "shrink-0 text-xs",
-                  skillsStatus?.installed
-                    ? "text-foreground"
-                    : "text-muted-foreground",
-                )}
+            <div className="flex min-w-0 items-center">
+              <button
+                className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-sidebar-accent/50"
+                data-tour="tour-skills"
+                onClick={() => setShowOnboarding(true)}
+                title={skillProblem ?? t("env.browseSkills")}
               >
-                {skillsLabel}
-              </span>
-            </button>
+                <FlaskConicalIcon
+                  className={cn(
+                    "size-3.5 shrink-0",
+                    skillsStatus?.installed
+                      ? "text-foreground"
+                      : "text-muted-foreground",
+                  )}
+                />
+                <span className="min-w-0 flex-1 truncate text-xs">
+                  {t("settings.skills")}
+                </span>
+                <span
+                  className={cn(
+                    "shrink-0 text-xs",
+                    skillsStatus?.installed
+                      ? "text-foreground"
+                      : "text-muted-foreground",
+                  )}
+                >
+                  {skillsLabel}
+                </span>
+              </button>
+              {showSkillRetry && (
+                <button
+                  type="button"
+                  className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-sidebar-accent/50 hover:text-foreground disabled:opacity-50"
+                  title={skillProblem ?? t("errors.retry")}
+                  aria-label={t("errors.retry")}
+                  disabled={skillLoading}
+                  onClick={retrySkills}
+                >
+                  <RefreshCwIcon
+                    className={cn("size-3.5", skillLoading && "animate-spin")}
+                  />
+                </button>
+              )}
+            </div>
             {/* Agents row — Settings → Agents */}
             <button
               className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-sidebar-accent/50"
               data-tour="tour-agents-open"
               onClick={onOpenAgents}
-              title={t("env.manageAgents")}
+              title={
+                agents.length === 0 && agentError
+                  ? agentError
+                  : t("env.manageAgents")
+              }
             >
               <BotIcon
                 className={cn(

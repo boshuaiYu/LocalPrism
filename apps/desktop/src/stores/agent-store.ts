@@ -4,6 +4,7 @@ import {
   BUILTIN_AGENT_PRESET_SEED_VERSION,
   builtinPresetContentUpdate,
   builtinPresetProfilesToSeed,
+  builtinPresetSkillSync,
 } from "@/lib/agent-presets";
 import type { AgentProfile, RuntimeKind, SkillScope } from "@/runtime/types";
 import { useSettingsStore } from "@/stores/settings-store";
@@ -32,12 +33,19 @@ export interface AgentStoreState {
    * agents are left alone. Later deletions stay deleted.
    */
   ensureBuiltinPresets: () => Promise<void>;
+  /**
+   * Fill skill attachments on unedited builtins after a pack install.
+   * Does not recreate agents the user deleted.
+   */
+  syncBuiltinPresetSkills: () => Promise<void>;
 }
 
 let builtinPresetSeed: Promise<void> | null = null;
+let builtinPresetPassCompleted = false;
 
 export function resetBuiltinPresetSeedForTests() {
   builtinPresetSeed = null;
+  builtinPresetPassCompleted = false;
 }
 
 function agentAlreadyExists(error: unknown): boolean {
@@ -151,7 +159,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   ensureBuiltinPresets: () => {
     if (
-      useSettingsStore.persist.hasHydrated() &&
+      builtinPresetPassCompleted &&
       useSettingsStore.getState().builtinAgentPresetsSeedVersion >=
         BUILTIN_AGENT_PRESET_SEED_VERSION
     ) {
@@ -160,37 +168,46 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     if (builtinPresetSeed) return builtinPresetSeed;
     builtinPresetSeed = (async () => {
       await whenSettingsHydrated();
-      if (
+      const versionDone =
         useSettingsStore.getState().builtinAgentPresetsSeedVersion >=
-        BUILTIN_AGENT_PRESET_SEED_VERSION
-      ) {
-        return;
-      }
+        BUILTIN_AGENT_PRESET_SEED_VERSION;
       const { useSkillStore } = await import("@/stores/skill-store");
       await useSkillStore.getState().refresh();
       await get().refresh("claude");
       const agents = get().agents;
       const skills = useSkillStore.getState().skills ?? [];
-      const profiles = builtinPresetProfilesToSeed(agents, skills);
-      const updates = agents.flatMap((agent) => {
-        const next = builtinPresetContentUpdate(agent, skills);
-        return next ? [next] : [];
-      });
       let failed = false;
-      for (const profile of profiles) {
-        try {
-          await get().save(profile, undefined, false);
-        } catch (error) {
-          if (!agentAlreadyExists(error)) {
-            failed = true;
-            continue;
+      if (!versionDone) {
+        const profiles = builtinPresetProfilesToSeed(agents, skills);
+        const updates = agents.flatMap((agent) => {
+          const next = builtinPresetContentUpdate(agent, skills);
+          return next ? [next] : [];
+        });
+        for (const profile of profiles) {
+          try {
+            await get().save(profile, undefined, false);
+          } catch (error) {
+            if (!agentAlreadyExists(error)) {
+              failed = true;
+              continue;
+            }
+            set({ error: null, loading: false });
           }
-          set({ error: null, loading: false });
+        }
+        for (const profile of updates) {
+          try {
+            await get().save(profile, undefined, true);
+          } catch (error) {
+            failed = true;
+            set({
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
         }
       }
-      for (const profile of updates) {
+      if (!failed) {
         try {
-          await get().save(profile, undefined, true);
+          await get().syncBuiltinPresetSkills();
         } catch (error) {
           failed = true;
           set({
@@ -199,13 +216,32 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         }
       }
       if (!failed) {
-        useSettingsStore
-          .getState()
-          .setBuiltinAgentPresetsSeedVersion(BUILTIN_AGENT_PRESET_SEED_VERSION);
+        if (!versionDone) {
+          useSettingsStore
+            .getState()
+            .setBuiltinAgentPresetsSeedVersion(
+              BUILTIN_AGENT_PRESET_SEED_VERSION,
+            );
+        }
+        builtinPresetPassCompleted = true;
       }
     })().finally(() => {
       builtinPresetSeed = null;
     });
     return builtinPresetSeed;
+  },
+
+  syncBuiltinPresetSkills: async () => {
+    const { useSkillStore } = await import("@/stores/skill-store");
+    await useSkillStore.getState().refresh(undefined, { silent: true });
+    await get().refresh("claude");
+    const skills = useSkillStore.getState().skills ?? [];
+    const updates = get().agents.flatMap((agent) => {
+      const next = builtinPresetSkillSync(agent, skills);
+      return next ? [next] : [];
+    });
+    for (const profile of updates) {
+      await get().save(profile, undefined, true);
+    }
   },
 }));
