@@ -15,12 +15,16 @@ describe("meaningfulChatTitle", () => {
     expect(meaningfulChatTitle("New Chat")).toBeNull();
     expect(meaningfulChatTitle("新对话")).toBeNull();
     expect(meaningfulChatTitle("Untitled")).toBeNull();
+    expect(meaningfulChatTitle("未命名")).toBeNull();
     expect(meaningfulChatTitle("未命名对话")).toBeNull();
+    expect(meaningfulChatTitle("未命名会话")).toBeNull();
     expect(meaningfulChatTitle("Untitled session")).toBeNull();
     expect(meaningfulChatTitle("!!!")).toBeNull();
     expect(meaningfulChatTitle("| |")).toBeNull();
     expect(meaningfulChatTitle("¥€$")).toBeNull();
     expect(meaningfulChatTitle("😀")).toBeNull();
+    expect(meaningfulChatTitle("\u0301")).toBeNull();
+    expect(meaningfulChatTitle("\u200b")).toBeNull();
   });
 
   it("keeps a real title, including symbols beside text", () => {

@@ -695,6 +695,19 @@ mod tests {
     }
 
     #[test]
+    fn install_dir_is_writable_is_false_when_the_probe_write_fails() {
+        let root = TempDir::new().unwrap();
+        let missing = root.path().join("does-not-exist");
+        assert!(!install_dir_is_writable(&missing));
+        assert!(!missing.join(WRITABLE_PROBE_NAME).exists());
+
+        let file = root.path().join("not-a-directory");
+        std::fs::write(&file, b"file").unwrap();
+        assert!(!install_dir_is_writable(&file));
+        assert!(!file.join(WRITABLE_PROBE_NAME).exists());
+    }
+
+    #[test]
     fn windows_nonwritable_install_falls_back_to_config_dir() {
         let root = TempDir::new().unwrap();
         let install = root.path().join("Program Files").join("LocalPrism");

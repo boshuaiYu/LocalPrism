@@ -233,7 +233,7 @@ const en = {
   "skills.uncategorized": "Uncategorized",
 
   "agents.storage":
-    "Custom subagents live in claude-home/agents under the LocalPrism data home, not ~/.claude. On Windows that is a writable portable install folder, or %APPDATA%/LocalPrism when the install folder is not writable. macOS uses ~/Library/Application Support/LocalPrism and Linux uses ~/.config/LocalPrism. LOCALPRISM_HOME overrides this on every platform.",
+    "Stored in the LocalPrism data folder. LOCALPRISM_HOME overrides that folder.",
   "agents.new": "New agent",
   "agents.loading": "Loading agents…",
   "agents.empty": "No custom agents yet.",
@@ -754,7 +754,7 @@ const zh: Record<MessageKey, string> = {
   "skills.uncategorized": "未分类",
 
   "agents.storage":
-    "自定义子智能体保存在 LocalPrism 数据目录的 claude-home/agents，而不是 ~/.claude。Windows 在安装目录可写时使用该便携目录，否则使用 %APPDATA%/LocalPrism。macOS 使用 ~/Library/Application Support/LocalPrism，Linux 使用 ~/.config/LocalPrism。所有平台都可用 LOCALPRISM_HOME 覆盖。",
+    "保存在 LocalPrism 数据目录中。可用 LOCALPRISM_HOME 覆盖该目录。",
   "agents.new": "新建智能体",
   "agents.loading": "正在加载智能体…",
   "agents.empty": "还没有自定义智能体。",

@@ -211,6 +211,7 @@ describe("SessionSelector runtime conversation ownership", () => {
       activeAccountKey: null,
       accountObserved: false,
     });
+    useSettingsStore.setState({ uiLanguage: "en" });
     localStorage.clear();
   });
 
@@ -627,7 +628,6 @@ describe("SessionSelector runtime conversation ownership", () => {
   });
 
   it("localizes a junk history title with the tab placeholder", async () => {
-    const previous = useSettingsStore.getState().uiLanguage;
     useSettingsStore.setState({ uiLanguage: "zh" });
     const pipeRef = reference("claude", "/project-a", "pipe-title");
     runtimeListConversations.mockImplementation((runtime) => {
@@ -635,17 +635,89 @@ describe("SessionSelector runtime conversation ownership", () => {
       return Promise.resolve([conversation(pipeRef, "|")]);
     });
 
-    try {
-      await renderAndOpen();
-      expect(findButton("Delete 新对话")).toBeTruthy();
-      expect(
-        Array.from(
-          document.querySelectorAll('[role="menuitem"] span.truncate'),
-        ).some((node) => node.textContent === "|"),
-      ).toBe(false);
-    } finally {
-      useSettingsStore.setState({ uiLanguage: previous });
-    }
+    await renderAndOpen();
+    expect(findButton("Delete 新对话")).toBeTruthy();
+    expect(
+      Array.from(
+        document.querySelectorAll('[role="menuitem"] span.truncate'),
+      ).some((node) => node.textContent === "|"),
+    ).toBe(false);
+  });
+
+  it("filters history on the displayed title, not the raw junk title", async () => {
+    const pipeRef = reference("claude", "/project-a", "pipe-title");
+    const firstLineRef = reference("claude", "/project-a", "first-line");
+    const current = useClaudeChatStore.getState().tabs[0];
+    useClaudeChatStore.setState({
+      tabs: [
+        {
+          ...current,
+          id: "tab-first-line",
+          title: "New Chat",
+          projectPath: firstLineRef.projectPath,
+          sessionId: firstLineRef.sessionId,
+          sessionRef: firstLineRef,
+          messages: [
+            {
+              type: "user",
+              message: {
+                content: [{ type: "text", text: "Tighten the abstract" }],
+              },
+            },
+          ],
+        },
+      ],
+      activeTabId: "tab-first-line",
+    });
+    runtimeListConversations.mockImplementation((runtime) => {
+      if (runtime === "codex") return Promise.resolve([]);
+      return Promise.resolve([
+        conversation(pipeRef, "|"),
+        conversation(firstLineRef, "New Chat"),
+      ]);
+    });
+
+    await renderAndOpen();
+
+    const historyTitles = () =>
+      Array.from(
+        document.querySelectorAll('[role="menuitem"] span.truncate'),
+      ).map((node) => node.textContent);
+
+    await act(async () => {
+      setSearchQuery("|");
+    });
+    expect(historyTitles()).toEqual([]);
+    expect(document.body.textContent).toContain("No matching chats");
+
+    await act(async () => {
+      setSearchQuery("new chat");
+    });
+    expect(historyTitles()).toEqual(["New Chat"]);
+
+    await act(async () => {
+      setSearchQuery("abstract");
+    });
+    expect(historyTitles()).toEqual(["Tighten the abstract"]);
+  });
+
+  it("drops a UUID session-id title and shows the placeholder", async () => {
+    const sessionId = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+    const uuidRef = reference("claude", "/project-a", sessionId);
+    runtimeListConversations.mockImplementation((runtime) => {
+      if (runtime === "codex") return Promise.resolve([]);
+      return Promise.resolve([conversation(uuidRef, sessionId.toUpperCase())]);
+    });
+
+    await renderAndOpen();
+
+    const titles = Array.from(
+      document.querySelectorAll('[role="menuitem"] span.truncate'),
+    ).map((node) => node.textContent);
+    expect(titles).toContain("New Chat");
+    expect(titles).not.toContain(sessionId);
+    expect(titles).not.toContain(sessionId.toUpperCase());
+    expect(findButton("Delete New Chat")).toBeTruthy();
   });
 
   it("filters sessions by title search", async () => {

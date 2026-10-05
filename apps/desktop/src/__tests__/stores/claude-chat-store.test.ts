@@ -548,7 +548,7 @@ describe("close last conversation", () => {
     const state = useClaudeChatStore.getState();
     expect(state.tabs).toHaveLength(1);
     expect(state.tabs[0].id).not.toBe(onlyId);
-    expect(state.tabs[0].title).toBe("New Chat");
+    expect(state.tabs[0].title).toBe("");
     expect(state.tabs[0].sessionId).toBeNull();
     expect(state.tabs[0].messages).toEqual([]);
     expect(state.activeTabId).toBe(state.tabs[0].id);
