@@ -1,3 +1,4 @@
+import { STORED_CHAT_TITLE_PLACEHOLDER } from "@/lib/chat-tab-title";
 import type {
   ChatRuntimePeer,
   ConversationRef,
@@ -146,7 +147,7 @@ function idleTab(tab: PersistedChatTab, legacySessionId?: string | null) {
 function defaultDocument(): HydratedChatDocument {
   const tab = idleTab({
     id: "tab-1",
-    title: "New Chat",
+    title: STORED_CHAT_TITLE_PLACEHOLDER,
     projectPath: null,
     runtime: "claude",
     chatPeer: "claude",
@@ -210,7 +211,7 @@ function migrateV2Tab(
   const providerKey = nullableString(value.providerKey);
   return idleTab({
     id: uniqueTabId(value.id, usedIds),
-    title: nullableString(value.title) ?? "New Chat",
+    title: nullableString(value.title) ?? STORED_CHAT_TITLE_PLACEHOLDER,
     projectPath,
     runtime,
     chatPeer: chatPeerKind(value.chatPeer, runtime, providerKey),
@@ -239,7 +240,7 @@ function migrateV1Tab(
   return idleTab(
     {
       id: uniqueTabId(value.id, usedIds),
-      title: nullableString(value.title) ?? "New Chat",
+      title: nullableString(value.title) ?? STORED_CHAT_TITLE_PLACEHOLDER,
       projectPath,
       runtime: "claude",
       chatPeer: peerFromTab({ runtime: "claude", providerKey }),

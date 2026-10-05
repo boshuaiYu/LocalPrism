@@ -104,6 +104,7 @@ describe("chat persistence migration", () => {
       expect(migrated.tabs).toHaveLength(1);
       expect(migrated.activeTabId).toBe(migrated.tabs[0].id);
       expect(migrated.tabs[0]).toMatchObject({
+        title: "",
         runtime: "claude",
         sessionId: null,
         sessionRef: null,
@@ -112,6 +113,25 @@ describe("chat persistence migration", () => {
         error: null,
       });
     }
+  });
+
+  it("restores a blank title as empty and keeps legacy placeholder titles", () => {
+    const missing = migratePersistedChat({
+      version: 2,
+      activeTabId: "tab-blank",
+      tabs: [{ id: "tab-blank", title: "   " }, { id: "tab-missing" }],
+    });
+    expect(missing.tabs.map((tab) => tab.title)).toEqual(["", ""]);
+
+    const legacy = migratePersistedChat({
+      version: 1,
+      activeTabId: "tab-en",
+      tabs: [
+        { id: "tab-en", title: "New Chat" },
+        { id: "tab-zh", title: "新对话" },
+      ],
+    });
+    expect(legacy.tabs.map((tab) => tab.title)).toEqual(["New Chat", "新对话"]);
   });
 
   it("migrates a plain v1 document without changing ids, sessions, or provider keys", () => {
@@ -609,7 +629,7 @@ describe("chat store persistence integration", () => {
       runtime: "claude",
       sessionId: null,
       sessionRef: null,
-      title: "New Chat",
+      title: "",
     });
   });
 

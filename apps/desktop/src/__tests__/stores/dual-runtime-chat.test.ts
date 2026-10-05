@@ -2595,7 +2595,7 @@ describe("changeTabRuntime", () => {
     expect(useClaudeChatStore.getState().tabs[0]).toEqual(
       expect.objectContaining({
         runtime: "codex",
-        title: "New Chat",
+        title: "",
         sessionRef: null,
         sessionId: null,
         runtimeModel: null,

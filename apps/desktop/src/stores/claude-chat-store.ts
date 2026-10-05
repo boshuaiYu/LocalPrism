@@ -41,7 +41,10 @@ import {
   rewindUserResendPrompt,
   type RewindAnchor,
 } from "@/lib/chat-rewind";
-import { meaningfulChatTitle } from "@/lib/chat-tab-title";
+import {
+  meaningfulChatTitle,
+  STORED_CHAT_TITLE_PLACEHOLDER,
+} from "@/lib/chat-tab-title";
 import { tabOpenedUnderOtherAccount } from "@/lib/provider-account";
 import { uiText } from "@/lib/use-i18n";
 import { sameProjectPath } from "./chat-persistence";
@@ -411,7 +414,7 @@ function makeDefaultTab(
   const providerKey = providerKeyForSelectedCredential(selectedCredentialId);
   return {
     id,
-    title: "New Chat",
+    title: STORED_CHAT_TITLE_PLACEHOLDER,
     projectPath,
     runtime: "claude",
     chatPeer: peerFromTab({ runtime: "claude", providerKey }),
@@ -2573,7 +2576,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         totalInputTokens: 0,
         totalOutputTokens: 0,
         lastTurnUsage: null,
-        title: "New Chat",
+        title: STORED_CHAT_TITLE_PLACEHOLDER,
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
         forcedQueuedGuidanceId: null,
@@ -2966,7 +2969,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         totalInputTokens: 0,
         totalOutputTokens: 0,
         lastTurnUsage: null,
-        title: "New Chat",
+        title: STORED_CHAT_TITLE_PLACEHOLDER,
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
         forcedQueuedGuidanceId: null,
@@ -3171,7 +3174,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         totalInputTokens: 0,
         totalOutputTokens: 0,
         lastTurnUsage: null,
-        title: sessionTitle ?? "New Chat",
+        title: sessionTitle ?? STORED_CHAT_TITLE_PLACEHOLDER,
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
         forcedQueuedGuidanceId: null,
@@ -3277,7 +3280,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
             sessionTitle ??
             (preservedLocal ? rollbackTab.title : undefined) ??
             titleForMessages(titleMessages) ??
-            "New Chat",
+            STORED_CHAT_TITLE_PLACEHOLDER,
           totalInputTokens: totals.inputTokens,
           totalOutputTokens: totals.outputTokens,
           lastTurnUsage: lastTurnUsageFromMessages(messages),

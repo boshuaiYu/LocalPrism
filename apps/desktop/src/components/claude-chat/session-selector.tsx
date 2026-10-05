@@ -390,11 +390,7 @@ export function SessionSelector() {
       title: displayConversationTitle(conversation, tabs, t("chat.newChat")),
     }));
     if (!query) return decorated;
-    return decorated.filter(
-      ({ conversation, title }) =>
-        title.toLowerCase().includes(query) ||
-        conversation.title.toLowerCase().includes(query),
-    );
+    return decorated.filter(({ title }) => title.toLowerCase().includes(query));
   }, [conversations, searchQuery, t, tabs]);
 
   const handleSelectConversation = useCallback(
