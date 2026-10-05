@@ -48,12 +48,12 @@ describe("chat token usage", () => {
       ],
     });
     expect(meter.windowTokens).toBe(272_000);
-    expect(meter.usedTokens).toBe(21450);
-    expect(meter.remainingTokens).toBe(250_550);
+    expect(meter.usedTokens).toBe(21550);
+    expect(meter.remainingTokens).toBe(250_450);
     expect(meter.percent).toBe(8);
     expect(meter.cacheReadTokens).toBe(17862);
     expect(meter.cacheCreationTokens).toBe(0);
-    expect(formatTokenCount(meter.usedTokens)).toBe("21,450");
+    expect(formatTokenCount(meter.usedTokens)).toBe("21,550");
   });
 
   it("keeps prompt tokens when a later result is output-only", () => {
@@ -165,7 +165,7 @@ describe("chat token usage", () => {
         cacheCreationTokens: 0,
       },
     });
-    expect(meter.usedTokens).toBe(1600);
+    expect(meter.usedTokens).toBe(1680);
     expect(meter.windowTokens).toBe(272_000);
     expect(meter.percent).toBe(1);
     expect(meter.estimated).toBe(false);
@@ -260,7 +260,7 @@ describe("chat token usage", () => {
     expect(meter.inputTokens).toBe(3588);
     expect(meter.outputTokens).toBe(80);
     expect(meter.cacheReadTokens).toBe(200);
-    expect(meter.usedTokens).toBe(3788);
+    expect(meter.usedTokens).toBe(3868);
   });
 
   it("treats exclusive input plus cache as occupancy, not a session sum", () => {
@@ -274,10 +274,10 @@ describe("chat token usage", () => {
         cacheCreationTokens: 0,
       },
     });
-    expect(meter.usedTokens).toBe(119_881);
+    expect(meter.usedTokens).toBe(126_892);
     expect(meter.inputTokens).toBe(66_121);
     expect(meter.cacheReadTokens).toBe(53_760);
-    expect(meter.percent).toBe(44);
+    expect(meter.percent).toBe(47);
   });
 
   it("reads nested message.usage", () => {
@@ -311,7 +311,7 @@ describe("chat token usage", () => {
     expect(meter.inputTokens).toBe(800);
     expect(meter.outputTokens).toBe(80);
     expect(meter.cacheReadTokens).toBe(400);
-    expect(meter.usedTokens).toBe(1200);
+    expect(meter.usedTokens).toBe(1280);
     expect(meter.estimated).toBe(false);
   });
 
@@ -332,7 +332,7 @@ describe("chat token usage", () => {
     });
     expect(meter.inputTokens).toBe(3588);
     expect(meter.cacheReadTokens).toBe(20992);
-    expect(meter.usedTokens).toBe(24580);
+    expect(meter.usedTokens).toBe(24680);
   });
 
   it("uses this conversation's messages instead of a leftover snapshot", () => {
@@ -356,7 +356,7 @@ describe("chat token usage", () => {
         },
       ],
     });
-    expect(meter.usedTokens).toBe(24580);
+    expect(meter.usedTokens).toBe(24680);
     expect(meter.inputTokens).toBe(3588);
     expect(meter.cacheReadTokens).toBe(20992);
     expect(meter.outputTokens).toBe(100);
@@ -383,7 +383,7 @@ describe("chat token usage", () => {
         },
       ],
     });
-    expect(meter.usedTokens).toBe(24580);
+    expect(meter.usedTokens).toBe(24680);
     expect(meter.inputTokens).toBe(3588);
   });
 
@@ -424,7 +424,7 @@ describe("chat token usage", () => {
     });
     expect(meter.inputTokens).toBe(12_000);
     expect(meter.cacheReadTokens).toBe(3_000);
-    expect(meter.usedTokens).toBe(15_000);
+    expect(meter.usedTokens).toBe(15_200);
     expect(meter.percent).toBe(8);
   });
 
@@ -456,7 +456,7 @@ describe("chat token usage", () => {
         },
       ],
     });
-    expect(meter.usedTokens).toBe(2_500);
+    expect(meter.usedTokens).toBe(2_510);
   });
 
   it("does not count an unread Read result before a later request reports it", () => {
@@ -474,7 +474,7 @@ describe("chat token usage", () => {
         { type: "user" },
       ],
     });
-    expect(meter.usedTokens).toBe(800);
+    expect(meter.usedTokens).toBe(820);
     expect(meter.percent).toBe(0);
   });
 
@@ -498,8 +498,105 @@ describe("chat token usage", () => {
         },
       ],
     });
-    expect(meter.usedTokens).toBe(20_000);
+    expect(meter.usedTokens).toBe(20_030);
     expect(meter.percent).toBe(10);
+  });
+
+  it("uses the latest Codex request instead of summing tool-loop inputs", () => {
+    const meter = buildTokenMeterModel({
+      modelLabel: "gpt-6-luna",
+      windowTokens: 272_000,
+      messages: [
+        { type: "user" },
+        {
+          type: "assistant",
+          message: {
+            usage: {
+              input_tokens: 94_800,
+              cached_input_tokens: 80_000,
+              output_tokens: 1_000,
+            },
+          },
+        },
+        { type: "user" },
+        {
+          type: "assistant",
+          message: {
+            usage: {
+              input_tokens: 99_600,
+              cached_input_tokens: 90_000,
+              output_tokens: 1_965,
+            },
+          },
+        },
+      ],
+    });
+    expect(meter.inputTokens).toBe(9_600);
+    expect(meter.cacheReadTokens).toBe(90_000);
+    expect(meter.outputTokens).toBe(1_965);
+    expect(meter.usedTokens).toBe(101_565);
+    expect(meter.usedTokens).not.toBe(189_600);
+  });
+
+  it("reads DeepSeek, Gemini, and Codex cache fields", () => {
+    const deepseek = buildTokenMeterModel({
+      modelLabel: "deepseek-v4-pro",
+      windowTokens: 1_000_000,
+      messages: [
+        {
+          type: "assistant",
+          usage: {
+            prompt_tokens: 4_000,
+            completion_tokens: 20,
+            prompt_cache_hit_tokens: 3_200,
+          },
+        },
+      ],
+    });
+    expect(deepseek.cacheReadTokens).toBe(3_200);
+    expect(deepseek.inputTokens).toBe(800);
+    expect(deepseek.usedTokens).toBe(4_020);
+
+    const gemini = buildTokenMeterModel({
+      modelLabel: "gemini-2.5-pro",
+      windowTokens: 1_000_000,
+      messages: [
+        {
+          type: "assistant",
+          usage: {
+            promptTokenCount: 5_000,
+            output_tokens: 30,
+            cachedContentTokenCount: 4_100,
+          },
+        },
+      ],
+    });
+    expect(gemini.cacheReadTokens).toBe(4_100);
+    expect(gemini.inputTokens).toBe(900);
+    expect(gemini.usedTokens).toBe(5_030);
+  });
+
+  it("does not let a missing cache field wipe a value from the same request", () => {
+    const merged = mergeTokenUsageSnapshots(
+      {
+        inputTokens: 8_000,
+        outputTokens: 10,
+        cacheReadTokens: 90_000,
+        cacheCreationTokens: 100,
+      },
+      {
+        inputTokens: 8_000,
+        outputTokens: 40,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        cacheReadKnown: false,
+        cacheCreationKnown: false,
+      },
+    );
+    expect(merged.cacheReadTokens).toBe(90_000);
+    expect(merged.cacheCreationTokens).toBe(100);
+    expect(merged.outputTokens).toBe(40);
+    expect(merged.cacheReadKnown).toBeUndefined();
   });
 
   it("ignores leftover lastUsage when this conversation has no messages", () => {

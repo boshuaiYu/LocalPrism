@@ -11,6 +11,7 @@ import {
   lastTurnUsage as lastTurnUsageFromMessages,
   mergeTokenUsageSnapshots,
   parseUsageFields,
+  snapshotHasPromptTokens,
   snapshotHasTokens,
   type TokenUsageSnapshot,
 } from "@/lib/chat-token-usage";
@@ -3526,9 +3527,26 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         !msg.codexTurnId && tab.activeCodexTurnId
           ? { ...msg, codexTurnId: tab.activeCodexTurnId }
           : msg;
-      const lastTurnUsage = snapshotHasTokens(incomingUsage)
-        ? mergeTokenUsageSnapshots(tab.lastTurnUsage, incomingUsage)
-        : undefined;
+      const currentInclusive = tab.lastTurnUsage
+        ? tab.lastTurnUsage.inputTokens +
+          tab.lastTurnUsage.cacheReadTokens +
+          tab.lastTurnUsage.cacheCreationTokens
+        : 0;
+      const incomingInclusive =
+        incomingUsage.inputTokens +
+        incomingUsage.cacheReadTokens +
+        incomingUsage.cacheCreationTokens;
+      // Claude `result.usage` sums every model call in the turn. Keep the
+      // latest request snapshot when that sum is larger.
+      const cumulativeResult =
+        stamped.type === "result" &&
+        !!tab.lastTurnUsage &&
+        snapshotHasPromptTokens(tab.lastTurnUsage) &&
+        incomingInclusive > currentInclusive;
+      const lastTurnUsage =
+        !cumulativeResult && snapshotHasTokens(incomingUsage)
+          ? mergeTokenUsageSnapshots(tab.lastTurnUsage, incomingUsage)
+          : undefined;
 
       if (
         stamped.type === "assistant" &&
@@ -3693,8 +3711,14 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       const lastTurnUsage = mergeTokenUsageSnapshots(tab.lastTurnUsage, {
         inputTokens,
         outputTokens,
-        cacheReadTokens: extras?.cacheReadTokens || 0,
-        cacheCreationTokens: extras?.cacheCreationTokens || 0,
+        cacheReadTokens: extras?.cacheReadTokens ?? 0,
+        cacheCreationTokens: extras?.cacheCreationTokens ?? 0,
+        ...(extras?.cacheReadTokens === undefined
+          ? { cacheReadKnown: false }
+          : {}),
+        ...(extras?.cacheCreationTokens === undefined
+          ? { cacheCreationKnown: false }
+          : {}),
       });
       const contextWindow =
         extras?.contextWindow && extras.contextWindow > 0

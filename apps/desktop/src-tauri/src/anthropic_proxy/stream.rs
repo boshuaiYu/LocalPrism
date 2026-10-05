@@ -22,6 +22,7 @@ struct OpenAiStreamState {
     input_tokens: u64,
     output_tokens: u64,
     cache_read_tokens: u64,
+    cache_creation_tokens: u64,
 }
 
 #[derive(Default)]
@@ -165,7 +166,11 @@ fn openai_stream_chunk_to_anthropic(
     credential: &OpenAiProxyCredential,
 ) -> String {
     let mut body = String::new();
-    if let Some(usage) = chunk.get("usage") {
+    if let Some(usage) = chunk
+        .get("usage")
+        .or_else(|| chunk.get("usage_metadata"))
+        .or_else(|| chunk.get("usageMetadata"))
+    {
         apply_openai_usage(state, usage);
     }
     ensure_stream_message_started(state, &mut body, chunk, anthropic_request, credential);
@@ -253,11 +258,7 @@ fn ensure_stream_message_started(
                 "content": [],
                 "stop_reason": Value::Null,
                 "stop_sequence": Value::Null,
-                "usage": {
-                    "input_tokens": state.input_tokens,
-                    "output_tokens": state.output_tokens,
-                    "cache_read_input_tokens": state.cache_read_tokens,
-                },
+                "usage": anthropic_usage(state),
             },
         }),
     );
@@ -402,11 +403,7 @@ fn finish_anthropic_stream(state: &mut OpenAiStreamState) -> String {
                     "content": [],
                     "stop_reason": Value::Null,
                     "stop_sequence": Value::Null,
-                    "usage": {
-                        "input_tokens": state.input_tokens,
-                        "output_tokens": state.output_tokens,
-                        "cache_read_input_tokens": state.cache_read_tokens,
-                    },
+                    "usage": anthropic_usage(state),
                 },
             }),
         );
@@ -506,11 +503,7 @@ fn finish_anthropic_stream(state: &mut OpenAiStreamState) -> String {
                 "stop_reason": stop_reason,
                 "stop_sequence": Value::Null,
             },
-            "usage": {
-                "input_tokens": state.input_tokens,
-                "output_tokens": state.output_tokens,
-                "cache_read_input_tokens": state.cache_read_tokens,
-            },
+            "usage": anthropic_usage(state),
         }),
     );
     push_sse(
@@ -559,14 +552,11 @@ pub(super) fn sse_response(message: &Value) -> String {
         .and_then(|value| value.as_array())
         .cloned()
         .unwrap_or_default();
-    let input_tokens = message
-        .pointer("/usage/input_tokens")
-        .and_then(|value| value.as_u64())
-        .unwrap_or(0);
-    let output_tokens = message
-        .pointer("/usage/output_tokens")
-        .and_then(|value| value.as_u64())
-        .unwrap_or(0);
+    let split = super::usage::split_provider_usage(message.get("usage").unwrap_or(&Value::Null));
+    let input_tokens = split.input_tokens;
+    let output_tokens = split.output_tokens;
+    let cache_read_tokens = split.cache_read_tokens.unwrap_or(0);
+    let cache_creation_tokens = split.cache_creation_tokens.unwrap_or(0);
 
     let start = json!({
         "type": "message_start",
@@ -581,6 +571,8 @@ pub(super) fn sse_response(message: &Value) -> String {
             "usage": {
                 "input_tokens": input_tokens,
                 "output_tokens": 0,
+                "cache_read_input_tokens": cache_read_tokens,
+                "cache_creation_input_tokens": cache_creation_tokens,
             },
         },
     });
@@ -745,31 +737,44 @@ fn push_sse(body: &mut String, event: &str, data: &Value) {
     body.push_str("\n\n");
 }
 
+fn anthropic_usage(state: &OpenAiStreamState) -> Value {
+    json!({
+        "input_tokens": state.input_tokens,
+        "output_tokens": state.output_tokens,
+        "cache_read_input_tokens": state.cache_read_tokens,
+        "cache_creation_input_tokens": state.cache_creation_tokens,
+    })
+}
+
 fn apply_openai_usage(state: &mut OpenAiStreamState, usage: &Value) {
-    let cache = super::usage::openai_cache_read_tokens(usage);
-    let input = super::usage::exclusive_openai_input_tokens(
-        super::usage::usage_token(
-            usage,
-            &["prompt_tokens", "input_tokens", "prompt_token_count"],
-        ),
-        cache,
-    );
-    let output = super::usage::usage_token(
-        usage,
-        &[
-            "completion_tokens",
-            "output_tokens",
-            "completion_token_count",
-        ],
-    );
-    if input > 0 {
-        state.input_tokens = input;
+    let split = super::usage::split_provider_usage(usage);
+    // A later chunk that omits cache must not wipe a count already seen, and
+    // must not be stored as exclusive input while the old cache is kept —
+    // that would count the cached tokens twice. An explicit zero still
+    // replaces the previous value.
+    let cache_known =
+        split.cache_read_tokens.is_some() || split.cache_creation_tokens.is_some();
+    if cache_known {
+        if let Some(cache) = split.cache_read_tokens {
+            state.cache_read_tokens = cache;
+        }
+        if let Some(cache) = split.cache_creation_tokens {
+            state.cache_creation_tokens = cache;
+        }
+        if split.input_tokens > 0
+            || split.cache_read_tokens.unwrap_or(0) > 0
+            || split.cache_creation_tokens.unwrap_or(0) > 0
+        {
+            state.input_tokens = split.input_tokens;
+        }
+    } else if state.cache_read_tokens == 0
+        && state.cache_creation_tokens == 0
+        && split.input_tokens > 0
+    {
+        state.input_tokens = split.input_tokens;
     }
-    if output > 0 {
-        state.output_tokens = output;
-    }
-    if cache > 0 {
-        state.cache_read_tokens = cache;
+    if split.output_tokens > 0 {
+        state.output_tokens = split.output_tokens;
     }
 }
 
@@ -989,6 +994,50 @@ mod tests {
         assert!(done.contains("\"input_tokens\":3388"));
         assert!(done.contains("\"output_tokens\":80"));
         assert!(done.contains("\"cache_read_input_tokens\":200"));
+    }
+
+    #[test]
+    fn later_usage_chunk_without_cache_does_not_double_count_or_clear_it() {
+        let request = json!({ "model": "gpt-6-luna" });
+        let mut state = OpenAiStreamState::default();
+        openai_stream_chunk_to_anthropic(
+            &mut state,
+            &json!({
+                "id": "chatcmpl_1",
+                "choices": [{ "delta": { "content": "Hi" }, "finish_reason": null }]
+            }),
+            &request,
+            &credential(),
+        );
+        openai_stream_chunk_to_anthropic(
+            &mut state,
+            &json!({
+                "id": "chatcmpl_1",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 189600,
+                    "completion_tokens": 2000,
+                    "prompt_tokens_details": { "cached_tokens": 170000 }
+                }
+            }),
+            &request,
+            &credential(),
+        );
+        openai_stream_chunk_to_anthropic(
+            &mut state,
+            &json!({
+                "id": "chatcmpl_1",
+                "choices": [],
+                "usage": { "completion_tokens": 2965 }
+            }),
+            &request,
+            &credential(),
+        );
+        let done = finish_anthropic_stream(&mut state);
+        assert!(done.contains("\"input_tokens\":19600"));
+        assert!(done.contains("\"output_tokens\":2965"));
+        assert!(done.contains("\"cache_read_input_tokens\":170000"));
+        assert!(!done.contains("\"input_tokens\":189600"));
     }
 
     #[test]

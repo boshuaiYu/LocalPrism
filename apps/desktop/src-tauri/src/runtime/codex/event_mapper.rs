@@ -62,7 +62,8 @@ pub(crate) struct CodexEventMapper {
 struct ContextUsage {
     input_tokens: u64,
     output_tokens: u64,
-    cache_read_tokens: u64,
+    cache_read_tokens: Option<u64>,
+    cache_creation_tokens: Option<u64>,
     context_window: Option<u64>,
 }
 
@@ -115,10 +116,15 @@ impl CodexEventMapper {
                 .collect(),
             "item/completed" => self.map_item_completed(generation, route, params),
             "turn/completed" => self.map_turn_completed(generation, route, params),
-            "thread/tokenUsage/updated" => self
+            "thread/tokenUsage/updated" | "rawResponse/completed" => self
                 .map_token_usage(generation, route, params)
                 .into_iter()
                 .collect(),
+            "codex/event" | "codex/event/token_count" if is_token_count_event(method, params) => {
+                self.map_token_usage(generation, route, params)
+                    .into_iter()
+                    .collect()
+            }
             "error" => self
                 .map_error(generation, route, params)
                 .into_iter()
@@ -709,19 +715,20 @@ impl CodexEventMapper {
         route: &TurnRoute,
         params: &Value,
     ) -> Option<RuntimeEventEnvelope> {
-        let thread_id = string_field(params, "threadId")?;
-        let turn_id = string_field(params, "turnId")
-            .or_else(|| nested_string(params, &["turn", "id"]))?;
-        if !route_matches(route, thread_id, Some(turn_id)) {
+        let thread_id = string_field(params, "threadId")
+            .or_else(|| string_field(params, "conversationId"))
+            .or_else(|| nested_string(params, &["thread", "id"]))?;
+        let turn_id = usage_turn_id(route, params)?;
+        if !route_matches(route, thread_id, Some(turn_id.as_str())) {
             return None;
         }
-        let turn = scoped_turn(generation, route, thread_id, turn_id);
+        let turn = scoped_turn(generation, route, thread_id, &turn_id);
         if self.terminal_turns.contains(&turn) {
             return None;
         }
         let usage = parse_turn_usage(params)?;
         self.context_usage.insert(turn, usage);
-        Some(self.usage_event(route, thread_id, turn_id, usage))
+        Some(self.usage_event(route, thread_id, &turn_id, usage))
     }
 
     fn usage_event(
@@ -739,6 +746,7 @@ impl CodexEventMapper {
                 input_tokens: usage.input_tokens,
                 output_tokens: usage.output_tokens,
                 cache_read_tokens: usage.cache_read_tokens,
+                cache_creation_tokens: usage.cache_creation_tokens,
                 context_window: usage.context_window,
             },
         )
@@ -903,97 +911,105 @@ impl CodexEventMapper {
     }
 }
 
+fn is_token_count_event(method: &str, params: &Value) -> bool {
+    if method == "codex/event/token_count" {
+        return true;
+    }
+    params.pointer("/msg/type").and_then(Value::as_str) == Some("token_count")
+        || params.get("type").and_then(Value::as_str) == Some("token_count")
+}
+
+fn usage_turn_id(route: &TurnRoute, params: &Value) -> Option<String> {
+    if let Some(turn_id) =
+        string_field(params, "turnId").or_else(|| nested_string(params, &["turn", "id"]))
+    {
+        return Some(turn_id.to_owned());
+    }
+    if !is_token_count_event("codex/event", params) {
+        return None;
+    }
+    // Legacy token_count often has no turnId. Attach it to the route's turn
+    // instead of dropping the only per-request snapshot.
+    route
+        .turn_id
+        .clone()
+        .or_else(|| string_field(params, "id").map(str::to_owned))
+}
+
 fn parse_turn_usage(params: &Value) -> Option<ContextUsage> {
     let usage = params
         .pointer("/tokenUsage")
+        .or_else(|| params.pointer("/token_usage"))
         .or_else(|| params.pointer("/turn/tokenUsage"))
         .or_else(|| params.pointer("/turn/usage"))
         .or_else(|| params.get("usage"))
-        .or_else(|| params.get("tokenUsage"))?;
-    // `last` is the current request. `total` is cumulative thread billing.
-    let snapshot = usage
-        .get("last")
-        .filter(|value| value.is_object())
-        .or_else(|| {
-            usage
-                .get("last_token_usage")
-                .filter(|value| value.is_object())
-        })
-        .unwrap_or(usage);
-    if snapshot.get("total").is_some() && snapshot.get("last").is_some() {
+        .or_else(|| params.get("tokenUsage"))
+        .or_else(|| params.pointer("/msg/info"))
+        .or_else(|| params.get("info"))?;
+    // `last` is this request. `total` sums every Responses call in the thread.
+    let snapshot = per_request_usage(usage)?;
+    let split = crate::anthropic_proxy::usage::split_provider_usage(snapshot);
+    let cache_read = split.cache_read_tokens.unwrap_or(0);
+    let cache_write = split.cache_creation_tokens.unwrap_or(0);
+    if split.input_tokens == 0 && split.output_tokens == 0 && cache_read == 0 && cache_write == 0 {
         return None;
     }
-    let raw_input = usage_number(
-        snapshot,
-        &["input_tokens", "inputTokens", "prompt_tokens", "promptTokens"],
-    )?;
-    let output = usage_number(
-        snapshot,
-        &[
-            "output_tokens",
-            "outputTokens",
-            "completion_tokens",
-            "completionTokens",
-        ],
-    )
-    .unwrap_or(0);
-    let cache = usage_number(
-        snapshot,
-        &[
-            "cached_input_tokens",
-            "cachedInputTokens",
-            "cache_read_input_tokens",
-            "cacheReadInputTokens",
-        ],
-    )
-    .unwrap_or(0);
-    // Codex counts cached input inside input_tokens. Anthropic-shaped meters
-    // add the two fields, so emit the uncached remainder when cache is a subset.
-    let input_tokens = if cache > 0 && cache <= raw_input {
-        raw_input - cache
-    } else {
-        raw_input
-    };
-    if input_tokens == 0 && output == 0 && cache == 0 {
-        return None;
-    }
-    let context_window = usage_number(
-        usage,
-        &["modelContextWindow", "model_context_window", "context_window"],
-    )
-    .filter(|window| *window > 0)
-    .or_else(|| {
-        usage_number(
-            snapshot,
-            &["modelContextWindow", "model_context_window", "context_window"],
-        )
-        .filter(|window| *window > 0)
-    });
+    let context_window = context_window_of(usage)
+        .or_else(|| context_window_of(snapshot))
+        .or_else(|| params.pointer("/msg/info").and_then(context_window_of))
+        .filter(|window| *window > 0);
     Some(ContextUsage {
-        input_tokens,
-        output_tokens: output,
-        cache_read_tokens: cache,
+        input_tokens: split.input_tokens,
+        output_tokens: split.output_tokens,
+        cache_read_tokens: split.cache_read_tokens,
+        cache_creation_tokens: split.cache_creation_tokens,
         context_window,
     })
 }
 
-fn usage_number(value: &Value, keys: &[&str]) -> Option<u64> {
-    for key in keys {
-        if let Some(number) = value.get(*key).and_then(json_u64) {
-            return Some(number);
+fn per_request_usage(usage: &Value) -> Option<&Value> {
+    const LAST: &[&str] = &["last", "lastTokenUsage", "last_token_usage"];
+    const TOTAL: &[&str] = &["total", "totalTokenUsage", "total_token_usage"];
+    if let Some(last) = object_field(usage, LAST) {
+        return Some(last);
+    }
+    if let Some(info) = usage.get("info").filter(|value| value.is_object()) {
+        if let Some(last) = object_field(info, LAST) {
+            return Some(last);
+        }
+        if object_field(info, TOTAL).is_some() {
+            return None;
         }
     }
-    None
+    if object_field(usage, TOTAL).is_some() {
+        return None;
+    }
+    Some(usage)
+}
+
+fn object_field<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
+    keys.iter()
+        .find_map(|key| value.get(*key).filter(|item| item.is_object()))
+}
+
+fn context_window_of(value: &Value) -> Option<u64> {
+    const KEYS: &[&str] = &[
+        "modelContextWindow",
+        "model_context_window",
+        "contextWindow",
+        "context_window",
+    ];
+    KEYS.iter().find_map(|key| value.get(*key).and_then(json_u64))
 }
 
 fn json_u64(value: &Value) -> Option<u64> {
     value
         .as_u64()
-        .or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
+        .or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()))
         .or_else(|| {
             value
                 .as_f64()
-                .and_then(|n| (n.is_finite() && n >= 0.0).then_some(n as u64))
+                .and_then(|number| (number.is_finite() && number >= 0.0).then_some(number as u64))
         })
 }
 
@@ -1021,8 +1037,9 @@ fn route_matches(route: &TurnRoute, thread_id: &str, turn_id: Option<&str>) -> b
 }
 
 fn known_ids_match_route(route: &TurnRoute, params: &Value) -> bool {
-    let thread_id =
-        string_field(params, "threadId").or_else(|| nested_string(params, &["thread", "id"]));
+    let thread_id = string_field(params, "threadId")
+        .or_else(|| string_field(params, "conversationId"))
+        .or_else(|| nested_string(params, &["thread", "id"]));
     if let (Some(expected), Some(received)) = (route.session_id.as_deref(), thread_id) {
         if expected != received {
             return false;
@@ -1809,7 +1826,8 @@ mod tests {
             RuntimeEvent::Usage {
                 input_tokens: 3588,
                 output_tokens: 100,
-                cache_read_tokens: 20992,
+                cache_read_tokens: Some(20992),
+                cache_creation_tokens: None,
                 context_window: None,
             }
         ));
@@ -1853,7 +1871,8 @@ mod tests {
             RuntimeEvent::Usage {
                 input_tokens: 2080,
                 output_tokens: 16,
-                cache_read_tokens: 3072,
+                cache_read_tokens: Some(3072),
+                cache_creation_tokens: None,
                 context_window: Some(272000),
             }
         ));
@@ -1880,10 +1899,142 @@ mod tests {
             RuntimeEvent::Usage {
                 input_tokens: 2080,
                 output_tokens: 16,
-                cache_read_tokens: 3072,
+                cache_read_tokens: Some(3072),
+                cache_creation_tokens: None,
                 context_window: Some(272000),
             }
         ));
+    }
+
+    #[test]
+    fn camel_case_last_usage_is_not_replaced_by_the_thread_total() {
+        let mut mapper = CodexEventMapper::default();
+        let route = route("main", "tab-a", "thread-a", Some("turn-a"));
+        let live = map(
+            &mut mapper,
+            &route,
+            "thread/tokenUsage/updated",
+            json!({
+                "threadId": "thread-a",
+                "turnId": "turn-a",
+                "tokenUsage": {
+                    "lastTokenUsage": {
+                        "inputTokens": 98_000,
+                        "cachedInputTokens": 90_000,
+                        "cacheWriteInputTokens": 100,
+                        "outputTokens": 1_500
+                    },
+                    "totalTokenUsage": {
+                        "inputTokens": 189_600,
+                        "cachedInputTokens": 170_000,
+                        "outputTokens": 2_965
+                    },
+                    "modelContextWindow": 272_000
+                }
+            }),
+        );
+        assert!(matches!(
+            &live[0].event,
+            RuntimeEvent::Usage {
+                input_tokens: 7_900,
+                output_tokens: 1_500,
+                cache_read_tokens: Some(90_000),
+                cache_creation_tokens: Some(100),
+                context_window: Some(272_000),
+            }
+        ));
+    }
+
+    #[test]
+    fn responses_details_and_legacy_token_count_use_the_latest_request() {
+        let mut mapper = CodexEventMapper::default();
+        let route = route("main", "tab-a", "thread-a", Some("turn-a"));
+        let raw = map(
+            &mut mapper,
+            &route,
+            "rawResponse/completed",
+            json!({
+                "threadId": "thread-a",
+                "turnId": "turn-a",
+                "responseId": "resp_1",
+                "usage": {
+                    "input_tokens": 189_600,
+                    "input_tokens_details": { "cached_tokens": 170_000 },
+                    "output_tokens": 2_965
+                }
+            }),
+        );
+        assert!(matches!(
+            &raw[0].event,
+            RuntimeEvent::Usage {
+                input_tokens: 19_600,
+                output_tokens: 2_965,
+                cache_read_tokens: Some(170_000),
+                context_window: None,
+                ..
+            }
+        ));
+
+        let mut mapper = CodexEventMapper::default();
+        let legacy = map(
+            &mut mapper,
+            &route,
+            "codex/event",
+            json!({
+                "conversationId": "thread-a",
+                "id": "turn-a",
+                "msg": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 98_000,
+                            "cached_input_tokens": 90_000,
+                            "output_tokens": 1_500
+                        },
+                        "total_token_usage": {
+                            "input_tokens": 189_600,
+                            "cached_input_tokens": 170_000,
+                            "output_tokens": 2_965
+                        },
+                        "model_context_window": 272_000
+                    }
+                }
+            }),
+        );
+        assert!(matches!(
+            &legacy[0].event,
+            RuntimeEvent::Usage {
+                input_tokens: 8_000,
+                output_tokens: 1_500,
+                cache_read_tokens: Some(90_000),
+                context_window: Some(272_000),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn cumulative_total_without_a_last_snapshot_is_not_context_usage() {
+        let mut mapper = CodexEventMapper::default();
+        let route = route("main", "tab-a", "thread-a", Some("turn-a"));
+        let events = map(
+            &mut mapper,
+            &route,
+            "thread/tokenUsage/updated",
+            json!({
+                "threadId": "thread-a",
+                "turnId": "turn-a",
+                "tokenUsage": {
+                    "total": {
+                        "inputTokens": 189_600,
+                        "cachedInputTokens": 170_000,
+                        "outputTokens": 2_965
+                    },
+                    "modelContextWindow": 272_000
+                }
+            }),
+        );
+        assert!(events.is_empty());
     }
 
     #[test]

@@ -3,6 +3,10 @@ export type TokenUsageSnapshot = {
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
+  /** False when this snapshot did not include a cache-read field. */
+  cacheReadKnown?: boolean;
+  /** False when this snapshot did not include a cache-write field. */
+  cacheCreationKnown?: boolean;
 };
 
 export type TokenMeterModel = {
@@ -18,6 +22,13 @@ export type TokenMeterModel = {
   estimated: boolean;
 };
 
+type UsageDetail = {
+  cached_tokens?: number;
+  cachedTokens?: number;
+  cache_write_tokens?: number;
+  cacheWriteTokens?: number;
+};
+
 type UsageFields = {
   input_tokens?: number;
   output_tokens?: number;
@@ -30,8 +41,25 @@ type UsageFields = {
   cache_read_tokens?: number;
   cache_creation_tokens?: number;
   cached_tokens?: number;
-  input_tokens_details?: { cached_tokens?: number };
-  prompt_tokens_details?: { cached_tokens?: number };
+  cachedTokens?: number;
+  cached_input_tokens?: number;
+  cachedInputTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+  cache_write_input_tokens?: number;
+  cacheWriteInputTokens?: number;
+  cache_write_tokens?: number;
+  cacheWriteTokens?: number;
+  prompt_cache_hit_tokens?: number;
+  promptCacheHitTokens?: number;
+  cached_content_token_count?: number;
+  cachedContentTokenCount?: number;
+  prompt_token_count?: number;
+  promptTokenCount?: number;
+  input_tokens_details?: UsageDetail;
+  prompt_tokens_details?: UsageDetail;
+  inputTokensDetails?: UsageDetail;
+  promptTokensDetails?: UsageDetail;
 };
 
 type UsageMessage = {
@@ -48,13 +76,23 @@ type CatalogModel = {
   contextWindow?: number | null;
 };
 
-function usageNumber(...values: Array<number | undefined | null>): number {
+function usageCount(...values: Array<number | undefined | null>): {
+  value: number;
+  present: boolean;
+} {
+  let sawZero = false;
   for (const value of values) {
-    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-      return value;
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+      continue;
     }
+    if (value > 0) return { value, present: true };
+    sawZero = true;
   }
-  return 0;
+  return { value: 0, present: sawZero };
+}
+
+function usageNumber(...values: Array<number | undefined | null>): number {
+  return usageCount(...values).value;
 }
 
 function exclusiveInputTokens(input: number, cache: number): number {
@@ -64,34 +102,71 @@ function exclusiveInputTokens(input: number, cache: number): number {
 export function parseUsageFields(
   usage: UsageFields | undefined | null,
 ): TokenUsageSnapshot {
-  const anthropicCache = usageNumber(usage?.cache_read_input_tokens);
-  const cacheReadTokens = usageNumber(
+  const anthropicCache = usageCount(
     usage?.cache_read_input_tokens,
+    usage?.cacheReadInputTokens,
+  );
+  const anthropicWrite = usageCount(
+    usage?.cache_creation_input_tokens,
+    usage?.cacheCreationInputTokens,
+  );
+  const cacheRead = usageCount(
+    usage?.cache_read_input_tokens,
+    usage?.cached_input_tokens,
+    usage?.cachedInputTokens,
     usage?.cache_read_tokens,
     usage?.cached_tokens,
+    usage?.cachedTokens,
+    usage?.prompt_cache_hit_tokens,
+    usage?.promptCacheHitTokens,
+    usage?.cached_content_token_count,
+    usage?.cachedContentTokenCount,
     usage?.input_tokens_details?.cached_tokens,
+    usage?.input_tokens_details?.cachedTokens,
     usage?.prompt_tokens_details?.cached_tokens,
+    usage?.prompt_tokens_details?.cachedTokens,
+    usage?.inputTokensDetails?.cached_tokens,
+    usage?.inputTokensDetails?.cachedTokens,
+    usage?.promptTokensDetails?.cachedTokens,
+  );
+  const cacheWrite = usageCount(
+    usage?.cache_creation_input_tokens,
+    usage?.cache_write_input_tokens,
+    usage?.cacheWriteInputTokens,
+    usage?.cache_creation_tokens,
+    usage?.cache_write_tokens,
+    usage?.cacheWriteTokens,
+    usage?.input_tokens_details?.cache_write_tokens,
+    usage?.input_tokens_details?.cacheWriteTokens,
+    usage?.prompt_tokens_details?.cache_write_tokens,
+    usage?.inputTokensDetails?.cacheWriteTokens,
+    usage?.promptTokensDetails?.cacheWriteTokens,
   );
   const rawInput = usageNumber(
     usage?.input_tokens,
     usage?.prompt_tokens,
     usage?.inputTokens,
+    usage?.prompt_token_count,
+    usage?.promptTokenCount,
   );
+  // Anthropic input already excludes cache. Other providers include it.
+  const anthropicShape = anthropicCache.value > 0 || anthropicWrite.value > 0;
+  let inputTokens = rawInput;
+  if (!anthropicShape) {
+    inputTokens = exclusiveInputTokens(inputTokens, cacheRead.value);
+    inputTokens = exclusiveInputTokens(inputTokens, cacheWrite.value);
+  }
   return {
-    inputTokens:
-      anthropicCache > 0
-        ? rawInput
-        : exclusiveInputTokens(rawInput, cacheReadTokens),
+    inputTokens,
     outputTokens: usageNumber(
       usage?.output_tokens,
       usage?.completion_tokens,
       usage?.outputTokens,
     ),
-    cacheReadTokens,
-    cacheCreationTokens: usageNumber(
-      usage?.cache_creation_input_tokens,
-      usage?.cache_creation_tokens,
-    ),
+    cacheReadTokens: cacheRead.value,
+    cacheCreationTokens: cacheWrite.value,
+    ...(cacheRead.present ? {} : { cacheReadKnown: false }),
+    ...(cacheWrite.present ? {} : { cacheCreationKnown: false }),
   };
 }
 
@@ -137,24 +212,41 @@ export function snapshotHasPromptTokens(snapshot: TokenUsageSnapshot): boolean {
   );
 }
 
+function publishedUsage(snapshot: TokenUsageSnapshot): TokenUsageSnapshot {
+  return {
+    inputTokens: snapshot.inputTokens,
+    outputTokens: snapshot.outputTokens,
+    cacheReadTokens: snapshot.cacheReadTokens,
+    cacheCreationTokens: snapshot.cacheCreationTokens,
+  };
+}
+
 export function mergeTokenUsageSnapshots(
   current: TokenUsageSnapshot | null | undefined,
   incoming: TokenUsageSnapshot,
 ): TokenUsageSnapshot {
-  if (!current || !snapshotHasTokens(current)) return incoming;
-  if (!snapshotHasTokens(incoming)) return current;
+  if (!current || !snapshotHasTokens(current)) return publishedUsage(incoming);
+  if (!snapshotHasTokens(incoming)) return publishedUsage(current);
   return {
     inputTokens: incoming.inputTokens || current.inputTokens,
     outputTokens:
       snapshotHasPromptTokens(incoming) && incoming.outputTokens > 0
         ? incoming.outputTokens
         : Math.max(incoming.outputTokens, current.outputTokens),
-    cacheReadTokens: snapshotHasPromptTokens(incoming)
-      ? incoming.cacheReadTokens
-      : current.cacheReadTokens,
-    cacheCreationTokens: snapshotHasPromptTokens(incoming)
-      ? incoming.cacheCreationTokens
-      : current.cacheCreationTokens,
+    // A missing cache field must not wipe a value already recorded for this
+    // request. An explicit zero still replaces it.
+    cacheReadTokens:
+      incoming.cacheReadKnown === false
+        ? current.cacheReadTokens
+        : snapshotHasPromptTokens(incoming)
+          ? incoming.cacheReadTokens
+          : current.cacheReadTokens,
+    cacheCreationTokens:
+      incoming.cacheCreationKnown === false
+        ? current.cacheCreationTokens
+        : snapshotHasPromptTokens(incoming)
+          ? incoming.cacheCreationTokens
+          : current.cacheCreationTokens,
   };
 }
 
@@ -188,12 +280,13 @@ export function lastTurnUsage(
   // `result.usage` is cumulative across tool steps and, on a resumed Claude
   // session, earlier spend. Context occupancy is the latest root request.
   const requestUsage = collectLastTurnUsage(messages, "requests");
-  if (requestUsage && snapshotHasPromptTokens(requestUsage))
-    return requestUsage;
-  return (
+  if (requestUsage && snapshotHasPromptTokens(requestUsage)) {
+    return publishedUsage(requestUsage);
+  }
+  const fallback =
     collectLastTurnUsage(messages, "results") ??
-    collectLastTurnUsage(messages, "any")
-  );
+    collectLastTurnUsage(messages, "any");
+  return fallback ? publishedUsage(fallback) : null;
 }
 
 function normalizeModelKey(value: string): string {
@@ -256,11 +349,15 @@ export function buildTokenMeterModel(options: {
   const outputTokens = last ? last.outputTokens : 0;
   const cacheReadTokens = last?.cacheReadTokens ?? 0;
   const cacheCreationTokens = last?.cacheCreationTokens ?? 0;
-  // Prompt occupancy for the latest request. Anthropic input excludes cache.
-  // OpenAI-shaped snapshots are split before they reach this sum. Do not add
-  // session-cumulative result totals on top of this request.
+  // Occupancy is the latest request: uncached input + cache read + cache
+  // write + that request's output. Cache is already split out of inclusive
+  // provider input, so adding it back does not double-count. Do not add
+  // earlier requests or a thread-lifetime total.
   const usedTokens = last
-    ? last.inputTokens + last.cacheReadTokens + last.cacheCreationTokens
+    ? last.inputTokens +
+      last.cacheReadTokens +
+      last.cacheCreationTokens +
+      last.outputTokens
     : 0;
   const windowTokens = estimateContextWindow(
     options.modelLabel,

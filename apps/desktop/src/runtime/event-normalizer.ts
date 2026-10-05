@@ -263,10 +263,12 @@ function normalizeRuntimeEvent(
           type: "usage",
           inputTokens: value.inputTokens,
           outputTokens: value.outputTokens,
-          cacheReadTokens:
-            typeof value.cacheReadTokens === "number"
-              ? value.cacheReadTokens
-              : 0,
+          ...(typeof value.cacheReadTokens === "number"
+            ? { cacheReadTokens: value.cacheReadTokens }
+            : {}),
+          ...(typeof value.cacheCreationTokens === "number"
+            ? { cacheCreationTokens: value.cacheCreationTokens }
+            : {}),
           contextWindow:
             typeof value.contextWindow === "number" && value.contextWindow > 0
               ? value.contextWindow

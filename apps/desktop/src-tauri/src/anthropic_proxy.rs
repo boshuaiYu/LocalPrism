@@ -5,7 +5,7 @@ pub(crate) mod responses;
 mod stream;
 pub(crate) mod tools;
 mod transformers;
-mod usage;
+pub(crate) mod usage;
 
 use self::messages::{
     anthropic_to_openai_request, hoist_anthropic_system_messages, normalize_openai_system_messages,

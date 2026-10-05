@@ -128,8 +128,13 @@ pub enum RuntimeEvent {
     Usage {
         input_tokens: u64,
         output_tokens: u64,
-        #[serde(default)]
-        cache_read_tokens: u64,
+        /// `None` means this event did not report cache reads. A present zero
+        /// is a real miss and may replace an older value.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_tokens: Option<u64>,
+        /// `None` means this event did not report cache writes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_creation_tokens: Option<u64>,
         /// Model context window reported with this snapshot, when the runtime
         /// knows it. Absent when the event only carries token counts.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -352,7 +357,8 @@ mod tests {
                 RuntimeEvent::Usage {
                     input_tokens: 3,
                     output_tokens: 5,
-                    cache_read_tokens: 0,
+                    cache_read_tokens: None,
+                    cache_creation_tokens: None,
                     context_window: None,
                 },
                 "usage",

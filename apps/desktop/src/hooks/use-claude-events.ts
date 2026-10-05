@@ -1067,6 +1067,7 @@ export function useClaudeEvents() {
           deltaBatcher.flush(tabId);
           chatStore._addUsage(tabId, event.inputTokens, event.outputTokens, {
             cacheReadTokens: event.cacheReadTokens,
+            cacheCreationTokens: event.cacheCreationTokens,
             contextWindow: event.contextWindow,
           });
           break;

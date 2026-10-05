@@ -178,6 +178,7 @@ pub struct ResponsesToAnthropic {
     input_tokens: u64,
     output_tokens: u64,
     cache_read_tokens: u64,
+    cache_creation_tokens: u64,
 }
 
 impl Default for ResponsesToAnthropic {
@@ -201,6 +202,7 @@ impl Default for ResponsesToAnthropic {
             input_tokens: 0,
             output_tokens: 0,
             cache_read_tokens: 0,
+            cache_creation_tokens: 0,
         }
     }
 }
@@ -229,7 +231,12 @@ impl ResponsesToAnthropic {
                     "content": [],
                     "model": self.model,
                     "stop_reason": null,
-                    "usage": { "input_tokens": 0, "output_tokens": 0 }
+                    "usage": {
+                        "input_tokens": self.input_tokens,
+                        "output_tokens": 0,
+                        "cache_read_input_tokens": self.cache_read_tokens,
+                        "cache_creation_input_tokens": self.cache_creation_tokens
+                    }
                 }
             }),
         )
@@ -584,6 +591,7 @@ impl ResponsesToAnthropic {
                     "input_tokens": self.input_tokens,
                     "output_tokens": self.output_tokens,
                     "cache_read_input_tokens": self.cache_read_tokens,
+                    "cache_creation_input_tokens": self.cache_creation_tokens,
                 }
             }),
         ));
@@ -603,23 +611,32 @@ impl ResponsesToAnthropic {
         if usage.is_null() {
             return;
         }
-        let cache = super::usage::openai_cache_read_tokens(&usage);
-        let input = super::usage::exclusive_openai_input_tokens(
-            super::usage::usage_token(&usage, &["input_tokens", "prompt_tokens", "inputTokens"]),
-            cache,
-        );
-        let output = super::usage::usage_token(
-            &usage,
-            &["output_tokens", "completion_tokens", "outputTokens"],
-        );
-        if input > 0 {
-            self.input_tokens = input;
+        let split = super::usage::split_provider_usage(&usage);
+        // Same rule as the Chat Completions stream: an omitted cache field
+        // must not clear a previous hit or be added on top of inclusive input.
+        let cache_known =
+            split.cache_read_tokens.is_some() || split.cache_creation_tokens.is_some();
+        if cache_known {
+            if let Some(cache) = split.cache_read_tokens {
+                self.cache_read_tokens = cache;
+            }
+            if let Some(cache) = split.cache_creation_tokens {
+                self.cache_creation_tokens = cache;
+            }
+            if split.input_tokens > 0
+                || split.cache_read_tokens.unwrap_or(0) > 0
+                || split.cache_creation_tokens.unwrap_or(0) > 0
+            {
+                self.input_tokens = split.input_tokens;
+            }
+        } else if self.cache_read_tokens == 0
+            && self.cache_creation_tokens == 0
+            && split.input_tokens > 0
+        {
+            self.input_tokens = split.input_tokens;
         }
-        if output > 0 {
-            self.output_tokens = output;
-        }
-        if cache > 0 {
-            self.cache_read_tokens = cache;
+        if split.output_tokens > 0 {
+            self.output_tokens = split.output_tokens;
         }
     }
 }
@@ -863,6 +880,27 @@ mod tests {
         assert!(done.contains("\"input_tokens\":3388"));
         assert!(done.contains("\"output_tokens\":80"));
         assert!(done.contains("\"cache_read_input_tokens\":200"));
+    }
+
+    #[test]
+    fn codex_cached_input_tokens_are_split_out_of_inclusive_input() {
+        let mut translator = ResponsesToAnthropic::default();
+        let done = translator.handle_event(
+            "response.completed",
+            &json!({
+                "response": {
+                    "usage": {
+                        "input_tokens": 189600,
+                        "cached_input_tokens": 170000,
+                        "output_tokens": 2965
+                    }
+                }
+            }),
+        );
+        assert!(done.contains("\"input_tokens\":19600"));
+        assert!(done.contains("\"cache_read_input_tokens\":170000"));
+        assert!(done.contains("\"output_tokens\":2965"));
+        assert!(!done.contains("\"input_tokens\":189600"));
     }
 
     #[test]

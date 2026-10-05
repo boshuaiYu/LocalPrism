@@ -238,6 +238,7 @@ export type RuntimeEvent =
       inputTokens: number;
       outputTokens: number;
       cacheReadTokens?: number;
+      cacheCreationTokens?: number;
       contextWindow?: number | null;
     }
   | { type: "approvalRequested"; request: RuntimeRequest }
