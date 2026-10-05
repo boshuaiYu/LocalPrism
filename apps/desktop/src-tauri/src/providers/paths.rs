@@ -17,24 +17,154 @@ const WRITABLE_PROBE_NAME: &str = ".localprism-writable";
 
 /// App-owned data root.
 ///
-/// Prefer the writable install folder (the directory that contains LocalPrism.exe),
-/// so a custom install like `D:\LocalPrism` keeps claude-home/providers/python there.
-/// Program Files and cargo `target/` builds are not writable/stable, so those
-/// fall back to `%APPDATA%/LocalPrism`. Override with `LOCALPRISM_HOME`.
+/// `LOCALPRISM_HOME`, when set and non-empty, wins on every platform.
+///
+/// On Windows, a writable install folder (the directory containing
+/// `LocalPrism.exe`) is the data home. A portable copy such as `D:\LocalPrism`
+/// keeps claude-home, providers, and uv beside the executable. Program Files
+/// and cargo `target/` builds are skipped and fall back to `%APPDATA%\LocalPrism`.
+///
+/// On macOS, Linux, and other non-Windows platforms the executable directory is
+/// never the data home. That includes AppImage trees (FUSE mounts, extracted
+/// copies, and `--appimage-extract-and-run`), `.app` bundles, and deb/rpm
+/// prefixes. The home is the OS config directory
+/// (`~/Library/Application Support/LocalPrism` or `~/.config/LocalPrism`).
 pub fn localprism_home() -> Result<PathBuf, String> {
-    if let Ok(override_dir) = std::env::var("LOCALPRISM_HOME") {
-        let trimmed = override_dir.trim();
-        if !trimmed.is_empty() {
-            return Ok(PathBuf::from(trimmed));
+    let override_dir = std::env::var("LOCALPRISM_HOME").ok();
+    let exe = std::env::current_exe().ok();
+    let config_dir = dirs::config_dir().or_else(dirs::home_dir);
+    resolve_localprism_home(
+        override_dir.as_deref(),
+        exe.as_deref(),
+        config_dir.as_deref(),
+        host_platform(),
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlatformKind {
+    Windows,
+    Macos,
+    Linux,
+    Other,
+}
+
+fn host_platform() -> PlatformKind {
+    if cfg!(windows) {
+        PlatformKind::Windows
+    } else if cfg!(target_os = "macos") {
+        PlatformKind::Macos
+    } else if cfg!(target_os = "linux") {
+        PlatformKind::Linux
+    } else {
+        PlatformKind::Other
+    }
+}
+
+fn allows_portable_install(platform: PlatformKind) -> bool {
+    matches!(platform, PlatformKind::Windows)
+}
+
+fn resolve_localprism_home(
+    override_dir: Option<&str>,
+    exe_path: Option<&Path>,
+    config_dir: Option<&Path>,
+    platform: PlatformKind,
+) -> Result<PathBuf, String> {
+    resolve_localprism_home_with(
+        override_dir,
+        exe_path,
+        config_dir,
+        platform,
+        install_dir_is_writable,
+    )
+}
+
+fn resolve_localprism_home_with(
+    override_dir: Option<&str>,
+    exe_path: Option<&Path>,
+    config_dir: Option<&Path>,
+    platform: PlatformKind,
+    mut install_dir_is_writable: impl FnMut(&Path) -> bool,
+) -> Result<PathBuf, String> {
+    if let Some(home) = override_home(override_dir) {
+        return Ok(home);
+    }
+    if allows_portable_install(platform) {
+        if let Some(install_dir) = writable_portable_dir(exe_path, &mut install_dir_is_writable) {
+            return Ok(install_dir);
         }
+    } else {
+        warn_stray_install_data_home(exe_path, platform);
     }
-    if let Some(install_dir) = writable_install_dir() {
-        return Ok(install_dir);
+    os_config_home(config_dir)
+}
+
+fn override_home(override_dir: Option<&str>) -> Option<PathBuf> {
+    let trimmed = override_dir?.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
     }
-    let config_dir = dirs::config_dir()
-        .or_else(dirs::home_dir)
-        .ok_or("Could not find config directory")?;
+}
+
+fn writable_portable_dir(
+    exe_path: Option<&Path>,
+    install_dir_is_writable: &mut impl FnMut(&Path) -> bool,
+) -> Option<PathBuf> {
+    let dir = exe_path?.parent()?;
+    if looks_like_build_output(dir) {
+        return None;
+    }
+    if !install_dir_is_writable(dir) {
+        return None;
+    }
+    Some(dir.to_path_buf())
+}
+
+fn install_dir_is_writable(dir: &Path) -> bool {
+    let probe = dir.join(WRITABLE_PROBE_NAME);
+    if std::fs::write(&probe, b"ok").is_err() {
+        return false;
+    }
+    let _ = std::fs::remove_file(&probe);
+    true
+}
+
+fn os_config_home(config_dir: Option<&Path>) -> Result<PathBuf, String> {
+    let config_dir = config_dir.ok_or("Could not find config directory")?;
     Ok(config_dir.join("LocalPrism"))
+}
+
+fn exe_dir_has_stray_data_home(dir: &Path) -> bool {
+    [CLAUDE_HOME_DIRNAME, "providers", "uv"]
+        .iter()
+        .any(|name| dir.join(name).is_dir())
+}
+
+fn should_warn_stray_install_data(exe_dir: &Path, platform: PlatformKind) -> bool {
+    !allows_portable_install(platform)
+        && !looks_like_build_output(exe_dir)
+        && exe_dir_has_stray_data_home(exe_dir)
+}
+
+/// One log line when a previous non-Windows run left claude-home, providers, or
+/// uv beside the executable. Nothing is moved or deleted.
+fn warn_stray_install_data_home(exe_path: Option<&Path>, platform: PlatformKind) {
+    let Some(exe_dir) = exe_path.and_then(Path::parent) else {
+        return;
+    };
+    if !should_warn_stray_install_data(exe_dir, platform) {
+        return;
+    }
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        eprintln!(
+            "[localprism] ignoring data beside the executable at {} and using the OS config directory instead. Set LOCALPRISM_HOME to choose a data directory.",
+            exe_dir.display()
+        );
+    });
 }
 
 pub fn user_skills_dir() -> Result<PathBuf, String> {
@@ -174,18 +304,6 @@ pub(crate) fn looks_like_build_output(dir: &Path) -> bool {
                 )
             })
     })
-}
-
-fn writable_install_dir() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?.to_path_buf();
-    if looks_like_build_output(&dir) {
-        return None;
-    }
-    let probe = dir.join(WRITABLE_PROBE_NAME);
-    std::fs::write(&probe, b"ok").ok()?;
-    let _ = std::fs::remove_file(&probe);
-    Some(dir)
 }
 
 /// Isolated Claude CLI config so LocalPrism skills/agents do not share `~/.claude`.
@@ -427,14 +545,288 @@ mod tests {
     #[test]
     fn build_output_dirs_are_not_treated_as_install_home() {
         assert!(looks_like_build_output(Path::new(
-            r"F:\Projects\claude-prism\apps\desktop\src-tauri\target-static\release"
+            "/tmp/claude-prism/src-tauri/target-static/release"
         )));
         assert!(looks_like_build_output(Path::new(
             "/tmp/claude-prism/src-tauri/target/debug"
         )));
-        assert!(!looks_like_build_output(Path::new(r"D:\LocalPrism")));
-        assert!(!looks_like_build_output(Path::new(
-            r"C:\Users\me\AppData\Local\LocalPrism"
-        )));
+        // `\` is not a separator on Unix, so these literals only describe components on Windows.
+        #[cfg(windows)]
+        {
+            assert!(looks_like_build_output(Path::new(
+                r"F:\Projects\claude-prism\apps\desktop\src-tauri\target-static\release"
+            )));
+            assert!(!looks_like_build_output(Path::new(r"D:\LocalPrism")));
+            assert!(!looks_like_build_output(Path::new(
+                r"C:\Users\me\AppData\Local\LocalPrism"
+            )));
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(!looks_like_build_output(Path::new("/tmp/LocalPrism")));
+            assert!(!looks_like_build_output(Path::new(
+                "/home/me/.config/LocalPrism"
+            )));
+        }
+    }
+
+    fn fake_exe(dir: &Path, file_name: &str) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let exe = dir.join(file_name);
+        std::fs::write(&exe, b"bin").unwrap();
+        exe
+    }
+
+    fn plant_stray_data_home(exe_dir: &Path) {
+        let sessions = exe_dir.join(CLAUDE_HOME_DIRNAME).join("projects");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("session.jsonl"), b"{}").unwrap();
+        let providers = exe_dir.join("providers");
+        std::fs::create_dir_all(&providers).unwrap();
+        std::fs::write(providers.join("providers.json"), b"{}").unwrap();
+    }
+
+    fn assert_stray_data_untouched(exe_dir: &Path) {
+        assert!(exe_dir
+            .join(CLAUDE_HOME_DIRNAME)
+            .join("projects")
+            .join("session.jsonl")
+            .is_file());
+        assert!(exe_dir.join("providers").join("providers.json").is_file());
+    }
+
+    struct RestoreWritable {
+        path: PathBuf,
+    }
+
+    impl RestoreWritable {
+        fn lock_dir(path: &Path) -> Self {
+            let mut perms = std::fs::metadata(path).unwrap().permissions();
+            perms.set_readonly(true);
+            std::fs::set_permissions(path, perms).unwrap();
+            Self {
+                path: path.to_path_buf(),
+            }
+        }
+    }
+
+    impl Drop for RestoreWritable {
+        fn drop(&mut self) {
+            if let Ok(meta) = std::fs::metadata(&self.path) {
+                let mut perms = meta.permissions();
+                perms.set_readonly(false);
+                let _ = std::fs::set_permissions(&self.path, perms);
+            }
+        }
+    }
+
+    fn assert_not_install_home(exe: &Path, config: &Path, platform: PlatformKind) {
+        let mut probed = false;
+        let home = resolve_localprism_home_with(None, Some(exe), Some(config), platform, |dir| {
+            probed = true;
+            assert_eq!(dir, exe.parent().unwrap());
+            true
+        })
+        .unwrap();
+        assert_eq!(
+            home,
+            config.join("LocalPrism"),
+            "executable directory {} must not be the data home",
+            exe.parent().unwrap().display()
+        );
+        assert!(
+            !probed,
+            "must not probe writability of {}",
+            exe.parent().unwrap().display()
+        );
+    }
+
+    #[test]
+    fn only_windows_allows_a_writable_install_home() {
+        assert!(allows_portable_install(PlatformKind::Windows));
+        assert!(!allows_portable_install(PlatformKind::Linux));
+        assert!(!allows_portable_install(PlatformKind::Macos));
+        assert!(!allows_portable_install(PlatformKind::Other));
+    }
+
+    #[test]
+    fn appimage_and_extracted_appimage_are_not_data_home() {
+        let root = TempDir::new().unwrap();
+        let config = root.path().join("config");
+        let cases = [
+            (
+                root.path().join("squashfs-root").join("usr").join("bin"),
+                "localprism",
+            ),
+            (root.path().join("squashfs-root"), "AppRun"),
+            (
+                root.path()
+                    .join(".mount_LocalPrismAbCdEf")
+                    .join("usr")
+                    .join("bin"),
+                "localprism",
+            ),
+            (
+                root.path()
+                    .join("appimage_extracted_abc123")
+                    .join("squashfs-root")
+                    .join("usr")
+                    .join("bin"),
+                "localprism",
+            ),
+        ];
+        for (exe_dir, file_name) in cases {
+            let exe = fake_exe(&exe_dir, file_name);
+            plant_stray_data_home(&exe_dir);
+            assert_not_install_home(&exe, &config, PlatformKind::Linux);
+            assert_stray_data_untouched(&exe_dir);
+        }
+    }
+
+    #[test]
+    fn macos_app_bundle_is_not_data_home() {
+        let root = TempDir::new().unwrap();
+        let config = root.path().join("Library").join("Application Support");
+        let exe_dir = root
+            .path()
+            .join("Applications")
+            .join("LocalPrism.app")
+            .join("Contents")
+            .join("MacOS");
+        let exe = fake_exe(&exe_dir, "localprism");
+        plant_stray_data_home(&exe_dir);
+        assert_not_install_home(&exe, &config, PlatformKind::Macos);
+        assert_stray_data_untouched(&exe_dir);
+    }
+
+    #[test]
+    fn deb_and_rpm_prefix_is_not_data_home() {
+        let root = TempDir::new().unwrap();
+        let config = root.path().join("config");
+        let exe = fake_exe(&root.path().join("usr").join("bin"), "localprism");
+        assert_not_install_home(&exe, &config, PlatformKind::Linux);
+        assert_not_install_home(&exe, &config, PlatformKind::Other);
+    }
+
+    #[test]
+    fn windows_writable_portable_install_is_data_home() {
+        let root = TempDir::new().unwrap();
+        let install = root.path().join("LocalPrism");
+        let exe = fake_exe(&install, "LocalPrism.exe");
+        let config = root.path().join("AppData").join("Roaming");
+        let home = resolve_localprism_home(None, Some(&exe), Some(&config), PlatformKind::Windows)
+            .unwrap();
+        assert_eq!(home, install);
+        assert!(!install.join(WRITABLE_PROBE_NAME).exists());
+        assert_ne!(home, config.join("LocalPrism"));
+    }
+
+    #[test]
+    fn windows_nonwritable_install_falls_back_to_config_dir() {
+        let root = TempDir::new().unwrap();
+        let install = root.path().join("Program Files").join("LocalPrism");
+        let exe = fake_exe(&install, "LocalPrism.exe");
+        let _readonly = RestoreWritable::lock_dir(&install);
+        let config = root.path().join("AppData").join("Roaming");
+        let home = resolve_localprism_home(None, Some(&exe), Some(&config), PlatformKind::Windows)
+            .unwrap();
+        assert_eq!(home, config.join("LocalPrism"));
+    }
+
+    #[test]
+    fn windows_build_output_is_not_data_home() {
+        let root = TempDir::new().unwrap();
+        let install = root.path().join("src-tauri").join("target").join("release");
+        let exe = fake_exe(&install, "LocalPrism.exe");
+        let config = root.path().join("AppData");
+        let mut probed = false;
+        let home = resolve_localprism_home_with(
+            None,
+            Some(&exe),
+            Some(&config),
+            PlatformKind::Windows,
+            |_| {
+                probed = true;
+                true
+            },
+        )
+        .unwrap();
+        assert!(!probed);
+        assert_eq!(home, config.join("LocalPrism"));
+    }
+
+    #[test]
+    fn override_wins_over_writable_portable_install() {
+        let root = TempDir::new().unwrap();
+        let install = root.path().join("LocalPrism");
+        let exe = fake_exe(&install, "LocalPrism.exe");
+        let config = root.path().join("AppData");
+        let custom = root.path().join("custom-home");
+        let custom_str = custom.to_str().unwrap();
+        let home = resolve_localprism_home_with(
+            Some(custom_str),
+            Some(&exe),
+            Some(&config),
+            PlatformKind::Windows,
+            |_| true,
+        )
+        .unwrap();
+        assert_eq!(home, custom);
+
+        let appimage = root.path().join("squashfs-root").join("usr").join("bin");
+        let app_exe = fake_exe(&appimage, "localprism");
+        let home = resolve_localprism_home_with(
+            Some(custom_str),
+            Some(&app_exe),
+            Some(&config),
+            PlatformKind::Linux,
+            |_| true,
+        )
+        .unwrap();
+        assert_eq!(home, custom);
+    }
+
+    #[test]
+    fn stray_data_beside_non_windows_exe_is_detected() {
+        let root = TempDir::new().unwrap();
+        for (marker, platform) in [
+            (CLAUDE_HOME_DIRNAME, PlatformKind::Linux),
+            ("providers", PlatformKind::Macos),
+            ("uv", PlatformKind::Other),
+        ] {
+            let exe_dir = root.path().join(marker).join("bin");
+            std::fs::create_dir_all(exe_dir.join(marker)).unwrap();
+            assert!(
+                should_warn_stray_install_data(&exe_dir, platform),
+                "{marker} on {platform:?}"
+            );
+        }
+
+        let clean = root.path().join("usr").join("bin");
+        std::fs::create_dir_all(&clean).unwrap();
+        assert!(!should_warn_stray_install_data(&clean, PlatformKind::Linux));
+
+        let build = root.path().join("target").join("release");
+        std::fs::create_dir_all(build.join(CLAUDE_HOME_DIRNAME)).unwrap();
+        assert!(!should_warn_stray_install_data(&build, PlatformKind::Linux));
+
+        let portable = root.path().join("LocalPrism");
+        std::fs::create_dir_all(portable.join("providers")).unwrap();
+        assert!(!should_warn_stray_install_data(
+            &portable,
+            PlatformKind::Windows
+        ));
+    }
+
+    #[test]
+    fn host_platform_matches_this_target() {
+        #[cfg(windows)]
+        assert_eq!(host_platform(), PlatformKind::Windows);
+        #[cfg(target_os = "macos")]
+        assert_eq!(host_platform(), PlatformKind::Macos);
+        #[cfg(target_os = "linux")]
+        assert_eq!(host_platform(), PlatformKind::Linux);
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+        assert_eq!(host_platform(), PlatformKind::Other);
     }
 }
