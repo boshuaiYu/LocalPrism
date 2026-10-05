@@ -188,9 +188,11 @@ export function isNewerVersion(candidate: string, current: string): boolean {
 }
 
 /**
- * Beta detection:
- * - GitHub release `prerelease: true`, or
- * - a semver prerelease identifier (`1.0.8-1`, `1.0.8-beta.1`).
+ * A beta candidate must be a real prerelease version:
+ * compact `1.0.8beta9`, or hyphenated `1.0.8-9` / `1.0.8-beta.9`.
+ * GitHub `prerelease: true` on a plain `1.9.0` is not a beta.
+ * A compact or hyphenated tag stays a beta when that flag was left off,
+ * so it is confirmed instead of installed as stable.
  * The manifest is `releases/download/<tag>/latest.json` on that tag.
  * It is never `releases/latest`.
  */
@@ -198,7 +200,7 @@ export function isBetaRelease(release: {
   prerelease?: boolean;
   version: string;
 }): boolean {
-  return release.prerelease === true || isPrereleaseVersion(release.version);
+  return isPrereleaseVersion(release.version);
 }
 
 export function isAllowedBetaManifestUrl(url: string): boolean {
