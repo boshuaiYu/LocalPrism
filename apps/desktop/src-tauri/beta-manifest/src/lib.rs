@@ -500,6 +500,37 @@ mod tests {
         assert_eq!(super::compare_release(&wix, &compact), 0);
         assert!(super::compare_release(&plain, &word) > 0);
         assert!(super::compare_release(&wix, &word) > 0);
+
+        assert!(is_compact_beta_version("1.0.8beta10"));
+        assert!(is_compact_beta_version("v1.0.8BETA10"));
+        let wix9 = super::parse_release("1.0.8-9").expect("wix 9");
+        let wix10 = super::parse_release("1.0.8-10").expect("wix 10");
+        let compact10 = super::parse_release("1.0.8beta10").expect("compact 10");
+        let tagged10 = super::parse_release("v1.0.8beta10").expect("tagged 10");
+        assert_eq!(super::post_release_build(&wix10), Some(10));
+        assert_eq!(super::post_release_build(&compact10), Some(10));
+        assert_eq!(super::post_release_build(&tagged10), Some(10));
+        assert!(super::compare_release(&wix10, &wix9) > 0);
+        assert_eq!(super::compare_release(&wix10, &compact10), 0);
+        assert_eq!(
+            compact_release_is_newer("1.0.8beta10", "1.0.8-9").ok(),
+            Some(true)
+        );
+        assert_eq!(
+            compact_release_is_newer("1.0.8beta10", "1.0.8-10").ok(),
+            Some(false)
+        );
+        assert_eq!(
+            compact_release_is_newer("1.0.8beta9", "1.0.8-10").ok(),
+            Some(false)
+        );
+        assert!(wix10.major <= 255 && wix10.minor <= 255 && wix10.patch <= 65535);
+        let build = super::post_release_build(&wix10).expect("build");
+        assert!(build <= 65535);
+        assert_eq!(
+            format!("{}.{}.{}.{}", wix10.major, wix10.minor, wix10.patch, build),
+            "1.0.8.10"
+        );
     }
 
     fn compact_manifest(url: &str) -> String {

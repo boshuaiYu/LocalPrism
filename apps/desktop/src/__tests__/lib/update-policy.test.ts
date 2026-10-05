@@ -7,6 +7,7 @@ import {
   compareSemver,
   isAllowedBetaManifestUrl,
   isBetaRelease,
+  isNewerVersion,
   isPrereleaseVersion,
   parseSemver,
   STABLE_UPDATER_ENDPOINT,
@@ -106,6 +107,49 @@ describe("beta update detection", () => {
     expect(compareSemver(parseSemver("1.0.9")!, compactNewer)).toBeGreaterThan(
       0,
     );
+  });
+
+  it("parses a two-digit beta and keeps installer version fields numeric", () => {
+    const beta9 = parseSemver("1.0.8-9");
+    const beta10 = parseSemver("1.0.8-10");
+    const compact10 = parseSemver("1.0.8beta10");
+    const tagged10 = parseSemver("v1.0.8beta10");
+    if (!beta9 || !beta10 || !compact10 || !tagged10) {
+      throw new Error("two-digit beta fixtures failed to parse");
+    }
+    expect(compact10).toEqual({
+      major: 1,
+      minor: 0,
+      patch: 8,
+      prerelease: [],
+      compactBeta: 10,
+    });
+    expect(tagged10.compactBeta).toBe(10);
+    expect(beta10.prerelease).toEqual(["10"]);
+    expect(compareSemver(beta10, beta9)).toBeGreaterThan(0);
+    expect(compareSemver(compact10, beta10)).toBe(0);
+    expect(compareSemver(compact10, beta9)).toBeGreaterThan(0);
+    expect(isNewerVersion("1.0.8-10", "1.0.8-9")).toBe(true);
+    expect(isNewerVersion("1.0.8beta10", "1.0.8-9")).toBe(true);
+    expect(isNewerVersion("1.0.8beta9", "1.0.8-10")).toBe(false);
+    expect(isNewerVersion("1.0.8beta10", "1.0.8-10")).toBe(false);
+
+    for (const parsed of [beta10, compact10]) {
+      const build =
+        parsed.compactBeta ??
+        (parsed.prerelease.length === 1 &&
+        /^\d+$/.test(parsed.prerelease[0] ?? "")
+          ? Number(parsed.prerelease[0])
+          : null);
+      expect(build).toBe(10);
+      const fields = [parsed.major, parsed.minor, parsed.patch, build];
+      expect(fields.every((field) => Number.isInteger(field))).toBe(true);
+      expect(parsed.major).toBeLessThanOrEqual(255);
+      expect(parsed.minor).toBeLessThanOrEqual(255);
+      expect(parsed.patch).toBeLessThanOrEqual(65535);
+      expect(build).toBeLessThanOrEqual(65535);
+      expect(fields.join(".")).toBe("1.0.8.10");
+    }
   });
 
   it("does not use releases/latest as a beta manifest", () => {
