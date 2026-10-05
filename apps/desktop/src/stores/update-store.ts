@@ -44,7 +44,13 @@ export type UpdateStatus =
   | { state: "ready"; version: string; notes?: string }
   | { state: "manual"; version: string; notes?: string }
   | { state: "installing"; version: string }
-  | { state: "error"; message: string; explicit: boolean };
+  | {
+      state: "error";
+      message: string;
+      explicit: boolean;
+      /** Install failures keep the raw message as the status label. */
+      phase?: "check" | "install";
+    };
 
 interface UpdateStore {
   status: UpdateStatus;
@@ -71,6 +77,10 @@ function notesFrom(update: Update): string | undefined {
 function formatUpdateError(err: unknown): string {
   if (err instanceof Error && err.message.trim()) return err.message.trim();
   if (typeof err === "string" && err.trim()) return err.trim();
+  if (typeof err === "object" && err !== null && "message" in err) {
+    const message = err.message;
+    if (typeof message === "string" && message.trim()) return message.trim();
+  }
   return String(err);
 }
 
@@ -368,8 +378,10 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
       try {
         await downloadPending(update, set);
       } catch (err) {
+        const message = formatUpdateError(err);
+        log.error("Update download failed", { message });
         set({
-          status: { state: "error", message: String(err), explicit: true },
+          status: { state: "error", message, explicit: true, phase: "check" },
         });
       }
       return;
@@ -411,8 +423,10 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
     } catch (err) {
       stopProgress?.();
       stopProgress = null;
+      const message = formatUpdateError(err);
+      log.error("Update download failed", { message });
       set({
-        status: { state: "error", message: String(err), explicit: true },
+        status: { state: "error", message, explicit: true, phase: "check" },
       });
     }
   },
@@ -430,8 +444,15 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
       }
       await relaunch();
     } catch (err) {
+      const message = formatUpdateError(err);
+      log.error("Update install failed", { message });
       set({
-        status: { state: "error", message: String(err), explicit: true },
+        status: {
+          state: "error",
+          message,
+          explicit: true,
+          phase: "install",
+        },
       });
     }
   },

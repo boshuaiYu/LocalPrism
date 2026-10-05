@@ -8,8 +8,13 @@
 //! minisign attestation so a rewritten version cannot ride on another
 //! release's signed URL.
 
+mod appimage;
 mod bind;
 
+pub use appimage::{
+    appimage_install_target, appimage_payload_is_raw, plan_appimage_install, replace_appimage_file,
+    AppImageInstallPlan,
+};
 pub use bind::{
     bind_updater_manifest, canonical_attestation, channel_for_version, decode_updater_pubkey,
     sha256_digest, tag_for_version, version_requires_signed_identity, BoundManifest, BoundPlatform,

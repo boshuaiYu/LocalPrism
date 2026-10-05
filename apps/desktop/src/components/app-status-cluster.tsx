@@ -242,6 +242,9 @@ function flashCopy(
         title: t("updates.flashCurrent"),
       };
     case "error":
+      if (status.phase === "install" && status.message.trim()) {
+        return { label: status.message, title: status.message };
+      }
       return classifyUpdateError(status.message) === "missing-platform"
         ? {
             label: t("updates.flashMissing"),

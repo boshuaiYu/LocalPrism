@@ -265,6 +265,88 @@ describe("AppStatusBar updates", () => {
     expect(container.textContent).toMatch(/Restart 1\.0\.8beta3/);
   });
 
+  it("shows the beta install error and does not check for updates again", async () => {
+    const installError =
+      "temp directory is not on the same mount point as the AppImage";
+    useSettingsStore.setState({ joinBetaChannel: true });
+    vi.mocked(check).mockResolvedValue(null);
+    vi.mocked(getVersion).mockResolvedValue("1.0.8");
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "update_install_channel") return "appimage";
+      if (command === "download_manifest_update") return "1.0.8beta9";
+      if (command === "install_prepared_update") throw installError;
+      if (command === "js_log") return undefined;
+      if (command === "clear_prepared_update") return undefined;
+      return undefined;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => [
+          {
+            tag_name: "v1.0.8beta9",
+            prerelease: true,
+            draft: false,
+            body: "preview",
+            assets: [{ name: "latest.json" }],
+          },
+        ],
+      })),
+    );
+
+    await renderBar();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const offer = container.querySelector("[data-testid='update-flash']");
+    await act(async () => {
+      if (offer instanceof HTMLButtonElement) offer.click();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toMatch(/Restart 1\.0\.8beta9/);
+    const checksBeforeRestart = vi.mocked(check).mock.calls.length;
+    expect(checksBeforeRestart).toBeGreaterThan(0);
+
+    const restart = container.querySelector("[data-testid='update-flash']");
+    await act(async () => {
+      if (restart instanceof HTMLButtonElement) restart.click();
+      await Promise.resolve();
+    });
+
+    expect(invoke).toHaveBeenCalledWith("install_prepared_update");
+    expect(vi.mocked(check).mock.calls.length).toBe(checksBeforeRestart);
+    expect(relaunch).not.toHaveBeenCalled();
+    const flash = container.querySelector("[data-testid='update-flash']");
+    expect(flash?.textContent).toBe(installError);
+    expect(flash?.getAttribute("title")).toBe(installError);
+    expect(flash?.textContent).not.toBe(translate("en", "updates.flashError"));
+    expect(invoke).toHaveBeenCalledWith(
+      "js_log",
+      expect.objectContaining({
+        msg: expect.stringContaining(installError),
+      }),
+    );
+  });
+
+  it("keeps a failed update check on the check-failed label", async () => {
+    vi.mocked(check).mockRejectedValue(new Error("signature mismatch"));
+
+    await renderBar();
+    const checkButton = container.querySelector(
+      "[data-testid='check-for-updates']",
+    );
+    await act(async () => {
+      if (checkButton instanceof HTMLButtonElement) checkButton.click();
+      await Promise.resolve();
+    });
+
+    const flash = container.querySelector("[data-testid='update-flash']");
+    expect(flash?.textContent).toBe(translate("en", "updates.flashError"));
+    expect(flash?.getAttribute("title")).toContain("signature mismatch");
+  });
+
   it("persists Join prerelease / Beta locally and defaults off", () => {
     expect(useSettingsStore.getState().joinBetaChannel).toBe(false);
     useSettingsStore.getState().setJoinBetaChannel(true);
