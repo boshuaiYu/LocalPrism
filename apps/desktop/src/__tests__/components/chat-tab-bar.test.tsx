@@ -16,6 +16,7 @@ import {
 } from "@/components/claude-chat/chat-tab-bar";
 import { useApprovalStore } from "@/stores/approval-store";
 import { type TabState, useClaudeChatStore } from "@/stores/claude-chat-store";
+import { useSettingsStore } from "@/stores/settings-store";
 
 function makeTab(
   id: string,
@@ -37,6 +38,13 @@ function makeTab(
     streamingStartedAt: isStreaming ? 1 : null,
     cancelledAttempts: [],
     activeAttemptId: isStreaming ? `${id}-attempt` : null,
+  };
+}
+
+function userText(text: string): TabState["messages"][number] {
+  return {
+    type: "user",
+    message: { content: [{ type: "text", text }] },
   };
 }
 
@@ -106,11 +114,23 @@ describe("ChatTabBar runtime badges", () => {
     await act(async () => root.render(<ChatTabBar />));
   }
 
-  it("reserves titlebar space beside window caption buttons", async () => {
+  it("clears caption buttons above the row instead of beside the label", async () => {
     await renderTabs([makeTab("tab-claude", "Hello", "claude")]);
-    const bar = container.querySelector("[data-testid='chat-tab-bar']");
-    expect(bar?.className).toContain("--titlebar-height");
-    expect(bar?.className).toContain("--window-controls-inset");
+    const band = container.querySelector("[data-testid='chat-titlebar-band']");
+    const toolbar = container.querySelector("[data-testid='chat-tab-toolbar']");
+    const cluster = container.querySelector(
+      "[data-testid='chat-account-cluster']",
+    );
+    const tab = tabButton(container, "tab-claude");
+    expect(band?.className).toContain("--titlebar-height");
+    expect(toolbar?.className ?? "").not.toContain("window-controls-inset");
+    expect(cluster?.className).toContain("flex-1");
+    expect(cluster?.className).not.toContain("shrink-0");
+    expect(tab.className.split(/\s+/)).toContain("shrink-0");
+    expect(tab.className.split(/\s+/)).not.toContain("min-w-0");
+    expect(
+      tab.querySelector("[data-testid='chat-tab-title']")?.textContent,
+    ).toBe("Hello");
   });
 
   it("shows tab titles without runtime badges", async () => {
@@ -287,6 +307,106 @@ describe("ChatTabBar runtime badges", () => {
       accountMin: "min-w-0",
     });
     expect(accountHeaderChrome(234).accountMin).not.toContain("46%");
+  });
+
+  it("fills a blank or punctuation title from the first user message", async () => {
+    await renderTabs([
+      {
+        ...makeTab("tab-blank", "", "claude"),
+        messages: [userText("你好")],
+      },
+      {
+        ...makeTab("tab-pipe", "|", "claude"),
+        messages: [userText("润色这一段")],
+      },
+      makeTab("tab-empty", "   ", "claude"),
+    ]);
+
+    expect(
+      tabButton(container, "tab-blank").querySelector(
+        "[data-testid='chat-tab-title']",
+      )?.textContent,
+    ).toBe("你好");
+    expect(
+      tabButton(container, "tab-pipe").querySelector(
+        "[data-testid='chat-tab-title']",
+      )?.textContent,
+    ).toBe("润色这一段");
+    expect(
+      tabButton(container, "tab-empty").querySelector(
+        "[data-testid='chat-tab-title']",
+      )?.textContent,
+    ).toBe("New Chat");
+  });
+
+  it("localizes the empty-tab fallback", async () => {
+    const previous = useSettingsStore.getState().uiLanguage;
+    useSettingsStore.setState({ uiLanguage: "zh" });
+    try {
+      await renderTabs([makeTab("tab-new", "New Chat", "claude")]);
+      expect(
+        tabButton(container, "tab-new").querySelector(
+          "[data-testid='chat-tab-title']",
+        )?.textContent,
+      ).toBe("新对话");
+    } finally {
+      await act(async () => {
+        useSettingsStore.setState({ uiLanguage: previous });
+      });
+    }
+  });
+
+  function installWidthObserver(width: number) {
+    const original = globalThis.ResizeObserver;
+    class WidthObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(target: Element) {
+        Object.defineProperty(target, "clientWidth", {
+          configurable: true,
+          value: width,
+        });
+        this.callback([], this);
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+    globalThis.ResizeObserver =
+      WidthObserver as unknown as typeof ResizeObserver;
+    return () => {
+      globalThis.ResizeObserver = original;
+    };
+  }
+
+  it("gives the account label the leftover width on a wide bar", async () => {
+    const restore = installWidthObserver(560);
+    try {
+      await renderTabs([makeTab("tab-wide", "你好", "claude")]);
+      expect(container.querySelector("[aria-label='New tab']")).toBeInstanceOf(
+        HTMLButtonElement,
+      );
+      expect(
+        container.querySelector("[data-testid='chat-account-cluster']")
+          ?.className,
+      ).toContain("flex-1");
+      expect(tabButton(container, "tab-wide").textContent).toContain("你好");
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps a narrow tab title visible without the history controls", async () => {
+    const restore = installWidthObserver(180);
+    try {
+      await renderTabs([makeTab("tab-narrow", "你好", "claude")]);
+      expect(container.querySelector("[aria-label='New tab']")).toBeNull();
+      expect(tabButton(container, "tab-narrow").textContent).toContain("你好");
+      expect(
+        container.querySelector("[data-testid='chat-account-cluster']")
+          ?.className,
+      ).toContain("min-w-0");
+    } finally {
+      restore();
+    }
   });
 
   it("shows a close control on the last idle tab", async () => {

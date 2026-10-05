@@ -90,6 +90,10 @@ import {
 import { createLogger } from "@/lib/debug/logger";
 
 const log = createLogger("chat-composer");
+
+/** Normal bottom inset. Linux can raise `--chat-bottom-gutter` for a dock. */
+export const CHAT_COMPOSER_FRAME_CLASS =
+  "relative mx-auto flex h-full min-h-0 w-full min-w-0 max-w-[44rem] shrink-0 flex-col px-4 pt-1 pb-[max(0.75rem,var(--chat-bottom-gutter,0px))]";
 const EMPTY_GUIDANCE: QueuedGuidance[] = [];
 
 // Re-export for other modules
@@ -1323,7 +1327,7 @@ export const ChatComposer: FC<{
   return (
     <div
       ref={composerRef}
-      className="relative mx-auto flex h-full min-h-0 w-full min-w-0 max-w-[44rem] shrink-0 flex-col px-4 pt-1 pb-[max(3rem,env(safe-area-inset-bottom,0px))]"
+      className={CHAT_COMPOSER_FRAME_CLASS}
       style={
         {
           "--composer-bg":
