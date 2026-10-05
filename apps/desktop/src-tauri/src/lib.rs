@@ -519,6 +519,7 @@ pub fn beta_manifest_endpoint(raw: &str) -> Result<String, String> {
 struct PreparedManifestUpdate {
     update: tauri_plugin_updater::Update,
     bytes: Vec<u8>,
+    bound: beta_manifest::BoundManifest,
 }
 
 #[derive(Default)]
@@ -606,7 +607,11 @@ async fn download_manifest_update(
 
     let state = app.state::<PreparedManifestUpdateState>();
     let mut guard = state.0.lock().map_err(|err| err.to_string())?;
-    *guard = Some(PreparedManifestUpdate { update, bytes });
+    *guard = Some(PreparedManifestUpdate {
+        update,
+        bytes,
+        bound,
+    });
     Ok(version)
 }
 
@@ -697,7 +702,7 @@ async fn verify_bound_updater_manifest(
 }
 
 #[tauri::command]
-fn install_prepared_update(app: tauri::AppHandle) -> Result<(), String> {
+async fn install_prepared_update(app: tauri::AppHandle) -> Result<(), String> {
     let prepared = {
         let state = app.state::<PreparedManifestUpdateState>();
         let mut guard = state.0.lock().map_err(|err| err.to_string())?;
@@ -705,6 +710,36 @@ fn install_prepared_update(app: tauri::AppHandle) -> Result<(), String> {
             .take()
             .ok_or_else(|| "No downloaded update is ready.".to_string())?
     };
+    let outcome = apply_prepared_update(prepared).await;
+    if let Err(err) = &outcome {
+        eprintln!("[updater] install failed: {err}");
+    }
+    outcome
+}
+
+/// Install bytes that `download_manifest_update` already signature-checked.
+///
+/// On a Linux AppImage the plugin installer is not used. Its temp-dir walk
+/// can fail before it ever writes the destination, and the UI then only
+/// sees a generic install error. The digest from the bound manifest is
+/// checked again immediately before the file is replaced.
+async fn apply_prepared_update(prepared: PreparedManifestUpdate) -> Result<(), String> {
+    prepared.bound.verify_artifact_bytes(&prepared.bytes)?;
+    #[cfg(target_os = "linux")]
+    {
+        let plan = beta_manifest::plan_appimage_install(
+            std::env::var_os("APPIMAGE").as_deref(),
+            &prepared.bytes,
+        )?;
+        if let beta_manifest::AppImageInstallPlan::Replace(target) = plan {
+            let bytes = prepared.bytes;
+            return tokio::task::spawn_blocking(move || {
+                beta_manifest::replace_appimage_file(&target, &bytes)
+            })
+            .await
+            .map_err(|err| format!("AppImage install task failed: {err}"))?;
+        }
+    }
     prepared
         .update
         .install(prepared.bytes)
