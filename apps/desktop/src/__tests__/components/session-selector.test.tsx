@@ -147,7 +147,7 @@ function findMenuItem(title: string): HTMLElement {
 }
 
 function setSearchQuery(value: string) {
-  const input = document.querySelector('[aria-label="Search chats"]');
+  const input = document.querySelector('input[type="search"]');
   if (!(input instanceof HTMLInputElement)) {
     throw new Error("Search chats input not found");
   }
@@ -168,6 +168,7 @@ describe("SessionSelector runtime conversation ownership", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    useSettingsStore.setState({ uiLanguage: "en" });
     runtimeListConversations.mockResolvedValue([]);
     runtimeArchiveConversation.mockResolvedValue(undefined);
     const baseTab = useClaudeChatStore.getState().tabs[0];
@@ -718,6 +719,118 @@ describe("SessionSelector runtime conversation ownership", () => {
     expect(titles).not.toContain(sessionId);
     expect(titles).not.toContain(sessionId.toUpperCase());
     expect(findButton("Delete New Chat")).toBeTruthy();
+  });
+
+  it("does not copy a UUID session-id title onto an open tab when history loads", async () => {
+    const sessionId = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+    const uuidRef = reference("claude", "/project-a", sessionId);
+    const current = useClaudeChatStore.getState().tabs[0];
+    useClaudeChatStore.setState({
+      tabs: [
+        current,
+        {
+          ...current,
+          id: "tab-uuid",
+          title: "Keep this",
+          projectPath: uuidRef.projectPath,
+          runtime: uuidRef.runtime,
+          sessionId,
+          sessionRef: uuidRef,
+          messages: [],
+        },
+      ],
+    });
+    runtimeListConversations.mockImplementation((runtime) => {
+      if (runtime === "codex") return Promise.resolve([]);
+      return Promise.resolve([conversation(uuidRef, sessionId.toUpperCase())]);
+    });
+
+    await renderAndOpen();
+
+    expect(
+      useClaudeChatStore.getState().tabs.find((tab) => tab.id === "tab-uuid")
+        ?.title,
+    ).toBe("Keep this");
+    const titles = Array.from(
+      document.querySelectorAll('[role="menuitem"] span.truncate'),
+    ).map((node) => node.textContent);
+    expect(titles).toContain("New Chat");
+    expect(titles).not.toContain(sessionId);
+    expect(titles).not.toContain(sessionId.toUpperCase());
+  });
+
+  it("searches Chinese titles and localized placeholders, including a blank stored title", async () => {
+    useSettingsStore.setState({ uiLanguage: "zh" });
+    const reviewRef = reference("claude", "/project-a", "review-session");
+    const legacyRef = reference("claude", "/project-a", "legacy-new-chat");
+    const blankRef = reference("claude", "/project-a", "blank-stored");
+    const current = useClaudeChatStore.getState().tabs[0];
+    useClaudeChatStore.setState({
+      tabs: [
+        current,
+        {
+          ...current,
+          id: "tab-blank",
+          title: "",
+          projectPath: blankRef.projectPath,
+          runtime: blankRef.runtime,
+          sessionId: blankRef.sessionId,
+          sessionRef: blankRef,
+          messages: [],
+        },
+      ],
+    });
+    runtimeListConversations.mockImplementation((runtime) => {
+      if (runtime === "codex") return Promise.resolve([]);
+      return Promise.resolve([
+        conversation(reviewRef, "文献综述"),
+        conversation(legacyRef, "New Chat"),
+      ]);
+    });
+
+    await renderAndOpen();
+
+    expect(
+      useClaudeChatStore.getState().tabs.find((tab) => tab.id === "tab-blank")
+        ?.title,
+    ).toBe("");
+
+    const historyTitles = () =>
+      Array.from(
+        document.querySelectorAll('[role="menuitem"] span.truncate'),
+      ).map((node) => node.textContent);
+
+    await act(async () => {
+      setSearchQuery("文献");
+    });
+    expect(historyTitles()).toEqual(["文献综述"]);
+
+    await act(async () => {
+      setSearchQuery("新对话");
+    });
+    expect(historyTitles()).toEqual(["新对话", "新对话"]);
+
+    await act(async () => {
+      setSearchQuery("New Chat");
+    });
+    expect(historyTitles()).toEqual([]);
+    expect(document.body.textContent).toContain("没有匹配的对话");
+  });
+
+  it("renders the Codex default title as the localized placeholder", async () => {
+    useSettingsStore.setState({ uiLanguage: "zh" });
+    const untitledRef = reference("claude", "/project-a", "codex-default");
+    runtimeListConversations.mockImplementation((runtime) => {
+      if (runtime === "codex") return Promise.resolve([]);
+      return Promise.resolve([
+        conversation(untitledRef, "Untitled conversation"),
+      ]);
+    });
+
+    await renderAndOpen();
+
+    expect(findButton("Delete 新对话")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("Untitled conversation");
   });
 
   it("filters sessions by title search", async () => {

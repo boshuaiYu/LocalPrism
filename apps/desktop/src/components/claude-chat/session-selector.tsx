@@ -42,9 +42,6 @@ import { useI18n } from "@/lib/use-i18n";
 const log = createLogger("session-selector");
 const IDLE_TABS: TabState[] = [];
 
-const SESSION_ID_TITLE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 type RecencyGroup = "today" | "yesterday" | "week" | "older";
 
 const RECENCY_LABELS: Record<RecencyGroup, string> = {
@@ -107,10 +104,6 @@ export function recencyGroup(
   return "older";
 }
 
-function isSessionIdTitle(title: string | null | undefined): boolean {
-  return SESSION_ID_TITLE.test(title?.trim() ?? "");
-}
-
 function firstUserLineFromMessages(
   messages: TabState["messages"] | undefined,
 ): string | null {
@@ -145,9 +138,7 @@ export function displayConversationTitle(
   tabs: readonly TabState[],
   placeholder: string,
 ): string {
-  const sanitized = isSessionIdTitle(conversation.title)
-    ? null
-    : meaningfulChatTitle(conversation.title);
+  const sanitized = meaningfulChatTitle(conversation.title);
   if (sanitized) return sanitized;
   const matchingTab = tabs.find((tab) =>
     sameConversation(tabConversationReference(tab), conversation.reference),

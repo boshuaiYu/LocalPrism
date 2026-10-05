@@ -1077,11 +1077,20 @@ const PLACEHOLDER_CHAT_TITLE_KEYS = [
   "chat.untitledSession",
 ] as const satisfies readonly MessageKey[];
 
-const placeholderChatTitles: ReadonlySet<string> = new Set(
-  [en, zh].flatMap((table) =>
+/**
+ * Runtime defaults that are not UI copy.
+ * Codex stores "Untitled conversation" when a thread preview is empty
+ * (`codex_thread_to_conversation`). Claude's "Untitled session" is already
+ * `chat.untitledSession`.
+ */
+const BACKEND_PLACEHOLDER_CHAT_TITLES = ["untitled conversation"] as const;
+
+const placeholderChatTitles: ReadonlySet<string> = new Set([
+  ...[en, zh].flatMap((table) =>
     PLACEHOLDER_CHAT_TITLE_KEYS.map((key) => table[key].trim().toLowerCase()),
   ),
-);
+  ...BACKEND_PLACEHOLDER_CHAT_TITLES,
+]);
 
 /** True for stored placeholders in every supported locale, in any case. */
 export function isPlaceholderChatTitle(title: string): boolean {
