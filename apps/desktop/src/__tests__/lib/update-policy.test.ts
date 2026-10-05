@@ -6,6 +6,7 @@ import {
   classifyUpdateError,
   compareSemver,
   isAllowedBetaManifestUrl,
+  isBetaRelease,
   isPrereleaseVersion,
   parseSemver,
   STABLE_UPDATER_ENDPOINT,
@@ -371,5 +372,74 @@ describe("beta update detection", () => {
         allowPrerelease: true,
       }).action,
     ).toBe("none");
+  });
+
+  it("ignores a plain prerelease and does not downgrade 1.0.8-9", () => {
+    expect(isBetaRelease({ prerelease: true, version: "1.9.0" })).toBe(false);
+    expect(isBetaRelease({ prerelease: true, version: "v1.9.0" })).toBe(false);
+    expect(isBetaRelease({ prerelease: true, version: "1.0.8beta9" })).toBe(
+      true,
+    );
+    expect(isBetaRelease({ prerelease: true, version: "1.0.8-9" })).toBe(true);
+    expect(isBetaRelease({ prerelease: true, version: "1.0.8-beta.9" })).toBe(
+      true,
+    );
+
+    const mistaken = betaCandidatesFromGithub([
+      {
+        tag_name: "v1.9.0",
+        prerelease: true,
+        draft: false,
+        body: "mistaken stable",
+      },
+    ]);
+    expect(mistaken).toEqual([]);
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.8-9",
+        stable: { version: "1.0.8" },
+        betas: mistaken,
+        allowPrerelease: true,
+      }),
+    ).toEqual({ action: "none" });
+
+    const sameBuild = betaCandidatesFromGithub([
+      { tag_name: "v1.0.8beta9", prerelease: true, draft: false },
+    ]);
+    expect(sameBuild.map((beta) => beta.version)).toEqual(["1.0.8beta9"]);
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.8-9",
+        stable: { version: "1.0.8" },
+        betas: sameBuild,
+        allowPrerelease: true,
+      }),
+    ).toEqual({ action: "none" });
+
+    const newerBeta = betaCandidatesFromGithub([
+      { tag_name: "v1.0.8beta10", prerelease: true, draft: false },
+    ]);
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.8-9",
+        stable: { version: "1.0.8" },
+        betas: newerBeta,
+        allowPrerelease: true,
+      }),
+    ).toMatchObject({
+      action: "confirm",
+      version: "1.0.8beta10",
+      manifestUrl:
+        "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.8beta10/latest.json",
+    });
+
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.8-9",
+        stable: { version: "1.0.8" },
+        betas: newerBeta,
+        allowPrerelease: false,
+      }),
+    ).toEqual({ action: "none" });
   });
 });
