@@ -1264,7 +1264,7 @@ export function Sidebar({
           variant="ghost"
           size="icon"
           className="size-7"
-          data-testid="chrome-settings"
+          data-testid="chrome-settings-rail"
           onClick={() => setSettingsOpen(true)}
           title={t("chrome.settings")}
           aria-label={t("chrome.openSettings")}

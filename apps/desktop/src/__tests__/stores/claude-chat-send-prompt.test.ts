@@ -690,7 +690,7 @@ describe("useClaudeChatStore.resumeSession", () => {
     await useClaudeChatStore.getState().resumeSession("session-with-context");
 
     const userContent = useClaudeChatStore.getState().messages[0].message
-      ?.content as string;
+      ?.content as unknown as string;
     expect(userContent).toBe(userText);
     expect(userContent).not.toContain("Currently open file");
     expect(userContent).not.toContain("保持原意");

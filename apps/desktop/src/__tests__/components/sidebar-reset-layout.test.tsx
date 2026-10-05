@@ -85,6 +85,46 @@ describe("Sidebar chrome", () => {
     expect(
       container.querySelector('[aria-label="Open settings"]'),
     ).toBeTruthy();
+    expect(
+      container.querySelectorAll('[data-testid="chrome-settings"]'),
+    ).toHaveLength(1);
+    const rail = container.querySelector(
+      '[data-testid="chrome-settings-rail"]',
+    );
+    expect(rail).not.toBeNull();
+    expect(rail?.closest('[aria-hidden="true"]')).not.toBeNull();
+  });
+
+  it("keeps a settings gear on the collapsed rail", async () => {
+    await act(async () =>
+      root.render(
+        <Sidebar
+          collapsed
+          layoutControls={{
+            codeVisible: true,
+            chatVisible: true,
+            pdfVisible: true,
+            sidebarVisible: true,
+            setCodeVisible: vi.fn(),
+            setChatVisible: vi.fn(),
+            setPdfVisible: vi.fn(),
+            setSidebarVisible: vi.fn(),
+          }}
+        />,
+      ),
+    );
+
+    const rail = container.querySelector(
+      '[data-testid="chrome-settings-rail"]',
+    );
+    expect(rail).toBeInstanceOf(HTMLButtonElement);
+    expect(rail?.closest('[aria-hidden="true"]')).toBeNull();
+    expect(rail?.getAttribute("aria-label")).toBe("Open settings");
+    expect(
+      container
+        .querySelector('[data-testid="chrome-settings"]')
+        ?.closest('[aria-hidden="true"]'),
+    ).not.toBeNull();
   });
 
   it("mounts skills and agents anchors and closes panels the tour opened", async () => {

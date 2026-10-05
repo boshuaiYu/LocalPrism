@@ -32,7 +32,6 @@ import {
   settleChatMessages,
 } from "@/lib/chat-turn-settlement";
 import { canOfferCompression } from "@/lib/chat-compression";
-import { visibleUserPromptText } from "@/lib/chat-visible-prompt";
 import { transcriptHasContentBelow } from "@/lib/chat-scroll";
 import {
   canRewindTo,
@@ -585,7 +584,7 @@ const UserMessage: FC<{ message: ClaudeStreamMessage }> = ({ message }) => {
     : typeof rawContent === "string"
       ? rawContent
       : "";
-  const textContent = visibleUserPromptText(rawText);
+  const textContent = rawText;
 
   if (!textContent || isSkillInstructionDump(textContent)) return null;
 

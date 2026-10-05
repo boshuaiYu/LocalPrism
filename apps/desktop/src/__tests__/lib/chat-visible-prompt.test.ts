@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { ACADEMIC_POLISH_INSTRUCTIONS } from "@/lib/agent-presets";
-import { applyReplyStyleToPrompt } from "@/lib/reply-mode";
+import {
+  buildCompressionCarryover,
+  prependCompressionCarryover,
+} from "@/lib/chat-compression";
 import { visibleUserPromptText } from "@/lib/chat-visible-prompt";
+import { applyReplyStyleToPrompt } from "@/lib/reply-mode";
+import type { ClaudeStreamMessage } from "@/stores/claude-chat-store";
 
 const AMBIENT_FILE =
   "[Currently open file: main.tex. Location only — do not read this file unless the user asked to use the document. File tools must use paths relative to the current working directory, such as main.tex.]";
@@ -80,5 +85,79 @@ describe("visibleUserPromptText", () => {
       "只改摘要。",
     ].join("\n");
     expect(visibleUserPromptText(stored)).toBe("只改摘要。");
+  });
+
+  it("preserves a plain sentence", () => {
+    const text = "Please explain the figure.";
+    expect(visibleUserPromptText(text)).toBe(text);
+  });
+
+  it("preserves reply-mode markers that appear mid-sentence", () => {
+    const text =
+      "Please add a heading [Reply mode: draft] and close with [/Reply mode] thanks";
+    expect(visibleUserPromptText(text)).toBe(text);
+  });
+
+  it("preserves user text written before an ambient file line", () => {
+    const stored = [
+      "What does this mean?",
+      AMBIENT_FILE,
+      "Please explain.",
+    ].join("\n");
+    expect(visibleUserPromptText(stored)).toBe(stored);
+  });
+
+  it("strips compression carryover and keeps the user's tail", () => {
+    const recent: ClaudeStreamMessage[] = [
+      {
+        type: "user",
+        message: { content: [{ type: "text", text: "hi" }] },
+      },
+      {
+        type: "assistant",
+        message: { content: [{ type: "text", text: "ok" }] },
+      },
+    ];
+    const carryover = buildCompressionCarryover("Earlier draft.", recent);
+    const stored = prependCompressionCarryover(
+      "Please revise.\n\nThanks",
+      carryover,
+    );
+    expect(stored).toContain(
+      "The earlier part of this conversation was compressed.",
+    );
+    expect(visibleUserPromptText(stored)).toBe("Please revise.\n\nThanks");
+  });
+
+  it("strips compression carryover that has no open-file line", () => {
+    const carryover = buildCompressionCarryover("Earlier draft.", []);
+    const stored = prependCompressionCarryover(
+      "Please revise the abstract.",
+      carryover,
+    );
+    expect(stored).not.toContain("[Currently open file:");
+    expect(visibleUserPromptText(stored)).toBe("Please revise the abstract.");
+  });
+
+  it("strips a leading reply-mode block and the compression carryover after it", () => {
+    const carryover = buildCompressionCarryover("Earlier draft.", []);
+    const stored = applyReplyStyleToPrompt(
+      prependCompressionCarryover(
+        `${AMBIENT_FILE}\n\n只保留这一句。`,
+        carryover,
+      ),
+      "de-ai",
+    );
+    expect(visibleUserPromptText(stored)).toBe("只保留这一句。");
+  });
+
+  it("preserves a user-authored leading file line", () => {
+    const stored = "[File: notes.tex]\nPlease review";
+    expect(visibleUserPromptText(stored)).toBe(stored);
+  });
+
+  it("preserves a user-authored leading reply-mode line", () => {
+    const stored = "[Reply mode: draft]\nPlease review";
+    expect(visibleUserPromptText(stored)).toBe(stored);
   });
 });

@@ -117,7 +117,7 @@ export function AppStatusBar({
       data-testid="app-status-bar"
       data-layout={layout}
       className={cn(
-        "w-full min-w-0 border-t text-muted-foreground text-xs",
+        "w-full min-w-0 shrink-0 border-t text-muted-foreground text-xs",
         stacked
           ? "flex flex-col gap-1 overflow-x-hidden px-1.5 py-1"
           : "flex min-h-9 items-center gap-1.5 px-2 py-1",
@@ -161,7 +161,7 @@ export function AppStatusBar({
       <div
         data-testid="app-status-actions"
         className={cn(
-          "flex min-w-0 items-center gap-0.5",
+          "flex min-w-0 items-center gap-0.5 [&>*]:shrink-0",
           stacked ? "w-full flex-wrap" : "ml-auto shrink-0",
         )}
       >

@@ -1583,7 +1583,7 @@ export const ChatComposer: FC<{
           <div
             data-testid="composer-controls"
             data-layout="inline"
-            className="flex w-full min-w-0 max-w-full shrink-0 flex-nowrap items-center gap-1.5 overflow-hidden px-0.5"
+            className="flex w-full min-w-0 max-w-full shrink-0 flex-nowrap items-center gap-1.5 px-0.5"
           >
             <div
               data-testid="composer-controls-leading"
