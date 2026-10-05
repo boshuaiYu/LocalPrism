@@ -82,6 +82,11 @@ import { Input } from "@/components/ui/input";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
+import {
+  environmentSkillInline,
+  environmentSkillProblem,
+  environmentSkillShowRetry,
+} from "@/lib/environment-skill-status";
 import { SKILLS_LIST_UPDATED_EVENT } from "@/lib/skills-refresh";
 import { useAgentStore } from "@/stores/agent-store";
 import { useSkillStore } from "@/stores/skill-store";
@@ -2238,7 +2243,9 @@ function EnvironmentSection({
 
   const retrySkills = useCallback(() => {
     void (async () => {
-      await useSkillStore.getState().ensureDefaultSkillPacks();
+      // force re-fetches a pack whose marker folder landed before the
+      // download failed, instead of treating that folder as already installed.
+      await useSkillStore.getState().ensureDefaultSkillPacks({ force: true });
       await checkSkillsStatus();
       await refreshAgents("claude");
     })();
@@ -2281,16 +2288,20 @@ function EnvironmentSection({
       : uvStatus === "ready"
         ? t("env.noVenv")
         : "";
-  const skillProblem =
-    skillsCheckError ?? (skillsStatus?.installed ? null : skillError);
-  const skillsLabel = skillsStatus?.installed
-    ? t("env.skillCount", { count: skillsStatus.skill_count })
-    : skillLoading
+  const skillProblem = environmentSkillProblem(skillsCheckError, skillError);
+  const skillsInstalled = Boolean(skillsStatus?.installed);
+  const showSkillRetry = environmentSkillShowRetry(
+    skillsInstalled,
+    skillProblem,
+  );
+  const skillsLabel =
+    skillLoading && !skillProblem
       ? t("env.installing")
       : skillProblem
-        ? t("env.installFailed")
-        : t("env.notInstalled");
-  const showSkillRetry = !skillsStatus?.installed || Boolean(skillProblem);
+        ? environmentSkillInline(skillProblem)
+        : skillsInstalled
+          ? t("env.skillCount", { count: skillsStatus?.skill_count ?? 0 })
+          : t("env.notInstalled");
   const agentsLabel = t("env.agentCount", { count: agents.length });
 
   return (
@@ -2334,7 +2345,7 @@ function EnvironmentSection({
                 <FlaskConicalIcon
                   className={cn(
                     "size-3.5 shrink-0",
-                    skillsStatus?.installed
+                    skillsInstalled && !skillProblem
                       ? "text-foreground"
                       : "text-muted-foreground",
                   )}
@@ -2344,8 +2355,9 @@ function EnvironmentSection({
                 </span>
                 <span
                   className={cn(
-                    "shrink-0 text-xs",
-                    skillsStatus?.installed
+                    "text-xs",
+                    skillProblem ? "min-w-0 max-w-[55%] truncate" : "shrink-0",
+                    skillsInstalled && !skillProblem
                       ? "text-foreground"
                       : "text-muted-foreground",
                   )}

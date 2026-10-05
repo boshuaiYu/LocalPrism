@@ -256,10 +256,18 @@ function sameSkillIds(
   left: readonly string[],
   right: readonly string[],
 ): boolean {
-  return (
-    left.length === right.length &&
-    left.every((id, index) => id === right[index])
-  );
+  if (left.length !== right.length) return false;
+  const counts = new Map<string, number>();
+  for (const id of left) {
+    counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  for (const id of right) {
+    const count = counts.get(id);
+    if (!count) return false;
+    if (count === 1) counts.delete(id);
+    else counts.set(id, count - 1);
+  }
+  return counts.size === 0;
 }
 
 /**
@@ -294,9 +302,10 @@ export function builtinPresetContentUpdate(
 }
 
 /**
- * Attach currently installed skills to an unedited builtin. Customized name,
- * description, or instructions are left alone, and missing preset files are
- * not recreated here.
+ * Fill skills on a factory builtin whose skill list is still empty (the file
+ * the backend just seeded). A list the user already changed is left alone,
+ * including a different order of the same ids. Missing preset files are not
+ * recreated here.
  */
 export function builtinPresetSkillSync(
   agent: AgentProfile,
@@ -304,6 +313,7 @@ export function builtinPresetSkillSync(
 ): AgentProfile | null {
   if (agent.runtime !== "claude" || agent.scope !== "user") return null;
   if (!isBuiltinAgentPresetId(agent.id)) return null;
+  if (agent.skillIds.length > 0) return null;
   const preset = builtinAgentPreset(agent.id);
   if (
     agent.name !== preset.name ||
@@ -313,7 +323,9 @@ export function builtinPresetSkillSync(
     return null;
   }
   const skillIds = presetSkillAttachment(agent.id, skills).skillIds;
-  if (sameSkillIds(agent.skillIds, skillIds)) return null;
+  if (skillIds.length === 0 || sameSkillIds(agent.skillIds, skillIds)) {
+    return null;
+  }
   return { ...agent, skillIds };
 }
 

@@ -120,26 +120,56 @@ fn agent_file(agents_dir: &Path, id: &str) -> PathBuf {
 }
 
 fn write_marker(path: &Path) -> Result<(), AgentError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            AgentError::from(format!("Failed to create {}: {error}", parent.display()))
-        })?;
-    }
-    fs::write(path, b"1\n")
-        .map_err(|error| AgentError::from(format!("Failed to write {}: {error}", path.display())))
+    super::atomic_write(path, b"1\n")
 }
 
-/// Install the three built-in agents into `claude-home/agents` when this data
-/// home has never had them. Existing files are left alone. After the home is
-/// marked seeded, deleted presets stay deleted.
-pub fn ensure_default_user_agents() -> Result<(), AgentError> {
-    let agents_dir = crate::providers::paths::user_agents_dir().map_err(AgentError::from)?;
-    fs::create_dir_all(&agents_dir).map_err(|error| {
+fn markdown_agent_ids(agents_dir: &Path) -> Result<Vec<String>, AgentError> {
+    if !agents_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let entries = fs::read_dir(agents_dir).map_err(|error| {
         AgentError::from(format!(
-            "Failed to create {}: {error}",
+            "Failed to read {}: {error}",
             agents_dir.display()
         ))
     })?;
+    let mut ids = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("md") || !path.is_file() {
+            continue;
+        }
+        if let Some(stem) = path.file_stem().and_then(|name| name.to_str()) {
+            ids.push(stem.to_string());
+        }
+    }
+    Ok(ids)
+}
+
+fn finish_without_creating_agents(seeded: &Path, seeding: &Path) -> Result<(), AgentError> {
+    write_marker(seeded)?;
+    if seeding.is_file() {
+        fs::remove_file(seeding).map_err(|error| {
+            AgentError::from(format!("Failed to remove {}: {error}", seeding.display()))
+        })?;
+    }
+    Ok(())
+}
+
+/// Install the three built-in agents into `claude-home/agents` only when that
+/// directory is missing or contains no agent markdown.
+///
+/// An upgraded home has no `.default-agents-seeded` marker. Any existing
+/// `*.md` — a custom agent such as `yixiu.md`, or one of the three presets —
+/// means this library was already in use: write the marker and do not add
+/// files. A directory with no markdown is seeded once. That includes a home
+/// where the user deleted every agent file; that empty directory cannot be
+/// told apart from a data home created after the config-directory move.
+///
+/// `.default-agents-seeding` does not fill gaps. If any markdown is already
+/// present, missing presets stay missing.
+pub fn ensure_default_user_agents() -> Result<(), AgentError> {
+    let agents_dir = crate::providers::paths::user_agents_dir().map_err(AgentError::from)?;
     let claude_home = agents_dir
         .parent()
         .ok_or_else(|| AgentError::from("User agents directory is missing a parent directory"))?;
@@ -148,25 +178,37 @@ pub fn ensure_default_user_agents() -> Result<(), AgentError> {
         return Ok(());
     }
     let seeding = claude_home.join(SEEDING_MARKER);
-    let resume = seeding.is_file();
-    if !resume
-        && DEFAULT_AGENT_IDS
-            .iter()
-            .any(|id| agent_file(&agents_dir, id).is_file())
-    {
-        return write_marker(&seeded);
+    // Decide from the directory that already exists. Creating it first would
+    // make a missing library look like an empty one before we have chosen.
+    let existing = markdown_agent_ids(&agents_dir)?;
+    if !existing.is_empty() {
+        return finish_without_creating_agents(&seeded, &seeding);
     }
-    if !resume {
-        write_marker(&seeding)?;
+
+    write_marker(&seeding)?;
+    fs::create_dir_all(&agents_dir).map_err(|error| {
+        AgentError::from(format!(
+            "Failed to create {}: {error}",
+            agents_dir.display()
+        ))
+    })?;
+    // A seed that crashed after writing one file must not fill the rest.
+    let now_present = markdown_agent_ids(&agents_dir)?;
+    if !now_present.is_empty() {
+        return finish_without_creating_agents(&seeded, &seeding);
     }
-    for profile in default_agent_profiles() {
-        let path = agent_file(&agents_dir, &profile.id);
-        if path.exists() {
-            continue;
-        }
-        claude::write_claude_agent(&path, &profile)?;
+    let profiles = default_agent_profiles();
+    for id in DEFAULT_AGENT_IDS {
+        let profile = profiles.iter().find(|profile| profile.id == *id).ok_or_else(|| {
+            AgentError::from(format!("Missing built-in agent profile for {id}"))
+        })?;
+        claude::create_claude_agent_if_absent(&agent_file(&agents_dir, id), profile)?;
     }
     write_marker(&seeded)?;
-    let _ = fs::remove_file(&seeding);
+    if seeding.is_file() {
+        fs::remove_file(&seeding).map_err(|error| {
+            AgentError::from(format!("Failed to remove {}: {error}", seeding.display()))
+        })?;
+    }
     Ok(())
 }

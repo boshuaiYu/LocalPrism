@@ -360,6 +360,35 @@ describe("agent-store", () => {
       "academic-paper",
     ]);
   });
+
+  it("does not rewrite a builtin whose skill list was customized", async () => {
+    useSettingsStore.setState({
+      builtinAgentPresetsSeedVersion: BUILTIN_AGENT_PRESET_SEED_VERSION,
+      builtinAgentPresetsSeeded: true,
+    });
+    const polish = {
+      ...buildPresetAgentProfile("academic-polish", []),
+      skillIds: ["my-skill"],
+      sourcePath: "/agents/academic-polish.md",
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "skill_list") {
+        return Promise.resolve([
+          presetSkill("nature-polishing", "Nature polishing"),
+          presetSkill("nature-writing", "Nature writing"),
+          presetSkill("academic-paper", "Academic paper"),
+        ]);
+      }
+      if (command === "list_agents") return Promise.resolve([polish]);
+      return Promise.reject(new Error(`unexpected ${command}`));
+    });
+
+    await useAgentStore.getState().ensureBuiltinPresets();
+
+    expect(
+      invoke.mock.calls.some(([command]) => command === "save_agent"),
+    ).toBe(false);
+  });
 });
 
 function presetSkill(folder: string, name: string): RuntimeSkill {

@@ -435,9 +435,13 @@ pub async fn list_agents(
     runtime: RuntimeKind,
     project_path: Option<String>,
 ) -> Result<Vec<AgentProfile>, String> {
-    // The environment panel counts this list. Seed the offline presets first
-    // so a fresh data home is not stuck at 0 while skill downloads fail.
-    ensure_default_user_agents().map_err(|error| error.to_string())?;
+    // Claude presets are local files. A seed failure must not hide agents
+    // that are already on disk, and Codex listings do not install them.
+    if runtime == RuntimeKind::Claude {
+        if let Err(error) = ensure_default_user_agents() {
+            eprintln!("[localprism] default agents were not installed: {error}");
+        }
+    }
     let project = project_path.as_deref().map(Path::new);
     let mut agents = list_scope(runtime, SkillScope::User, project).map_err(|e| e.to_string())?;
     if project.is_some() {
@@ -931,5 +935,120 @@ mod tests {
         let agents_dir = crate::providers::paths::user_agents_dir().unwrap();
         assert_ne!(skills_dir, agents_dir);
         assert!(agents_dir.starts_with(home.join("claude-home")));
+    }
+
+    #[tokio::test]
+    async fn custom_markdown_without_a_marker_does_not_receive_default_agents() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let agents_dir = home.join("claude-home").join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        let custom = "---\nname: 一休学术\ndescription: User router\n---\nBody\n";
+        fs::write(agents_dir.join("yixiu.md"), custom).unwrap();
+        let _home = HomeGuard::set(&home);
+
+        let listed = list_agents(RuntimeKind::Claude, None).await.unwrap();
+        let ids: Vec<_> = listed.iter().map(|agent| agent.id.as_str()).collect();
+        assert_eq!(ids, vec!["yixiu"]);
+        assert!(!agents_dir.join("academic-polish.md").exists());
+        assert!(!agents_dir.join("de-ai.md").exists());
+        assert!(!agents_dir.join("peer-review.md").exists());
+        assert_eq!(fs::read_to_string(agents_dir.join("yixiu.md")).unwrap(), custom);
+        assert!(home
+            .join("claude-home")
+            .join(".default-agents-seeded")
+            .is_file());
+    }
+
+    #[tokio::test]
+    async fn empty_agents_directory_is_seeded_once() {
+        // A directory with no markdown cannot be told apart from a home
+        // created after the config-directory move, so both receive the
+        // presets. A user who deleted every agent file hits this once.
+        let _guard = crate::providers::paths::lock_provider_env();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let agents_dir = home.join("claude-home").join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        let _home = HomeGuard::set(&home);
+
+        ensure_default_user_agents().unwrap();
+
+        assert!(agents_dir.join("academic-polish.md").is_file());
+        assert!(agents_dir.join("de-ai.md").is_file());
+        assert!(agents_dir.join("peer-review.md").is_file());
+    }
+
+    #[tokio::test]
+    async fn seeding_marker_does_not_restore_a_deleted_preset() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let claude_home = home.join("claude-home");
+        let agents_dir = claude_home.join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        let polish = "---\nname: 论文抛光机\ndescription: Kept\n---\nKeep this.\n";
+        fs::write(agents_dir.join("academic-polish.md"), polish).unwrap();
+        fs::write(
+            agents_dir.join("peer-review.md"),
+            "---\nname: 毒舌审稿官\ndescription: Kept\n---\nKeep this too.\n",
+        )
+        .unwrap();
+        fs::write(claude_home.join(".default-agents-seeding"), b"1\n").unwrap();
+        let _home = HomeGuard::set(&home);
+
+        ensure_default_user_agents().unwrap();
+
+        assert!(!agents_dir.join("de-ai.md").exists());
+        assert_eq!(
+            fs::read_to_string(agents_dir.join("academic-polish.md")).unwrap(),
+            polish
+        );
+        assert!(claude_home.join(".default-agents-seeded").is_file());
+        assert!(!claude_home.join(".default-agents-seeding").exists());
+    }
+
+    #[tokio::test]
+    async fn list_agents_returns_existing_agents_when_the_seed_cannot_be_marked() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let claude_home = home.join("claude-home");
+        let agents_dir = claude_home.join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        fs::write(
+            agents_dir.join("yixiu.md"),
+            "---\nname: 一休学术\ndescription: User router\n---\nBody\n",
+        )
+        .unwrap();
+        // A directory where the marker file should be makes the atomic rename fail.
+        let blocked = claude_home.join(".default-agents-seeded");
+        fs::create_dir_all(blocked.join("occupied")).unwrap();
+        let _home = HomeGuard::set(&home);
+
+        let listed = list_agents(RuntimeKind::Claude, None).await.unwrap();
+        let ids: Vec<_> = listed.iter().map(|agent| agent.id.as_str()).collect();
+        assert_eq!(ids, vec!["yixiu"]);
+        assert!(!agents_dir.join("academic-polish.md").exists());
+        assert!(!agents_dir.join("de-ai.md").exists());
+        assert!(!agents_dir.join("peer-review.md").exists());
+    }
+
+    #[tokio::test]
+    async fn codex_listing_does_not_seed_claude_presets() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let _home = HomeGuard::set(&home);
+
+        let listed = list_agents(RuntimeKind::Codex, None).await.unwrap();
+        assert!(listed.is_empty());
+        let agents_dir = crate::providers::paths::user_agents_dir().unwrap();
+        assert!(!agents_dir.join("academic-polish.md").exists());
+        assert!(!home
+            .join("claude-home")
+            .join(".default-agents-seeded")
+            .exists());
     }
 }
