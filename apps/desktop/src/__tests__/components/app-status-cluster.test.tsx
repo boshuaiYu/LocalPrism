@@ -62,4 +62,29 @@ describe("AppStatusBar tour anchor", () => {
     const step = PRODUCT_TOUR_STEPS.find((item) => item.id === "updates");
     expect(findProductTourElement(step!)).toBe(button);
   });
+
+  it("stacks a narrow sidebar bar so actions wrap instead of overflowing", async () => {
+    await act(async () => {
+      root.render(<AppStatusBar layout="stack" />);
+    });
+
+    const bar = container.querySelector('[data-testid="app-status-bar"]');
+    const version = container.querySelector('[data-testid="app-version"]');
+    const actions = container.querySelector(
+      '[data-testid="app-status-actions"]',
+    );
+    expect(bar?.getAttribute("data-layout")).toBe("stack");
+    expect(bar?.className).toContain("flex-col");
+    expect(bar?.className).toContain("overflow-x-hidden");
+    expect(version?.className).toContain("truncate");
+    expect(version?.className).not.toContain("shrink-0");
+    expect(actions?.className).toContain("flex-wrap");
+    expect(actions?.className).not.toContain("ml-auto");
+    expect(
+      actions?.querySelector('[data-testid="beta-channel-toggle"]'),
+    ).not.toBeNull();
+    expect(
+      actions?.querySelector('[data-testid="check-for-updates"]'),
+    ).not.toBeNull();
+  });
 });

@@ -32,6 +32,7 @@ import {
   settleChatMessages,
 } from "@/lib/chat-turn-settlement";
 import { canOfferCompression } from "@/lib/chat-compression";
+import { visibleUserPromptText } from "@/lib/chat-visible-prompt";
 import { transcriptHasContentBelow } from "@/lib/chat-scroll";
 import {
   canRewindTo,
@@ -391,88 +392,92 @@ export const ChatMessages: FC = () => {
   const scrollToBottomLabel = t("chat.scrollToBottom");
 
   return (
-    <>
-      <div
-        ref={viewportRef}
-        onScroll={handleScroll}
-        data-testid="chat-transcript"
-        className="absolute inset-0 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden scroll-smooth px-5 pt-5 pb-2"
-      >
-        {settledMessages.length === 0 &&
-          pendingGuidance.length === 0 &&
-          !isStreaming && (
-            <div className="flex h-full items-center justify-center px-6 text-center text-muted-foreground text-sm leading-relaxed">
-              {t("chat.ask")}
+    <div className="flex h-full min-h-0 flex-col">
+      {offerCompression ? (
+        <div
+          className={cn(
+            "flex w-full shrink-0 justify-end px-5 pt-2 pb-1",
+            THREAD_MAX_WIDTH,
+            "mx-auto",
+          )}
+        >
+          <button
+            type="button"
+            data-testid="compress-earlier"
+            className="px-1 py-1 text-muted-foreground text-xs underline-offset-2 hover:text-foreground hover:underline disabled:opacity-50"
+            disabled={isStreaming}
+            onClick={() => void compressEarlierMessages({ force: true })}
+          >
+            {t("chat.compress")}
+          </button>
+        </div>
+      ) : null}
+      <div className="relative min-h-0 flex-1">
+        <div
+          ref={viewportRef}
+          onScroll={handleScroll}
+          data-testid="chat-transcript"
+          className="absolute inset-0 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden scroll-smooth px-5 pt-5 pb-2"
+        >
+          {settledMessages.length === 0 &&
+            pendingGuidance.length === 0 &&
+            !isStreaming && (
+              <div className="flex h-full items-center justify-center px-6 text-center text-muted-foreground text-sm leading-relaxed">
+                {t("chat.ask")}
+              </div>
+            )}
+
+          {settledMessages.map((msg, idx) => (
+            <div
+              key={idx}
+              className={cn("mx-auto w-full min-w-0", THREAD_MAX_WIDTH)}
+            >
+              <MessageBubble
+                message={msg}
+                toolResultMap={toolResultMap}
+                live={isStreaming && idx > openTurnStart}
+              />
+            </div>
+          ))}
+
+          {isStreaming && (
+            <div
+              className={cn("mx-auto w-full min-w-0 px-2", THREAD_MAX_WIDTH)}
+            >
+              <StreamingIndicator
+                startedAt={streamingStartedAt}
+                status={streamingStatus}
+                runtime={streamingRuntime === "codex" ? "codex" : "claude"}
+              />
             </div>
           )}
 
-        {offerCompression && (
-          <div
-            className={cn(
-              "pointer-events-none sticky top-0 z-10 mx-auto mb-1 flex w-full justify-end",
-              THREAD_MAX_WIDTH,
-            )}
-          >
-            <button
-              type="button"
-              data-testid="compress-earlier"
-              className="pointer-events-auto px-1 py-1 text-muted-foreground text-xs underline-offset-2 hover:text-foreground hover:underline disabled:opacity-50"
-              disabled={isStreaming}
-              onClick={() => void compressEarlierMessages({ force: true })}
+          {pendingGuidance.map((guidance) => (
+            <div
+              key={guidance.id}
+              className={cn("mx-auto w-full min-w-0", THREAD_MAX_WIDTH)}
             >
-              {t("chat.compress")}
-            </button>
-          </div>
-        )}
-
-        {settledMessages.map((msg, idx) => (
-          <div
-            key={idx}
-            className={cn("mx-auto w-full min-w-0", THREAD_MAX_WIDTH)}
+              <PendingGuidanceMessage guidance={guidance} />
+            </div>
+          ))}
+        </div>
+        {showScrollToBottom && (
+          <TooltipIconButton
+            tooltip={scrollToBottomLabel}
+            aria-label={scrollToBottomLabel}
+            side="top"
+            variant="outline"
+            size="icon"
+            type="button"
+            data-testid="scroll-to-bottom"
+            className="absolute bottom-3 left-1/2 z-10 size-9 -translate-x-1/2 rounded-full bg-background/95 shadow-sm"
+            onClick={jumpToLatest}
           >
-            <MessageBubble
-              message={msg}
-              toolResultMap={toolResultMap}
-              live={isStreaming && idx > openTurnStart}
-            />
-          </div>
-        ))}
-
-        {isStreaming && (
-          <div className={cn("mx-auto w-full min-w-0 px-2", THREAD_MAX_WIDTH)}>
-            <StreamingIndicator
-              startedAt={streamingStartedAt}
-              status={streamingStatus}
-              runtime={streamingRuntime === "codex" ? "codex" : "claude"}
-            />
-          </div>
+            <ArrowDownIcon className="size-4" />
+          </TooltipIconButton>
         )}
-
-        {pendingGuidance.map((guidance) => (
-          <div
-            key={guidance.id}
-            className={cn("mx-auto w-full min-w-0", THREAD_MAX_WIDTH)}
-          >
-            <PendingGuidanceMessage guidance={guidance} />
-          </div>
-        ))}
       </div>
-      {showScrollToBottom && (
-        <TooltipIconButton
-          tooltip={scrollToBottomLabel}
-          aria-label={scrollToBottomLabel}
-          side="top"
-          variant="outline"
-          size="icon"
-          type="button"
-          data-testid="scroll-to-bottom"
-          className="absolute bottom-3 left-1/2 z-10 size-9 -translate-x-1/2 rounded-full bg-background/95 shadow-sm"
-          onClick={jumpToLatest}
-        >
-          <ArrowDownIcon className="size-4" />
-        </TooltipIconButton>
-      )}
-    </>
+    </div>
   );
 };
 
@@ -572,7 +577,7 @@ function SummaryMessage({
 
 const UserMessage: FC<{ message: ClaudeStreamMessage }> = ({ message }) => {
   const rawContent = message.message?.content;
-  const textContent = Array.isArray(rawContent)
+  const rawText = Array.isArray(rawContent)
     ? rawContent
         .filter((b) => b.type === "text")
         .map((b) => b.text)
@@ -580,6 +585,7 @@ const UserMessage: FC<{ message: ClaudeStreamMessage }> = ({ message }) => {
     : typeof rawContent === "string"
       ? rawContent
       : "";
+  const textContent = visibleUserPromptText(rawText);
 
   if (!textContent || isSkillInstructionDump(textContent)) return null;
 

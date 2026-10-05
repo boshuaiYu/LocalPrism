@@ -93,6 +93,7 @@ import {
   initialTourWorkspaceChrome,
   type ProductTourCue,
 } from "@/lib/product-tour";
+import { OPEN_SETTINGS_EVENT } from "@/lib/settings-chrome";
 import { SIDEBAR_SPLIT_AUTOSAVE_ID } from "@/lib/workspace-pane-layout";
 import { createLogger } from "@/lib/debug/logger";
 import { resolveNewProjectFile } from "@/lib/new-project-file";
@@ -991,10 +992,10 @@ export function Sidebar({
       setSettingsOpen(next.settingsOpen);
       setSettingsTab(next.settingsTab);
     };
-    window.addEventListener("localprism-open-settings", openSettings);
+    window.addEventListener(OPEN_SETTINGS_EVENT, openSettings);
     window.addEventListener(PRODUCT_TOUR_EVENT, onTourCue);
     return () => {
-      window.removeEventListener("localprism-open-settings", openSettings);
+      window.removeEventListener(OPEN_SETTINGS_EVENT, openSettings);
       window.removeEventListener(PRODUCT_TOUR_EVENT, onTourCue);
     };
   }, []);
@@ -1258,7 +1259,18 @@ export function Sidebar({
           </Button>
         )}
       </div>
-      <div className="flex h-9 w-full items-center justify-center gap-1 border-sidebar-border border-t">
+      <div className="mt-auto flex w-full flex-col items-center gap-1 border-sidebar-border border-t py-1">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7"
+          data-testid="chrome-settings"
+          onClick={() => setSettingsOpen(true)}
+          title={t("chrome.settings")}
+          aria-label={t("chrome.openSettings")}
+        >
+          <SettingsIcon className="size-3.5" />
+        </Button>
         <ProjectCloseButton
           className="size-7 transition-transform duration-300 ease-in-out hover:scale-105"
           onClose={closeProject}
@@ -1544,6 +1556,7 @@ export function Sidebar({
           />
 
           <AppStatusBar
+            layout="stack"
             className="border-sidebar-border bg-sidebar text-sidebar-foreground"
             trailing={
               <>
@@ -1551,6 +1564,7 @@ export function Sidebar({
                   variant="ghost"
                   size="icon"
                   className="size-6"
+                  data-testid="chrome-settings"
                   onClick={() => setSettingsOpen(true)}
                   title={t("chrome.settings")}
                   aria-label={t("chrome.openSettings")}

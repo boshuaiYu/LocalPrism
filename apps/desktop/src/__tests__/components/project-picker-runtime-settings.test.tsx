@@ -230,4 +230,30 @@ describe("ProjectPicker runtime settings", () => {
     expect(flash?.className).toMatch(/lp-update-flash/);
     expect(container.querySelector("[role='dialog']")).toBeNull();
   });
+
+  it("opens Settings from the start page gear and from Ctrl+,", async () => {
+    await act(async () => {
+      root.render(<ProjectPicker />);
+      await Promise.resolve();
+    });
+
+    const gear = container.querySelector('[data-testid="chrome-settings"]');
+    expect(gear).toBeInstanceOf(HTMLButtonElement);
+    expect(gear?.getAttribute("aria-label")).toMatch(/settings/i);
+
+    await act(async () => {
+      if (gear instanceof HTMLButtonElement) gear.click();
+    });
+    expect(document.body.textContent).toContain("Settings");
+    expect(
+      document.body.querySelector('[data-testid="runtime-settings"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("localprism-open-settings"));
+    });
+    expect(
+      document.body.querySelector('[data-testid="runtime-settings"]'),
+    ).not.toBeNull();
+  });
 });

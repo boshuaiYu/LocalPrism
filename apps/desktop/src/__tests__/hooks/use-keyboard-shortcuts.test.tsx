@@ -7,6 +7,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
+import { OPEN_SETTINGS_EVENT } from "@/lib/settings-chrome";
 
 function Probe() {
   useKeyboardShortcuts();
@@ -92,6 +93,48 @@ describe("useKeyboardShortcuts capture vs cut", () => {
     expect(prevented).toBe(false);
     expect(capture).not.toHaveBeenCalled();
     window.removeEventListener("toggle-capture-mode", capture);
+  });
+
+  it("opens Settings with Ctrl+, even while a field is focused", async () => {
+    const openSettings = vi.fn();
+    window.addEventListener(OPEN_SETTINGS_EVENT, openSettings);
+    await act(async () => {
+      root.render(<Probe />);
+    });
+
+    const textarea = container.querySelector("textarea");
+    const event = new KeyboardEvent("keydown", {
+      key: ",",
+      code: "Comma",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    textarea?.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(openSettings).toHaveBeenCalledTimes(1);
+    window.removeEventListener(OPEN_SETTINGS_EVENT, openSettings);
+  });
+
+  it("opens Settings with Cmd+,", async () => {
+    const openSettings = vi.fn();
+    window.addEventListener(OPEN_SETTINGS_EVENT, openSettings);
+    await act(async () => {
+      root.render(<Probe />);
+    });
+
+    const event = new KeyboardEvent("keydown", {
+      key: ",",
+      code: "Comma",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(event);
+
+    expect(openSettings).toHaveBeenCalledTimes(1);
+    window.removeEventListener(OPEN_SETTINGS_EVENT, openSettings);
   });
 
   it("leaves Ctrl+Shift+X in the document editor for cut, not capture", async () => {

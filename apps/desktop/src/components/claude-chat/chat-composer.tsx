@@ -58,7 +58,6 @@ import {
   RuntimeSelector,
   runtimeSelectionSupportsImages,
 } from "@/components/runtime/runtime-selector";
-import { composerControlsLayout } from "@/lib/composer-controls-layout";
 import {
   deriveReasoningStrength,
   reasoningStrengthChipLabel,
@@ -454,20 +453,6 @@ export const ChatComposer: FC<{
     left: 0,
     bottom: 0,
   });
-  const [controlsWidth, setControlsWidth] = useState(0);
-  const controlsRef = useRef<HTMLDivElement>(null);
-  const controlsLayout = composerControlsLayout(controlsWidth);
-
-  useLayoutEffect(() => {
-    const node = controlsRef.current;
-    if (!node || typeof ResizeObserver === "undefined") return;
-    const update = () => setControlsWidth(node.clientWidth);
-    update();
-    const observer = new ResizeObserver(() => update());
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [archivedCodex]);
-
   // Recalculate popup position when it opens
   useLayoutEffect(() => {
     if (!modelPickerOpen || !modelButtonRef.current) return;
@@ -1596,24 +1581,13 @@ export const ChatComposer: FC<{
           </div>
 
           <div
-            ref={controlsRef}
             data-testid="composer-controls"
-            data-layout={controlsLayout}
-            className={cn(
-              "flex w-full min-w-0 max-w-full shrink-0 gap-1.5 px-0.5",
-              controlsLayout === "narrow"
-                ? "flex-col"
-                : "flex-row flex-wrap items-center",
-            )}
+            data-layout="inline"
+            className="flex w-full min-w-0 max-w-full shrink-0 flex-nowrap items-center gap-1.5 overflow-hidden px-0.5"
           >
             <div
               data-testid="composer-controls-leading"
-              className={cn(
-                "flex min-w-0 max-w-full items-center gap-1.5",
-                controlsLayout === "narrow"
-                  ? "w-full flex-wrap"
-                  : "flex-1 flex-nowrap overflow-hidden",
-              )}
+              className="flex min-w-0 max-w-full flex-1 flex-nowrap items-center gap-1.5 overflow-hidden"
             >
               <TooltipIconButton
                 tooltip="Attach files"
@@ -1656,7 +1630,7 @@ export const ChatComposer: FC<{
               />
               <div
                 data-testid="composer-controls-model"
-                className="flex min-w-0 max-w-full flex-1 overflow-hidden"
+                className="flex min-w-0 max-w-full flex-1 basis-0 overflow-hidden"
               >
                 <ComposerModelChip
                   buttonRef={modelButtonRef}
@@ -1668,11 +1642,6 @@ export const ChatComposer: FC<{
                   onClick={() => setModelPickerOpen((open) => !open)}
                 />
               </div>
-              {controlsLayout === "narrow" ? (
-                <div data-testid="composer-send" className="ml-auto shrink-0">
-                  {sendButton}
-                </div>
-              ) : null}
             </div>
             <div
               data-testid="composer-controls-context"
@@ -1680,11 +1649,9 @@ export const ChatComposer: FC<{
             >
               <ChatTokenMeter />
             </div>
-            {controlsLayout === "wide" ? (
-              <div data-testid="composer-send" className="shrink-0">
-                {sendButton}
-              </div>
-            ) : null}
+            <div data-testid="composer-send" className="shrink-0">
+              {sendButton}
+            </div>
           </div>
         </div>
       )}

@@ -72,6 +72,7 @@ import {
   writePersistedChatForProject,
 } from "./chat-persistence";
 import { useApprovalStore } from "./approval-store";
+import { visibleUserPromptText } from "@/lib/chat-visible-prompt";
 import { applyReplyStyleToPrompt } from "@/lib/reply-mode";
 import { useAgentStore } from "./agent-store";
 
@@ -699,24 +700,6 @@ function messageContentText(message: ClaudeStreamMessage): string {
   return parts.join("\n").trim();
 }
 
-function displayTextForStoredUserPrompt(text: string): string {
-  const normalized = text.replace(/\r\n/g, "\n");
-  if (!/^\[(?:Currently open file|File): [^\]\n]*\]/.test(normalized)) {
-    return text;
-  }
-
-  const contextEnd = normalized.lastIndexOf("]\n\n");
-  if (contextEnd < 0) return text;
-
-  const contextText = normalized.slice(0, contextEnd + 1);
-  const body = normalized.slice(contextEnd + 3);
-  const selectionMatch = contextText.match(/(?:^|\n)\[Selection: ([^\]\n]+)\]/);
-  const contextLabel = selectionMatch?.[1]?.trim();
-
-  if (!contextLabel) return body;
-  return body.trim() ? `${contextLabel}\n${body}` : contextLabel;
-}
-
 function sanitizeStoredUserMessageForDisplay(
   message: ClaudeStreamMessage,
 ): ClaudeStreamMessage {
@@ -724,7 +707,7 @@ function sanitizeStoredUserMessageForDisplay(
 
   const rawContent = (message.message as any)?.content;
   if (typeof rawContent === "string") {
-    const displayText = displayTextForStoredUserPrompt(rawContent);
+    const displayText = visibleUserPromptText(rawContent);
     return displayText === rawContent
       ? message
       : {
@@ -741,7 +724,7 @@ function sanitizeStoredUserMessageForDisplay(
       return block;
     }
 
-    const displayText = displayTextForStoredUserPrompt(block.text);
+    const displayText = visibleUserPromptText(block.text);
     if (displayText === block.text) return block;
 
     changed = true;
@@ -843,8 +826,11 @@ function conversationHistoryMessages(
   runtime: RuntimeKind,
   items: unknown[],
 ): ClaudeStreamMessage[] {
-  if (runtime === "codex") return codexHistoryMessages(items);
-  return claudeHistoryMessages(items).map(sanitizeStoredUserMessageForDisplay);
+  const messages =
+    runtime === "codex"
+      ? codexHistoryMessages(items)
+      : claudeHistoryMessages(items);
+  return messages.map(sanitizeStoredUserMessageForDisplay);
 }
 
 let tabCounter = 0n;

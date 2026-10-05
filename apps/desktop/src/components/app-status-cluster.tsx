@@ -53,9 +53,12 @@ function noticeMode(status: UpdateStatus): "blink" | "steady" | "hidden" {
 export function AppStatusBar({
   className,
   trailing,
+  layout = "inline",
 }: {
   className?: string;
   trailing?: ReactNode;
+  /** Sidebar bars stack so version text cannot push actions past the pane. */
+  layout?: "inline" | "stack";
 }) {
   const version = useAppVersion();
   const { t } = useI18n();
@@ -104,42 +107,61 @@ export function AppStatusBar({
     (status.state === "error" &&
       classifyUpdateError(status.message) === "missing-platform");
 
+  const stacked = layout === "stack";
+
   return (
     <div
       data-testid="app-status-bar"
+      data-layout={layout}
       className={cn(
-        "flex min-h-9 w-full min-w-0 items-center gap-1.5 border-t px-2 py-1 text-muted-foreground text-xs",
+        "w-full min-w-0 border-t text-muted-foreground text-xs",
+        stacked
+          ? "flex flex-col gap-1 overflow-x-hidden px-1.5 py-1"
+          : "flex min-h-9 items-center gap-1.5 px-2 py-1",
         className,
       )}
     >
-      <span className="shrink-0 truncate" data-testid="app-version">
-        LocalPrism{version ? ` v${version}` : ""}
-      </span>
-      {notice ? (
-        noticeInteractive ? (
-          <button
-            type="button"
-            data-testid="update-flash"
-            className={cn(
-              "min-w-0 truncate rounded px-1 text-left text-foreground hover:bg-muted/70",
-              blink && "lp-update-flash",
-            )}
-            title={notice.title}
-            onClick={onNotice}
-          >
-            {notice.label}
-          </button>
-        ) : (
-          <span
-            data-testid="update-flash"
-            className="min-w-0 truncate text-foreground"
-            title={notice.title}
-          >
-            {notice.label}
-          </span>
-        )
-      ) : null}
-      <div className="ml-auto flex shrink-0 items-center gap-0.5">
+      <div
+        className={cn(
+          "flex min-w-0 items-center gap-1.5",
+          stacked ? "w-full" : "flex-1",
+        )}
+      >
+        <span className="min-w-0 truncate" data-testid="app-version">
+          LocalPrism{version ? ` v${version}` : ""}
+        </span>
+        {notice ? (
+          noticeInteractive ? (
+            <button
+              type="button"
+              data-testid="update-flash"
+              className={cn(
+                "min-w-0 truncate rounded px-1 text-left text-foreground hover:bg-muted/70",
+                blink && "lp-update-flash",
+              )}
+              title={notice.title}
+              onClick={onNotice}
+            >
+              {notice.label}
+            </button>
+          ) : (
+            <span
+              data-testid="update-flash"
+              className="min-w-0 truncate text-foreground"
+              title={notice.title}
+            >
+              {notice.label}
+            </span>
+          )
+        ) : null}
+      </div>
+      <div
+        data-testid="app-status-actions"
+        className={cn(
+          "flex min-w-0 items-center gap-0.5",
+          stacked ? "w-full flex-wrap" : "ml-auto shrink-0",
+        )}
+      >
         <LanguageSwitch compact />
         <button
           type="button"

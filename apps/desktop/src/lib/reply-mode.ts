@@ -63,7 +63,7 @@ export function replyStylePrefix(
   const saved = agents.find((agent) => agent.id === mode)?.instructions.trim();
   const instructions = saved || builtinAgentPreset(mode).instructions.trim();
   if (!instructions) return null;
-  return `[Reply mode: ${mode}. Follow this speaking style for this turn only. Do not rewrite earlier messages.]\n${instructions}`;
+  return `[Reply mode: ${mode}. Follow this speaking style for this turn only. Do not rewrite earlier messages.]\n${instructions}\n[/Reply mode]`;
 }
 
 export function applyReplyStyleToPrompt(

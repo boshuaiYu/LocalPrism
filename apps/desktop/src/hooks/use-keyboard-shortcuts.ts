@@ -1,6 +1,10 @@
 import { useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getAppZoomAction, shouldHandleAppZoomShortcut } from "@/lib/app-zoom";
+import {
+  isOpenSettingsShortcut,
+  requestOpenSettings,
+} from "@/lib/settings-chrome";
 import { useDocumentStore } from "@/stores/document-store";
 
 export function isTypingTarget(target: EventTarget | null): boolean {
@@ -38,6 +42,11 @@ export function useKeyboardShortcuts() {
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (isOpenSettingsShortcut(e)) {
+        e.preventDefault();
+        requestOpenSettings();
+      }
+
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();
         const state = useDocumentStore.getState();
