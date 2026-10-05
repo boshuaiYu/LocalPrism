@@ -87,6 +87,7 @@ import { SessionSelector } from "@/components/claude-chat/session-selector";
 import { DISMISSED_FOREIGN_SESSIONS_KEY } from "@/lib/dismissed-foreign-sessions";
 import { type TabState, useClaudeChatStore } from "@/stores/claude-chat-store";
 import { useDocumentStore } from "@/stores/document-store";
+import { useSettingsStore } from "@/stores/settings-store";
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -574,9 +575,11 @@ describe("SessionSelector runtime conversation ownership", () => {
     expect(document.body.textContent).toContain("No previous sessions");
   });
 
-  it("falls back to the first user line or Untitled chat", async () => {
+  it("falls back to the first user line or the tab placeholder", async () => {
     const untitledRef = reference("claude", "/project-a", "empty-title");
     const firstLineRef = reference("claude", "/project-a", "first-line");
+    const pipeRef = reference("claude", "/project-a", "pipe-title");
+    const pricedRef = reference("claude", "/project-a", "priced-title");
     const current = useClaudeChatStore.getState().tabs[0];
     useClaudeChatStore.setState({
       tabs: [
@@ -604,15 +607,45 @@ describe("SessionSelector runtime conversation ownership", () => {
       return Promise.resolve([
         conversation(untitledRef, "   "),
         conversation(firstLineRef, "New Chat"),
+        conversation(pipeRef, "|"),
+        conversation(pricedRef, "$100"),
       ]);
     });
 
     await renderAndOpen();
 
-    expect(document.body.textContent).toContain("Untitled chat");
-    expect(document.body.textContent).toContain("Tighten the abstract");
-    expect(findButton("Delete Untitled chat")).toBeTruthy();
+    const titles = Array.from(
+      document.querySelectorAll('[role="menuitem"] span.truncate'),
+    ).map((node) => node.textContent);
+    expect(titles).toContain("New Chat");
+    expect(titles).toContain("Tighten the abstract");
+    expect(titles).toContain("$100");
+    expect(titles).not.toContain("|");
+    expect(findButton("Delete New Chat")).toBeTruthy();
     expect(findButton("Delete Tighten the abstract")).toBeTruthy();
+    expect(findButton("Delete $100")).toBeTruthy();
+  });
+
+  it("localizes a junk history title with the tab placeholder", async () => {
+    const previous = useSettingsStore.getState().uiLanguage;
+    useSettingsStore.setState({ uiLanguage: "zh" });
+    const pipeRef = reference("claude", "/project-a", "pipe-title");
+    runtimeListConversations.mockImplementation((runtime) => {
+      if (runtime === "codex") return Promise.resolve([]);
+      return Promise.resolve([conversation(pipeRef, "|")]);
+    });
+
+    try {
+      await renderAndOpen();
+      expect(findButton("Delete 新对话")).toBeTruthy();
+      expect(
+        Array.from(
+          document.querySelectorAll('[role="menuitem"] span.truncate'),
+        ).some((node) => node.textContent === "|"),
+      ).toBe(false);
+    } finally {
+      useSettingsStore.setState({ uiLanguage: previous });
+    }
   });
 
   it("filters sessions by title search", async () => {

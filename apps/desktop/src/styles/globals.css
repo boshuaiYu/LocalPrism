@@ -141,10 +141,8 @@
   }
   html {
     @apply overscroll-y-none scroll-smooth;
-    /* macOS overlay titlebar inset — traffic lights safe area */
+    /* macOS overlay titlebar. Other platforms override this. */
     --titlebar-height: 28px;
-    --traffic-light-width: 70px;
-    --window-controls-inset: 0px;
     /* Linux raises this so a dock does not cover Send. Other platforms stay flush. */
     --chat-bottom-gutter: 0px;
     --workspace-topbar-height: 40px;

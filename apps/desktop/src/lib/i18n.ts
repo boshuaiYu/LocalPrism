@@ -233,7 +233,7 @@ const en = {
   "skills.uncategorized": "Uncategorized",
 
   "agents.storage":
-    "Custom subagents are stored in claude-home/agents next to the LocalPrism install folder, not ~/.claude.",
+    "Custom subagents live in claude-home/agents under the LocalPrism data home, not ~/.claude. On Windows that is a writable portable install folder, or %APPDATA%/LocalPrism when the install folder is not writable. macOS uses ~/Library/Application Support/LocalPrism and Linux uses ~/.config/LocalPrism. LOCALPRISM_HOME overrides this on every platform.",
   "agents.new": "New agent",
   "agents.loading": "Loading agents…",
   "agents.empty": "No custom agents yet.",
@@ -306,6 +306,9 @@ const en = {
     "{{model}} produced no output before the request timed out. Check the connection, then retry or switch models in the model picker.",
 
   "chat.newChat": "New Chat",
+  "chat.untitled": "Untitled",
+  "chat.untitledChat": "Untitled chat",
+  "chat.untitledSession": "Untitled session",
   "chat.newTab": "New tab",
   "chat.startNew": "Start a new chat",
   "chat.search": "Search chats",
@@ -751,7 +754,7 @@ const zh: Record<MessageKey, string> = {
   "skills.uncategorized": "未分类",
 
   "agents.storage":
-    "自定义子智能体保存在 LocalPrism 安装目录旁的 claude-home/agents，而不是 ~/.claude。",
+    "自定义子智能体保存在 LocalPrism 数据目录的 claude-home/agents，而不是 ~/.claude。Windows 在安装目录可写时使用该便携目录，否则使用 %APPDATA%/LocalPrism。macOS 使用 ~/Library/Application Support/LocalPrism，Linux 使用 ~/.config/LocalPrism。所有平台都可用 LOCALPRISM_HOME 覆盖。",
   "agents.new": "新建智能体",
   "agents.loading": "正在加载智能体…",
   "agents.empty": "还没有自定义智能体。",
@@ -815,6 +818,9 @@ const zh: Record<MessageKey, string> = {
     "{{model}} 在超时前没有返回内容。请检查网络后重试，或在模型选择器里更换模型。",
 
   "chat.newChat": "新对话",
+  "chat.untitled": "未命名",
+  "chat.untitledChat": "未命名对话",
+  "chat.untitledSession": "未命名会话",
   "chat.newTab": "新标签",
   "chat.startNew": "开始新对话",
   "chat.search": "搜索对话",
@@ -1062,4 +1068,22 @@ export function translate(
 
 export function isUiLanguage(value: unknown): value is UiLanguage {
   return value === "en" || value === "zh";
+}
+
+const PLACEHOLDER_CHAT_TITLE_KEYS = [
+  "chat.newChat",
+  "chat.untitled",
+  "chat.untitledChat",
+  "chat.untitledSession",
+] as const satisfies readonly MessageKey[];
+
+const placeholderChatTitles: ReadonlySet<string> = new Set(
+  [en, zh].flatMap((table) =>
+    PLACEHOLDER_CHAT_TITLE_KEYS.map((key) => table[key].trim().toLowerCase()),
+  ),
+);
+
+/** True for stored placeholders in every supported locale, in any case. */
+export function isPlaceholderChatTitle(title: string): boolean {
+  return placeholderChatTitles.has(title.trim().toLowerCase());
 }

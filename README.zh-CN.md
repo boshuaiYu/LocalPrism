@@ -52,7 +52,7 @@ LocalPrism 是一个**独立**的桌面应用：稿件留在本机文件夹，Te
 
 ### 隔离的主目录，不污染你的 Claude Code
 
-技能、自定义 Agent、斜杠命令写在 LocalPrism 自己的数据根下（`claude-home/`）：安装目录可写就跟安装包放在一起，否则落在 `%APPDATA%/LocalPrism` 或系统配置目录。某一篇论文还可以把文件放在项目里的 `.localprism/`。日常使用的 `~/.claude` 不会被改乱。
+技能、自定义 Agent、斜杠命令写在 LocalPrism 自己的数据根下（`claude-home/`）。Windows 在安装目录可写时使用该便携目录，否则使用 `%APPDATA%/LocalPrism`。macOS 的数据目录是 `~/Library/Application Support/LocalPrism`，Linux 是 `~/.config/LocalPrism`。所有平台都可用 `LOCALPRISM_HOME` 覆盖。某一篇论文还可以把文件放在项目里的 `.localprism/`。日常使用的 `~/.claude` 不会被改乱。
 
 [uv](https://docs.astral.sh/uv/) 管的 Python 环境同样装在 LocalPrism 主目录里。
 

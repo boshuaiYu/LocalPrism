@@ -196,8 +196,7 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
       data-testid="chat-tab-bar"
       className="flex min-w-0 flex-col overflow-hidden border-border/70 border-b bg-background"
     >
-      {/* Caption buttons occupy this band. The row below is full width so
-          the account label is not inset by --window-controls-inset. */}
+      {/* Caption buttons occupy this band. The row below spans the panel. */}
       <div
         data-testid="chat-titlebar-band"
         aria-hidden="true"
