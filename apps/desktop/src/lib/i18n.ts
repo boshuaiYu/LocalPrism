@@ -35,6 +35,7 @@ const en = {
   "updates.check": "Check for updates",
   "updates.beta": "Beta",
   "updates.betaJoin": "Join prerelease / Beta",
+  "updates.betaJoined": "On Beta channel — click to leave",
   "updates.flashBeta": "Beta {{version}}",
   "updates.flashReady": "Restart {{version}}",
   "updates.flashManual": "{{version}}",
@@ -66,7 +67,7 @@ const en = {
     "{{version}} is available. This Linux install is a .deb or .rpm, so LocalPrism will not replace it with the AppImage. Download the new package from Releases.",
   "updates.installing": "Installing {{version}} and restarting…",
   "updates.settingsBody":
-    "In-app install applies to the AppImage, macOS, and Windows. Debian and RPM installs stay on the package from Releases. Stable updates download in the background and restart only after you confirm. A beta is a GitHub prerelease or a version such as 1.0.8-1. Betas are read from that release's latest.json, not from releases/latest, and LocalPrism asks before downloading. Downloads are checked with the existing updater signature.",
+    "In-app install applies to the AppImage, macOS, and Windows. Debian and RPM installs stay on the package from Releases. Stable updates download in the background and restart only after you confirm. A beta is a prerelease version such as 1.0.8beta9 or 1.0.8-1, not a plain version number. Betas are read from that release's latest.json, not from releases/latest, and LocalPrism asks before downloading. Downloads are checked with the existing updater signature.",
 
   "tour.back": "Back",
   "tour.next": "Next",
@@ -575,6 +576,7 @@ const zh: Record<MessageKey, string> = {
   "updates.check": "检查更新",
   "updates.beta": "Beta",
   "updates.betaJoin": "加入预发布 / Beta",
+  "updates.betaJoined": "已在 Beta 频道 — 点击退出",
   "updates.flashBeta": "测试版 {{version}}",
   "updates.flashReady": "重启 {{version}}",
   "updates.flashManual": "{{version}}",
@@ -605,7 +607,7 @@ const zh: Record<MessageKey, string> = {
     "{{version}} 可用。当前 Linux 安装包是 .deb 或 .rpm，LocalPrism 不会用 AppImage 替换它。请到发布页下载新的安装包。",
   "updates.installing": "正在安装 {{version}} 并重启…",
   "updates.settingsBody":
-    "应用内安装适用于 AppImage、macOS 和 Windows。Debian 与 RPM 仍使用发布页上的安装包。稳定版在后台下载，只有在你确认后才会重启。测试版是 GitHub prerelease，或 1.0.8-1 这类带预发布号的版本。测试版读取该发布标签上的 latest.json，不会占用 releases/latest，下载前会先询问。下载仍使用现有的更新签名校验。",
+    "应用内安装适用于 AppImage、macOS 和 Windows。Debian 与 RPM 仍使用发布页上的安装包。稳定版在后台下载，只有在你确认后才会重启。测试版是 1.0.8beta9 或 1.0.8-1 这类预发布版本，不是普通版本号。测试版读取该发布标签上的 latest.json，不会占用 releases/latest，下载前会先询问。下载仍使用现有的更新签名校验。",
 
   "tour.back": "上一步",
   "tour.next": "下一步",

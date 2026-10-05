@@ -273,5 +273,55 @@ describe("AppStatusBar updates", () => {
     expect(raw).toContain('"joinBetaChannel":true');
     expect(translate("zh", "updates.betaJoin")).toBe("加入预发布 / Beta");
     expect(translate("en", "updates.betaJoin")).toBe("Join prerelease / Beta");
+    expect(translate("zh", "updates.betaJoined")).toBe(
+      "已在 Beta 频道 — 点击退出",
+    );
+    expect(translate("en", "updates.betaJoined")).toBe(
+      "On Beta channel — click to leave",
+    );
+  });
+
+  it("shows a leave tooltip after the Beta channel is joined", async () => {
+    vi.mocked(check).mockResolvedValue(null);
+    useSettingsStore.setState({ joinBetaChannel: false, uiLanguage: "en" });
+
+    await renderBar();
+    const toggle = container.querySelector(
+      "[data-testid='beta-channel-toggle']",
+    );
+    expect(toggle?.getAttribute("title")).toBe(
+      translate("en", "updates.betaJoin"),
+    );
+    expect(toggle?.getAttribute("aria-label")).toBe(
+      translate("en", "updates.betaJoin"),
+    );
+
+    useSettingsStore.setState({ joinBetaChannel: true });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const joined = container.querySelector(
+      "[data-testid='beta-channel-toggle']",
+    );
+    expect(joined?.getAttribute("title")).toBe(
+      translate("en", "updates.betaJoined"),
+    );
+    expect(joined?.getAttribute("aria-label")).toBe(
+      translate("en", "updates.betaJoined"),
+    );
+
+    useSettingsStore.setState({ uiLanguage: "zh" });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const joinedZh = container.querySelector(
+      "[data-testid='beta-channel-toggle']",
+    );
+    expect(joinedZh?.getAttribute("title")).toBe(
+      translate("zh", "updates.betaJoined"),
+    );
+    expect(joinedZh?.getAttribute("aria-label")).toBe(
+      translate("zh", "updates.betaJoined"),
+    );
   });
 });

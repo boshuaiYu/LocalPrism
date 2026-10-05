@@ -71,6 +71,9 @@ export function AppStatusBar({
   const setJoinBetaChannel = useSettingsStore(
     (state) => state.setJoinBetaChannel,
   );
+  const betaChannelLabel = t(
+    joinBeta ? "updates.betaJoined" : "updates.betaJoin",
+  );
   const busy =
     status.state === "checking" ||
     status.state === "downloading" ||
@@ -167,8 +170,8 @@ export function AppStatusBar({
           type="button"
           role="switch"
           aria-checked={joinBeta}
-          aria-label={t("updates.betaJoin")}
-          title={t("updates.betaJoin")}
+          aria-label={betaChannelLabel}
+          title={betaChannelLabel}
           data-testid="beta-channel-toggle"
           disabled={busy}
           className={cn(
