@@ -375,6 +375,7 @@ const en = {
 
   "env.active": "Active",
   "env.notInstalled": "Not installed",
+  "env.installFailed": "Install failed",
   "env.noVenv": "No venv",
   "env.skillCount": "{{count}} skills",
   "env.agentCount": "{{count}} agents",
@@ -887,6 +888,7 @@ const zh: Record<MessageKey, string> = {
 
   "env.active": "已启用",
   "env.notInstalled": "未安装",
+  "env.installFailed": "安装失败",
   "env.noVenv": "无虚拟环境",
   "env.skillCount": "{{count}} 个技能",
   "env.agentCount": "{{count}} 个智能体",

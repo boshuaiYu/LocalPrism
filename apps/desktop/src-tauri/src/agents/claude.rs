@@ -4,6 +4,7 @@ use crate::skills::domain::SkillScope;
 use serde_yaml::Value;
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 pub fn agents_root(scope: SkillScope, project_path: Option<&Path>) -> Result<PathBuf, AgentError> {
@@ -148,6 +149,34 @@ pub fn parse_claude_agent(path: &Path, scope: SkillScope) -> Result<AgentProfile
 }
 
 pub fn write_claude_agent(path: &Path, profile: &AgentProfile) -> Result<(), AgentError> {
+    let content = render_claude_agent(profile)?;
+    crate::agents::atomic_write(path, content.as_bytes())
+}
+
+/// Create `path` only when it is absent. An existing file is left unchanged.
+pub fn create_claude_agent_if_absent(path: &Path, profile: &AgentProfile) -> Result<(), AgentError> {
+    let content = render_claude_agent(profile)?;
+    let mut file = match fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => {
+            return Err(AgentError::from(format!(
+                "Failed to create {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    if let Err(error) = file.write_all(content.as_bytes()).and_then(|_| file.sync_all()) {
+        let _ = fs::remove_file(path);
+        return Err(AgentError::from(format!(
+            "Failed to write {}: {error}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn render_claude_agent(profile: &AgentProfile) -> Result<String, AgentError> {
     let mut map = serde_yaml::Mapping::new();
     map.insert(
         Value::String("name".into()),
@@ -204,12 +233,11 @@ pub fn write_claude_agent(path: &Path, profile: &AgentProfile) -> Result<(), Age
     let frontmatter = serde_yaml::to_string(&Value::Mapping(map))
         .map_err(|error| AgentError::from(format!("Failed to serialize Claude agent: {error}")))?;
     let body = profile.instructions.trim_end();
-    let content = if body.is_empty() {
+    Ok(if body.is_empty() {
         format!("---\n{frontmatter}---\n")
     } else {
         format!("---\n{frontmatter}---\n{body}\n")
-    };
-    crate::agents::atomic_write(path, content.as_bytes())
+    })
 }
 
 fn split_frontmatter(content: &str) -> (Option<String>, String) {

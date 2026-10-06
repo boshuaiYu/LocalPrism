@@ -114,8 +114,7 @@ export const useSkillStore = create<SkillStoreState>((set, get) => ({
     const epoch = ++skillListEpoch;
     set({
       listedProjectPath: path ?? null,
-      error: null,
-      ...(silent ? {} : { loading: true }),
+      ...(silent ? {} : { error: null, loading: true }),
     });
     try {
       const skills = await invoke<RuntimeSkill[]>("skill_list", {
@@ -306,7 +305,22 @@ export const useSkillStore = create<SkillStoreState>((set, get) => ({
         }
       }
 
-      set({ loading: false, installingPackId: null });
+      try {
+        await useAgentStore.getState().syncBuiltinPresetSkills();
+      } catch {
+        // Pack results stay visible when attaching skills to agents fails.
+      }
+      const failures = results.filter(
+        (item) => item.status === "error" && item.error,
+      );
+      set({
+        loading: false,
+        installingPackId: null,
+        error:
+          failures.length > 0
+            ? failures.map((item) => item.error).join("\n")
+            : null,
+      });
       return results;
     })().finally(() => {
       if (defaultPacksInFlight === operation) {

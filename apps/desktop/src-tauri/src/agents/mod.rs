@@ -1,5 +1,8 @@
 pub mod claude;
 pub mod codex;
+mod defaults;
+
+pub use defaults::ensure_default_user_agents;
 
 use crate::runtime::RuntimeKind;
 use crate::skills::domain::SkillScope;
@@ -432,6 +435,13 @@ pub async fn list_agents(
     runtime: RuntimeKind,
     project_path: Option<String>,
 ) -> Result<Vec<AgentProfile>, String> {
+    // Claude presets are local files. A seed failure must not hide agents
+    // that are already on disk, and Codex listings do not install them.
+    if runtime == RuntimeKind::Claude {
+        if let Err(error) = ensure_default_user_agents() {
+            eprintln!("[localprism] default agents were not installed: {error}");
+        }
+    }
     let project = project_path.as_deref().map(Path::new);
     let mut agents = list_scope(runtime, SkillScope::User, project).map_err(|e| e.to_string())?;
     if project.is_some() {
@@ -563,6 +573,7 @@ mod tests {
     use crate::runtime::RuntimeKind;
     use crate::skills::domain::SkillScope;
     use std::fs;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn legacy_compatibility_notes_are_not_fatal_assignment_errors() {
@@ -796,5 +807,248 @@ mod tests {
     fn link_creation_is_not_permitted(error: &io::Error) -> bool {
         error.kind() == io::ErrorKind::PermissionDenied
             || matches!(error.raw_os_error(), Some(5 | 1314))
+    }
+
+    struct HomeGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl HomeGuard {
+        fn set(home: &Path) -> Self {
+            let previous = std::env::var_os("LOCALPRISM_HOME");
+            std::env::set_var("LOCALPRISM_HOME", home);
+            Self { previous }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("LOCALPRISM_HOME", value),
+                None => std::env::remove_var("LOCALPRISM_HOME"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_home_lists_default_agents_from_the_install_directory() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let _home = HomeGuard::set(&home);
+
+        let listed = list_agents(RuntimeKind::Claude, None).await.unwrap();
+        let ids: Vec<_> = listed.iter().map(|agent| agent.id.as_str()).collect();
+        assert!(ids.contains(&"academic-polish"));
+        assert!(ids.contains(&"de-ai"));
+        assert!(ids.contains(&"peer-review"));
+        assert_eq!(ids.len(), 3);
+        for expected in super::defaults::default_agent_profiles() {
+            let found = listed
+                .iter()
+                .find(|agent| agent.id == expected.id)
+                .unwrap();
+            assert_eq!(found.name, expected.name);
+            assert_eq!(found.description, expected.description);
+            assert_eq!(found.instructions, expected.instructions);
+        }
+
+        let agents_dir = crate::providers::paths::user_agents_dir().unwrap();
+        assert_eq!(agents_dir, home.join("claude-home").join("agents"));
+        for agent in &listed {
+            assert!(
+                Path::new(&agent.source_path).starts_with(&agents_dir),
+                "{} is outside {}",
+                agent.source_path,
+                agents_dir.display()
+            );
+            assert!(Path::new(&agent.source_path).is_file());
+        }
+        let polish = fs::read_to_string(agents_dir.join("academic-polish.md")).unwrap();
+        assert!(
+            polish.contains(r"\cite/\citet/\citep"),
+            "preset body must match the frontend copy so skill sync can attach"
+        );
+        assert!(
+            !polish.contains(r"\\cite"),
+            "preset body must not double-escape LaTeX commands"
+        );
+        assert!(home
+            .join("claude-home")
+            .join(".default-agents-seeded")
+            .is_file());
+
+        fs::remove_file(agents_dir.join("de-ai.md")).unwrap();
+        let after_delete = list_agents(RuntimeKind::Claude, None).await.unwrap();
+        assert!(!after_delete.iter().any(|agent| agent.id == "de-ai"));
+        assert!(!agents_dir.join("de-ai.md").exists());
+    }
+
+    #[tokio::test]
+    async fn existing_builtin_is_kept_and_missing_siblings_are_not_backfilled() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let agents_dir = home.join("claude-home").join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        let custom = "---\nname: Custom polish\ndescription: Mine\n---\nDo not replace.\n";
+        fs::write(agents_dir.join("academic-polish.md"), custom).unwrap();
+        let _home = HomeGuard::set(&home);
+
+        ensure_default_user_agents().unwrap();
+
+        assert_eq!(
+            fs::read_to_string(agents_dir.join("academic-polish.md")).unwrap(),
+            custom
+        );
+        assert!(!agents_dir.join("de-ai.md").exists());
+        assert!(!agents_dir.join("peer-review.md").exists());
+        let listed = list_scope(RuntimeKind::Claude, SkillScope::User, None).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "academic-polish");
+        assert_eq!(listed[0].instructions, "Do not replace.");
+    }
+
+    #[tokio::test]
+    async fn skill_status_counts_the_same_directory_install_writes() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let _home = HomeGuard::set(&home);
+
+        let before = crate::skills::check_skills_installed(None).await.unwrap();
+        let skills_dir = crate::providers::paths::user_skills_dir().unwrap();
+        assert_eq!(PathBuf::from(&before.location), skills_dir);
+        assert_eq!(skills_dir, home.join("claude-home").join("skills"));
+        assert!(!before.installed);
+        assert_eq!(before.skill_count, 0);
+
+        let installed = skills_dir.join("paper-spine");
+        fs::create_dir_all(&installed).unwrap();
+        fs::write(installed.join("SKILL.md"), "# PaperSpine\n").unwrap();
+
+        let after = crate::skills::check_skills_installed(None).await.unwrap();
+        assert_eq!(PathBuf::from(&after.location), skills_dir);
+        assert!(after.installed);
+        assert_eq!(after.skill_count, 1);
+
+        let agents_dir = crate::providers::paths::user_agents_dir().unwrap();
+        assert_ne!(skills_dir, agents_dir);
+        assert!(agents_dir.starts_with(home.join("claude-home")));
+    }
+
+    #[tokio::test]
+    async fn custom_markdown_without_a_marker_does_not_receive_default_agents() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let agents_dir = home.join("claude-home").join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        let custom = "---\nname: 一休学术\ndescription: User router\n---\nBody\n";
+        fs::write(agents_dir.join("yixiu.md"), custom).unwrap();
+        let _home = HomeGuard::set(&home);
+
+        let listed = list_agents(RuntimeKind::Claude, None).await.unwrap();
+        let ids: Vec<_> = listed.iter().map(|agent| agent.id.as_str()).collect();
+        assert_eq!(ids, vec!["yixiu"]);
+        assert!(!agents_dir.join("academic-polish.md").exists());
+        assert!(!agents_dir.join("de-ai.md").exists());
+        assert!(!agents_dir.join("peer-review.md").exists());
+        assert_eq!(fs::read_to_string(agents_dir.join("yixiu.md")).unwrap(), custom);
+        assert!(home
+            .join("claude-home")
+            .join(".default-agents-seeded")
+            .is_file());
+    }
+
+    #[tokio::test]
+    async fn empty_agents_directory_is_seeded_once() {
+        // A directory with no markdown cannot be told apart from a home
+        // created after the config-directory move, so both receive the
+        // presets. A user who deleted every agent file hits this once.
+        let _guard = crate::providers::paths::lock_provider_env();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let agents_dir = home.join("claude-home").join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        let _home = HomeGuard::set(&home);
+
+        ensure_default_user_agents().unwrap();
+
+        assert!(agents_dir.join("academic-polish.md").is_file());
+        assert!(agents_dir.join("de-ai.md").is_file());
+        assert!(agents_dir.join("peer-review.md").is_file());
+    }
+
+    #[tokio::test]
+    async fn seeding_marker_does_not_restore_a_deleted_preset() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let claude_home = home.join("claude-home");
+        let agents_dir = claude_home.join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        let polish = "---\nname: 论文抛光机\ndescription: Kept\n---\nKeep this.\n";
+        fs::write(agents_dir.join("academic-polish.md"), polish).unwrap();
+        fs::write(
+            agents_dir.join("peer-review.md"),
+            "---\nname: 毒舌审稿官\ndescription: Kept\n---\nKeep this too.\n",
+        )
+        .unwrap();
+        fs::write(claude_home.join(".default-agents-seeding"), b"1\n").unwrap();
+        let _home = HomeGuard::set(&home);
+
+        ensure_default_user_agents().unwrap();
+
+        assert!(!agents_dir.join("de-ai.md").exists());
+        assert_eq!(
+            fs::read_to_string(agents_dir.join("academic-polish.md")).unwrap(),
+            polish
+        );
+        assert!(claude_home.join(".default-agents-seeded").is_file());
+        assert!(!claude_home.join(".default-agents-seeding").exists());
+    }
+
+    #[tokio::test]
+    async fn list_agents_returns_existing_agents_when_the_seed_cannot_be_marked() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let claude_home = home.join("claude-home");
+        let agents_dir = claude_home.join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        fs::write(
+            agents_dir.join("yixiu.md"),
+            "---\nname: 一休学术\ndescription: User router\n---\nBody\n",
+        )
+        .unwrap();
+        // A directory where the marker file should be makes the atomic rename fail.
+        let blocked = claude_home.join(".default-agents-seeded");
+        fs::create_dir_all(blocked.join("occupied")).unwrap();
+        let _home = HomeGuard::set(&home);
+
+        let listed = list_agents(RuntimeKind::Claude, None).await.unwrap();
+        let ids: Vec<_> = listed.iter().map(|agent| agent.id.as_str()).collect();
+        assert_eq!(ids, vec!["yixiu"]);
+        assert!(!agents_dir.join("academic-polish.md").exists());
+        assert!(!agents_dir.join("de-ai.md").exists());
+        assert!(!agents_dir.join("peer-review.md").exists());
+    }
+
+    #[tokio::test]
+    async fn codex_listing_does_not_seed_claude_presets() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let _home = HomeGuard::set(&home);
+
+        let listed = list_agents(RuntimeKind::Codex, None).await.unwrap();
+        assert!(listed.is_empty());
+        let agents_dir = crate::providers::paths::user_agents_dir().unwrap();
+        assert!(!agents_dir.join("academic-polish.md").exists());
+        assert!(!home
+            .join("claude-home")
+            .join(".default-agents-seeded")
+            .exists());
     }
 }

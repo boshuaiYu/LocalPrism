@@ -17,6 +17,7 @@ import { emptyAgentProfile, useAgentStore } from "@/stores/agent-store";
 import { useSkillCategoryStore } from "@/stores/skill-category-store";
 import {
   ACADEMIC_RESEARCH_SKILLS_URL,
+  DEFAULT_SKILL_PACKS,
   NATURE_SKILLS_URL,
   SCIENTIFIC_AGENT_SKILLS_URL,
 } from "@/lib/default-skill-packs";
@@ -532,6 +533,77 @@ describe("skill-store", () => {
 
     expect(results.every((item) => item.status === "imported")).toBe(true);
     expect(skipFlags.some((skipExisting) => skipExisting === false)).toBe(true);
+  });
+
+  it("keeps every failed pack download visible for retry", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (
+        command === "skill_list" ||
+        command === "list_agents" ||
+        command === "slash_commands_list"
+      ) {
+        return [];
+      }
+      if (command === "skill_import_url") {
+        throw new Error(
+          "Could not download skills from https://github.com/example. network unreachable",
+        );
+      }
+      return [];
+    });
+
+    const results = await useSkillStore.getState().ensureDefaultSkillPacks();
+
+    expect(results.every((item) => item.status === "error")).toBe(true);
+    expect(useSkillStore.getState().error).toContain("Could not download");
+    expect(useSkillStore.getState().error?.split("\n")).toHaveLength(
+      results.length,
+    );
+  });
+
+  it("keeps a partial download failure visible and retries every pack with force", async () => {
+    const skills: RuntimeSkill[] = [];
+    const imports: Array<{ sourceUrl: string; skipExisting?: boolean }> = [];
+    invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "skill_list") return skills;
+      if (command === "list_agents" || command === "slash_commands_list") {
+        return [];
+      }
+      if (command === "skill_import_url") {
+        const payload = args as { sourceUrl: string; skipExisting?: boolean };
+        imports.push({
+          sourceUrl: payload.sourceUrl,
+          skipExisting: payload.skipExisting,
+        });
+        if (payload.sourceUrl === NATURE_SKILLS_URL) {
+          const installed = skill({
+            id: "claude:user:nature-polishing",
+            folder: "nature-polishing",
+            name: "Nature polishing",
+          });
+          skills.push(installed);
+          return [installed];
+        }
+        throw new Error(
+          "Could not download skills from https://github.com/example. network unreachable",
+        );
+      }
+      return [];
+    });
+
+    const first = await useSkillStore.getState().ensureDefaultSkillPacks();
+    expect(
+      first.some(
+        (item) => item.id === "nature-skills" && item.status === "imported",
+      ),
+    ).toBe(true);
+    expect(first.some((item) => item.status === "error")).toBe(true);
+    expect(useSkillStore.getState().error).toContain("Could not download");
+
+    imports.length = 0;
+    await useSkillStore.getState().ensureDefaultSkillPacks({ force: true });
+    expect(imports).toHaveLength(DEFAULT_SKILL_PACKS.length);
+    expect(imports.every((item) => item.skipExisting === false)).toBe(true);
   });
 
   it("keeps unmanaged skills visible and only deletes managed ids", async () => {

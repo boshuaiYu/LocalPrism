@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   ACADEMIC_POLISH_INSTRUCTIONS,
@@ -9,6 +12,7 @@ import {
   buildPresetAgentProfile,
   builtinPresetContentUpdate,
   builtinPresetProfilesToSeed,
+  builtinPresetSkillSync,
 } from "@/lib/agent-presets";
 import { emptyAgentProfile } from "@/stores/agent-store";
 import type { RuntimeSkill, SkillScope } from "@/runtime/types";
@@ -375,4 +379,90 @@ describe("builtin agent presets", () => {
       ]),
     ).toBeNull();
   });
+
+  it("syncs skill attachments only when the builtin copy is unchanged", () => {
+    const polish = buildPresetAgentProfile("academic-polish", []);
+    const synced = builtinPresetSkillSync(polish, [
+      skill("nature-polishing", "user"),
+      skill("academic-paper", "user"),
+    ]);
+    expect(synced?.skillIds).toEqual(["nature-polishing", "academic-paper"]);
+    expect(synced?.instructions).toBe(polish.instructions);
+    expect(
+      builtinPresetSkillSync({ ...polish, instructions: "User rewrite" }, [
+        skill("nature-polishing", "user"),
+      ]),
+    ).toBeNull();
+    expect(
+      builtinPresetSkillSync(synced!, [
+        skill("nature-polishing", "user"),
+        skill("academic-paper", "user"),
+      ]),
+    ).toBeNull();
+    expect(
+      builtinPresetSkillSync({ ...polish, skillIds: ["my-skill"] }, [
+        skill("nature-polishing", "user"),
+        skill("academic-paper", "user"),
+      ]),
+    ).toBeNull();
+  });
+
+  it("treats the same skill ids in a different order as unchanged", () => {
+    const installed = [
+      skill("nature-writing", "user"),
+      skill("nature-polishing", "user"),
+    ];
+    const profile = buildPresetAgentProfile("academic-polish", installed);
+    const reordered = {
+      ...profile,
+      skillIds: [...profile.skillIds].reverse(),
+    };
+    expect(reordered.skillIds).not.toEqual(profile.skillIds);
+    expect(builtinPresetContentUpdate(reordered, installed)).toBeNull();
+    expect(builtinPresetSkillSync(reordered, installed)).toBeNull();
+  });
+
+  it("matches the Rust factory copy for the three presets", () => {
+    const source = readFileSync(
+      resolve(
+        dirname(fileURLToPath(import.meta.url)),
+        "../../../src-tauri/src/agents/defaults.rs",
+      ),
+      "utf8",
+    );
+    const instructions: Record<string, string> = {
+      ACADEMIC_POLISH_INSTRUCTIONS,
+      DE_AI_INSTRUCTIONS,
+      PEER_REVIEW_INSTRUCTIONS,
+    };
+    for (const [name, text] of Object.entries(instructions)) {
+      expect(rustRawConst(source, name)).toBe(text);
+    }
+    const profiles = [
+      ...source.matchAll(
+        /empty_profile\(\s*"([^"]+)",\s*"([^"]+)",\s*"([^"]+)",\s*([A-Z_]+),/g,
+      ),
+    ];
+    expect(profiles).toHaveLength(BUILTIN_AGENT_PRESETS.length);
+    for (const match of profiles) {
+      const preset = BUILTIN_AGENT_PRESETS.find((item) => item.id === match[1]);
+      expect(preset?.name).toBe(match[2]);
+      expect(preset?.description).toBe(match[3]);
+      expect(match[4]).toMatch(/_INSTRUCTIONS$/);
+    }
+  });
 });
+
+function rustRawConst(source: string, name: string): string {
+  const marker = `const ${name}: &str = r#"`;
+  const start = source.indexOf(marker);
+  if (start < 0) {
+    throw new Error(`missing Rust constant ${name}`);
+  }
+  const from = start + marker.length;
+  const end = source.indexOf('"#', from);
+  if (end < 0) {
+    throw new Error(`unterminated Rust constant ${name}`);
+  }
+  return source.slice(from, end);
+}
