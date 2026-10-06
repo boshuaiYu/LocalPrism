@@ -2901,7 +2901,6 @@ fn common_claude_args_for_turn(
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--verbose".to_string(),
-        "--include-partial-messages".to_string(),
         "--permission-prompt-tool".to_string(),
         "stdio".to_string(),
         "--permission-mode".to_string(),
@@ -2944,6 +2943,25 @@ fn extend_provider_claude_args(
         permission_mode,
         model,
     ));
+    // Thinking deltas are not in stream-json unless this flag is set. Official
+    // Claude and ChatGPT Official keep the default argv; only third-party
+    // spawns need the deltas for the reply watchdog.
+    args.push("--include-partial-messages".to_string());
+}
+
+fn push_third_party_partial_messages(args: &mut Vec<String>) {
+    if crate::providers::active_provider_identity()
+        != crate::providers::ActiveProviderIdentity::ThirdParty
+    {
+        return;
+    }
+    if args
+        .iter()
+        .any(|arg| arg == "--include-partial-messages")
+    {
+        return;
+    }
+    args.push("--include-partial-messages".to_string());
 }
 
 fn system_prompt_flag(identity: crate::providers::ActiveProviderIdentity) -> &'static str {
@@ -3466,6 +3484,7 @@ async fn execute_openai_compatible_via_claude_proxy(
     cmd.env("ANTHROPIC_API_KEY", "claude-prism-local-proxy");
     cmd.env("ANTHROPIC_BASE_URL", proxy_url);
     cmd.env("LOCALPRISM_CODEX_USAGE_SLOT", usage_slot.to_string());
+    cmd.env("CLAUDE_CODE_ATTRIBUTION_HEADER", "0");
     cmd.env_remove("CLAUDE_MODEL");
 
     spawn_claude_process(
@@ -3577,6 +3596,7 @@ async fn execute_openai_compatible_via_native_anthropic(
     apply_native_anthropic_provider_env(&mut cmd, &credential, &anthropic_base_url);
     cmd.env("ANTHROPIC_BASE_URL", proxy_url);
     cmd.env("LOCALPRISM_CODEX_USAGE_SLOT", usage_slot.to_string());
+    cmd.env("CLAUDE_CODE_ATTRIBUTION_HEADER", "0");
 
     spawn_claude_process(
         window,
@@ -3791,6 +3811,7 @@ pub async fn execute_claude_code(
             permission_mode.as_deref(),
             selected_model.as_deref(),
         ));
+        push_third_party_partial_messages(&mut args);
 
         let mut cmd = create_command(
             &claude_path,
@@ -3878,6 +3899,7 @@ pub async fn continue_claude_code(
             permission_mode.as_deref(),
             selected_model.as_deref(),
         ));
+        push_third_party_partial_messages(&mut args);
 
         let mut cmd = create_command(
             &claude_path,
@@ -3972,6 +3994,7 @@ pub async fn resume_claude_code(
             permission_mode.as_deref(),
             selected_model.as_deref(),
         ));
+        push_third_party_partial_messages(&mut args);
 
         let mut cmd = create_command(
             &claude_path,
@@ -5915,7 +5938,7 @@ mod tests {
         assert!(args.contains(&"--output-format".to_string()));
         assert!(args.contains(&"stream-json".to_string()));
         assert!(args.contains(&"--verbose".to_string()));
-        assert!(args.contains(&"--include-partial-messages".to_string()));
+        assert!(!args.contains(&"--include-partial-messages".to_string()));
         assert!(args.contains(&"--permission-prompt-tool".to_string()));
         assert!(args.contains(&"stdio".to_string()));
         assert!(args.contains(&"--permission-mode".to_string()));
@@ -6015,6 +6038,7 @@ mod tests {
         let mut bare = Vec::new();
         extend_provider_claude_args(&mut bare, None, Some("acceptEdits"), "deepseek-chat", None);
         assert!(!bare.iter().any(|arg| arg == "--agent"));
+        assert!(bare.iter().any(|arg| arg == "--include-partial-messages"));
     }
 
     #[test]

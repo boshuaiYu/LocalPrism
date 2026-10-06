@@ -117,8 +117,9 @@ export function ChatTokenMeter() {
         messages,
         lastUsage,
         windowTokens,
+        inFlight: Boolean(activeTab?.isStreaming),
       }),
-    [lastUsage, messages, modelLabel, windowTokens],
+    [activeTab?.isStreaming, lastUsage, messages, modelLabel, windowTokens],
   );
 
   useEffect(() => {

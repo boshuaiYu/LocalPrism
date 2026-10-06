@@ -4,6 +4,7 @@ import {
   catalogContextWindow,
   estimateContextWindow,
   formatTokenCount,
+  isSubagentUsageMessage,
   lastTurnUsage,
   mergeTokenUsageSnapshots,
   streamEventCountsAsReplyProgress,
@@ -855,5 +856,154 @@ describe("chat token usage", () => {
     ).toBe(true);
     expect(streamEventCountsAsReplyProgress({ type: "ping" })).toBe(false);
     expect(usageFromAnthropicStreamEvent({ type: "ping" })).toBeNull();
+  });
+
+  it("replaces output when the next request's message_start still says zero", () => {
+    const merged = mergeTokenUsageSnapshots(
+      {
+        inputTokens: 22_933,
+        outputTokens: 47,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        requestKey: "msg_1",
+      },
+      {
+        inputTokens: 31_511,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        requestKey: "msg_2",
+      },
+    );
+    expect(merged).toEqual({
+      inputTokens: 31_511,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      requestKey: "msg_2",
+    });
+    expect(
+      mergeTokenUsageSnapshots(
+        {
+          inputTokens: 22_933,
+          outputTokens: 47,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+        },
+        {
+          inputTokens: 31_511,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+        },
+      ).outputTokens,
+    ).toBe(0);
+  });
+
+  it("takes the later snapshot when two requests share an inclusive total", () => {
+    expect(
+      mergeTokenUsageSnapshots(
+        {
+          inputTokens: 1_406,
+          outputTokens: 80,
+          cacheReadTokens: 22_912,
+          cacheCreationTokens: 0,
+        },
+        {
+          inputTokens: 2_000,
+          outputTokens: 10,
+          cacheReadTokens: 22_318,
+          cacheCreationTokens: 0,
+        },
+      ),
+    ).toEqual({
+      inputTokens: 2_000,
+      outputTokens: 10,
+      cacheReadTokens: 22_318,
+      cacheCreationTokens: 0,
+    });
+  });
+
+  it("shows the in-flight request instead of the previous assistant", () => {
+    const meter = buildTokenMeterModel({
+      modelLabel: "Qwen/Qwen3.5-35B-A3B",
+      windowTokens: 200_000,
+      inFlight: true,
+      messages: [
+        {
+          type: "assistant",
+          message: {
+            usage: {
+              input_tokens: 23_267,
+              output_tokens: 94,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
+          },
+        },
+        { type: "user" },
+      ],
+      lastUsage: {
+        inputTokens: 27_350,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        requestKey: "msg_next",
+      },
+    });
+    expect(meter.inputTokens).toBe(27_350);
+    expect(meter.outputTokens).toBe(0);
+    expect(meter.usedTokens).toBe(27_350);
+  });
+
+  it("treats agent_id and user_id JSON as sub-agent traffic", () => {
+    expect(isSubagentUsageMessage({ parent_tool_use_id: "toolu_1" })).toBe(
+      true,
+    );
+    expect(isSubagentUsageMessage({ agent_id: "writer" })).toBe(true);
+    expect(
+      isSubagentUsageMessage({
+        metadata: { user_id: '{"parent_tool_use_id":"toolu_parent"}' },
+      }),
+    ).toBe(true);
+    expect(
+      isSubagentUsageMessage({
+        user_id: '{"agent_id":"writer"}',
+        message: { content: "not scanned" },
+      }),
+    ).toBe(true);
+    expect(isSubagentUsageMessage({ user_id: "session-user" })).toBe(false);
+    expect(
+      lastTurnUsage([
+        {
+          type: "assistant",
+          message: {
+            usage: {
+              input_tokens: 100,
+              output_tokens: 8,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
+          },
+        },
+        {
+          type: "assistant",
+          agent_id: "writer",
+          message: {
+            usage: {
+              input_tokens: 9_000,
+              output_tokens: 999,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
+          },
+        },
+      ]),
+    ).toEqual({
+      inputTokens: 100,
+      outputTokens: 8,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+    });
   });
 });

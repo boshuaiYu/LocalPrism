@@ -372,6 +372,7 @@ pub async fn apply_managed_provider(
                 "LOCALPRISM_CODEX_USAGE_SLOT".into(),
                 usage_slot.to_string(),
             ));
+            values.push(("CLAUDE_CODE_ATTRIBUTION_HEADER".into(), "0".into()));
         }
         Some(ProxyKind::AnthropicNative(provider)) => {
             ensure_secure_provider_base_url(&provider.base_url)?;
@@ -391,6 +392,7 @@ pub async fn apply_managed_provider(
                 "LOCALPRISM_CODEX_USAGE_SLOT".into(),
                 usage_slot.to_string(),
             ));
+            values.push(("CLAUDE_CODE_ATTRIBUTION_HEADER".into(), "0".into()));
         }
         None => {}
     }

@@ -32,8 +32,10 @@ import { createStreamDeltaBatcher } from "@/hooks/stream-delta-batch";
 import { shouldRefreshSkillsAfterTool } from "@/lib/skills-refresh";
 import { scheduleSkillsRefresh } from "@/stores/skill-store";
 import {
+  isSubagentUsageMessage,
   streamEventCountsAsReplyProgress,
   usageFromAnthropicStreamEvent,
+  type TokenUsageSnapshot,
 } from "@/lib/chat-token-usage";
 
 function streamingAttemptSignature(tabs: readonly TabState[]): string {
@@ -153,6 +155,7 @@ export function useClaudeEvents() {
   const listenersRef = useRef<UnlistenFn[]>([]);
   const activeAttemptRef = useRef(new Map<string, string>());
   const msgCountRef = useRef(new Map<string, number>());
+  const openRequestKeyRef = useRef(new Map<string, string>());
   const streamStartTimeRef = useRef(new Map<string, number>());
   const lastMsgTimeRef = useRef(new Map<string, number>());
   const lastCodexEventAtRef = useRef(new Map<string, number>());
@@ -187,6 +190,7 @@ export function useClaudeEvents() {
           !!providerKey && providerKey !== CLAUDE_CODE_PROVIDER_ID,
         );
         msgCountRef.current.set(tab.id, 0);
+        openRequestKeyRef.current.delete(tab.id);
         streamStartTimeRef.current.delete(tab.id);
         lastMsgTimeRef.current.delete(tab.id);
         const now = Date.now();
@@ -205,6 +209,7 @@ export function useClaudeEvents() {
         lastErrorRef.current.delete(tab.id);
         directProviderTabRef.current.delete(tab.id);
         msgCountRef.current.delete(tab.id);
+        openRequestKeyRef.current.delete(tab.id);
         streamStartTimeRef.current.delete(tab.id);
         lastMsgTimeRef.current.delete(tab.id);
         lastCodexEventAtRef.current.delete(tab.id);
@@ -391,6 +396,33 @@ export function useClaudeEvents() {
       }
     }
 
+    function noteClaudeStdout(tabId: string) {
+      const count = (msgCountRef.current.get(tabId) ?? 0) + 1;
+      msgCountRef.current.set(tabId, count);
+      if (count === 1) streamStartTimeRef.current.set(tabId, performance.now());
+      return count;
+    }
+
+    function stampOpenRequest(
+      tabId: string,
+      event: unknown,
+      snapshot: TokenUsageSnapshot | null,
+    ): TokenUsageSnapshot | null {
+      if (!snapshot) return null;
+      const record =
+        event && typeof event === "object"
+          ? (event as { type?: string; message?: { id?: string } })
+          : null;
+      if (record?.type === "message_start") {
+        const id = record.message?.id?.trim();
+        if (id) openRequestKeyRef.current.set(tabId, id);
+        else openRequestKeyRef.current.delete(tabId);
+      }
+      const requestKey =
+        snapshot.requestKey ?? openRequestKeyRef.current.get(tabId);
+      return requestKey ? { ...snapshot, requestKey } : snapshot;
+    }
+
     function elapsed(tabId: string) {
       const start = streamStartTimeRef.current.get(tabId);
       if (!start) return "";
@@ -420,24 +452,26 @@ export function useClaudeEvents() {
       }
 
       if ((msg as { type?: string }).type === "stream_event") {
+        noteClaudeStdout(tabId);
         const event = (msg as { event?: unknown }).event;
         if (streamEventCountsAsReplyProgress(event)) {
           lastClaudeProgressAtRef.current.set(tabId, Date.now());
         }
-        const parent = (msg as { parent_tool_use_id?: unknown })
-          .parent_tool_use_id;
-        const subagent = typeof parent === "string" && parent.trim().length > 0;
-        const requestUsage = usageFromAnthropicStreamEvent(event);
-        if (!subagent && requestUsage) {
+        const requestUsage = isSubagentUsageMessage(msg)
+          ? null
+          : stampOpenRequest(
+              tabId,
+              event,
+              usageFromAnthropicStreamEvent(event),
+            );
+        if (requestUsage) {
           chatStore._noteRequestUsage(tabId, requestUsage);
         }
         return;
       }
 
-      const count = (msgCountRef.current.get(tabId) ?? 0) + 1;
-      msgCountRef.current.set(tabId, count);
+      const count = noteClaudeStdout(tabId);
       const now = performance.now();
-      if (count === 1) streamStartTimeRef.current.set(tabId, now);
       const lastTime = lastMsgTimeRef.current.get(tabId);
       const gap = lastTime ? ((now - lastTime) / 1000).toFixed(1) : "0";
       lastMsgTimeRef.current.set(tabId, now);

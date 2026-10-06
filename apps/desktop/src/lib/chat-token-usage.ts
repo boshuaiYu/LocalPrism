@@ -7,6 +7,11 @@ export type TokenUsageSnapshot = {
   cacheReadKnown?: boolean;
   /** False when this snapshot did not include a cache-write field. */
   cacheCreationKnown?: boolean;
+  /**
+   * Upstream message id for this request. A different id is a different
+   * request even when the inclusive token total happens to match.
+   */
+  requestKey?: string;
 };
 
 export type TokenMeterModel = {
@@ -62,12 +67,24 @@ type UsageFields = {
   promptTokensDetails?: UsageDetail;
 };
 
+type UsageMetadata = {
+  agent_id?: string | null;
+  agentId?: string | null;
+  parent_tool_use_id?: string | null;
+  parentToolUseId?: string | null;
+  user_id?: string | null;
+};
+
 type UsageMessage = {
   type?: string;
   parent_tool_use_id?: string | null;
   parentToolUseId?: string | null;
+  agent_id?: string | null;
+  agentId?: string | null;
+  user_id?: string | null;
+  metadata?: UsageMetadata | null;
   usage?: UsageFields;
-  message?: { usage?: UsageFields };
+  message?: { id?: string; usage?: UsageFields };
 };
 
 type CatalogModel = {
@@ -173,13 +190,20 @@ export function parseUsageFields(
 export function conversationUsage(
   messages?: ReadonlyArray<UsageMessage> | null,
   lastUsage?: TokenUsageSnapshot | null,
+  options?: { inFlight?: boolean },
 ): TokenUsageSnapshot | null {
   if (messages && messages.length === 0) return null;
-  const fromMessages = lastTurnUsage(messages);
+  const scoped = options?.inFlight ? messagesAfterLastUser(messages) : messages;
+  const fromMessages = lastTurnUsage(scoped);
   const fromStore =
     lastUsage && snapshotHasTokens(lastUsage) ? lastUsage : null;
   if (!fromMessages) return fromStore;
   if (!fromStore) return fromMessages;
+  // While the turn is in flight the store is the live request. The previous
+  // assistant is outside `scoped`, and a new message_start must replace it.
+  if (options?.inFlight) {
+    return mergeTokenUsageSnapshots(fromMessages, fromStore);
+  }
   if (!snapshotHasPromptTokens(fromStore)) {
     return mergeTokenUsageSnapshots(fromMessages, fromStore);
   }
@@ -187,6 +211,21 @@ export function conversationUsage(
     return mergeTokenUsageSnapshots(fromStore, fromMessages);
   }
   return mergeTokenUsageSnapshots(fromStore, fromMessages);
+}
+
+function messagesAfterLastUser(
+  messages: ReadonlyArray<UsageMessage> | null | undefined,
+): ReadonlyArray<UsageMessage> | null | undefined {
+  if (!messages?.length) return messages;
+  let boundary = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.type === "user") {
+      boundary = index;
+      break;
+    }
+  }
+  if (boundary < 0) return messages;
+  return messages.slice(boundary + 1);
 }
 
 export function usageFromStreamMessage(
@@ -198,7 +237,7 @@ export function usageFromStreamMessage(
 type AnthropicStreamEvent = {
   type?: string;
   usage?: UsageFields;
-  message?: { usage?: UsageFields };
+  message?: { id?: string; usage?: UsageFields };
   delta?: { type?: string };
   content_block?: { type?: string };
 };
@@ -216,7 +255,10 @@ export function usageFromAnthropicStreamEvent(
         : undefined;
   if (!usage) return null;
   const snapshot = parseUsageFields(usage);
-  return snapshotHasTokens(snapshot) ? snapshot : null;
+  if (!snapshotHasTokens(snapshot)) return null;
+  const requestKey =
+    record.type === "message_start" ? textMarker(record.message?.id) : null;
+  return requestKey ? { ...snapshot, requestKey } : snapshot;
 }
 
 /** Thinking and token deltas count as a reply even before visible text lands. */
@@ -279,6 +321,7 @@ function publishedUsage(snapshot: TokenUsageSnapshot): TokenUsageSnapshot {
   if (snapshot.cacheCreationKnown === false) {
     published.cacheCreationKnown = false;
   }
+  if (snapshot.requestKey) published.requestKey = snapshot.requestKey;
   return published;
 }
 
@@ -305,34 +348,89 @@ function mergedCacheField(
   return { value: incomingValue, known: undefined };
 }
 
+function keptOutput(
+  current: TokenUsageSnapshot,
+  incoming: TokenUsageSnapshot,
+): number {
+  return incoming.outputTokens > 0
+    ? incoming.outputTokens
+    : Math.max(incoming.outputTokens, current.outputTokens);
+}
+
+function requestKeysDisagree(
+  current: TokenUsageSnapshot,
+  incoming: TokenUsageSnapshot,
+): boolean {
+  return Boolean(
+    current.requestKey &&
+      incoming.requestKey &&
+      current.requestKey !== incoming.requestKey,
+  );
+}
+
+/** One side reports the whole prompt as input and the other still names cache. */
+function isCacheFold(
+  named: TokenUsageSnapshot,
+  folded: TokenUsageSnapshot,
+): boolean {
+  return (
+    cacheDetail(folded) === 0 &&
+    cacheDetail(named) > 0 &&
+    folded.inputTokens > 0 &&
+    inclusiveTokens(named) === folded.inputTokens
+  );
+}
+
+function foldedSnapshot(
+  current: TokenUsageSnapshot,
+  incoming: TokenUsageSnapshot,
+): TokenUsageSnapshot {
+  const named =
+    cacheDetail(incoming) > cacheDetail(current) ? incoming : current;
+  return publishedUsage({
+    inputTokens: named.inputTokens,
+    outputTokens: Math.max(incoming.outputTokens, current.outputTokens),
+    cacheReadTokens: named.cacheReadTokens,
+    cacheCreationTokens: named.cacheCreationTokens,
+    ...(named.cacheReadKnown === false ? { cacheReadKnown: false } : {}),
+    ...(named.cacheCreationKnown === false
+      ? { cacheCreationKnown: false }
+      : {}),
+    requestKey: incoming.requestKey ?? current.requestKey,
+  });
+}
+
 export function mergeTokenUsageSnapshots(
   current: TokenUsageSnapshot | null | undefined,
   incoming: TokenUsageSnapshot,
 ): TokenUsageSnapshot {
   if (!current || !snapshotHasTokens(current)) return publishedUsage(incoming);
   if (!snapshotHasTokens(incoming)) return publishedUsage(current);
-  const currentInclusive = inclusiveTokens(current);
-  const incomingInclusive = inclusiveTokens(incoming);
-  // Claude sometimes folds cache into input_tokens. When the inclusive total
-  // matches, keep the split that still names the cache.
-  if (
-    currentInclusive > 0 &&
-    currentInclusive === incomingInclusive &&
-    cacheDetail(current) !== cacheDetail(incoming)
-  ) {
-    const richer =
-      cacheDetail(incoming) > cacheDetail(current) ? incoming : current;
+  if (!snapshotHasPromptTokens(incoming)) {
+    if (requestKeysDisagree(current, incoming)) return publishedUsage(current);
     return publishedUsage({
-      inputTokens: richer.inputTokens,
-      outputTokens: Math.max(incoming.outputTokens, current.outputTokens),
-      cacheReadTokens: richer.cacheReadTokens,
-      cacheCreationTokens: richer.cacheCreationTokens,
-      ...(richer.cacheReadKnown === false ? { cacheReadKnown: false } : {}),
-      ...(richer.cacheCreationKnown === false
+      inputTokens: current.inputTokens,
+      outputTokens: keptOutput(current, incoming),
+      cacheReadTokens: current.cacheReadTokens,
+      cacheCreationTokens: current.cacheCreationTokens,
+      ...(current.cacheReadKnown === false ? { cacheReadKnown: false } : {}),
+      ...(current.cacheCreationKnown === false
         ? { cacheCreationKnown: false }
         : {}),
+      requestKey: incoming.requestKey ?? current.requestKey,
     });
   }
+  if (requestKeysDisagree(current, incoming)) return publishedUsage(incoming);
+  const sameRequest =
+    Boolean(current.requestKey && incoming.requestKey) ||
+    incoming.inputTokens === current.inputTokens;
+  if (
+    !sameRequest &&
+    (isCacheFold(current, incoming) || isCacheFold(incoming, current))
+  ) {
+    return foldedSnapshot(current, incoming);
+  }
+  if (!sameRequest) return publishedUsage(incoming);
   const cacheRead = mergedCacheField(
     current.cacheReadTokens,
     incoming.cacheReadTokens,
@@ -352,23 +450,72 @@ export function mergeTokenUsageSnapshots(
   // Exclusive input 0 is real when the prompt tokens were all cached.
   // `||` would treat that 0 as missing and keep the previous turn.
   return publishedUsage({
-    inputTokens: snapshotHasPromptTokens(incoming)
-      ? incoming.inputTokens
-      : current.inputTokens,
-    outputTokens:
-      snapshotHasPromptTokens(incoming) && incoming.outputTokens > 0
-        ? incoming.outputTokens
-        : Math.max(incoming.outputTokens, current.outputTokens),
+    inputTokens: incoming.inputTokens,
+    outputTokens: keptOutput(current, incoming),
     cacheReadTokens: cacheRead.value,
     cacheCreationTokens: cacheWrite.value,
     ...(cacheRead.known === false ? { cacheReadKnown: false } : {}),
     ...(cacheWrite.known === false ? { cacheCreationKnown: false } : {}),
+    requestKey: incoming.requestKey ?? current.requestKey,
   });
 }
 
+function textMarker(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  return text.length > 0 ? text : null;
+}
+
+function markerInRecord(
+  record: object | null | undefined,
+  keys: readonly string[],
+): string | null {
+  if (!record) return null;
+  const fields = record as Record<string, unknown>;
+  for (const key of keys) {
+    const marker = textMarker(fields[key]);
+    if (marker) return marker;
+  }
+  return null;
+}
+
+function markerInUserId(value: unknown): string | null {
+  const text = textMarker(value);
+  if (!text?.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(text) as object;
+    return (
+      markerInRecord(parsed, ["agent_id", "agentId"]) ??
+      markerInRecord(parsed, ["parent_tool_use_id", "parentToolUseId"])
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** Matches the proxy: agent id, parent tool id, or those fields inside user_id JSON. */
+export function isSubagentUsageMessage(
+  message: object | null | undefined,
+): boolean {
+  if (!message) return false;
+  const record = message as UsageMessage;
+  return (
+    markerInRecord(record, ["parent_tool_use_id", "parentToolUseId"]) !==
+      null ||
+    markerInRecord(record, ["agent_id", "agentId"]) !== null ||
+    markerInRecord(record.metadata, [
+      "agent_id",
+      "agentId",
+      "parent_tool_use_id",
+      "parentToolUseId",
+    ]) !== null ||
+    markerInUserId(record.user_id) !== null ||
+    markerInUserId(record.metadata?.user_id) !== null
+  );
+}
+
 function isSubagentUsage(message: UsageMessage): boolean {
-  const parent = message.parent_tool_use_id ?? message.parentToolUseId;
-  return typeof parent === "string" && parent.trim().length > 0;
+  return isSubagentUsageMessage(message);
 }
 
 function collectLastTurnUsage(
@@ -459,8 +606,11 @@ export function buildTokenMeterModel(options: {
   messages?: ReadonlyArray<UsageMessage> | null;
   lastUsage?: TokenUsageSnapshot | null;
   windowTokens?: number | null;
+  inFlight?: boolean;
 }): TokenMeterModel {
-  const last = conversationUsage(options.messages, options.lastUsage);
+  const last = conversationUsage(options.messages, options.lastUsage, {
+    inFlight: options.inFlight,
+  });
   const inputTokens = last ? last.inputTokens : 0;
   const outputTokens = last ? last.outputTokens : 0;
   const cacheReadTokens = last?.cacheReadTokens ?? 0;

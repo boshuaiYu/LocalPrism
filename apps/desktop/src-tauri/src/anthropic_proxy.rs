@@ -9,7 +9,7 @@ pub(crate) mod usage;
 
 use self::messages::{
     anthropic_to_openai_request, hoist_anthropic_system_messages, normalize_openai_system_messages,
-    openai_to_anthropic_message,
+    openai_to_anthropic_message, stabilize_third_party_prompt_prefix,
 };
 use self::providers::apply_provider_request_transforms;
 use self::responses::{
@@ -195,6 +195,9 @@ async fn handle_anthropic_passthrough(
 ) -> Result<(), String> {
     let mut body = serde_json::from_slice::<Value>(&request.body)
         .map_err(|err| format!("Claude Code sent invalid Anthropic JSON: {err}"))?;
+    let subagent =
+        crate::codex_turn_usage::subagent_marker(claude_agent_header(request), &body).is_some();
+    stabilize_third_party_prompt_prefix(&mut body, claude_session_header(request));
     hoist_anthropic_system_messages(&mut body);
     tools::sanitize_tool_uses_in_messages(&mut body);
     if !credential.model.trim().is_empty() {
@@ -205,8 +208,8 @@ async fn handle_anthropic_passthrough(
     crate::providers::ensure_secure_provider_base_url(&credential.base_url)?;
     let client = crate::providers::bypass_system_proxy_for_loopback(
         reqwest::Client::builder()
-            // Whole-body timeout. Thinking streams reset the UI watchdog, so this
-            // only bounds a request that never finishes.
+            // Upper bound for the whole body. Chunk reads use a 45s/180s idle
+            // timeout and stop when the Claude client disconnects.
             .timeout(std::time::Duration::from_secs(900))
             .redirect(reqwest::redirect::Policy::none()),
         &credential.base_url,
@@ -244,8 +247,6 @@ async fn handle_anthropic_passthrough(
         .unwrap_or("application/json")
         .to_string();
 
-    let subagent =
-        crate::codex_turn_usage::subagent_marker(claude_agent_header(request), &body).is_some();
     if wants_stream && status.is_success() && content_type.to_ascii_lowercase().contains("stream") {
         stream
             .write_all(
@@ -256,9 +257,11 @@ async fn handle_anthropic_passthrough(
         let mut response = response;
         let mut filter = tools::AnthropicToolInputSseFilter::default();
         let mut usage = usage::AnthropicStreamUsage::default();
+        let mut saw_bytes = false;
         loop {
-            match response.chunk().await {
-                Ok(Some(chunk)) => {
+            match read_provider_chunk(&mut response, stream, saw_bytes).await {
+                ProviderRead::Chunk(chunk) => {
+                    saw_bytes = true;
                     usage.push_bytes(&chunk);
                     let rewritten = filter.push_bytes(&chunk);
                     if !rewritten.is_empty() {
@@ -269,11 +272,22 @@ async fn handle_anthropic_passthrough(
                         }
                     }
                 }
-                Ok(None) => break,
-                Err(err) => {
+                ProviderRead::End => break,
+                ProviderRead::Failed(err) => {
                     usage.finish();
                     usage.commit(&credential.model, credential.usage_slot, subagent);
                     return Err(format!("Provider stream error: {err}"));
+                }
+                ProviderRead::Idle => {
+                    usage.finish();
+                    usage.commit(&credential.model, credential.usage_slot, subagent);
+                    let _ = stream.write_all(provider_idle_sse().as_bytes()).await;
+                    return Ok(());
+                }
+                ProviderRead::ClientGone => {
+                    usage.finish();
+                    usage.commit(&credential.model, credential.usage_slot, subagent);
+                    return Ok(());
                 }
             }
         }
@@ -309,6 +323,55 @@ async fn handle_anthropic_passthrough(
         .await
         .map_err(|err| format!("Failed to write Anthropic proxy response: {err}"))?;
     Ok(())
+}
+
+pub(super) enum ProviderRead {
+    Chunk(Vec<u8>),
+    End,
+    Idle,
+    Failed(String),
+    ClientGone,
+}
+
+/// 45s until the first byte, then 180s between chunks. Matches the Codex proxy.
+pub(super) fn provider_stream_idle(saw_bytes: bool) -> Duration {
+    Duration::from_secs(if saw_bytes { 180 } else { 45 })
+}
+
+pub(super) async fn read_provider_chunk(
+    response: &mut reqwest::Response,
+    client: &TcpStream,
+    saw_bytes: bool,
+) -> ProviderRead {
+    let idle = provider_stream_idle(saw_bytes);
+    tokio::select! {
+        result = tokio::time::timeout(idle, response.chunk()) => match result {
+            Ok(Ok(Some(chunk))) => ProviderRead::Chunk(chunk.to_vec()),
+            Ok(Ok(None)) => ProviderRead::End,
+            Ok(Err(err)) => ProviderRead::Failed(err.to_string()),
+            Err(_) => ProviderRead::Idle,
+        },
+        () = wait_for_tcp_eof(client) => ProviderRead::ClientGone,
+    }
+}
+
+async fn wait_for_tcp_eof(stream: &TcpStream) {
+    let mut buf = [0u8; 1];
+    loop {
+        if stream.readable().await.is_err() {
+            return;
+        }
+        match stream.try_read(&mut buf) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => return,
+        }
+    }
+}
+
+fn provider_idle_sse() -> &'static str {
+    "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"timeout_error\",\"message\":\"Provider stream idle timeout\"}}\n\n"
 }
 
 fn request_header<'a>(request: &'a HttpRequest, name: &str) -> Option<&'a str> {
@@ -1058,7 +1121,7 @@ async fn handle_messages_to_stream(
     credential: &OpenAiProxyCredential,
     stream: &mut TcpStream,
 ) -> Result<(), String> {
-    let anthropic_request: Value = serde_json::from_slice(&request.body)
+    let mut anthropic_request: Value = serde_json::from_slice(&request.body)
         .map_err(|err| format!("Claude Code sent invalid Anthropic JSON: {}", err))?;
     let wants_stream = anthropic_request
         .get("stream")
@@ -1067,6 +1130,7 @@ async fn handle_messages_to_stream(
     let subagent =
         crate::codex_turn_usage::subagent_marker(claude_agent_header(request), &anthropic_request)
             .is_some();
+    stabilize_third_party_prompt_prefix(&mut anthropic_request, claude_session_header(request));
     let transformers = ProxyTransformerChain::for_credential(credential, wants_stream);
     let mut openai_request =
         anthropic_to_openai_request(&anthropic_request, credential, &transformers)?;
@@ -1091,8 +1155,8 @@ async fn handle_messages_to_stream(
     crate::providers::ensure_secure_provider_base_url(&credential.base_url)?;
     let client = crate::providers::bypass_system_proxy_for_loopback(
         reqwest::Client::builder()
-            // Whole-body timeout. Thinking streams reset the UI watchdog, so this
-            // only bounds a request that never finishes.
+            // Upper bound for the whole body. Chunk reads use a 45s/180s idle
+            // timeout and stop when the Claude client disconnects.
             .timeout(std::time::Duration::from_secs(900))
             .redirect(reqwest::redirect::Policy::none()),
         &credential.base_url,
@@ -1786,5 +1850,23 @@ mod tests {
             text.contains("413") || text.contains("too large"),
             "unexpected response: {text}"
         );
+    }
+
+    #[test]
+    fn provider_stream_idle_matches_the_codex_windows() {
+        assert_eq!(provider_stream_idle(false), Duration::from_secs(45));
+        assert_eq!(provider_stream_idle(true), Duration::from_secs(180));
+    }
+
+    #[tokio::test]
+    async fn client_eof_finishes_the_disconnect_wait() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(2), wait_for_tcp_eof(&server))
+            .await
+            .expect("client close should unblock the read");
     }
 }

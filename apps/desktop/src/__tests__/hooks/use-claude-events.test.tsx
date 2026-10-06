@@ -44,6 +44,7 @@ vi.mock("@/lib/latex-compiler", () => ({
 }));
 
 import { useClaudeEvents } from "@/hooks/use-claude-events";
+import { buildTokenMeterModel } from "@/lib/chat-token-usage";
 import {
   CLAUDE_CODE_PROVIDER_ID,
   type TabState,
@@ -1606,6 +1607,155 @@ describe("useClaudeEvents cancellation isolation", () => {
       .tabs.find((candidate) => candidate.id === "tab-a");
     expect(afterSubagent?.lastTurnUsage?.outputTokens).toBe(80);
     expect(afterSubagent?.messages).toHaveLength(2);
+
+    await act(async () => {
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "stream_event",
+            agent_id: "writer",
+            event: {
+              type: "message_delta",
+              usage: { output_tokens: 111 },
+            },
+          }),
+        ),
+      );
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "stream_event",
+            user_id: '{"parent_tool_use_id":"toolu_parent"}',
+            event: {
+              type: "message_start",
+              message: {
+                id: "msg_sub",
+                usage: {
+                  input_tokens: 50_000,
+                  output_tokens: 0,
+                  cache_read_input_tokens: 0,
+                  cache_creation_input_tokens: 0,
+                },
+              },
+            },
+          }),
+        ),
+      );
+      await Promise.resolve();
+    });
+    const afterMarkers = useClaudeChatStore
+      .getState()
+      .tabs.find((candidate) => candidate.id === "tab-a");
+    expect(afterMarkers?.lastTurnUsage?.outputTokens).toBe(80);
+    expect(afterMarkers?.lastTurnUsage?.inputTokens).toBe(1406);
+  });
+
+  it("counts a thinking-only stream_event as a started Claude turn", async () => {
+    const output = callbacks.get("claude-output");
+    const complete = callbacks.get("claude-complete");
+    await act(async () => {
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "stream_event",
+            event: {
+              type: "content_block_delta",
+              delta: { type: "thinking_delta", thinking: "..." },
+            },
+          }),
+        ),
+      );
+      complete?.({
+        event: "claude-complete",
+        id: 1,
+        payload: {
+          tab_id: "tab-a",
+          attempt_id: "tab-a-attempt-1",
+          success: false,
+          exit_code: 1,
+          stderr_tail: "boom",
+        },
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const error = useClaudeChatStore
+      .getState()
+      .tabs.find((tab) => tab.id === "tab-a")?.error;
+    expect(error).toMatch(/exited unexpectedly/i);
+    expect(error).not.toMatch(/failed to start/i);
+  });
+
+  it("drives the visible meter from the in-flight request", async () => {
+    await act(async () => {
+      useClaudeChatStore.setState((state) => ({
+        tabs: state.tabs.map((tab) =>
+          tab.id === "tab-a"
+            ? {
+                ...tab,
+                messages: [
+                  {
+                    type: "assistant",
+                    message: {
+                      usage: {
+                        input_tokens: 23_267,
+                        output_tokens: 94,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                      },
+                    },
+                  },
+                  { type: "user", message: { content: "next" } },
+                ] as TabState["messages"],
+              }
+            : tab,
+        ),
+      }));
+    });
+    const output = callbacks.get("claude-output");
+    await act(async () => {
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "stream_event",
+            event: {
+              type: "message_start",
+              message: {
+                id: "msg_next",
+                usage: {
+                  input_tokens: 27_350,
+                  output_tokens: 0,
+                  cache_read_input_tokens: 0,
+                  cache_creation_input_tokens: 0,
+                },
+              },
+            },
+          }),
+        ),
+      );
+      await Promise.resolve();
+    });
+    const tab = useClaudeChatStore
+      .getState()
+      .tabs.find((candidate) => candidate.id === "tab-a");
+    const meter = buildTokenMeterModel({
+      modelLabel: "Qwen/Qwen3.5-35B-A3B",
+      messages: tab?.messages,
+      lastUsage: tab?.lastTurnUsage,
+      inFlight: true,
+      windowTokens: 200_000,
+    });
+    expect(meter.inputTokens).toBe(27_350);
+    expect(meter.outputTokens).toBe(0);
+    expect(tab?.messages).toHaveLength(2);
   });
 
   it("counts thinking deltas as Claude reply progress for the 180s watchdog", async () => {

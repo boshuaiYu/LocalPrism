@@ -49,16 +49,34 @@ pub(super) async fn stream_openai_sse_to_anthropic(
 
     let mut state = OpenAiStreamState::default();
     let mut buffer = String::new();
-    while let Some(chunk) = match response.chunk().await {
-        Ok(chunk) => chunk,
-        Err(err) => {
-            let rendered =
-                anthropic_stream_error_sse(&format!("Provider stream ended unexpectedly: {}", err));
-            let _ = write_stream_body(stream, &rendered, "provider stream error").await;
-            record_openai_stream_usage(&mut state, credential, subagent);
-            return Ok(());
-        }
-    } {
+    let mut saw_bytes = false;
+    loop {
+        let chunk = match super::read_provider_chunk(&mut response, stream, saw_bytes).await {
+            super::ProviderRead::Chunk(chunk) => {
+                saw_bytes = true;
+                chunk
+            }
+            super::ProviderRead::End => break,
+            super::ProviderRead::Failed(err) => {
+                let rendered = anthropic_stream_error_sse(&format!(
+                    "Provider stream ended unexpectedly: {}",
+                    err
+                ));
+                let _ = write_stream_body(stream, &rendered, "provider stream error").await;
+                record_openai_stream_usage(&mut state, credential, subagent);
+                return Ok(());
+            }
+            super::ProviderRead::Idle => {
+                let rendered = anthropic_stream_error_sse("Provider stream idle timeout");
+                let _ = write_stream_body(stream, &rendered, "provider stream idle").await;
+                record_openai_stream_usage(&mut state, credential, subagent);
+                return Ok(());
+            }
+            super::ProviderRead::ClientGone => {
+                record_openai_stream_usage(&mut state, credential, subagent);
+                return Ok(());
+            }
+        };
         buffer.push_str(&String::from_utf8_lossy(&chunk));
         while let Some((event, rest)) = take_next_sse_event(&buffer) {
             buffer = rest;
