@@ -969,6 +969,7 @@ pub async fn spawn_claude_process(
         .get_current_dir()
         .map(|path| path.to_string_lossy().to_string());
     let allow_roots = path_guard_allow_roots(&cmd);
+    let usage_slot_guard = crate::codex_turn_usage::take_slot_env(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| {
         eprintln!(
             "[claude-spawn] Failed to spawn process for tab {}: {}",
@@ -1055,6 +1056,9 @@ pub async fn spawn_claude_process(
     let project_root_stdout = project_root.clone();
     let allow_roots_stdout = allow_roots.clone();
     let stdout_task = tokio::spawn(async move {
+        let usage_slot = usage_slot_guard
+            .as_ref()
+            .map(crate::codex_turn_usage::UsageSlotGuard::id);
         let mut lines = stdout_reader.lines();
         let mut line_count: u64 = 0;
         let mut agent_mapper = crate::runtime::claude::ClaudeAgentMapper::default();
@@ -1098,6 +1102,13 @@ pub async fn spawn_claude_process(
                 }
 
                 if msg.get("type").and_then(|v| v.as_str()) == Some("result") {
+                    if let Some(slot) = usage_slot {
+                        if let Some(rewritten) =
+                            crate::codex_turn_usage::rewrite_result_line(&line, slot)
+                        {
+                            line = rewritten;
+                        }
+                    }
                     let is_success = msg.get("subtype").and_then(|v| v.as_str()) == Some("success");
                     if let Ok(mut guard) = result_success_stdout.lock() {
                         *guard = Some(is_success);

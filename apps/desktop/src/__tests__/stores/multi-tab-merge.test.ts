@@ -596,6 +596,7 @@ describe("Multi-tab merge triggers", () => {
         outputTokens: 80,
         cacheReadTokens: 200,
         cacheCreationTokens: 0,
+        cacheCreationKnown: false,
       });
     });
   });

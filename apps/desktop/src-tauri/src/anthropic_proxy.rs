@@ -5,7 +5,7 @@ pub(crate) mod responses;
 mod stream;
 pub(crate) mod tools;
 mod transformers;
-mod usage;
+pub(crate) mod usage;
 
 use self::messages::{
     anthropic_to_openai_request, hoist_anthropic_system_messages, normalize_openai_system_messages,
@@ -13,8 +13,9 @@ use self::messages::{
 };
 use self::providers::apply_provider_request_transforms;
 use self::responses::{
-    anthropic_to_codex_responses, parse_sse_block, responses_headers, CodexProxyCredential,
-    NO_OUTPUT_TIMEOUT_PREFIX, ResponsesToAnthropic,
+    codex_turn_state_for_request, parse_sse_block, prepare_codex_request,
+    remember_codex_turn_state, responses_headers, CodexProxyCredential, ResponsesToAnthropic,
+    NO_OUTPUT_TIMEOUT_PREFIX,
 };
 use self::stream::{sse_response, stream_openai_sse_to_anthropic};
 use self::transformers::ProxyTransformerChain;
@@ -197,10 +198,7 @@ async fn handle_anthropic_passthrough(
     if !credential.model.trim().is_empty() {
         body["model"] = Value::String(credential.model.clone());
     }
-    let wants_stream = body
-        .get("stream")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let wants_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
 
     crate::providers::ensure_secure_provider_base_url(&credential.base_url)?;
     let client = crate::providers::bypass_system_proxy_for_loopback(
@@ -422,7 +420,19 @@ async fn handle_codex_messages(
 ) -> Result<(), String> {
     let anthropic_request: Value = serde_json::from_slice(&request.body)
         .map_err(|err| format!("Claude Code sent invalid Anthropic JSON: {err}"))?;
-    let body = anthropic_to_codex_responses(&anthropic_request, credential)?;
+    let header_session = claude_session_header(request);
+    let header_agent = claude_agent_header(request);
+    let prepared =
+        prepare_codex_request(&anthropic_request, credential, header_session, header_agent)?;
+    let body = prepared.body;
+    let subagent = prepared.subagent;
+    let cache_key = body
+        .get("prompt_cache_key")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let input = body.get("input").and_then(Value::as_array).cloned();
+    let turn_state = codex_turn_state_for_request(&cache_key, input.as_deref().unwrap_or(&[]));
     let client = crate::providers::bypass_system_proxy_for_loopback(
         reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(15))
@@ -434,22 +444,38 @@ async fn handle_codex_messages(
     .map_err(|err| format!("Failed to create Codex Responses client: {err}"))?;
     let mut credential = credential.clone();
     let mut retried_auth = false;
+    let mut logged_request = false;
     let mut response = loop {
+        let headers = responses_headers(
+            &credential,
+            (!cache_key.is_empty()).then_some(cache_key.as_str()),
+            turn_state.as_deref(),
+        );
+        if !logged_request {
+            crate::usage_debug::log_codex_request(
+                &credential.model,
+                body.get("instructions").and_then(Value::as_str),
+                body.get("tools"),
+                input.as_deref().unwrap_or(&[]),
+                &cache_key,
+                prepared.cache_key_origin,
+                &headers,
+                subagent,
+            );
+            logged_request = true;
+        }
         let mut builder = client
             .post(OPENAI_CODEX_API_ENDPOINT)
             .body(body.to_string());
-        for (key, value) in responses_headers(&credential) {
+        for (key, value) in headers {
             builder = builder.header(key, value);
         }
-        let response = builder
-            .send()
-            .await
-            .map_err(|err| {
-                format!(
-                    "Codex Responses request failed for {}: {err}",
-                    credential.model
-                )
-            })?;
+        let response = builder.send().await.map_err(|err| {
+            format!(
+                "Codex Responses request failed for {}: {err}",
+                credential.model
+            )
+        })?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED && !retried_auth {
             if let Some(refresh) = credential.refresh_token.clone() {
                 retried_auth = true;
@@ -465,6 +491,13 @@ async fn handle_codex_messages(
         }
         break response;
     };
+    if let Some(state) = response
+        .headers()
+        .get("x-codex-turn-state")
+        .and_then(|value| value.to_str().ok())
+    {
+        remember_codex_turn_state(&cache_key, state);
+    }
     let status = response.status();
     if !status.is_success() {
         let text = response.text().await.unwrap_or_else(|_| String::new());
@@ -482,6 +515,7 @@ async fn handle_codex_messages(
     let mut translator = ResponsesToAnthropic::for_model(&credential.model);
     let mut buffer = String::new();
     let mut saw_output = false;
+    let mut usage_recorded = false;
     loop {
         let idle = if saw_output {
             std::time::Duration::from_secs(180)
@@ -492,6 +526,9 @@ async fn handle_codex_messages(
             Ok(Ok(Some(bytes))) => bytes,
             Ok(Ok(None)) => break,
             Ok(Err(err)) => {
+                if !usage_recorded {
+                    record_codex_request_usage(&credential, &translator, subagent);
+                }
                 write_proxy_sse(
                     stream,
                     &translator.fail(&format!(
@@ -506,11 +543,11 @@ async fn handle_codex_messages(
                 let payload = if saw_output {
                     translator.close_stream()
                 } else {
-                    translator.fail(&format!(
-                        "{NO_OUTPUT_TIMEOUT_PREFIX}{}",
-                        credential.model
-                    ))
+                    translator.fail(&format!("{NO_OUTPUT_TIMEOUT_PREFIX}{}", credential.model))
                 };
+                if !usage_recorded {
+                    record_codex_request_usage(&credential, &translator, subagent);
+                }
                 write_proxy_sse(stream, &payload).await?;
                 return Ok(());
             }
@@ -520,6 +557,9 @@ async fn handle_codex_messages(
             buffer = rest;
             if let Some((event, data)) = parse_sse_block(&block) {
                 let translated = translator.handle_event(&event, &data);
+                if !usage_recorded {
+                    usage_recorded = record_codex_request_usage(&credential, &translator, subagent);
+                }
                 if !translated.is_empty() {
                     saw_output = true;
                 }
@@ -530,11 +570,58 @@ async fn handle_codex_messages(
     if !buffer.trim().is_empty() {
         if let Some((event, data)) = parse_sse_block(&buffer) {
             let translated = translator.handle_event(&event, &data);
+            if !usage_recorded {
+                usage_recorded = record_codex_request_usage(&credential, &translator, subagent);
+            }
             write_proxy_sse(stream, &translated).await?;
         }
     }
+    if !usage_recorded {
+        record_codex_request_usage(&credential, &translator, subagent);
+    }
     write_proxy_sse(stream, &translator.close_stream()).await?;
     Ok(())
+}
+
+fn claude_session_header(request: &HttpRequest) -> Option<&str> {
+    [
+        "x-claude-code-session-id",
+        "x-session-id",
+        "session-id",
+        "x-claude-session-id",
+    ]
+    .into_iter()
+    .find_map(|name| request_header(request, name))
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+}
+
+fn claude_agent_header(request: &HttpRequest) -> Option<&str> {
+    [
+        "x-claude-code-agent-id",
+        "x-claude-agent-id",
+        "x-agent-id",
+        "x-claude-code-parent-tool-use-id",
+    ]
+    .into_iter()
+    .find_map(|name| request_header(request, name))
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+}
+
+fn record_codex_request_usage(
+    credential: &CodexProxyCredential,
+    translator: &ResponsesToAnthropic,
+    subagent: bool,
+) -> bool {
+    if subagent || credential.usage_slot == 0 {
+        return subagent;
+    }
+    let Some(usage) = translator.request_usage() else {
+        return false;
+    };
+    crate::codex_turn_usage::record(credential.usage_slot, usage);
+    true
 }
 
 fn take_sse_block(buffer: &str) -> Option<(String, String)> {
@@ -616,12 +703,8 @@ async fn acquire_proxy_slot(
     match slots.clone().try_acquire_owned() {
         Ok(permit) => Some((permit, stream)),
         Err(_) => {
-            let _ = write_proxy_error(
-                &mut stream,
-                503,
-                "Too many concurrent proxy connections",
-            )
-            .await;
+            let _ =
+                write_proxy_error(&mut stream, 503, "Too many concurrent proxy connections").await;
             None
         }
     }
@@ -1404,10 +1487,7 @@ mod tests {
             Some("/v1/messages")
         );
 
-        let header_request = request_with(
-            "/v1/messages",
-            vec![("x-api-key", "secret-token")],
-        );
+        let header_request = request_with("/v1/messages", vec![("x-api-key", "secret-token")]);
         assert_eq!(
             authorize_proxy_request(&header_request, "secret-token").as_deref(),
             Some("/v1/messages")
@@ -1598,10 +1678,7 @@ mod tests {
             body.contains("hello"),
             "proxy should return translated assistant text, got {body}"
         );
-        assert_eq!(
-            seen_auth.lock().unwrap().as_deref(),
-            Some("Bearer sk-test")
-        );
+        assert_eq!(seen_auth.lock().unwrap().as_deref(), Some("Bearer sk-test"));
     }
 
     #[tokio::test]
@@ -1610,11 +1687,7 @@ mod tests {
             .await
             .expect("proxy should start");
         let parsed = url::Url::parse(&url).unwrap();
-        let addr = format!(
-            "{}:{}",
-            parsed.host_str().unwrap(),
-            parsed.port().unwrap()
-        );
+        let addr = format!("{}:{}", parsed.host_str().unwrap(), parsed.port().unwrap());
         let mut held = Vec::new();
         for _ in 0..MAX_PROXY_CONNECTIONS {
             let mut stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
@@ -1643,11 +1716,7 @@ mod tests {
             .await
             .expect("proxy should start");
         let parsed = url::Url::parse(&url).unwrap();
-        let addr = format!(
-            "{}:{}",
-            parsed.host_str().unwrap(),
-            parsed.port().unwrap()
-        );
+        let addr = format!("{}:{}", parsed.host_str().unwrap(), parsed.port().unwrap());
         let token = parsed.path_segments().unwrap().next().unwrap();
         let mut stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
         let request = format!(

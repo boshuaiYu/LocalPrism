@@ -1,0 +1,479 @@
+//! Optional usage trace for verifying provider cache fields on a real device.
+//!
+//! Enabled only when `LOCALPRISM_DEBUG_USAGE=1`. The disabled path is a cached
+//! flag check: no JSON, no filesystem, and no request-sequence increment.
+//! Records contain usage objects, or a request stage of hashes and routing
+//! metadata. Never request bodies, prompts, header secrets, or credentials.
+
+use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
+use std::io::Write;
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+#[cfg(test)]
+use std::cell::Cell;
+
+const OFF: u8 = 1;
+const ON: u8 = 2;
+
+static STATE: AtomicU8 = AtomicU8::new(0);
+static SEQ: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+thread_local! {
+    static FORCE: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+pub(crate) fn enabled() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = FORCE.with(|cell| cell.get()) {
+        return forced;
+    }
+    match STATE.load(Ordering::Relaxed) {
+        OFF => false,
+        ON => true,
+        _ => {
+            let on = std::env::var("LOCALPRISM_DEBUG_USAGE").ok().as_deref() == Some("1");
+            STATE.store(if on { ON } else { OFF }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+/// Log the last upstream usage object and the Anthropic usage derived from it.
+/// Both lines share one request sequence. No-op unless debug is enabled.
+pub(crate) fn log_translated(model: &str, raw: &Value, anthropic: &Value) {
+    if !enabled() || raw.is_null() {
+        return;
+    }
+    let seq = next_seq();
+    write_record(model, seq, "upstream", raw);
+    write_record(model, seq, "anthropic", anthropic);
+}
+
+/// Log the numbers the context panel is about to show. Drops every non-numeric
+/// field so a caller cannot append a prompt or a secret through this command.
+pub(crate) fn log_panel(model: &str, usage: &Value) {
+    if !enabled() {
+        return;
+    }
+    let usage = panel_numbers(usage);
+    if usage.is_null() {
+        return;
+    }
+    let seq = next_seq();
+    write_record(model, seq, "panel", &usage);
+}
+
+const INPUT_ITEMS_HASHED: usize = 8;
+
+/// Hash the upstream Responses body and the header names before the call.
+/// The line is metadata only: no instructions, tool text, input text, or
+/// credential values. Session and thread ids are the exception, because the
+/// next device run has to show whether the cache key moved.
+pub(crate) fn log_codex_request(
+    model: &str,
+    instructions: Option<&str>,
+    tools: Option<&Value>,
+    input: &[Value],
+    prompt_cache_key: &str,
+    prompt_cache_key_origin: &str,
+    headers: &[(String, String)],
+    subagent: bool,
+) {
+    if !enabled() {
+        return;
+    }
+    let tool_list = tools.and_then(Value::as_array);
+    let mut tool_hashes = Vec::new();
+    if let Some(tools) = tool_list {
+        for tool in tools {
+            let name = tool
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .chars()
+                .take(128)
+                .collect::<String>();
+            tool_hashes.push(json!({
+                "name": name,
+                "sha256": sha256_hex(tool.to_string().as_bytes()),
+            }));
+        }
+    }
+    let hashed = input.len().min(INPUT_ITEMS_HASHED);
+    let input_sha256: Vec<String> = input
+        .iter()
+        .take(hashed)
+        .map(|item| sha256_hex(item.to_string().as_bytes()))
+        .collect();
+    let mut header_names = Vec::new();
+    let mut session_id = None;
+    let mut thread_id = None;
+    for (name, value) in headers {
+        header_names.push(name.clone());
+        match name.to_ascii_lowercase().as_str() {
+            "session-id" | "session_id" => session_id = Some(bound_id(value)),
+            "thread-id" | "conversation-id" | "conversation_id" => {
+                thread_id = Some(bound_id(value));
+            }
+            _ => {}
+        }
+    }
+    let request = json!({
+        "instructions_sha256": sha256_hex(instructions.unwrap_or("").as_bytes()),
+        "tools_sha256": sha256_hex(tools.map(Value::to_string).unwrap_or_default().as_bytes()),
+        "tools": tool_hashes,
+        "input_sha256": input_sha256,
+        "input_items_hashed": hashed,
+        "input_items": input.len(),
+        "prompt_cache_key": bound_id(prompt_cache_key),
+        "prompt_cache_key_origin": prompt_cache_key_origin,
+        "headers": header_names,
+        "session_id": session_id,
+        "thread_id": thread_id,
+        "subagent": subagent,
+    });
+    let seq = next_seq();
+    write_request(model, seq, &request);
+}
+
+fn bound_id(value: &str) -> String {
+    value.trim().chars().take(128).collect()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn write_request(model: &str, seq: u64, request: &Value) {
+    let record = json!({
+        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "model": bounded_model(model),
+        "seq": seq,
+        "stage": "request",
+        "request": request,
+    });
+    let Ok(line) = serde_json::to_string(&record) else {
+        return;
+    };
+    append_line(&line);
+}
+
+fn next_seq() -> u64 {
+    SEQ.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+fn write_record(model: &str, seq: u64, stage: &str, usage: &Value) {
+    let record = json!({
+        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "model": bounded_model(model),
+        "seq": seq,
+        "stage": stage,
+        "usage": usage,
+    });
+    let Ok(line) = serde_json::to_string(&record) else {
+        return;
+    };
+    append_line(&line);
+}
+
+fn append_line(line: &str) {
+    let Ok(home) = crate::providers::paths::localprism_home() else {
+        return;
+    };
+    let dir = home.join("logs");
+    let path = dir.join("usage-debug.jsonl");
+    let _guard = write_lock().lock().unwrap_or_else(|err| err.into_inner());
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    let _ = writeln!(file, "{line}");
+}
+
+fn write_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn bounded_model(model: &str) -> String {
+    model.trim().chars().take(128).collect()
+}
+
+fn panel_numbers(usage: &Value) -> Value {
+    let Some(obj) = usage.as_object() else {
+        return Value::Null;
+    };
+    let mut out = Map::new();
+    for key in [
+        "inputTokens",
+        "outputTokens",
+        "cacheReadTokens",
+        "cacheCreationTokens",
+        "usedTokens",
+        "windowTokens",
+    ] {
+        let Some(value) = obj.get(key).and_then(json_count) else {
+            continue;
+        };
+        out.insert(key.to_string(), json!(value));
+    }
+    if out.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(out)
+    }
+}
+
+fn json_count(value: &Value) -> Option<u64> {
+    if let Some(number) = value.as_u64() {
+        return Some(number);
+    }
+    if let Some(number) = value.as_i64() {
+        return (number >= 0).then_some(number as u64);
+    }
+    value
+        .as_f64()
+        .filter(|number| number.is_finite() && *number >= 0.0)
+        .map(|number| number as u64)
+}
+
+#[tauri::command]
+pub fn usage_debug_enabled() -> bool {
+    enabled()
+}
+
+#[tauri::command]
+pub fn log_usage_debug_panel(model: String, usage: Value) {
+    log_panel(&model, &usage);
+}
+
+#[cfg(test)]
+pub(crate) fn force_for_test(enabled: Option<bool>) {
+    FORCE.with(|cell| cell.set(enabled));
+}
+
+#[cfg(test)]
+pub(crate) fn reset_seq_for_test() {
+    SEQ.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::paths::lock_provider_env;
+    use std::path::PathBuf;
+
+    struct EnvRestore {
+        previous: Option<String>,
+    }
+
+    impl EnvRestore {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::var("LOCALPRISM_HOME").ok();
+            std::env::set_var("LOCALPRISM_HOME", path);
+            Self { previous }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("LOCALPRISM_HOME", value),
+                None => std::env::remove_var("LOCALPRISM_HOME"),
+            }
+        }
+    }
+
+    struct ForceRestore;
+
+    impl Drop for ForceRestore {
+        fn drop(&mut self) {
+            force_for_test(None);
+        }
+    }
+
+    fn log_path(home: &std::path::Path) -> PathBuf {
+        home.join("logs").join("usage-debug.jsonl")
+    }
+
+    #[test]
+    fn disabled_debug_does_not_create_a_log() {
+        let _lock = lock_provider_env();
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvRestore::set(home.path());
+        let _force = ForceRestore;
+        force_for_test(Some(false));
+        reset_seq_for_test();
+
+        let raw = json!({
+            "input_tokens": 189600,
+            "input_tokens_details": { "cached_tokens": 170000 },
+            "output_tokens": 2965
+        });
+        let anthropic = json!({
+            "input_tokens": 19600,
+            "output_tokens": 2965,
+            "cache_read_input_tokens": 170000,
+            "cache_creation_input_tokens": 0
+        });
+        log_translated("gpt-6-luna", &raw, &anthropic);
+        log_panel(
+            "gpt-6-luna",
+            &json!({
+                "inputTokens": 19600,
+                "prompt": "do not log this body",
+                "authorization": "Bearer sk-test"
+            }),
+        );
+
+        assert!(!log_path(home.path()).exists());
+        assert_eq!(SEQ.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn enabled_debug_appends_usage_only() {
+        let _lock = lock_provider_env();
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvRestore::set(home.path());
+        let _force = ForceRestore;
+        force_for_test(Some(true));
+        reset_seq_for_test();
+
+        let raw = json!({
+            "input_tokens": 189600,
+            "input_tokens_details": { "cached_tokens": 170000 },
+            "output_tokens": 2965
+        });
+        let anthropic = json!({
+            "input_tokens": 19600,
+            "output_tokens": 2965,
+            "cache_read_input_tokens": 170000,
+            "cache_creation_input_tokens": 0
+        });
+        log_translated("gpt-6-luna", &raw, &anthropic);
+        log_panel(
+            "gpt-6-luna",
+            &json!({
+                "inputTokens": 19600,
+                "outputTokens": 2965,
+                "cacheReadTokens": 170000,
+                "cacheCreationTokens": 0,
+                "usedTokens": 192565,
+                "windowTokens": 272000,
+                "prompt": "Read main.tex SECRET",
+                "authorization": "Bearer sk-live"
+            }),
+        );
+
+        let text = std::fs::read_to_string(log_path(home.path())).unwrap();
+        assert!(!text.contains("SECRET"));
+        assert!(!text.contains("Bearer"));
+        assert!(!text.contains("sk-live"));
+        assert!(!text.contains("main.tex"));
+        let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
+        assert_eq!(lines.len(), 3);
+        let upstream: Value = serde_json::from_str(lines[0]).unwrap();
+        let anthropic_line: Value = serde_json::from_str(lines[1]).unwrap();
+        let panel: Value = serde_json::from_str(lines[2]).unwrap();
+        assert_eq!(upstream["stage"], "upstream");
+        assert_eq!(anthropic_line["stage"], "anthropic");
+        assert_eq!(panel["stage"], "panel");
+        assert_eq!(upstream["model"], "gpt-6-luna");
+        assert_eq!(upstream["seq"], 1);
+        assert_eq!(anthropic_line["seq"], 1);
+        assert_eq!(panel["seq"], 2);
+        assert_eq!(upstream["usage"]["input_tokens"], 189600);
+        assert_eq!(
+            upstream["usage"]["input_tokens_details"]["cached_tokens"],
+            170000
+        );
+        assert_eq!(anthropic_line["usage"]["cache_read_input_tokens"], 170000);
+        assert_eq!(panel["usage"]["usedTokens"], 192565);
+        assert_eq!(panel["usage"]["cacheReadTokens"], 170000);
+        assert!(panel["usage"].get("prompt").is_none());
+        assert!(upstream["ts"].as_str().unwrap().contains('T'));
+    }
+
+    #[test]
+    fn request_stage_logs_hashes_and_session_ids_only() {
+        let _lock = lock_provider_env();
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvRestore::set(home.path());
+        let _force = ForceRestore;
+        force_for_test(Some(true));
+        reset_seq_for_test();
+
+        let instructions = "SECRET system prompt. Do not log this.";
+        let tools = json!([{
+            "name": "Read",
+            "description": "SECRET tool description",
+            "parameters": { "type": "object" }
+        }]);
+        let input = vec![json!({
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "SECRET user turn" }]
+        })];
+        log_codex_request(
+            "gpt-6-luna",
+            Some(instructions),
+            Some(&tools),
+            &input,
+            "sess_abc",
+            "body",
+            &[
+                ("Authorization".into(), "Bearer sk-live-secret".into()),
+                ("Content-Type".into(), "application/json".into()),
+                ("session-id".into(), "sess_abc".into()),
+                ("thread-id".into(), "sess_abc".into()),
+                ("x-client-request-id".into(), "sess_abc".into()),
+                ("ChatGPT-Account-Id".into(), "acct_secret".into()),
+                ("x-codex-turn-state".into(), "turn-secret".into()),
+            ],
+            false,
+        );
+
+        let text = std::fs::read_to_string(log_path(home.path())).unwrap();
+        assert!(!text.contains("SECRET"));
+        assert!(!text.contains("sk-live"));
+        assert!(!text.contains("Bearer"));
+        assert!(!text.contains("acct_secret"));
+        assert!(!text.contains("turn-secret"));
+        let record: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(record["stage"], "request");
+        assert_eq!(record["seq"], 1);
+        assert_eq!(record["request"]["prompt_cache_key"], "sess_abc");
+        assert_eq!(record["request"]["prompt_cache_key_origin"], "body");
+        assert_eq!(record["request"]["session_id"], "sess_abc");
+        assert_eq!(record["request"]["thread_id"], "sess_abc");
+        assert_eq!(record["request"]["subagent"], false);
+        assert_eq!(record["request"]["input_items"], 1);
+        assert_eq!(record["request"]["input_items_hashed"], 1);
+        assert_eq!(record["request"]["tools"][0]["name"], "Read");
+        let instructions_hash = record["request"]["instructions_sha256"].as_str().unwrap();
+        assert_eq!(instructions_hash.len(), 64);
+        assert_ne!(
+            record["request"]["tools"][0]["sha256"].as_str().unwrap(),
+            instructions_hash
+        );
+        let names = record["request"]["headers"].as_array().unwrap();
+        assert!(names.iter().any(|name| name == "Authorization"));
+        assert!(names.iter().any(|name| name == "session-id"));
+        assert!(names.iter().any(|name| name == "x-codex-turn-state"));
+    }
+}

@@ -197,6 +197,12 @@ pub(super) fn openai_to_anthropic_message(
     };
 
     let usage = openai_response.get("usage").unwrap_or(&Value::Null);
+    let model = anthropic_request
+        .get("model")
+        .and_then(|value| value.as_str())
+        .unwrap_or(&credential.model);
+    let anthropic_usage = openai_usage_to_anthropic(usage);
+    crate::usage_debug::log_translated(model, usage, &anthropic_usage);
     Ok(json!({
         "id": openai_response
             .get("id")
@@ -205,14 +211,11 @@ pub(super) fn openai_to_anthropic_message(
             .unwrap_or_else(|| format!("msg_{}", uuid::Uuid::new_v4().simple())),
         "type": "message",
         "role": "assistant",
-        "model": anthropic_request
-            .get("model")
-            .and_then(|value| value.as_str())
-            .unwrap_or(&credential.model),
+        "model": model,
         "content": content,
         "stop_reason": stop_reason,
         "stop_sequence": Value::Null,
-        "usage": openai_usage_to_anthropic(usage),
+        "usage": anthropic_usage,
     }))
 }
 
@@ -785,21 +788,12 @@ fn contains_only_exit_tool(message: &Value) -> bool {
 }
 
 fn openai_usage_to_anthropic(usage: &Value) -> Value {
-    let cache = super::usage::openai_cache_read_tokens(usage);
-    let input = super::usage::exclusive_openai_input_tokens(
-        super::usage::usage_token(
-            usage,
-            &["prompt_tokens", "input_tokens", "prompt_token_count"],
-        ),
-        cache,
-    );
+    let split = super::usage::split_provider_usage(usage);
     json!({
-        "input_tokens": input,
-        "output_tokens": super::usage::usage_token(
-            usage,
-            &["completion_tokens", "output_tokens", "completion_token_count"],
-        ),
-        "cache_read_input_tokens": cache,
+        "input_tokens": split.input_tokens,
+        "output_tokens": split.output_tokens,
+        "cache_read_input_tokens": split.cache_read_tokens.unwrap_or(0),
+        "cache_creation_input_tokens": split.cache_creation_tokens.unwrap_or(0),
     })
 }
 
