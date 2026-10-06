@@ -1,6 +1,6 @@
 {
   "name": "@claude-prism/desktop",
-  "version": "1.0.8-10",
+  "version": "1.0.8-11",
   "private": true,
   "type": "module",
   "scripts": {
