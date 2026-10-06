@@ -1,5 +1,13 @@
 name: Build Desktop
 
+# vcpkg Actions caches are readable from a tag only when they were saved on
+# the default branch. A tag push stores them under refs/heads/refs/tags/<tag>,
+# which the next tag cannot see, so this file saves those caches only for
+# refs/heads/main. Warm the shared cache, and optionally upload a release, by
+# dispatching this workflow on main:
+#   gh workflow run build-desktop.yml --ref main -f release_tag=<tag>
+# Re-running an older tag workflow does not pick up this file.
+
 on:
   workflow_dispatch:
     inputs:
@@ -35,20 +43,30 @@ jobs:
         with:
           path: ${{ env.VCPKG_INSTALLED }}
           key: vcpkg-win-v2
+          # Exact key is checked on this ref, then on the default branch.
+          # The prefix matches a future vcpkg-win-v2-<suffix> entry on main
+          # when the exact key is missing. A prefix hit leaves cache-hit
+          # false, so the install step still runs.
+          restore-keys: |
+            vcpkg-win-v2-
+            vcpkg-win-v2
 
       - name: Install Windows dependencies (vcpkg)
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
         shell: bash
         env:
+          # Keep source builds. x64-windows-static-release is not in
+          # Microsoft's binary cache, so clearing it does not skip gperf.
           VCPKG_BINARY_SOURCES: "clear"
         run: |
+          bash scripts/ci-prefetch-vcpkg-downloads.sh gperf
           vcpkg install "harfbuzz[graphite2]:x64-windows-static-release" \
             fontconfig:x64-windows-static-release \
             freetype:x64-windows-static-release \
             icu:x64-windows-static-release
 
       - name: Save vcpkg cache
-        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@v4
         with:
           path: ${{ env.VCPKG_INSTALLED }}
@@ -138,12 +156,16 @@ jobs:
         with:
           path: ~/vcpkg/installed
           key: vcpkg-macos-arm64-v1
+          restore-keys: |
+            vcpkg-macos-arm64-v1-
+            vcpkg-macos-arm64-v1
 
       - name: Install macOS dependencies (vcpkg)
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
         env:
           VCPKG_BINARY_SOURCES: "clear"
         run: |
+          bash scripts/ci-prefetch-vcpkg-downloads.sh gperf
           $HOME/vcpkg/vcpkg install \
             "harfbuzz[graphite2]:arm64-osx" \
             fontconfig:arm64-osx \
@@ -151,7 +173,7 @@ jobs:
             icu:arm64-osx
 
       - name: Save vcpkg cache
-        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@v4
         with:
           path: ~/vcpkg/installed
@@ -292,12 +314,16 @@ jobs:
         with:
           path: ~/vcpkg/installed
           key: vcpkg-macos-x64-v1
+          restore-keys: |
+            vcpkg-macos-x64-v1-
+            vcpkg-macos-x64-v1
 
       - name: Install macOS dependencies (vcpkg)
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
         env:
           VCPKG_BINARY_SOURCES: "clear"
         run: |
+          bash scripts/ci-prefetch-vcpkg-downloads.sh gperf
           $HOME/vcpkg/vcpkg install \
             "harfbuzz[graphite2]:x64-osx" \
             fontconfig:x64-osx \
@@ -305,7 +331,7 @@ jobs:
             icu:x64-osx
 
       - name: Save vcpkg cache
-        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@v4
         with:
           path: ~/vcpkg/installed
