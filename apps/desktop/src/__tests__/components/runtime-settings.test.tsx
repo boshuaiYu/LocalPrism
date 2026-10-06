@@ -96,6 +96,13 @@ describe("RuntimeSettings", () => {
     expect(
       container.querySelector('input[placeholder="API key"]'),
     ).not.toBeNull();
+    const format = container.querySelector(
+      '[data-testid="provider-api-format"]',
+    );
+    expect(format).not.toBeNull();
+    expect(format?.textContent).toContain("OpenAI Responses");
+    expect(format?.textContent).toContain("OpenAI Chat Completions");
+    expect(format?.textContent).toContain("Anthropic Messages");
     expect(container.textContent).not.toContain("Sign in to Claude Official");
     expect(container.textContent).not.toContain("Writing engine");
 

@@ -16,7 +16,8 @@ use tokio::sync::Mutex;
 
 use crate::anthropic_proxy::responses::CodexProxyCredential;
 use crate::anthropic_proxy::{
-    start_anthropic_passthrough_proxy, start_codex_responses_proxy, start_openai_anthropic_proxy,
+    probe_openai_responses_connection, start_anthropic_passthrough_proxy,
+    start_codex_responses_proxy, start_openai_anthropic_proxy, start_openai_responses_proxy,
     OpenAiProxyCredential,
 };
 
@@ -31,7 +32,7 @@ pub use types::{
 pub use url_guard::{bypass_system_proxy_for_loopback, ensure_secure_provider_base_url};
 
 use store::{delete_oauth, load_index, load_oauth, save_index, OAuthKind};
-use types::{is_official_id, ProviderIndex};
+use types::{is_official_id, ApiFormat, ProviderIndex};
 
 #[derive(Default)]
 pub struct ProviderLoginState {
@@ -101,6 +102,14 @@ pub async fn provider_upsert_third_party(
         return Err("API key is required".into());
     }
     ensure_secure_provider_base_url(&provider.base_url)?;
+    if provider.api_format == ApiFormat::OpenaiResponses {
+        probe_openai_responses_connection(
+            &provider.api_key,
+            &provider.base_url,
+            &provider.models.main,
+        )
+        .await?;
+    }
     let mut index = load_index()?;
     let id = if provider.id.trim().is_empty() {
         uuid::Uuid::new_v4().to_string()
@@ -374,6 +383,26 @@ pub async fn apply_managed_provider(
             ));
             values.push(("CLAUDE_CODE_ATTRIBUTION_HEADER".into(), "0".into()));
         }
+        Some(ProxyKind::OpenaiResponses(provider)) => {
+            ensure_secure_provider_base_url(&provider.base_url)?;
+            let usage_slot = crate::codex_turn_usage::register_slot();
+            let proxy = start_openai_responses_proxy(OpenAiProxyCredential {
+                api_key: provider.api_key,
+                base_url: provider.base_url,
+                model: provider.models.main,
+                transformers: Vec::new(),
+                model_transformers: Vec::new(),
+                usage_slot,
+            })
+            .await?;
+            attach_proxy_capability(&mut values, &proxy);
+            values.push(("ANTHROPIC_BASE_URL".into(), proxy));
+            values.push((
+                "LOCALPRISM_CODEX_USAGE_SLOT".into(),
+                usage_slot.to_string(),
+            ));
+            values.push(("CLAUDE_CODE_ATTRIBUTION_HEADER".into(), "0".into()));
+        }
         Some(ProxyKind::AnthropicNative(provider)) => {
             ensure_secure_provider_base_url(&provider.base_url)?;
             let usage_slot = crate::codex_turn_usage::register_slot();
@@ -499,6 +528,88 @@ mod tests {
                 .find(|(key, _)| key == "ANTHROPIC_AUTH_TOKEN")
                 .map(|(_, value)| value.as_str()),
             Some("session-secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_openai_responses_probes_responses_endpoint() {
+        let (_dir, _guard) = isolate();
+        save_index(&ProviderIndex::default()).unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen_task = std::sync::Arc::clone(&seen);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let seen_task = std::sync::Arc::clone(&seen_task);
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buffer = Vec::new();
+                    let mut temp = [0_u8; 2048];
+                    let header_end = loop {
+                        let Ok(n) = stream.read(&mut temp).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        buffer.extend_from_slice(&temp[..n]);
+                        if let Some(index) =
+                            buffer.windows(4).position(|window| window == b"\r\n\r\n")
+                        {
+                            break index;
+                        }
+                        if buffer.len() > 64 * 1024 {
+                            return;
+                        }
+                    };
+                    let header = String::from_utf8_lossy(&buffer[..header_end]);
+                    let path = header
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("")
+                        .to_string();
+                    seen_task.lock().unwrap().push(path.clone());
+                    let response_body = if path.ends_with("/responses") {
+                        r#"{"id":"resp_ok","status":"completed","output_text":"ok"}"#
+                    } else {
+                        r#"{"error":"not found"}"#
+                    };
+                    let status = if path.ends_with("/responses") {
+                        200
+                    } else {
+                        404
+                    };
+                    let payload = format!(
+                        "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                        response_body.len()
+                    );
+                    let _ = stream.write_all(payload.as_bytes()).await;
+                });
+            }
+        });
+
+        let mut provider = sample_provider(&format!("http://{addr}/v1"));
+        provider.api_format = ApiFormat::OpenaiResponses;
+        provider.models.main = "gpt-4.1".into();
+        let status = provider_upsert_third_party(provider, true)
+            .await
+            .expect("openai_responses save should probe /responses");
+        assert!(status.active_authenticated);
+        let paths = seen.lock().unwrap().clone();
+        assert!(
+            paths.iter().any(|path| path.ends_with("/responses")),
+            "expected a /responses probe, saw {paths:?}"
+        );
+        assert!(
+            paths.iter().all(|path| !path.contains("chat/completions")),
+            "save must not probe chat completions, saw {paths:?}"
         );
     }
 }

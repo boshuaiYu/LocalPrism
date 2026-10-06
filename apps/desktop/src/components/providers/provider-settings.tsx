@@ -307,6 +307,7 @@ function ThirdPartySection({
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState(defaultPreset.baseUrl);
   const [model, setModel] = useState(defaultPreset.model);
+  const [apiFormat, setApiFormat] = useState(defaultPreset.apiFormat);
   const preset = thirdPartyPresetById(presetId);
   const isCustom = presetId === "custom";
   const canEditEndpoint = Boolean(preset?.editBaseUrl || isCustom);
@@ -316,6 +317,7 @@ function ThirdPartySection({
     setName(next.id === "custom" ? "" : next.name);
     setBaseUrl(next.baseUrl);
     setModel(next.model);
+    setApiFormat(next.apiFormat);
   };
 
   const presetLabel = (item: ThirdPartyPreset) =>
@@ -346,6 +348,29 @@ function ThirdPartySection({
               />
             </div>
           )}
+          <label className="block space-y-1">
+            <span className="text-lp-meta text-xs">{t("providers.apiFormat")}</span>
+            <select
+              data-testid="provider-api-format"
+              className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              value={apiFormat}
+              onChange={(event) =>
+                setApiFormat(
+                  event.target.value as ThirdPartyPreset["apiFormat"],
+                )
+              }
+            >
+              <option value="anthropic">
+                {t("providers.apiFormat.anthropic")}
+              </option>
+              <option value="openai_chat">
+                {t("providers.apiFormat.openaiChat")}
+              </option>
+              <option value="openai_responses">
+                {t("providers.apiFormat.openaiResponses")}
+              </option>
+            </select>
+          </label>
           <div className="grid gap-2 sm:grid-cols-2">
             <Input
               placeholder={t("providers.apiKey")}
@@ -372,7 +397,7 @@ function ThirdPartySection({
                 name: name.trim(),
                 apiKey: apiKey.trim(),
                 baseUrl: baseUrl.trim(),
-                apiFormat: preset.apiFormat,
+                apiFormat,
                 models: { main: model.trim() },
               });
               setApiKey("");
