@@ -39,10 +39,15 @@ mkdir -p "$VCPKG_DOWNLOADS"
 
 sha512_file() {
   local file="$1"
+  # windows-latest passes C:\vcpkg\downloads\... to sha512sum. GNU sha512sum
+  # and shasum prefix that line with '\', so awk's $1 is \246b75b8... and
+  # never matches the portfile. Drop the marker. coreutils opens the path
+  # itself in binary mode; hashing via stdin can translate CRLF under Git
+  # Bash and change the digest of a gzip tarball.
   if command -v sha512sum >/dev/null 2>&1; then
-    sha512sum "$file" | awk '{print tolower($1)}'
+    sha512sum -- "$file" | awk '{sub(/^\\/, "", $1); print tolower($1)}' | tr -d '\r'
   else
-    shasum -a 512 "$file" | awk '{print tolower($1)}'
+    shasum -a 512 -- "$file" | awk '{sub(/^\\/, "", $1); print tolower($1)}' | tr -d '\r'
   fi
 }
 
@@ -55,7 +60,7 @@ prefetch_port() {
   local port_dir="${VCPKG_ROOT}/ports/${port}"
   local manifest="${port_dir}/vcpkg.json"
   local portfile="${port_dir}/portfile.cmake"
-  local version filename_tmpl filename gnu_pkg sha512 dest got tmp url
+  local version filename_tmpl filename gnu_pkg sha512 dest got tmp url bytes
   local -a urls
 
   if [[ ! -f "$manifest" || ! -f "$portfile" ]]; then
@@ -63,10 +68,11 @@ prefetch_port() {
     exit 1
   fi
 
-  version="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -n 1)"
-  filename_tmpl="$(sed -n 's/^[[:space:]]*FILENAME[[:space:]]\{1,\}"\{0,1\}\([^"[:space:]]*\).*/\1/p' "$portfile" | head -n 1)"
-  sha512="$(sed -n 's/^[[:space:]]*SHA512[[:space:]]\{1,\}"\{0,1\}\([0-9A-Fa-f][0-9A-Fa-f]*\).*/\1/p' "$portfile" | head -n 1)"
-  gnu_pkg="$(sed -n 's#.*gnu/\([^/"][^/"]*\)/.*#\1#p' "$portfile" | head -n 1)"
+  # Drop CR so a CRLF port file cannot leak into the URL or expected digest.
+  version="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -n 1 | tr -d '\r')"
+  filename_tmpl="$(sed -n 's/^[[:space:]]*FILENAME[[:space:]]\{1,\}"\{0,1\}\([^"[:space:]]*\).*/\1/p' "$portfile" | head -n 1 | tr -d '\r')"
+  sha512="$(sed -n 's/^[[:space:]]*SHA512[[:space:]]\{1,\}"\{0,1\}\([0-9A-Fa-f][0-9A-Fa-f]*\).*/\1/p' "$portfile" | head -n 1 | tr -d '\r')"
+  gnu_pkg="$(sed -n 's#.*gnu/\([^/"][^/"]*\)/.*#\1#p' "$portfile" | head -n 1 | tr -d '\r')"
 
   if [[ -z "$version" || -z "$sha512" || -z "$gnu_pkg" ]]; then
     echo "Could not parse version, SHA512, or GNU directory for ${port}" >&2
@@ -88,6 +94,8 @@ prefetch_port() {
       return 0
     fi
     echo "Removing ${filename}; SHA512 does not match the portfile" >&2
+    echo "  expected ${sha512}" >&2
+    echo "  got      ${got}" >&2
     rm -f "$dest"
   fi
 
@@ -117,7 +125,10 @@ prefetch_port() {
       echo "Prefetched ${dest}"
       return 0
     fi
-    echo "SHA512 mismatch from ${url}" >&2
+    bytes="$(wc -c <"$tmp" | tr -d '[:space:]')"
+    echo "SHA512 mismatch from ${url} (${bytes} bytes)" >&2
+    echo "  expected ${sha512}" >&2
+    echo "  got      ${got}" >&2
     rm -f "$tmp"
   done
 
