@@ -1,8 +1,9 @@
-//! Last Codex Responses request in one Claude spawn.
+//! Last upstream request in one Claude spawn.
 //!
 //! A tool loop sends several upstream requests, and Claude Code's `result.usage`
 //! adds them together. The context meter needs the last request, so each spawn
 //! gets its own slot and the result line is rewritten before the UI sees it.
+//! ChatGPT Codex, OpenAI-chat, and Anthropic-passthrough proxies share this slot.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

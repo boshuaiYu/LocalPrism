@@ -808,6 +808,7 @@ mod tests {
             model: "qwen-test".to_string(),
             transformers: Vec::new(),
             model_transformers: Vec::new(),
+            usage_slot: 0,
         }
     }
 

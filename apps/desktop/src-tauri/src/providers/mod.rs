@@ -356,29 +356,41 @@ pub async fn apply_managed_provider(
         }
         Some(ProxyKind::OpenaiChat(provider)) => {
             ensure_secure_provider_base_url(&provider.base_url)?;
+            let usage_slot = crate::codex_turn_usage::register_slot();
             let proxy = start_openai_anthropic_proxy(OpenAiProxyCredential {
                 api_key: provider.api_key,
                 base_url: provider.base_url,
                 model: provider.models.main,
                 transformers: Vec::new(),
                 model_transformers: Vec::new(),
+                usage_slot,
             })
             .await?;
             attach_proxy_capability(&mut values, &proxy);
             values.push(("ANTHROPIC_BASE_URL".into(), proxy));
+            values.push((
+                "LOCALPRISM_CODEX_USAGE_SLOT".into(),
+                usage_slot.to_string(),
+            ));
         }
         Some(ProxyKind::AnthropicNative(provider)) => {
             ensure_secure_provider_base_url(&provider.base_url)?;
+            let usage_slot = crate::codex_turn_usage::register_slot();
             let proxy = start_anthropic_passthrough_proxy(OpenAiProxyCredential {
                 api_key: provider.api_key,
                 base_url: provider.base_url,
                 model: provider.models.main,
                 transformers: Vec::new(),
                 model_transformers: Vec::new(),
+                usage_slot,
             })
             .await?;
             attach_proxy_capability(&mut values, &proxy);
             values.push(("ANTHROPIC_BASE_URL".into(), proxy));
+            values.push((
+                "LOCALPRISM_CODEX_USAGE_SLOT".into(),
+                usage_slot.to_string(),
+            ));
         }
         None => {}
     }

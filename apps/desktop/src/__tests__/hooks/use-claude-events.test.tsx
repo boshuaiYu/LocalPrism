@@ -1496,4 +1496,198 @@ describe("useClaudeEvents cancellation isolation", () => {
       /This may be due to rate limiting or an API error/,
     );
   });
+
+  it("applies the last stream_event usage without appending partial events", async () => {
+    const output = callbacks.get("claude-output");
+    await act(async () => {
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "stream_event",
+            event: {
+              type: "message_start",
+              message: {
+                usage: {
+                  input_tokens: 1406,
+                  output_tokens: 0,
+                  cache_read_input_tokens: 22912,
+                  cache_creation_input_tokens: 0,
+                },
+              },
+            },
+          }),
+        ),
+      );
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "stream_event",
+            event: {
+              type: "message_delta",
+              usage: { output_tokens: 80 },
+            },
+          }),
+        ),
+      );
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "assistant",
+            message: {
+              usage: {
+                input_tokens: 24318,
+                output_tokens: 0,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+              },
+            },
+          }),
+        ),
+      );
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "result",
+            usage: {
+              input_tokens: 50000,
+              output_tokens: 200,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
+          }),
+        ),
+      );
+      await Promise.resolve();
+    });
+
+    const tab = useClaudeChatStore
+      .getState()
+      .tabs.find((candidate) => candidate.id === "tab-a");
+    expect(tab?.messages.map((message) => message.type)).toEqual([
+      "assistant",
+      "result",
+    ]);
+    expect(tab?.lastTurnUsage).toEqual({
+      inputTokens: 1406,
+      outputTokens: 80,
+      cacheReadTokens: 22912,
+      cacheCreationTokens: 0,
+    });
+    expect(tab?.totalInputTokens).toBe(24318 + 50000);
+    expect(tab?.totalOutputTokens).toBe(200);
+
+    await act(async () => {
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "stream_event",
+            parent_tool_use_id: "toolu_sub",
+            event: {
+              type: "message_delta",
+              usage: { output_tokens: 999 },
+            },
+          }),
+        ),
+      );
+      await Promise.resolve();
+    });
+    const afterSubagent = useClaudeChatStore
+      .getState()
+      .tabs.find((candidate) => candidate.id === "tab-a");
+    expect(afterSubagent?.lastTurnUsage?.outputTokens).toBe(80);
+    expect(afterSubagent?.messages).toHaveLength(2);
+  });
+
+  it("counts thinking deltas as Claude reply progress for the 180s watchdog", async () => {
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+      container = document.createElement("div");
+      document.body.append(container);
+      root = createRoot(container);
+      await act(async () => {
+        root.render(<Probe />);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        useClaudeChatStore.setState((state) => ({
+          tabs: state.tabs.map((tab) =>
+            tab.id === "tab-a"
+              ? {
+                  ...tab,
+                  runtime: "claude" as const,
+                  isStreaming: true,
+                  activeAttemptId: "tab-a-attempt-1",
+                  streamingStartedAt: Date.now(),
+                  error: null,
+                }
+              : tab,
+          ),
+        }));
+      });
+
+      const output = callbacks.get("claude-output");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(90_000);
+      });
+
+      await act(async () => {
+        output?.(
+          dataEvent(
+            "claude-output",
+            "tab-a",
+            JSON.stringify({
+              type: "stream_event",
+              event: {
+                type: "content_block_delta",
+                delta: { type: "thinking_delta", thinking: "still working" },
+              },
+            }),
+          ),
+        );
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(90_000);
+      });
+
+      let tab = useClaudeChatStore
+        .getState()
+        .tabs.find((candidate) => candidate.id === "tab-a");
+      expect(tab?.isStreaming).toBe(true);
+      expect(tab?.error).toBeNull();
+      expect(tab?.messages).toHaveLength(0);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(180_000);
+      });
+
+      tab = useClaudeChatStore
+        .getState()
+        .tabs.find((candidate) => candidate.id === "tab-a");
+      expect(tab?.isStreaming).toBe(false);
+      expect(tab?.error).toMatch(/no reply for 180 seconds/i);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -31,6 +31,10 @@ import {
 import { createStreamDeltaBatcher } from "@/hooks/stream-delta-batch";
 import { shouldRefreshSkillsAfterTool } from "@/lib/skills-refresh";
 import { scheduleSkillsRefresh } from "@/stores/skill-store";
+import {
+  streamEventCountsAsReplyProgress,
+  usageFromAnthropicStreamEvent,
+} from "@/lib/chat-token-usage";
 
 function streamingAttemptSignature(tabs: readonly TabState[]): string {
   return tabs
@@ -412,6 +416,21 @@ export function useClaudeEvents() {
         tab.runtime !== "claude" ||
         tab.activeAttemptId !== attemptId
       ) {
+        return;
+      }
+
+      if ((msg as { type?: string }).type === "stream_event") {
+        const event = (msg as { event?: unknown }).event;
+        if (streamEventCountsAsReplyProgress(event)) {
+          lastClaudeProgressAtRef.current.set(tabId, Date.now());
+        }
+        const parent = (msg as { parent_tool_use_id?: unknown })
+          .parent_tool_use_id;
+        const subagent = typeof parent === "string" && parent.trim().length > 0;
+        const requestUsage = usageFromAnthropicStreamEvent(event);
+        if (!subagent && requestUsage) {
+          chatStore._noteRequestUsage(tabId, requestUsage);
+        }
         return;
       }
 

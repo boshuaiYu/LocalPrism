@@ -2901,6 +2901,7 @@ fn common_claude_args_for_turn(
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--verbose".to_string(),
+        "--include-partial-messages".to_string(),
         "--permission-prompt-tool".to_string(),
         "stdio".to_string(),
         "--permission-mode".to_string(),
@@ -3433,12 +3434,14 @@ async fn execute_openai_compatible_via_claude_proxy(
         .get(&credential.model)
         .cloned()
         .unwrap_or_default();
+    let usage_slot = crate::codex_turn_usage::register_slot();
     let proxy_url = start_openai_anthropic_proxy(OpenAiProxyCredential {
         api_key: credential.api_key.clone(),
         base_url: credential.base_url.clone(),
         model: credential.model.clone(),
         transformers: credential.transformers.clone(),
         model_transformers,
+        usage_slot,
     })
     .await?;
     let claude_path = find_claude_binary()?;
@@ -3462,6 +3465,7 @@ async fn execute_openai_compatible_via_claude_proxy(
     clear_anthropic_provider_env(&mut cmd);
     cmd.env("ANTHROPIC_API_KEY", "claude-prism-local-proxy");
     cmd.env("ANTHROPIC_BASE_URL", proxy_url);
+    cmd.env("LOCALPRISM_CODEX_USAGE_SLOT", usage_slot.to_string());
     cmd.env_remove("CLAUDE_MODEL");
 
     spawn_claude_process(
@@ -3538,6 +3542,7 @@ async fn execute_openai_compatible_via_native_anthropic(
 ) -> Result<(), String> {
     let anthropic_base_url = native_anthropic_base_url(&credential)
         .ok_or_else(|| "Provider does not expose a native Anthropic endpoint".to_string())?;
+    let usage_slot = crate::codex_turn_usage::register_slot();
     let proxy_url = start_anthropic_passthrough_proxy(OpenAiProxyCredential {
         api_key: credential.api_key.clone(),
         base_url: anthropic_base_url.clone(),
@@ -3548,6 +3553,7 @@ async fn execute_openai_compatible_via_native_anthropic(
             .get(&credential.model)
             .cloned()
             .unwrap_or_default(),
+        usage_slot,
     })
     .await?;
     let claude_path = find_claude_binary()?;
@@ -3570,6 +3576,7 @@ async fn execute_openai_compatible_via_native_anthropic(
     )?;
     apply_native_anthropic_provider_env(&mut cmd, &credential, &anthropic_base_url);
     cmd.env("ANTHROPIC_BASE_URL", proxy_url);
+    cmd.env("LOCALPRISM_CODEX_USAGE_SLOT", usage_slot.to_string());
 
     spawn_claude_process(
         window,
@@ -5908,6 +5915,7 @@ mod tests {
         assert!(args.contains(&"--output-format".to_string()));
         assert!(args.contains(&"stream-json".to_string()));
         assert!(args.contains(&"--verbose".to_string()));
+        assert!(args.contains(&"--include-partial-messages".to_string()));
         assert!(args.contains(&"--permission-prompt-tool".to_string()));
         assert!(args.contains(&"stdio".to_string()));
         assert!(args.contains(&"--permission-mode".to_string()));

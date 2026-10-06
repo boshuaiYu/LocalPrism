@@ -599,5 +599,55 @@ describe("Multi-tab merge triggers", () => {
         cacheCreationKnown: false,
       });
     });
+
+    it("applies the last request output and ignores the summed result", () => {
+      const chat = useClaudeChatStore.getState();
+      chat._noteRequestUsage("tab-default", {
+        inputTokens: 22_933,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      });
+      chat._appendMessage("tab-default", {
+        type: "assistant",
+        message: {
+          usage: {
+            input_tokens: 31_511,
+            output_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      });
+      chat._noteRequestUsage("tab-default", {
+        inputTokens: 0,
+        outputTokens: 64,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        cacheReadKnown: false,
+        cacheCreationKnown: false,
+      });
+      chat._appendMessage("tab-default", {
+        type: "result",
+        usage: {
+          input_tokens: 54_444,
+          output_tokens: 111,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+      });
+
+      const tab = useClaudeChatStore
+        .getState()
+        .tabs.find((candidate) => candidate.id === "tab-default");
+      expect(tab?.lastTurnUsage).toEqual({
+        inputTokens: 31_511,
+        outputTokens: 64,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      });
+      expect(tab?.messages).toHaveLength(2);
+      expect(tab?.totalInputTokens).toBe(31_511 + 54_444);
+    });
   });
 });

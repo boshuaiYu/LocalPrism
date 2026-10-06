@@ -23,6 +23,8 @@ struct OpenAiStreamState {
     output_tokens: u64,
     cache_read_tokens: u64,
     cache_creation_tokens: u64,
+    saw_usage: bool,
+    usage_committed: bool,
     debug_raw_usage: Option<Value>,
 }
 
@@ -38,6 +40,7 @@ pub(super) async fn stream_openai_sse_to_anthropic(
     mut response: reqwest::Response,
     anthropic_request: &Value,
     credential: &OpenAiProxyCredential,
+    subagent: bool,
 ) -> Result<(), String> {
     stream
         .write_all(streaming_http_headers().as_bytes())
@@ -52,6 +55,7 @@ pub(super) async fn stream_openai_sse_to_anthropic(
             let rendered =
                 anthropic_stream_error_sse(&format!("Provider stream ended unexpectedly: {}", err));
             let _ = write_stream_body(stream, &rendered, "provider stream error").await;
+            record_openai_stream_usage(&mut state, credential, subagent);
             return Ok(());
         }
     } {
@@ -61,6 +65,7 @@ pub(super) async fn stream_openai_sse_to_anthropic(
             let rendered =
                 openai_sse_event_to_anthropic(&mut state, &event, anthropic_request, credential);
             if !write_stream_body(stream, &rendered, "proxy stream event").await {
+                record_openai_stream_usage(&mut state, credential, subagent);
                 return Ok(());
             }
         }
@@ -70,12 +75,14 @@ pub(super) async fn stream_openai_sse_to_anthropic(
         let rendered =
             openai_sse_event_to_anthropic(&mut state, &buffer, anthropic_request, credential);
         if !write_stream_body(stream, &rendered, "final proxy stream event").await {
+            record_openai_stream_usage(&mut state, credential, subagent);
             return Ok(());
         }
     }
 
     let rendered = finish_anthropic_stream(&mut state);
     let _ = write_stream_body(stream, &rendered, "proxy stream completion").await;
+    record_openai_stream_usage(&mut state, credential, subagent);
     Ok(())
 }
 
@@ -749,6 +756,10 @@ fn anthropic_usage(state: &OpenAiStreamState) -> Value {
 }
 
 fn apply_openai_usage(state: &mut OpenAiStreamState, usage: &Value) {
+    if !usage.is_object() {
+        return;
+    }
+    state.saw_usage = true;
     if crate::usage_debug::enabled() {
         state.debug_raw_usage = Some(usage.clone());
     }
@@ -795,6 +806,30 @@ fn emit_stream_usage_debug(state: &mut OpenAiStreamState) {
     crate::usage_debug::log_translated(&model, &raw, &anthropic_usage(state));
 }
 
+fn record_openai_stream_usage(
+    state: &mut OpenAiStreamState,
+    credential: &OpenAiProxyCredential,
+    subagent: bool,
+) {
+    if state.usage_committed {
+        return;
+    }
+    state.usage_committed = true;
+    if !state.saw_usage {
+        return;
+    }
+    super::usage::record_turn_usage(
+        credential.usage_slot,
+        super::usage::SplitUsage {
+            input_tokens: state.input_tokens,
+            output_tokens: state.output_tokens,
+            cache_read_tokens: Some(state.cache_read_tokens),
+            cache_creation_tokens: Some(state.cache_creation_tokens),
+        },
+        subagent,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -806,6 +841,7 @@ mod tests {
             model: "qwen-test".to_string(),
             transformers: Vec::new(),
             model_transformers: Vec::new(),
+            usage_slot: 0,
         }
     }
 
@@ -1194,5 +1230,74 @@ mod tests {
         assert_eq!(anthropic["usage"]["input_tokens"], 19600);
         assert_eq!(anthropic["usage"]["cache_read_input_tokens"], 170000);
         assert_eq!(anthropic["usage"]["output_tokens"], 2965);
+    }
+
+    #[test]
+    fn multi_request_turn_records_the_last_openai_stream() {
+        let slot = crate::codex_turn_usage::register_slot();
+        let mut cred = credential();
+        cred.usage_slot = slot;
+        let request = json!({ "model": "Qwen/Qwen3.5-35B-A3B" });
+
+        let mut first = OpenAiStreamState::default();
+        let _ = openai_stream_chunk_to_anthropic(
+            &mut first,
+            &json!({
+                "id": "chatcmpl_1",
+                "choices": [{
+                    "delta": { "content": "I'll read it." },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": { "prompt_tokens": 22933, "completion_tokens": 47 }
+            }),
+            &request,
+            &cred,
+        );
+        let _ = finish_anthropic_stream(&mut first);
+        record_openai_stream_usage(&mut first, &cred, false);
+
+        let mut second = OpenAiStreamState::default();
+        for completion in [10_u64, 64] {
+            let _ = openai_stream_chunk_to_anthropic(
+                &mut second,
+                &json!({
+                    "id": "chatcmpl_2",
+                    "choices": [{ "delta": {}, "finish_reason": null }],
+                    "usage": {
+                        "prompt_tokens": 31511,
+                        "completion_tokens": completion,
+                        "prompt_tokens_details": { "cached_tokens": 0 }
+                    }
+                }),
+                &request,
+                &cred,
+            );
+        }
+        let _ = finish_anthropic_stream(&mut second);
+        record_openai_stream_usage(&mut second, &cred, false);
+        record_openai_stream_usage(&mut second, &cred, false);
+
+        let mut subagent = OpenAiStreamState::default();
+        let _ = openai_stream_chunk_to_anthropic(
+            &mut subagent,
+            &json!({
+                "id": "chatcmpl_sub",
+                "choices": [],
+                "usage": { "prompt_tokens": 9, "completion_tokens": 9 }
+            }),
+            &request,
+            &cred,
+        );
+        record_openai_stream_usage(&mut subagent, &cred, true);
+
+        let line = r#"{"type":"result","usage":{"input_tokens":54444,"output_tokens":111,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#;
+        let rewritten = crate::codex_turn_usage::rewrite_result_line(line, slot).unwrap();
+        let value: Value = serde_json::from_str(&rewritten).unwrap();
+        assert_eq!(value["usage"]["input_tokens"], 31_511);
+        assert_eq!(value["usage"]["output_tokens"], 64);
+        assert_eq!(value["usage"]["cache_read_input_tokens"], 0);
+        assert_ne!(value["usage"]["input_tokens"], 54_444);
+        assert_ne!(value["usage"]["output_tokens"], 111);
+        crate::codex_turn_usage::drop_slot(slot);
     }
 }

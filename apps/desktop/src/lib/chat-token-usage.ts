@@ -195,6 +195,50 @@ export function usageFromStreamMessage(
   return parseUsageFields(message?.usage || message?.message?.usage);
 }
 
+type AnthropicStreamEvent = {
+  type?: string;
+  usage?: UsageFields;
+  message?: { usage?: UsageFields };
+  delta?: { type?: string };
+  content_block?: { type?: string };
+};
+
+export function usageFromAnthropicStreamEvent(
+  event: unknown,
+): TokenUsageSnapshot | null {
+  if (!event || typeof event !== "object") return null;
+  const record = event as AnthropicStreamEvent;
+  const usage =
+    record.type === "message_start"
+      ? record.message?.usage
+      : record.type === "message_delta"
+        ? record.usage
+        : undefined;
+  if (!usage) return null;
+  const snapshot = parseUsageFields(usage);
+  return snapshotHasTokens(snapshot) ? snapshot : null;
+}
+
+/** Thinking and token deltas count as a reply even before visible text lands. */
+export function streamEventCountsAsReplyProgress(event: unknown): boolean {
+  if (!event || typeof event !== "object") return false;
+  const record = event as AnthropicStreamEvent;
+  if (record.type === "content_block_delta") {
+    const delta = record.delta?.type;
+    return (
+      delta === "thinking_delta" ||
+      delta === "text_delta" ||
+      delta === "input_json_delta" ||
+      delta === "signature_delta"
+    );
+  }
+  if (record.type === "content_block_start") {
+    const kind = record.content_block?.type;
+    return kind === "thinking" || kind === "text" || kind === "tool_use";
+  }
+  return false;
+}
+
 export function snapshotHasTokens(snapshot: TokenUsageSnapshot): boolean {
   return (
     snapshot.inputTokens > 0 ||
@@ -210,6 +254,18 @@ export function snapshotHasPromptTokens(snapshot: TokenUsageSnapshot): boolean {
     snapshot.cacheReadTokens > 0 ||
     snapshot.cacheCreationTokens > 0
   );
+}
+
+function inclusiveTokens(snapshot: TokenUsageSnapshot): number {
+  return (
+    snapshot.inputTokens +
+    snapshot.cacheReadTokens +
+    snapshot.cacheCreationTokens
+  );
+}
+
+function cacheDetail(snapshot: TokenUsageSnapshot): number {
+  return snapshot.cacheReadTokens + snapshot.cacheCreationTokens;
 }
 
 function publishedUsage(snapshot: TokenUsageSnapshot): TokenUsageSnapshot {
@@ -255,6 +311,28 @@ export function mergeTokenUsageSnapshots(
 ): TokenUsageSnapshot {
   if (!current || !snapshotHasTokens(current)) return publishedUsage(incoming);
   if (!snapshotHasTokens(incoming)) return publishedUsage(current);
+  const currentInclusive = inclusiveTokens(current);
+  const incomingInclusive = inclusiveTokens(incoming);
+  // Claude sometimes folds cache into input_tokens. When the inclusive total
+  // matches, keep the split that still names the cache.
+  if (
+    currentInclusive > 0 &&
+    currentInclusive === incomingInclusive &&
+    cacheDetail(current) !== cacheDetail(incoming)
+  ) {
+    const richer =
+      cacheDetail(incoming) > cacheDetail(current) ? incoming : current;
+    return publishedUsage({
+      inputTokens: richer.inputTokens,
+      outputTokens: Math.max(incoming.outputTokens, current.outputTokens),
+      cacheReadTokens: richer.cacheReadTokens,
+      cacheCreationTokens: richer.cacheCreationTokens,
+      ...(richer.cacheReadKnown === false ? { cacheReadKnown: false } : {}),
+      ...(richer.cacheCreationKnown === false
+        ? { cacheCreationKnown: false }
+        : {}),
+    });
+  }
   const cacheRead = mergedCacheField(
     current.cacheReadTokens,
     incoming.cacheReadTokens,

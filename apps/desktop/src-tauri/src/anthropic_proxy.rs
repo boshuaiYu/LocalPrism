@@ -41,6 +41,8 @@ pub(crate) struct OpenAiProxyCredential {
     pub(crate) model: String,
     pub(crate) transformers: Vec<String>,
     pub(crate) model_transformers: Vec<String>,
+    /// Claude spawn slot. `0` does not rewrite `result.usage`.
+    pub(crate) usage_slot: u64,
 }
 
 pub(crate) fn proxy_capability_token(proxy_url: &str) -> Option<String> {
@@ -203,7 +205,9 @@ async fn handle_anthropic_passthrough(
     crate::providers::ensure_secure_provider_base_url(&credential.base_url)?;
     let client = crate::providers::bypass_system_proxy_for_loopback(
         reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
+            // Whole-body timeout. Thinking streams reset the UI watchdog, so this
+            // only bounds a request that never finishes.
+            .timeout(std::time::Duration::from_secs(900))
             .redirect(reqwest::redirect::Policy::none()),
         &credential.base_url,
     )
@@ -240,6 +244,8 @@ async fn handle_anthropic_passthrough(
         .unwrap_or("application/json")
         .to_string();
 
+    let subagent =
+        crate::codex_turn_usage::subagent_marker(claude_agent_header(request), &body).is_some();
     if wants_stream && status.is_success() && content_type.to_ascii_lowercase().contains("stream") {
         stream
             .write_all(
@@ -249,28 +255,38 @@ async fn handle_anthropic_passthrough(
             .map_err(|err| format!("Failed to write Anthropic SSE headers: {err}"))?;
         let mut response = response;
         let mut filter = tools::AnthropicToolInputSseFilter::default();
+        let mut usage = usage::AnthropicStreamUsage::default();
         loop {
             match response.chunk().await {
                 Ok(Some(chunk)) => {
+                    usage.push_bytes(&chunk);
                     let rewritten = filter.push_bytes(&chunk);
                     if !rewritten.is_empty() {
-                        stream
-                            .write_all(&rewritten)
-                            .await
-                            .map_err(|err| format!("Failed to write Anthropic SSE chunk: {err}"))?;
+                        if let Err(err) = stream.write_all(&rewritten).await {
+                            usage.finish();
+                            usage.commit(&credential.model, credential.usage_slot, subagent);
+                            return Err(format!("Failed to write Anthropic SSE chunk: {err}"));
+                        }
                     }
                 }
                 Ok(None) => break,
-                Err(err) => return Err(format!("Provider stream error: {err}")),
+                Err(err) => {
+                    usage.finish();
+                    usage.commit(&credential.model, credential.usage_slot, subagent);
+                    return Err(format!("Provider stream error: {err}"));
+                }
             }
         }
         let tail = filter.finish_bytes();
         if !tail.is_empty() {
-            stream
-                .write_all(&tail)
-                .await
-                .map_err(|err| format!("Failed to write Anthropic SSE tail: {err}"))?;
+            if let Err(err) = stream.write_all(&tail).await {
+                usage.finish();
+                usage.commit(&credential.model, credential.usage_slot, subagent);
+                return Err(format!("Failed to write Anthropic SSE tail: {err}"));
+            }
         }
+        usage.finish();
+        usage.commit(&credential.model, credential.usage_slot, subagent);
         return Ok(());
     }
 
@@ -279,6 +295,11 @@ async fn handle_anthropic_passthrough(
         .await
         .map_err(|err| format!("Failed to read provider response: {err}"))?;
     let response_text = if status.is_success() {
+        if let Ok(message) = serde_json::from_str::<Value>(&response_text) {
+            let mut usage = usage::AnthropicStreamUsage::default();
+            usage.observe_message(&message);
+            usage.commit(&credential.model, credential.usage_slot, subagent);
+        }
         tools::sanitize_anthropic_message_body(&response_text)
     } else {
         response_text
@@ -1043,6 +1064,9 @@ async fn handle_messages_to_stream(
         .get("stream")
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
+    let subagent =
+        crate::codex_turn_usage::subagent_marker(claude_agent_header(request), &anthropic_request)
+            .is_some();
     let transformers = ProxyTransformerChain::for_credential(credential, wants_stream);
     let mut openai_request =
         anthropic_to_openai_request(&anthropic_request, credential, &transformers)?;
@@ -1067,7 +1091,9 @@ async fn handle_messages_to_stream(
     crate::providers::ensure_secure_provider_base_url(&credential.base_url)?;
     let client = crate::providers::bypass_system_proxy_for_loopback(
         reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
+            // Whole-body timeout. Thinking streams reset the UI watchdog, so this
+            // only bounds a request that never finishes.
+            .timeout(std::time::Duration::from_secs(900))
             .redirect(reqwest::redirect::Policy::none()),
         &credential.base_url,
     )
@@ -1103,7 +1129,14 @@ async fn handle_messages_to_stream(
             .unwrap_or_default()
             .to_ascii_lowercase();
         if content_type.contains("stream") {
-            stream_openai_sse_to_anthropic(stream, response, &anthropic_request, credential).await
+            stream_openai_sse_to_anthropic(
+                stream,
+                response,
+                &anthropic_request,
+                credential,
+                subagent,
+            )
+            .await
         } else {
             let response_text = response
                 .text()
@@ -1113,6 +1146,7 @@ async fn handle_messages_to_stream(
                 .map_err(|err| format!("Provider returned invalid JSON: {}", err))?;
             let anthropic_response =
                 openai_to_anthropic_message(&anthropic_request, &openai_response, credential)?;
+            record_translated_message_usage(credential, &anthropic_response, subagent);
             stream
                 .write_all(sse_response(&anthropic_response).as_bytes())
                 .await
@@ -1127,11 +1161,27 @@ async fn handle_messages_to_stream(
             .map_err(|err| format!("Provider returned invalid JSON: {}", err))?;
         let anthropic_response =
             openai_to_anthropic_message(&anthropic_request, &openai_response, credential)?;
+        record_translated_message_usage(credential, &anthropic_response, subagent);
         stream
             .write_all(json_response(200, &anthropic_response).as_bytes())
             .await
             .map_err(|err| format!("Failed to write proxy JSON response: {}", err))
     }
+}
+
+fn record_translated_message_usage(
+    credential: &OpenAiProxyCredential,
+    message: &Value,
+    subagent: bool,
+) {
+    let Some(usage) = message.get("usage") else {
+        return;
+    };
+    usage::record_turn_usage(
+        credential.usage_slot,
+        usage::split_provider_usage(usage),
+        subagent,
+    );
 }
 
 fn openai_chat_completions_url(base_url: &str) -> String {
@@ -1275,6 +1325,7 @@ mod tests {
             model: "qwen-test".to_string(),
             transformers: Vec::new(),
             model_transformers: Vec::new(),
+            usage_slot: 0,
         };
         let request = json!({
             "system": "system prompt",
@@ -1328,6 +1379,7 @@ mod tests {
             model: "qwen-test".to_string(),
             transformers: Vec::new(),
             model_transformers: Vec::new(),
+            usage_slot: 0,
         };
         let request = json!({
             "messages": [
@@ -1378,6 +1430,7 @@ mod tests {
             model: "qwen-test".to_string(),
             transformers: Vec::new(),
             model_transformers: Vec::new(),
+            usage_slot: 0,
         };
         let request = json!({
             "messages": [
@@ -1418,6 +1471,7 @@ mod tests {
             model: "deepseek-test".to_string(),
             transformers: Vec::new(),
             model_transformers: Vec::new(),
+            usage_slot: 0,
         };
         let request = json!({ "model": "claude-sonnet-4" });
         let response = json!({
@@ -1453,6 +1507,7 @@ mod tests {
             model: "test-model".to_string(),
             transformers: Vec::new(),
             model_transformers: Vec::new(),
+            usage_slot: 0,
         }
     }
 

@@ -6,6 +6,8 @@ import {
   formatTokenCount,
   lastTurnUsage,
   mergeTokenUsageSnapshots,
+  streamEventCountsAsReplyProgress,
+  usageFromAnthropicStreamEvent,
 } from "@/lib/chat-token-usage";
 
 describe("chat token usage", () => {
@@ -727,5 +729,131 @@ describe("chat token usage", () => {
     });
     expect(meter.usedTokens).toBe(0);
     expect(meter.estimated).toBe(true);
+  });
+
+  it("keeps a folded cache split when the inclusive total matches", () => {
+    const split = {
+      inputTokens: 1_406,
+      outputTokens: 0,
+      cacheReadTokens: 22_912,
+      cacheCreationTokens: 0,
+    };
+    const folded = {
+      inputTokens: 24_318,
+      outputTokens: 71,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+    };
+    expect(mergeTokenUsageSnapshots(folded, split)).toEqual({
+      inputTokens: 1_406,
+      outputTokens: 71,
+      cacheReadTokens: 22_912,
+      cacheCreationTokens: 0,
+    });
+    expect(mergeTokenUsageSnapshots(split, folded)).toEqual({
+      inputTokens: 1_406,
+      outputTokens: 71,
+      cacheReadTokens: 22_912,
+      cacheCreationTokens: 0,
+    });
+    expect(
+      mergeTokenUsageSnapshots(split, {
+        inputTokens: 27_553,
+        outputTokens: 71,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      }),
+    ).toEqual({
+      inputTokens: 27_553,
+      outputTokens: 71,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+    });
+  });
+
+  it("shows the last request output when assistant snapshots still say zero", () => {
+    const meter = buildTokenMeterModel({
+      modelLabel: "Qwen/Qwen3.5-35B-A3B",
+      windowTokens: 262_144,
+      messages: [
+        {
+          type: "assistant",
+          message: {
+            usage: {
+              input_tokens: 22_933,
+              output_tokens: 0,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
+          },
+        },
+        {
+          type: "assistant",
+          message: {
+            usage: {
+              input_tokens: 31_511,
+              output_tokens: 0,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
+          },
+        },
+        {
+          type: "result",
+          usage: {
+            input_tokens: 54_444,
+            output_tokens: 111,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      ],
+      lastUsage: {
+        inputTokens: 31_511,
+        outputTokens: 64,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      },
+    });
+    expect(meter.inputTokens).toBe(31_511);
+    expect(meter.outputTokens).toBe(64);
+    expect(meter.cacheReadTokens).toBe(0);
+    expect(meter.usedTokens).toBe(31_575);
+  });
+
+  it("parses anthropic passthrough usage without summing start and delta", () => {
+    const start = usageFromAnthropicStreamEvent({
+      type: "message_start",
+      message: {
+        usage: {
+          input_tokens: 1_406,
+          output_tokens: 0,
+          cache_read_input_tokens: 22_912,
+          cache_creation_input_tokens: 0,
+        },
+      },
+    });
+    const delta = usageFromAnthropicStreamEvent({
+      type: "message_delta",
+      delta: { stop_reason: "end_turn" },
+      usage: { output_tokens: 80 },
+    });
+    expect(start?.outputTokens).toBe(0);
+    expect(delta?.inputTokens).toBe(0);
+    const merged = mergeTokenUsageSnapshots(start, delta!);
+    expect(merged).toEqual({
+      inputTokens: 1_406,
+      outputTokens: 80,
+      cacheReadTokens: 22_912,
+      cacheCreationTokens: 0,
+    });
+    expect(
+      streamEventCountsAsReplyProgress({
+        type: "content_block_delta",
+        delta: { type: "thinking_delta", thinking: "..." },
+      }),
+    ).toBe(true);
+    expect(streamEventCountsAsReplyProgress({ type: "ping" })).toBe(false);
+    expect(usageFromAnthropicStreamEvent({ type: "ping" })).toBeNull();
   });
 });
