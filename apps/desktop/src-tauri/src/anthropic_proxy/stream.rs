@@ -23,6 +23,7 @@ struct OpenAiStreamState {
     output_tokens: u64,
     cache_read_tokens: u64,
     cache_creation_tokens: u64,
+    debug_raw_usage: Option<Value>,
 }
 
 #[derive(Default)]
@@ -385,6 +386,7 @@ fn finish_anthropic_stream(state: &mut OpenAiStreamState) -> String {
         return String::new();
     }
     state.completed = true;
+    emit_stream_usage_debug(state);
     let mut body = String::new();
     if !state.message_started {
         state.message_started = true;
@@ -747,6 +749,9 @@ fn anthropic_usage(state: &OpenAiStreamState) -> Value {
 }
 
 fn apply_openai_usage(state: &mut OpenAiStreamState, usage: &Value) {
+    if crate::usage_debug::enabled() {
+        state.debug_raw_usage = Some(usage.clone());
+    }
     let split = super::usage::split_provider_usage(usage);
     // A later chunk that omits cache must not wipe a count already seen, and
     // must not be stored as exclusive input while the old cache is kept —
@@ -776,6 +781,18 @@ fn apply_openai_usage(state: &mut OpenAiStreamState, usage: &Value) {
     if split.output_tokens > 0 {
         state.output_tokens = split.output_tokens;
     }
+}
+
+fn emit_stream_usage_debug(state: &mut OpenAiStreamState) {
+    let Some(raw) = state.debug_raw_usage.take() else {
+        return;
+    };
+    let model = state
+        .model
+        .clone()
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    crate::usage_debug::log_translated(&model, &raw, &anthropic_usage(state));
 }
 
 #[cfg(test)]
@@ -1093,5 +1110,89 @@ mod tests {
         let done = finish_anthropic_stream(&mut state);
         assert_eq!(done.matches("\"name\":\"Skill\"").count(), 1);
         assert_eq!(done.matches("\"name\":\"Read\"").count(), 1);
+    }
+
+    #[test]
+    fn debug_usage_log_keeps_the_last_usage_chunk_only() {
+        struct EnvRestore(Option<String>);
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("LOCALPRISM_HOME", value),
+                    None => std::env::remove_var("LOCALPRISM_HOME"),
+                }
+            }
+        }
+        struct ForceRestore;
+        impl Drop for ForceRestore {
+            fn drop(&mut self) {
+                crate::usage_debug::force_for_test(None);
+            }
+        }
+
+        let _lock = crate::providers::paths::lock_provider_env();
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvRestore(std::env::var("LOCALPRISM_HOME").ok());
+        std::env::set_var("LOCALPRISM_HOME", home.path());
+        let _force = ForceRestore;
+        crate::usage_debug::force_for_test(Some(true));
+        crate::usage_debug::reset_seq_for_test();
+
+        let request = json!({ "model": "gpt-6-luna" });
+        let mut state = OpenAiStreamState::default();
+        let _ = openai_stream_chunk_to_anthropic(
+            &mut state,
+            &json!({
+                "id": "chatcmpl_1",
+                "choices": [{
+                    "delta": { "content": "SECRET_BODY do not log" },
+                    "finish_reason": null
+                }]
+            }),
+            &request,
+            &credential(),
+        );
+        let _ = openai_stream_chunk_to_anthropic(
+            &mut state,
+            &json!({
+                "id": "chatcmpl_1",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 189600,
+                    "completion_tokens": 2000,
+                    "prompt_tokens_details": { "cached_tokens": 170000 }
+                }
+            }),
+            &request,
+            &credential(),
+        );
+        let _ = openai_stream_chunk_to_anthropic(
+            &mut state,
+            &json!({
+                "id": "chatcmpl_1",
+                "choices": [],
+                "usage": { "completion_tokens": 2965 }
+            }),
+            &request,
+            &credential(),
+        );
+        let done = finish_anthropic_stream(&mut state);
+        assert!(done.contains("\"cache_read_input_tokens\":170000"));
+
+        let text =
+            std::fs::read_to_string(home.path().join("logs").join("usage-debug.jsonl")).unwrap();
+        assert!(!text.contains("SECRET_BODY"));
+        assert!(!text.contains("sk-test"));
+        let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
+        assert_eq!(lines.len(), 2);
+        let upstream: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        let anthropic: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(upstream["model"], "gpt-6-luna");
+        assert_eq!(upstream["seq"], anthropic["seq"]);
+        assert_eq!(upstream["usage"]["completion_tokens"], 2965);
+        assert!(upstream["usage"].get("prompt_tokens").is_none());
+        assert_eq!(anthropic["usage"]["input_tokens"], 19600);
+        assert_eq!(anthropic["usage"]["cache_read_input_tokens"], 170000);
+        assert_eq!(anthropic["usage"]["output_tokens"], 2965);
     }
 }

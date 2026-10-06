@@ -13,6 +13,7 @@ mod providers;
 mod runtime;
 mod skills;
 mod slash_commands;
+mod usage_debug;
 mod uv;
 mod zotero;
 
@@ -870,6 +871,8 @@ pub fn run() {
             editors::detect_editors,
             editors::open_in_editor,
             js_log,
+            usage_debug::usage_debug_enabled,
+            usage_debug::log_usage_debug_panel,
             read_clipboard_file_paths,
             latex::compile_latex,
             latex::synctex_edit,

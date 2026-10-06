@@ -179,6 +179,7 @@ pub struct ResponsesToAnthropic {
     output_tokens: u64,
     cache_read_tokens: u64,
     cache_creation_tokens: u64,
+    debug_raw_usage: Option<Value>,
 }
 
 impl Default for ResponsesToAnthropic {
@@ -203,6 +204,7 @@ impl Default for ResponsesToAnthropic {
             output_tokens: 0,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            debug_raw_usage: None,
         }
     }
 }
@@ -574,6 +576,7 @@ impl ResponsesToAnthropic {
             return String::new();
         }
         self.finished = true;
+        self.emit_usage_debug();
         let mut out = String::new();
         let nothing_visible = !self.saw_text && !self.saw_tool && !self.saw_thinking;
         if nothing_visible && stop_reason == "end_turn" {
@@ -611,6 +614,9 @@ impl ResponsesToAnthropic {
         if usage.is_null() {
             return;
         }
+        if crate::usage_debug::enabled() {
+            self.debug_raw_usage = Some(usage.clone());
+        }
         let split = super::usage::split_provider_usage(&usage);
         // Same rule as the Chat Completions stream: an omitted cache field
         // must not clear a previous hit or be added on top of inclusive input.
@@ -638,6 +644,19 @@ impl ResponsesToAnthropic {
         if split.output_tokens > 0 {
             self.output_tokens = split.output_tokens;
         }
+    }
+
+    fn emit_usage_debug(&mut self) {
+        let Some(raw) = self.debug_raw_usage.take() else {
+            return;
+        };
+        let anthropic = json!({
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_read_input_tokens": self.cache_read_tokens,
+            "cache_creation_input_tokens": self.cache_creation_tokens,
+        });
+        crate::usage_debug::log_translated(&self.model, &raw, &anthropic);
     }
 }
 
@@ -1120,5 +1139,69 @@ mod tests {
             .unwrap();
         assert!(pages_description.contains("1-5"));
         assert!(pages_description.contains("10-20"));
+    }
+
+    #[test]
+    fn debug_usage_log_records_completed_usage_and_not_the_reply() {
+        struct EnvRestore(Option<String>);
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("LOCALPRISM_HOME", value),
+                    None => std::env::remove_var("LOCALPRISM_HOME"),
+                }
+            }
+        }
+        struct ForceRestore;
+        impl Drop for ForceRestore {
+            fn drop(&mut self) {
+                crate::usage_debug::force_for_test(None);
+            }
+        }
+
+        let _lock = crate::providers::paths::lock_provider_env();
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvRestore(std::env::var("LOCALPRISM_HOME").ok());
+        std::env::set_var("LOCALPRISM_HOME", home.path());
+        let _force = ForceRestore;
+        crate::usage_debug::force_for_test(Some(true));
+        crate::usage_debug::reset_seq_for_test();
+
+        let mut translator = ResponsesToAnthropic::for_model("gpt-6-luna");
+        let done = translator.handle_event(
+            "response.completed",
+            &json!({
+                "response": {
+                    "output": [{
+                        "type": "message",
+                        "content": [{ "type": "output_text", "text": "SECRET_PROMPT main.tex body" }]
+                    }],
+                    "usage": {
+                        "input_tokens": 189600,
+                        "cached_input_tokens": 170000,
+                        "output_tokens": 2965
+                    }
+                }
+            }),
+        );
+        assert!(done.contains("\"input_tokens\":19600"));
+
+        let text =
+            std::fs::read_to_string(home.path().join("logs").join("usage-debug.jsonl")).unwrap();
+        assert!(!text.contains("SECRET_PROMPT"));
+        assert!(!text.contains("main.tex"));
+        assert!(!text.contains("Bearer"));
+        let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
+        assert_eq!(lines.len(), 2);
+        let upstream: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        let anthropic: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(upstream["stage"], "upstream");
+        assert_eq!(anthropic["stage"], "anthropic");
+        assert_eq!(upstream["model"], "gpt-6-luna");
+        assert_eq!(upstream["seq"], anthropic["seq"]);
+        assert_eq!(upstream["usage"]["cached_input_tokens"], 170000);
+        assert_eq!(anthropic["usage"]["input_tokens"], 19600);
+        assert_eq!(anthropic["usage"]["cache_read_input_tokens"], 170000);
+        assert!(upstream["usage"].get("output").is_none());
     }
 }

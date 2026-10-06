@@ -7,6 +7,10 @@ import {
   catalogContextWindow,
   formatTokenCount,
 } from "@/lib/chat-token-usage";
+import {
+  contextPanelUsageDebugIsOff,
+  noteContextPanelUsage,
+} from "@/lib/usage-debug";
 import { useI18n } from "@/lib/use-i18n";
 import { cn } from "@/lib/utils";
 
@@ -116,6 +120,18 @@ export function ChatTokenMeter() {
       }),
     [lastUsage, messages, modelLabel, windowTokens],
   );
+
+  useEffect(() => {
+    if (contextPanelUsageDebugIsOff()) return;
+    noteContextPanelUsage(meter.modelLabel, {
+      inputTokens: meter.inputTokens,
+      outputTokens: meter.outputTokens,
+      cacheReadTokens: meter.cacheReadTokens,
+      cacheCreationTokens: meter.cacheCreationTokens,
+      usedTokens: meter.usedTokens,
+      windowTokens: meter.windowTokens,
+    });
+  }, [meter]);
 
   useLayoutEffect(() => {
     if (!open || !buttonRef.current) return;

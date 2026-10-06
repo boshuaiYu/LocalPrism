@@ -197,6 +197,12 @@ pub(super) fn openai_to_anthropic_message(
     };
 
     let usage = openai_response.get("usage").unwrap_or(&Value::Null);
+    let model = anthropic_request
+        .get("model")
+        .and_then(|value| value.as_str())
+        .unwrap_or(&credential.model);
+    let anthropic_usage = openai_usage_to_anthropic(usage);
+    crate::usage_debug::log_translated(model, usage, &anthropic_usage);
     Ok(json!({
         "id": openai_response
             .get("id")
@@ -205,14 +211,11 @@ pub(super) fn openai_to_anthropic_message(
             .unwrap_or_else(|| format!("msg_{}", uuid::Uuid::new_v4().simple())),
         "type": "message",
         "role": "assistant",
-        "model": anthropic_request
-            .get("model")
-            .and_then(|value| value.as_str())
-            .unwrap_or(&credential.model),
+        "model": model,
         "content": content,
         "stop_reason": stop_reason,
         "stop_sequence": Value::Null,
-        "usage": openai_usage_to_anthropic(usage),
+        "usage": anthropic_usage,
     }))
 }
 

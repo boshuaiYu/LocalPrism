@@ -213,12 +213,40 @@ export function snapshotHasPromptTokens(snapshot: TokenUsageSnapshot): boolean {
 }
 
 function publishedUsage(snapshot: TokenUsageSnapshot): TokenUsageSnapshot {
-  return {
+  const published: TokenUsageSnapshot = {
     inputTokens: snapshot.inputTokens,
     outputTokens: snapshot.outputTokens,
     cacheReadTokens: snapshot.cacheReadTokens,
     cacheCreationTokens: snapshot.cacheCreationTokens,
   };
+  if (snapshot.cacheReadKnown === false) published.cacheReadKnown = false;
+  if (snapshot.cacheCreationKnown === false) {
+    published.cacheCreationKnown = false;
+  }
+  return published;
+}
+
+function mergedCacheField(
+  currentValue: number,
+  incomingValue: number,
+  currentKnown: boolean | undefined,
+  incomingKnown: boolean | undefined,
+  current: TokenUsageSnapshot,
+  incoming: TokenUsageSnapshot,
+): { value: number; known: boolean | undefined } {
+  if (!snapshotHasPromptTokens(incoming)) {
+    return { value: currentValue, known: currentKnown };
+  }
+  // Absent on this snapshot. Keep the value only when this is still the same
+  // request (same exclusive input, or an output-only update above). A later
+  // turn that omits the field must not inherit the previous turn's cache.
+  if (incomingKnown === false) {
+    if (incoming.inputTokens === current.inputTokens) {
+      return { value: currentValue, known: currentKnown };
+    }
+    return { value: 0, known: false };
+  }
+  return { value: incomingValue, known: undefined };
 }
 
 export function mergeTokenUsageSnapshots(
@@ -227,27 +255,37 @@ export function mergeTokenUsageSnapshots(
 ): TokenUsageSnapshot {
   if (!current || !snapshotHasTokens(current)) return publishedUsage(incoming);
   if (!snapshotHasTokens(incoming)) return publishedUsage(current);
-  return {
-    inputTokens: incoming.inputTokens || current.inputTokens,
+  const cacheRead = mergedCacheField(
+    current.cacheReadTokens,
+    incoming.cacheReadTokens,
+    current.cacheReadKnown,
+    incoming.cacheReadKnown,
+    current,
+    incoming,
+  );
+  const cacheWrite = mergedCacheField(
+    current.cacheCreationTokens,
+    incoming.cacheCreationTokens,
+    current.cacheCreationKnown,
+    incoming.cacheCreationKnown,
+    current,
+    incoming,
+  );
+  // Exclusive input 0 is real when the prompt tokens were all cached.
+  // `||` would treat that 0 as missing and keep the previous turn.
+  return publishedUsage({
+    inputTokens: snapshotHasPromptTokens(incoming)
+      ? incoming.inputTokens
+      : current.inputTokens,
     outputTokens:
       snapshotHasPromptTokens(incoming) && incoming.outputTokens > 0
         ? incoming.outputTokens
         : Math.max(incoming.outputTokens, current.outputTokens),
-    // A missing cache field must not wipe a value already recorded for this
-    // request. An explicit zero still replaces it.
-    cacheReadTokens:
-      incoming.cacheReadKnown === false
-        ? current.cacheReadTokens
-        : snapshotHasPromptTokens(incoming)
-          ? incoming.cacheReadTokens
-          : current.cacheReadTokens,
-    cacheCreationTokens:
-      incoming.cacheCreationKnown === false
-        ? current.cacheCreationTokens
-        : snapshotHasPromptTokens(incoming)
-          ? incoming.cacheCreationTokens
-          : current.cacheCreationTokens,
-  };
+    cacheReadTokens: cacheRead.value,
+    cacheCreationTokens: cacheWrite.value,
+    ...(cacheRead.known === false ? { cacheReadKnown: false } : {}),
+    ...(cacheWrite.known === false ? { cacheCreationKnown: false } : {}),
+  });
 }
 
 function isSubagentUsage(message: UsageMessage): boolean {

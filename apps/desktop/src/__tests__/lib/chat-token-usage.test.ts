@@ -76,6 +76,7 @@ describe("chat token usage", () => {
       outputTokens: 80,
       cacheReadTokens: 200,
       cacheCreationTokens: 0,
+      cacheCreationKnown: false,
     });
   });
 
@@ -99,6 +100,7 @@ describe("chat token usage", () => {
       outputTokens: 100,
       cacheReadTokens: 20992,
       cacheCreationTokens: 0,
+      cacheCreationKnown: false,
     });
   });
 
@@ -597,6 +599,73 @@ describe("chat token usage", () => {
     expect(merged.cacheCreationTokens).toBe(100);
     expect(merged.outputTokens).toBe(40);
     expect(merged.cacheReadKnown).toBeUndefined();
+  });
+
+  it("keeps exclusive input of 0 when the whole prompt was cached", () => {
+    const merged = mergeTokenUsageSnapshots(
+      {
+        inputTokens: 500,
+        outputTokens: 10,
+        cacheReadTokens: 1_000,
+        cacheCreationTokens: 0,
+      },
+      {
+        inputTokens: 0,
+        outputTokens: 20,
+        cacheReadTokens: 18_000,
+        cacheCreationTokens: 0,
+      },
+    );
+    expect(merged.inputTokens).toBe(0);
+    expect(merged.cacheReadTokens).toBe(18_000);
+    expect(merged.outputTokens).toBe(20);
+  });
+
+  it("zeros cache when a later turn omits the cache fields", () => {
+    const merged = mergeTokenUsageSnapshots(
+      {
+        inputTokens: 8_000,
+        outputTokens: 10,
+        cacheReadTokens: 90_000,
+        cacheCreationTokens: 100,
+      },
+      {
+        inputTokens: 12_000,
+        outputTokens: 40,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        cacheReadKnown: false,
+        cacheCreationKnown: false,
+      },
+    );
+    expect(merged.inputTokens).toBe(12_000);
+    expect(merged.cacheReadTokens).toBe(0);
+    expect(merged.cacheCreationTokens).toBe(0);
+    expect(merged.outputTokens).toBe(40);
+    expect(merged.cacheReadKnown).toBe(false);
+    expect(merged.cacheCreationKnown).toBe(false);
+  });
+
+  it("publishes the known flag when a snapshot omits cache write", () => {
+    const last = lastTurnUsage([
+      {
+        type: "assistant",
+        message: {
+          usage: {
+            input_tokens: 10,
+            output_tokens: 2,
+            cache_read_input_tokens: 4,
+          },
+        },
+      },
+    ]);
+    expect(last).toEqual({
+      inputTokens: 10,
+      outputTokens: 2,
+      cacheReadTokens: 4,
+      cacheCreationTokens: 0,
+      cacheCreationKnown: false,
+    });
   });
 
   it("ignores leftover lastUsage when this conversation has no messages", () => {

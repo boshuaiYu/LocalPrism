@@ -97,11 +97,12 @@ describe("ChatTokenMeter", () => {
     expect(meter?.textContent).toContain("Cache read");
     expect(meter?.textContent).toContain("20,992");
     expect(meter?.textContent).toContain("Cache write");
+    expect(meter?.textContent).toContain("640");
     expect(meter?.textContent).toContain("Input tokens");
     expect(meter?.textContent).toContain("3,588");
     expect(meter?.textContent).toContain("Output tokens");
     expect(meter?.textContent).toContain("Used");
-    expect(meter?.textContent).toContain("24,680");
+    expect(meter?.textContent).toContain("25,320");
   });
 
   it("reads usage from the active conversation, not leftover store totals", async () => {
