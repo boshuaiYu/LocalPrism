@@ -139,21 +139,27 @@ export const useProviderStore = create<ProviderState>((set) => ({
 
   upsertThirdParty: async (provider, activate = true) => {
     set({ error: null });
-    const status = await invoke<ProviderWorkspaceStatus>(
-      "provider_upsert_third_party",
-      {
-        provider: {
-          id: provider.id ?? "",
-          name: provider.name,
-          apiKey: provider.apiKey,
-          baseUrl: provider.baseUrl,
-          apiFormat: provider.apiFormat ?? "openai_chat",
-          models: provider.models,
+    try {
+      const status = await invoke<ProviderWorkspaceStatus>(
+        "provider_upsert_third_party",
+        {
+          provider: {
+            id: provider.id ?? "",
+            name: provider.name,
+            apiKey: provider.apiKey,
+            baseUrl: provider.baseUrl,
+            apiFormat: provider.apiFormat ?? "openai_chat",
+            models: provider.models,
+          },
+          activate,
         },
-        activate,
-      },
-    );
-    set(status);
+      );
+      set(status);
+    } catch (error) {
+      set({
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   },
 
   remove: async (id) => {

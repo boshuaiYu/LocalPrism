@@ -981,6 +981,7 @@ pub async fn verify_openai_compatible_api_key(
     api_key: String,
     base_url: String,
     model: String,
+    api_format: Option<String>,
 ) -> Result<(), String> {
     let api_key = normalize_optional_api_key(&api_key)?;
     let base_url = normalize_base_url(Some(base_url.as_str()))?
@@ -993,6 +994,13 @@ pub async fn verify_openai_compatible_api_key(
     }
     let model = normalize_model(Some(model.as_str()))?
         .ok_or("OpenAI-compatible provider requires a model")?;
+    if api_format
+        .as_deref()
+        .is_some_and(|format| format.trim().eq_ignore_ascii_case("openai_responses"))
+    {
+        return crate::anthropic_proxy::probe_openai_responses_connection(&api_key, &base_url, &model)
+            .await;
+    }
     let credential = StoredOpenAiCompatibleCredential {
         id: "verification".to_string(),
         label: model.clone(),

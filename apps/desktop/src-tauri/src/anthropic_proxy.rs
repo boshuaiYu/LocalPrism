@@ -13,8 +13,9 @@ use self::messages::{
 };
 use self::providers::apply_provider_request_transforms;
 use self::responses::{
-    codex_turn_state_for_request, parse_sse_block, prepare_codex_request,
-    remember_codex_turn_state, responses_headers, CodexProxyCredential, ResponsesToAnthropic,
+    anthropic_to_provider_responses, codex_turn_state_for_request, parse_sse_block,
+    prepare_codex_request, remember_codex_turn_state, responses_headers,
+    responses_json_to_anthropic_message, CodexProxyCredential, ResponsesToAnthropic,
     NO_OUTPUT_TIMEOUT_PREFIX,
 };
 use self::stream::{sse_response, stream_openai_sse_to_anthropic};
@@ -91,6 +92,47 @@ pub(crate) async fn start_openai_anthropic_proxy(
                 let _permit = permit;
                 if let Err(err) = handle_connection(stream, credential, &token).await {
                     eprintln!("[anthropic-proxy] request failed: {}", err);
+                }
+            });
+        }
+    });
+
+    Ok(proxy_listen_url(addr, &token))
+}
+
+/// Third-party OpenAI Responses proxy. Anthropic `/v1/messages` in, `POST
+/// {baseUrl}/responses` out. Auth is only the provider API key.
+pub(crate) async fn start_openai_responses_proxy(
+    credential: OpenAiProxyCredential,
+) -> Result<String, String> {
+    crate::providers::ensure_secure_provider_base_url(&credential.base_url)?;
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(|err| format!("Failed to start local Responses proxy: {err}"))?;
+    let addr = listener
+        .local_addr()
+        .map_err(|err| format!("Failed to read local Responses proxy address: {err}"))?;
+    let credential = Arc::new(credential);
+    let token = new_proxy_capability();
+    let slots = Arc::new(Semaphore::new(MAX_PROXY_CONNECTIONS));
+    let listen_token = token.clone();
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let Some((permit, stream)) = acquire_proxy_slot(&slots, stream).await else {
+                continue;
+            };
+            let credential = Arc::clone(&credential);
+            let token = listen_token.clone();
+            tokio::spawn(async move {
+                let _permit = permit;
+                if let Err(err) =
+                    handle_openai_responses_connection(stream, credential, &token).await
+                {
+                    eprintln!("[openai-responses-proxy] request failed: {err}");
                 }
             });
         }
@@ -1259,6 +1301,366 @@ fn openai_chat_completions_url(base_url: &str) -> String {
     }
 }
 
+/// OpenAI Responses endpoint for a third-party base URL.
+///
+/// Versioned roots (`/v1`, `/v4`, DeepSeek's bare origin) append `/responses`.
+/// A bare host appends `/v1/responses`. An URL that already ends in
+/// `/responses` is kept.
+pub(crate) fn openai_responses_url(base_url: &str) -> String {
+    let clean = base_url.trim_end_matches('/');
+    if clean.ends_with("/responses") {
+        clean.to_string()
+    } else if openai_compatible_base_url_has_chat_root(clean) {
+        format!("{clean}/responses")
+    } else {
+        format!("{clean}/v1/responses")
+    }
+}
+
+async fn handle_openai_responses_connection(
+    mut stream: TcpStream,
+    credential: Arc<OpenAiProxyCredential>,
+    token: &str,
+) -> Result<(), String> {
+    let Some(request) = accept_proxy_request(&mut stream, token).await? else {
+        return Ok(());
+    };
+    let path = request_path_without_query(&request.path);
+    if request.method == "POST" && is_messages_path(path) {
+        match handle_openai_responses_messages(&request, &credential, &mut stream).await {
+            Ok(()) => {
+                let _ = stream.shutdown().await;
+                return Ok(());
+            }
+            Err(err) => {
+                let response = json_response(
+                    502,
+                    &json!({
+                        "type": "error",
+                        "error": { "type": "api_error", "message": err },
+                    }),
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .map_err(|err| format!("Failed to write Responses proxy error: {err}"))?;
+                let _ = stream.shutdown().await;
+                return Ok(());
+            }
+        }
+    }
+    if request.method == "POST" && is_count_tokens_path(path) {
+        let response = handle_count_tokens(&request);
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .map_err(|err| format!("Failed to write Responses count_tokens: {err}"))?;
+        let _ = stream.shutdown().await;
+        return Ok(());
+    }
+    let response = json_response(
+        200,
+        &json!({ "ok": true, "service": "localprism-openai-responses-proxy" }),
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .map_err(|err| format!("Failed to write Responses proxy ping: {err}"))?;
+    let _ = stream.shutdown().await;
+    Ok(())
+}
+
+async fn handle_openai_responses_messages(
+    request: &HttpRequest,
+    credential: &OpenAiProxyCredential,
+    stream: &mut TcpStream,
+) -> Result<(), String> {
+    let mut anthropic_request: Value = serde_json::from_slice(&request.body)
+        .map_err(|err| format!("Claude Code sent invalid Anthropic JSON: {err}"))?;
+    let wants_stream = anthropic_request
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let subagent =
+        crate::codex_turn_usage::subagent_marker(claude_agent_header(request), &anthropic_request)
+            .is_some();
+    stabilize_third_party_prompt_prefix(&mut anthropic_request, claude_session_header(request));
+    let mut body = anthropic_to_provider_responses(&anthropic_request, &credential.model)?;
+    body["stream"] = Value::Bool(wants_stream);
+    log_provider_responses_request(&credential.model, &body, subagent);
+
+    crate::providers::ensure_secure_provider_base_url(&credential.base_url)?;
+    let client = crate::providers::bypass_system_proxy_for_loopback(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(900))
+            .redirect(reqwest::redirect::Policy::none()),
+        &credential.base_url,
+    )
+    .build()
+    .map_err(|err| format!("Failed to create Responses client: {err}"))?;
+    let upstream = client
+        .post(openai_responses_url(&credential.base_url))
+        .header("Content-Type", "application/json")
+        .body(body.to_string());
+    let response = with_optional_bearer_auth(upstream, &credential.api_key)
+        .send()
+        .await
+        .map_err(|err| format!("Responses request failed: {err}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let response_text = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "Responses API returned HTTP {}: {}",
+            status,
+            compact_error_text(&response_text)
+        ));
+    }
+
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if wants_stream && content_type.contains("stream") {
+        return stream_provider_responses(stream, response, credential, subagent).await;
+    }
+
+    let response_text = response
+        .text()
+        .await
+        .map_err(|err| format!("Failed to read Responses response: {err}"))?;
+    let upstream_json: Value = serde_json::from_str(&response_text)
+        .map_err(|err| format!("Responses API returned invalid JSON: {err}"))?;
+    let message = responses_json_to_anthropic_message(&credential.model, &upstream_json)?;
+    if let Some(raw) = upstream_json.get("usage") {
+        let anthropic = message.get("usage").cloned().unwrap_or(Value::Null);
+        crate::usage_debug::log_translated(&credential.model, raw, &anthropic);
+    }
+    record_translated_message_usage(credential, &message, subagent);
+    let payload = if wants_stream {
+        sse_response(&message)
+    } else {
+        json_response(200, &message)
+    };
+    stream
+        .write_all(payload.as_bytes())
+        .await
+        .map_err(|err| format!("Failed to write Responses proxy response: {err}"))?;
+    Ok(())
+}
+
+async fn stream_provider_responses(
+    stream: &mut TcpStream,
+    mut response: reqwest::Response,
+    credential: &OpenAiProxyCredential,
+    subagent: bool,
+) -> Result<(), String> {
+    stream
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n")
+        .await
+        .map_err(|err| format!("Failed to write Responses SSE headers: {err}"))?;
+
+    let mut translator = ResponsesToAnthropic::for_provider(&credential.model);
+    let mut buffer = String::new();
+    let mut saw_bytes = false;
+    let mut saw_output = false;
+    let mut usage_recorded = false;
+
+    'read: loop {
+        match read_provider_chunk(&mut response, stream, saw_bytes).await {
+            ProviderRead::Chunk(chunk) => {
+                saw_bytes = true;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some((block, rest)) = take_sse_block(&buffer) {
+                    buffer = rest;
+                    if let Some((event, data)) = parse_sse_block(&block) {
+                        let translated = translator.handle_event(&event, &data);
+                        if !usage_recorded {
+                            usage_recorded =
+                                record_responses_proxy_usage(credential, &translator, subagent);
+                        }
+                        if !translated.is_empty() {
+                            saw_output = true;
+                        }
+                        write_proxy_sse(stream, &translated).await?;
+                        if translator.is_finished() {
+                            break 'read;
+                        }
+                    }
+                }
+            }
+            ProviderRead::End => break,
+            ProviderRead::Failed(err) => {
+                let payload = translator.fail(&format!(
+                    "Responses stream error for {}: {err}",
+                    credential.model
+                ));
+                if !usage_recorded {
+                    record_responses_proxy_usage(credential, &translator, subagent);
+                }
+                write_proxy_sse(stream, &payload).await?;
+                return Ok(());
+            }
+            ProviderRead::Idle => {
+                let payload = if saw_output {
+                    translator.close_stream()
+                } else {
+                    translator.fail(&format!("{NO_OUTPUT_TIMEOUT_PREFIX}{}", credential.model))
+                };
+                if !usage_recorded {
+                    record_responses_proxy_usage(credential, &translator, subagent);
+                }
+                write_proxy_sse(stream, &payload).await?;
+                return Ok(());
+            }
+            ProviderRead::ClientGone => {
+                if !usage_recorded {
+                    record_responses_proxy_usage(credential, &translator, subagent);
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    if translator.is_finished() {
+        if !usage_recorded {
+            record_responses_proxy_usage(credential, &translator, subagent);
+        }
+        return Ok(());
+    }
+    if !buffer.trim().is_empty() {
+        if let Some((event, data)) = parse_sse_block(&buffer) {
+            let translated = translator.handle_event(&event, &data);
+            if !usage_recorded {
+                usage_recorded = record_responses_proxy_usage(credential, &translator, subagent);
+            }
+            write_proxy_sse(stream, &translated).await?;
+        }
+    }
+    if !usage_recorded {
+        record_responses_proxy_usage(credential, &translator, subagent);
+    }
+    if !translator.is_finished() {
+        write_proxy_sse(stream, &translator.close_stream()).await?;
+    }
+    Ok(())
+}
+
+fn log_provider_responses_request(model: &str, body: &Value, subagent: bool) {
+    let headers = [
+        ("Authorization".to_string(), String::new()),
+        ("Content-Type".to_string(), "application/json".to_string()),
+    ];
+    let input = body.get("input").and_then(Value::as_array);
+    crate::usage_debug::log_codex_request(
+        model,
+        body.get("instructions").and_then(Value::as_str),
+        body.get("tools"),
+        input.map(Vec::as_slice).unwrap_or(&[]),
+        "",
+        "provider",
+        &headers,
+        subagent,
+    );
+}
+
+fn record_responses_proxy_usage(
+    credential: &OpenAiProxyCredential,
+    translator: &ResponsesToAnthropic,
+    subagent: bool,
+) -> bool {
+    if subagent || credential.usage_slot == 0 {
+        return subagent;
+    }
+    let Some(usage) = translator.request_usage() else {
+        return false;
+    };
+    crate::codex_turn_usage::record(credential.usage_slot, usage);
+    true
+}
+
+/// Non-streaming probe used when saving or testing an `openai_responses` provider.
+pub(crate) async fn probe_openai_responses_connection(
+    api_key: &str,
+    base_url: &str,
+    model: &str,
+) -> Result<(), String> {
+    crate::providers::ensure_secure_provider_base_url(base_url)?;
+    let client = crate::providers::bypass_system_proxy_for_loopback(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::none()),
+        base_url,
+    )
+    .build()
+    .map_err(|err| format!("Failed to create Responses client: {err}"))?;
+    let body = json!({
+        "model": model,
+        "input": "Reply with exactly: ok",
+        "stream": false,
+        "store": false,
+        "max_output_tokens": 16,
+    });
+    let request = client
+        .post(openai_responses_url(base_url))
+        .header("Content-Type", "application/json")
+        .body(body.to_string());
+    let response = with_optional_bearer_auth(request, api_key)
+        .send()
+        .await
+        .map_err(|err| format!("Responses verification request failed: {err}"))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|err| format!("Failed to read Responses verification response: {err}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "Responses verification failed (HTTP {}): {}",
+            status,
+            compact_error_text(&text)
+        ));
+    }
+    let value: Value = serde_json::from_str(&text)
+        .map_err(|err| format!("Responses verification returned invalid JSON: {err}"))?;
+    if responses_probe_accepted(&value) {
+        return Ok(());
+    }
+    let message = value
+        .pointer("/error/message")
+        .or_else(|| value.pointer("/response/error/message"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or("Responses verification did not return a Responses API result");
+    Err(message.to_string())
+}
+
+fn responses_probe_accepted(value: &Value) -> bool {
+    if value.get("status").and_then(Value::as_str) == Some("failed") {
+        return false;
+    }
+    if value
+        .get("output_text")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.trim().is_empty())
+    {
+        return true;
+    }
+    if value
+        .get("output")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+    {
+        return true;
+    }
+    matches!(
+        value.get("status").and_then(Value::as_str),
+        Some("completed" | "incomplete")
+    )
+}
+
 fn with_optional_bearer_auth(
     request: reqwest::RequestBuilder,
     api_key: &str,
@@ -1868,5 +2270,267 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), wait_for_tcp_eof(&server))
             .await
             .expect("client close should unblock the read");
+    }
+
+    #[test]
+    fn openai_responses_url_appends_responses_not_chat_completions() {
+        assert_eq!(
+            openai_responses_url("https://api.openai.com/v1"),
+            "https://api.openai.com/v1/responses"
+        );
+        assert_eq!(
+            openai_responses_url("https://api.openai.com"),
+            "https://api.openai.com/v1/responses"
+        );
+        assert_eq!(
+            openai_responses_url("https://api.openai.com/v1/responses"),
+            "https://api.openai.com/v1/responses"
+        );
+        assert_eq!(
+            openai_responses_url("https://api.deepseek.com"),
+            "https://api.deepseek.com/responses"
+        );
+        assert_eq!(
+            openai_responses_url("https://api.deepseek.com/v1"),
+            "https://api.deepseek.com/v1/responses"
+        );
+        assert_eq!(
+            openai_chat_completions_url("https://api.openai.com/v1"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            openai_chat_completions_url("https://api.deepseek.com"),
+            "https://api.deepseek.com/chat/completions"
+        );
+    }
+
+    struct CapturedUpstream {
+        path: String,
+        authorization: String,
+        body: String,
+    }
+
+    async fn serve_captured_upstream(
+        status: u16,
+        content_type: &str,
+        body: String,
+    ) -> (String, Arc<std::sync::Mutex<Option<CapturedUpstream>>>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let seen_task = Arc::clone(&seen);
+        let content_type = content_type.to_string();
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buffer = Vec::new();
+            let mut temp = [0_u8; 8192];
+            let header_end = loop {
+                let Ok(n) = stream.read(&mut temp).await else {
+                    return;
+                };
+                if n == 0 {
+                    return;
+                }
+                buffer.extend_from_slice(&temp[..n]);
+                if let Some(index) = find_header_end(&buffer) {
+                    break index;
+                }
+            };
+            let header_text = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+            let path = header_text
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or("")
+                .to_string();
+            let authorization = header_text
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("authorization")
+                            .then(|| value.trim().to_string())
+                    })
+                })
+                .unwrap_or_default();
+            let content_length = header_text
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                })
+                .unwrap_or(0);
+            let body_start = header_end + 4;
+            while buffer.len().saturating_sub(body_start) < content_length {
+                let Ok(n) = stream.read(&mut temp).await else {
+                    return;
+                };
+                if n == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&temp[..n]);
+            }
+            let request_body = String::from_utf8_lossy(
+                buffer
+                    .get(body_start..body_start + content_length)
+                    .unwrap_or_default(),
+            )
+            .to_string();
+            *seen_task.lock().unwrap() = Some(CapturedUpstream {
+                path,
+                authorization,
+                body: request_body,
+            });
+            let _ = stream
+                .write_all(http_response(status, &content_type, &body).as_bytes())
+                .await;
+        });
+        (format!("http://{addr}/v1"), seen)
+    }
+
+    #[tokio::test]
+    async fn responses_proxy_posts_responses_and_translates_usage() {
+        let sse = "\
+event: response.created\n\
+data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_live\"}}\n\
+\n\
+event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}\n\
+\n\
+event: response.completed\n\
+data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_live\",\"usage\":{\"input_tokens\":100,\"output_tokens\":5,\"input_tokens_details\":{\"cached_tokens\":40}}}}\n\
+\n";
+        let (upstream, seen) =
+            serve_captured_upstream(200, "text/event-stream", sse.to_string()).await;
+        let url = start_openai_responses_proxy(test_credential(&upstream))
+            .await
+            .expect("responses proxy should start");
+        let response = reqwest::Client::new()
+            .post(format!("{url}v1/messages"))
+            .header("content-type", "application/json")
+            .json(&json!({
+                "model": "claude-sonnet-4",
+                "max_tokens": 16,
+                "messages": [{ "role": "user", "content": "hi" }],
+                "stream": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let body = response.text().await.unwrap();
+        assert!(body.contains("resp_live"), "missing message id: {body}");
+        assert!(
+            body.matches("\"id\":\"resp_live\"").count() >= 2,
+            "message id should be on start and delta: {body}"
+        );
+        assert!(body.contains("\"input_tokens\":60"), "{body}");
+        assert!(body.contains("\"cache_read_input_tokens\":40"), "{body}");
+        assert!(body.contains("\"output_tokens\":5"), "{body}");
+        let captured = seen.lock().unwrap().take().expect("upstream request");
+        assert!(
+            captured.path.ends_with("/responses"),
+            "path {}",
+            captured.path
+        );
+        assert!(!captured.path.contains("chat/completions"));
+        assert_eq!(captured.authorization, "Bearer sk-test");
+        assert!(captured.body.contains("\"input\""));
+        assert!(!captured.body.contains("chat/completions"));
+    }
+
+    #[tokio::test]
+    async fn responses_proxy_surfaces_upstream_http_errors() {
+        let (upstream, seen) = serve_captured_upstream(
+            401,
+            "application/json",
+            r#"{"error":{"message":"bad key"}}"#.to_string(),
+        )
+        .await;
+        let url = start_openai_responses_proxy(test_credential(&upstream))
+            .await
+            .expect("responses proxy should start");
+        let response = reqwest::Client::new()
+            .post(format!("{url}v1/messages"))
+            .header("content-type", "application/json")
+            .json(&json!({
+                "model": "claude-sonnet-4",
+                "max_tokens": 16,
+                "messages": [{ "role": "user", "content": "hi" }],
+                "stream": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 502);
+        let body = response.text().await.unwrap();
+        assert!(body.contains("401"), "{body}");
+        assert!(body.contains("bad key"), "{body}");
+        let captured = seen.lock().unwrap().take().expect("upstream request");
+        assert!(captured.path.ends_with("/responses"));
+    }
+
+    #[tokio::test]
+    async fn chat_proxy_still_posts_chat_completions() {
+        let (upstream, seen) = serve_captured_upstream(
+            200,
+            "application/json",
+            json!({
+                "id": "chatcmpl_1",
+                "choices": [{
+                    "message": { "role": "assistant", "content": "hello" },
+                    "finish_reason": "stop"
+                }],
+                "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+            })
+            .to_string(),
+        )
+        .await;
+        let url = start_openai_anthropic_proxy(test_credential(&upstream))
+            .await
+            .expect("chat proxy should start");
+        let response = reqwest::Client::new()
+            .post(format!("{url}v1/messages"))
+            .header("content-type", "application/json")
+            .json(&json!({
+                "model": "claude-sonnet-4",
+                "max_tokens": 16,
+                "messages": [{ "role": "user", "content": "hi" }],
+                "stream": false
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let captured = seen.lock().unwrap().take().expect("upstream request");
+        assert!(
+            captured.path.ends_with("/chat/completions"),
+            "path {}",
+            captured.path
+        );
+        assert!(!captured.path.ends_with("/responses"));
+        assert_eq!(captured.authorization, "Bearer sk-test");
+    }
+
+    #[tokio::test]
+    async fn responses_probe_posts_responses() {
+        let (upstream, seen) = serve_captured_upstream(
+            200,
+            "application/json",
+            r#"{"id":"resp_ok","status":"completed","output_text":"ok"}"#.to_string(),
+        )
+        .await;
+        probe_openai_responses_connection("sk-test", &upstream, "gpt-4.1")
+            .await
+            .expect("probe should accept a completed responses body");
+        let captured = seen.lock().unwrap().take().expect("probe request");
+        assert!(captured.path.ends_with("/responses"), "{}", captured.path);
+        assert_eq!(captured.authorization, "Bearer sk-test");
+        assert!(captured.body.contains("Reply with exactly: ok"));
+        assert!(captured.body.contains("\"stream\":false"));
     }
 }

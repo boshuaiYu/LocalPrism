@@ -61,6 +61,7 @@ pub struct ManagedRuntimeEnv {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProxyKind {
     OpenaiChat(SavedProvider),
+    OpenaiResponses(SavedProvider),
     AnthropicNative(SavedProvider),
     CodexResponses {
         model: String,
@@ -176,7 +177,7 @@ pub fn build_managed_env(
                 proxy_kind: Some(ProxyKind::AnthropicNative(routed)),
             })
         }
-        ApiFormat::OpenaiChat | ApiFormat::OpenaiResponses => {
+        ApiFormat::OpenaiChat => {
             let mut routed = provider;
             routed.models.main = model.to_string();
             Ok(ManagedRuntimeEnv {
@@ -186,6 +187,21 @@ pub fn build_managed_env(
                 ],
                 remove: vec!["CLAUDE_MODEL".into(), "CLAUDE_CODE_OAUTH_TOKEN".into()],
                 proxy_kind: Some(ProxyKind::OpenaiChat(routed)),
+            })
+        }
+        ApiFormat::OpenaiResponses => {
+            let mut routed = provider;
+            routed.models.main = model.to_string();
+            Ok(ManagedRuntimeEnv {
+                values: vec![
+                    (
+                        "ANTHROPIC_API_KEY".into(),
+                        "localprism-responses-proxy".into(),
+                    ),
+                    ("ANTHROPIC_MODEL".into(), model.to_string()),
+                ],
+                remove: vec!["CLAUDE_MODEL".into(), "CLAUDE_CODE_OAUTH_TOKEN".into()],
+                proxy_kind: Some(ProxyKind::OpenaiResponses(routed)),
             })
         }
     }
@@ -275,6 +291,75 @@ mod tests {
             .values
             .iter()
             .any(|(key, value)| key == "ANTHROPIC_AUTH_TOKEN" && value == "localprism-anthropic-proxy"));
+    }
+
+    fn saved_third_party(id: &str, format: ApiFormat) -> SavedProvider {
+        SavedProvider {
+            id: id.into(),
+            name: id.into(),
+            api_key: "sk-test".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            api_format: format,
+            models: ProviderModels {
+                main: "gpt-4.1".into(),
+                haiku: None,
+                sonnet: None,
+                opus: None,
+            },
+        }
+    }
+
+    #[test]
+    fn third_party_openai_responses_uses_responses_proxy() {
+        let (_dir, _guard) = isolate();
+        let mut index = ProviderIndex::default();
+        index.active_id = Some("openai-responses".into());
+        index.providers.push(saved_third_party(
+            "openai-responses",
+            ApiFormat::OpenaiResponses,
+        ));
+        save_index(&index).unwrap();
+
+        let env = build_managed_env(None, None).unwrap();
+        match env.proxy_kind {
+            Some(ProxyKind::OpenaiResponses(provider)) => {
+                assert_eq!(provider.base_url, "https://api.openai.com/v1");
+                assert_eq!(provider.models.main, "gpt-4.1");
+                assert_eq!(provider.api_key, "sk-test");
+                assert_eq!(provider.api_format, ApiFormat::OpenaiResponses);
+            }
+            other => panic!("expected OpenaiResponses, got {other:?}"),
+        }
+        assert!(env.values.iter().any(|(key, value)| {
+            key == "ANTHROPIC_API_KEY" && value == "localprism-responses-proxy"
+        }));
+        assert!(env
+            .values
+            .iter()
+            .all(|(key, _)| key != "ANTHROPIC_BASE_URL"));
+    }
+
+    #[test]
+    fn third_party_openai_chat_stays_on_chat_proxy() {
+        let (_dir, _guard) = isolate();
+        let mut index = ProviderIndex::default();
+        index.active_id = Some("openai-chat".into());
+        index
+            .providers
+            .push(saved_third_party("openai-chat", ApiFormat::OpenaiChat));
+        save_index(&index).unwrap();
+
+        let env = build_managed_env(None, None).unwrap();
+        match env.proxy_kind {
+            Some(ProxyKind::OpenaiChat(provider)) => {
+                assert_eq!(provider.api_format, ApiFormat::OpenaiChat);
+                assert_eq!(provider.models.main, "gpt-4.1");
+            }
+            other => panic!("expected OpenaiChat, got {other:?}"),
+        }
+        assert!(env.values.iter().any(|(key, value)| {
+            key == "ANTHROPIC_API_KEY" && value == "localprism-chat-proxy"
+        }));
     }
 
     #[test]

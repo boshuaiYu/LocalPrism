@@ -173,6 +173,12 @@ fn flatten_text(value: Option<&Value>) -> Option<String> {
 }
 
 fn append_input_for_message(input: &mut Vec<Value>, message: &Value) {
+    // ChatGPT Official keeps the original item shape: no image parts and no
+    // reasoning items. Third-party Responses turns those on.
+    append_responses_message(input, message, false);
+}
+
+fn append_responses_message(input: &mut Vec<Value>, message: &Value, provider: bool) {
     let role = message
         .get("role")
         .and_then(Value::as_str)
@@ -181,25 +187,22 @@ fn append_input_for_message(input: &mut Vec<Value>, message: &Value) {
         Some(Value::String(text)) => push_role_text(input, role, text),
         Some(Value::Array(blocks)) => {
             let mut texts = Vec::new();
+            let mut images = Vec::new();
             for block in blocks {
                 match block.get("type").and_then(Value::as_str) {
-                    Some("tool_use") => {
-                        input.push(json!({
-                            "type": "function_call",
-                            "call_id": block.get("id").and_then(Value::as_str).unwrap_or(""),
-                            "name": block.get("name").and_then(Value::as_str).unwrap_or(""),
-                            "arguments": super::tools::sanitize_tool_input(
-                                block.get("input").cloned().unwrap_or(json!({}))
-                            ).to_string(),
-                        }));
-                    }
+                    Some("tool_use") => input.push(function_call_from_block(block)),
                     Some("tool_result") => {
-                        let text = flatten_text(block.get("content")).unwrap_or_default();
-                        input.push(json!({
-                            "type": "function_call_output",
-                            "call_id": block.get("tool_use_id").and_then(Value::as_str).unwrap_or(""),
-                            "output": text,
-                        }));
+                        input.push(function_output_from_block(block, provider));
+                    }
+                    Some("thinking" | "reasoning" | "redacted_thinking") if provider => {
+                        if let Some(item) = reasoning_input_from_block(block) {
+                            input.push(item);
+                        }
+                    }
+                    Some("image") if provider && role_allows_responses_image(role) => {
+                        if let Some(part) = responses_image_part(block) {
+                            images.push(part);
+                        }
                     }
                     _ => {
                         if let Some(text) = block.get("text").and_then(Value::as_str) {
@@ -208,12 +211,309 @@ fn append_input_for_message(input: &mut Vec<Value>, message: &Value) {
                     }
                 }
             }
-            if !texts.is_empty() {
+            if provider && !images.is_empty() {
+                push_role_parts(input, role, &texts, images);
+            } else if !texts.is_empty() {
                 push_role_text(input, role, &texts.join("\n"));
             }
         }
         _ => {}
     }
+}
+
+fn function_call_from_block(block: &Value) -> Value {
+    json!({
+        "type": "function_call",
+        "call_id": block.get("id").and_then(Value::as_str).unwrap_or(""),
+        "name": block.get("name").and_then(Value::as_str).unwrap_or(""),
+        "arguments": super::tools::sanitize_tool_input(
+            block.get("input").cloned().unwrap_or(json!({}))
+        ).to_string(),
+    })
+}
+
+fn function_output_from_block(block: &Value, provider: bool) -> Value {
+    let call_id = block
+        .get("tool_use_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let text = flatten_text(block.get("content")).unwrap_or_default();
+    if !provider {
+        return json!({
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": text,
+        });
+    }
+    let images = tool_result_images(block);
+    if images.is_empty() {
+        return json!({
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": text,
+        });
+    }
+    let mut parts = Vec::new();
+    if !text.trim().is_empty() {
+        parts.push(json!({ "type": "input_text", "text": text }));
+    }
+    parts.extend(images);
+    json!({
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": parts,
+    })
+}
+
+fn tool_result_images(block: &Value) -> Vec<Value> {
+    let Some(Value::Array(parts)) = block.get("content") else {
+        return Vec::new();
+    };
+    parts
+        .iter()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("image"))
+        .filter_map(responses_image_part)
+        .collect()
+}
+
+fn role_allows_responses_image(role: &str) -> bool {
+    // DeepSeek rejects images on assistant and system messages. User and
+    // developer turns, plus function_call_output, are the supported places.
+    matches!(role, "user" | "developer")
+}
+
+fn responses_image_part(block: &Value) -> Option<Value> {
+    let source = block.get("source")?;
+    let url = match source.get("type").and_then(Value::as_str) {
+        Some("base64") => {
+            let media_type = source
+                .get("media_type")
+                .and_then(Value::as_str)
+                .unwrap_or("image/png");
+            let data = source.get("data").and_then(Value::as_str)?;
+            if data.is_empty() {
+                return None;
+            }
+            format!("data:{media_type};base64,{data}")
+        }
+        Some("url") => source
+            .get("url")
+            .and_then(Value::as_str)
+            .filter(|url| !url.is_empty())?
+            .to_string(),
+        _ => return None,
+    };
+    Some(json!({
+        "type": "input_image",
+        "image_url": url,
+    }))
+}
+
+fn reasoning_input_from_block(block: &Value) -> Option<Value> {
+    let text = block
+        .get("thinking")
+        .and_then(Value::as_str)
+        .or_else(|| block.get("text").and_then(Value::as_str))
+        .unwrap_or("")
+        .trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "type": "reasoning",
+        "summary": [{ "type": "summary_text", "text": text }],
+        "content": [{ "type": "reasoning_text", "text": text }],
+    }))
+}
+
+fn push_role_parts(input: &mut Vec<Value>, role: &str, texts: &[String], images: Vec<Value>) {
+    let text = if role == "system" || role == "developer" {
+        stabilize_prompt_text(&texts.join("\n"))
+    } else {
+        texts.join("\n")
+    };
+    let (wire_role, content_type) = if role == "assistant" {
+        ("assistant", "output_text")
+    } else if role == "system" || role == "developer" {
+        ("developer", "input_text")
+    } else {
+        ("user", "input_text")
+    };
+    let mut content = Vec::new();
+    let trimmed = text.trim();
+    if !trimmed.is_empty() {
+        content.push(json!({ "type": content_type, "text": trimmed }));
+    }
+    content.extend(images);
+    if content.is_empty() {
+        return;
+    }
+    input.push(json!({
+        "role": wire_role,
+        "content": content,
+    }));
+}
+
+/// Anthropic Messages body for a third-party OpenAI Responses endpoint.
+///
+/// Shares input items, tool calls, and tool results with the Codex translator.
+/// Does not add Codex cache keys, account headers, or effort remapping.
+pub fn anthropic_to_provider_responses(request: &Value, model: &str) -> Result<Value, String> {
+    let instructions = flatten_text(request.get("system")).and_then(|system| {
+        if system.trim().is_empty() {
+            return None;
+        }
+        let bound = super::identity::bind_hosted_model_identity(&system, model);
+        let trimmed = bound.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
+    let mut input = Vec::new();
+    for message in request
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Anthropic request is missing messages[]".to_string())?
+    {
+        append_responses_message(&mut input, message, true);
+    }
+
+    let tools = request
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(anthropic_tool_to_function)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut body = json!({
+        "model": model,
+        "input": input,
+        "stream": true,
+        "store": false,
+    });
+    if let Some(instructions) = instructions {
+        body["instructions"] = Value::String(instructions);
+    }
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(tools);
+    }
+    if let Some(max_tokens) = request.get("max_tokens").and_then(Value::as_u64) {
+        if max_tokens > 0 {
+            body["max_output_tokens"] = json!(max_tokens);
+        }
+    }
+    Ok(body)
+}
+
+/// Non-streaming Responses JSON to one Anthropic message.
+pub fn responses_json_to_anthropic_message(model: &str, response: &Value) -> Result<Value, String> {
+    if response.get("status").and_then(Value::as_str) == Some("failed") {
+        let message = responses_error_text(response, "Responses request failed")
+            .unwrap_or_else(|| "Responses request failed".to_string());
+        return Err(message);
+    }
+    if response.get("output").is_none() && response.get("output_text").is_none() {
+        if let Some(message) = responses_error_text(response, "") {
+            if !message.is_empty() {
+                return Err(message);
+            }
+        }
+    }
+    let mut content = Vec::new();
+    let mut saw_tool = false;
+    let has_output_items = response
+        .get("output")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty());
+    if !has_output_items {
+        if let Some(text) = response.get("output_text").and_then(Value::as_str) {
+            if !text.is_empty() {
+                content.push(json!({ "type": "text", "text": text }));
+            }
+        }
+    }
+    if has_output_items {
+        if let Some(items) = response.get("output").and_then(Value::as_array) {
+            for item in items {
+                match item.get("type").and_then(Value::as_str) {
+                    Some("reasoning") => {
+                        let text = visible_reasoning_text(item);
+                        if !text.is_empty() {
+                            content.push(json!({ "type": "thinking", "thinking": text }));
+                        }
+                    }
+                    Some("message") => {
+                        let text = visible_message_text(item);
+                        if !text.is_empty() {
+                            content.push(json!({ "type": "text", "text": text }));
+                        }
+                    }
+                    Some("function_call") => {
+                        saw_tool = true;
+                        let arguments = item
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or("{}");
+                        content.push(json!({
+                            "type": "tool_use",
+                            "id": item.get("call_id").and_then(Value::as_str).unwrap_or("call"),
+                            "name": item.get("name").and_then(Value::as_str).unwrap_or("tool"),
+                            "input": super::tools::repaired_tool_arguments_value(arguments),
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    if content.is_empty() {
+        content.push(json!({ "type": "text", "text": EMPTY_REPLY_TOKEN }));
+    }
+    let usage_value = response
+        .get("usage")
+        .or_else(|| response.pointer("/response/usage"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let split = super::usage::split_provider_usage(&usage_value);
+    let stop_reason = if saw_tool {
+        "tool_use"
+    } else {
+        match response
+            .pointer("/incomplete_details/reason")
+            .and_then(Value::as_str)
+        {
+            Some("max_output_tokens" | "max_tokens") => "max_tokens",
+            Some("content_filter") => "refusal",
+            _ => "end_turn",
+        }
+    };
+    let id = response
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("msg_{}", uuid::Uuid::new_v4().simple()));
+    Ok(json!({
+        "id": id,
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "stop_reason": stop_reason,
+        "content": content,
+        "usage": {
+            "input_tokens": split.input_tokens,
+            "output_tokens": split.output_tokens,
+            "cache_read_input_tokens": split.cache_read_tokens.unwrap_or(0),
+            "cache_creation_input_tokens": split.cache_creation_tokens.unwrap_or(0),
+        }
+    }))
 }
 
 fn push_role_text(input: &mut Vec<Value>, role: &str, text: &str) {
@@ -583,6 +883,11 @@ pub const NO_OUTPUT_TIMEOUT_PREFIX: &str = "localprism:no-output-timeout:";
 
 pub struct ResponsesToAnthropic {
     model: String,
+    /// Same id on message_start and message_delta for this upstream request.
+    message_id: String,
+    /// Third-party Responses. Official Codex keeps the historical stop reason
+    /// and the fixed `msg_localprism` id.
+    provider_mode: bool,
     message_started: bool,
     finished: bool,
     text_open: bool,
@@ -608,6 +913,8 @@ impl Default for ResponsesToAnthropic {
     fn default() -> Self {
         Self {
             model: "gpt-5.6-sol".into(),
+            message_id: "msg_localprism".into(),
+            provider_mode: false,
             message_started: false,
             finished: false,
             text_open: false,
@@ -639,6 +946,24 @@ impl ResponsesToAnthropic {
         }
     }
 
+    /// One stable message id for a third-party Responses turn.
+    pub fn for_provider(model: impl Into<String>) -> Self {
+        Self {
+            model: model.into(),
+            message_id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
+            provider_mode: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
+
+    pub fn message_id(&self) -> &str {
+        &self.message_id
+    }
+
     pub fn start_message(&mut self) -> String {
         if self.message_started {
             return String::new();
@@ -649,7 +974,7 @@ impl ResponsesToAnthropic {
             &json!({
                 "type": "message_start",
                 "message": {
-                    "id": "msg_localprism",
+                    "id": self.message_id,
                     "type": "message",
                     "role": "assistant",
                     "content": [],
@@ -667,8 +992,26 @@ impl ResponsesToAnthropic {
     }
 
     pub fn handle_event(&mut self, event_name: &str, data: &Value) -> String {
+        // Completed and failed streams ignore late events, including a trailing
+        // `response.failed`. Unfinished Official and third-party streams still fail.
+        if self.finished {
+            return String::new();
+        }
         let event_name = resolve_codex_event_name(event_name, data);
         match event_name.as_str() {
+            "response.created" | "response.in_progress"
+                if self.provider_mode && !self.message_started =>
+            {
+                if let Some(id) = data
+                    .pointer("/response/id")
+                    .or_else(|| data.get("id"))
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                {
+                    self.message_id = id.to_string();
+                }
+                String::new()
+            }
             "response.output_text.delta" | "response.text.delta" => {
                 let text = data
                     .get("delta")
@@ -685,6 +1028,12 @@ impl ResponsesToAnthropic {
                 self.emit_text_delta(text)
             }
             "response.reasoning_summary_text.delta" | "response.reasoning_summary.delta" => {
+                let text = data.get("delta").and_then(Value::as_str).unwrap_or("");
+                self.emit_thinking_delta(text)
+            }
+            // Codex Official streams reasoning summaries only. Raw reasoning text
+            // is a third-party Responses event (DeepSeek) and must stay dropped here.
+            "response.reasoning_text.delta" if self.provider_mode => {
                 let text = data.get("delta").and_then(Value::as_str).unwrap_or("");
                 self.emit_thinking_delta(text)
             }
@@ -777,17 +1126,20 @@ impl ResponsesToAnthropic {
             }
             "response.completed" | "response.incomplete" => {
                 self.apply_usage(data);
+                let stop_reason = self.completion_stop_reason(data);
                 let mut out = self.start_message();
-                out.push_str(&self.finish("end_turn"));
+                out.push_str(&self.finish(&stop_reason));
                 out
             }
             "response.failed" | "error" => {
-                let message = data
-                    .pointer("/error/message")
-                    .or_else(|| data.get("message"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("Codex Responses request failed");
-                self.fail(message)
+                let fallback = if self.provider_mode {
+                    "Responses request failed"
+                } else {
+                    "Codex Responses request failed"
+                };
+                let message =
+                    responses_error_text(data, fallback).unwrap_or_else(|| fallback.to_string());
+                self.fail(&message)
             }
             _ => String::new(),
         }
@@ -1007,24 +1359,43 @@ impl ResponsesToAnthropic {
         out.push_str(&self.close_thinking());
         out.push_str(&self.close_text());
         out.push_str(&self.close_tool());
-        out.push_str(&sse_event(
-            "message_delta",
-            &json!({
-                "type": "message_delta",
-                "delta": { "stop_reason": stop_reason },
-                "usage": {
-                    "input_tokens": self.input_tokens,
-                    "output_tokens": self.output_tokens,
-                    "cache_read_input_tokens": self.cache_read_tokens,
-                    "cache_creation_input_tokens": self.cache_creation_tokens,
-                }
-            }),
-        ));
+        let mut delta = json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": stop_reason },
+            "usage": {
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
+                "cache_read_input_tokens": self.cache_read_tokens,
+                "cache_creation_input_tokens": self.cache_creation_tokens,
+            }
+        });
+        if self.provider_mode {
+            delta["message"] = json!({ "id": self.message_id });
+        }
+        out.push_str(&sse_event("message_delta", &delta));
         out.push_str(&sse_event(
             "message_stop",
             &json!({ "type": "message_stop" }),
         ));
         out
+    }
+
+    fn completion_stop_reason(&self, data: &Value) -> String {
+        if !self.provider_mode {
+            return "end_turn".to_string();
+        }
+        if self.saw_tool {
+            return "tool_use".to_string();
+        }
+        match data
+            .pointer("/response/incomplete_details/reason")
+            .or_else(|| data.pointer("/incomplete_details/reason"))
+            .and_then(Value::as_str)
+        {
+            Some("max_output_tokens" | "max_tokens") => "max_tokens".to_string(),
+            Some("content_filter") => "refusal".to_string(),
+            _ => "end_turn".to_string(),
+        }
     }
 
     fn apply_usage(&mut self, data: &Value) {
@@ -1096,6 +1467,24 @@ impl ResponsesToAnthropic {
         });
         crate::usage_debug::log_translated(&self.model, &raw, &anthropic);
     }
+}
+
+fn responses_error_text(data: &Value, fallback: &str) -> Option<String> {
+    let message = data
+        .pointer("/error/message")
+        .or_else(|| data.pointer("/response/error/message"))
+        .or_else(|| data.get("message"))
+        .or_else(|| data.pointer("/response/error"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+    message.map(str::to_string).or_else(|| {
+        if fallback.is_empty() {
+            None
+        } else {
+            Some(fallback.to_string())
+        }
+    })
 }
 
 fn visible_reasoning_text(item: &Value) -> String {
@@ -2435,5 +2824,326 @@ mod tests {
             load_turn_state(&mut routes, &kept, &continued).as_deref(),
             Some("token")
         );
+    }
+
+    #[test]
+    fn provider_responses_request_keeps_tools_text_images_and_system() {
+        let request = json!({
+            "system": "You are a writer",
+            "max_tokens": 32,
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Look at this"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abcd"}}
+                ]},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "Need the file"},
+                    {"type": "text", "text": "I'll read it."},
+                    {"type": "tool_use", "id": "call_1", "name": "Read", "input": {"path": "main.tex"}},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "zzzz"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "call_1", "content": [
+                        {"type": "text", "text": "file body"},
+                        {"type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}}
+                    ]}
+                ]}
+            ],
+            "tools": [
+                {"name": "Zebra", "description": "Last", "input_schema": {"type": "object"}},
+                {"name": "Alpha", "description": "First", "input_schema": {"type": "object"}}
+            ]
+        });
+        let body = anthropic_to_provider_responses(&request, "deepseek-v4-pro").expect("convert");
+        assert_eq!(body["model"], "deepseek-v4-pro");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["store"], false);
+        assert_eq!(body["max_output_tokens"], 32);
+        assert!(body.get("prompt_cache_key").is_none());
+        assert!(body.get("include").is_none());
+        assert!(body.get("reasoning").is_none());
+        let instructions = body["instructions"].as_str().unwrap();
+        assert!(instructions.contains("IDENTITY OVERRIDE"));
+        assert!(instructions.contains("deepseek-v4-pro"));
+        assert!(instructions.contains("You are a writer"));
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools[0]["name"], "Zebra");
+        assert_eq!(tools[1]["name"], "Alpha");
+        assert_eq!(tools[0]["type"], "function");
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input[0]["role"], "user");
+        assert!(input[0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|part| part["type"] == "input_image"
+                && part["image_url"] == "data:image/png;base64,abcd"));
+        assert!(input.iter().any(|item| item["type"] == "reasoning"));
+        assert!(input.iter().any(|item| item["type"] == "function_call"
+            && item["call_id"] == "call_1"
+            && item["name"] == "Read"));
+        let tool_output = input
+            .iter()
+            .find(|item| item["type"] == "function_call_output")
+            .unwrap();
+        assert_eq!(tool_output["call_id"], "call_1");
+        let output_parts = tool_output["output"].as_array().unwrap();
+        assert!(output_parts.iter().any(|part| part["type"] == "input_text"));
+        assert!(output_parts.iter().any(|part| part["type"] == "input_image"
+            && part["image_url"] == "https://example.com/a.png"));
+        let assistant_images = input.iter().any(|item| {
+            item["role"] == "assistant"
+                && item["content"]
+                    .as_array()
+                    .is_some_and(|parts| parts.iter().any(|part| part["type"] == "input_image"))
+        });
+        assert!(!assistant_images);
+    }
+
+    #[test]
+    fn codex_request_still_drops_images_and_keeps_cache_key() {
+        let request = json!({
+            "system": "You are a writer",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "Look"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abcd"}}
+            ]}]
+        });
+        let body = anthropic_to_codex_responses(
+            &request,
+            &CodexProxyCredential {
+                access_token: "t".into(),
+                refresh_token: None,
+                account_id: Some("acc".into()),
+                model: "gpt-5.6-sol".into(),
+                effort: Some("high".into()),
+                usage_slot: 0,
+            },
+        )
+        .expect("convert");
+        assert!(body.get("prompt_cache_key").is_some());
+        assert_eq!(body["include"][0], "reasoning.encrypted_content");
+        assert!(!body.to_string().contains("input_image"));
+        assert_eq!(body["reasoning"]["effort"], "high");
+    }
+
+    #[test]
+    fn provider_sse_keeps_one_message_id_and_splits_cached_input() {
+        let mut translator = ResponsesToAnthropic::for_provider("deepseek-v4-pro");
+        let created = translator.handle_event(
+            "response.created",
+            &json!({ "response": { "id": "resp_abc" } }),
+        );
+        assert!(created.is_empty());
+        assert_eq!(translator.message_id(), "resp_abc");
+        let text = translator.handle_event("response.output_text.delta", &json!({ "delta": "Hi" }));
+        assert!(text.contains("message_start"));
+        assert!(text.contains("\"id\":\"resp_abc\""));
+        let done = translator.handle_event(
+            "response.completed",
+            &json!({
+                "response": {
+                    "id": "resp_abc",
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 7,
+                        "input_tokens_details": { "cached_tokens": 40 }
+                    }
+                }
+            }),
+        );
+        assert!(done.contains("\"id\":\"resp_abc\""));
+        assert!(done.contains("\"input_tokens\":60"));
+        assert!(done.contains("\"cache_read_input_tokens\":40"));
+        assert!(done.contains("\"output_tokens\":7"));
+        assert!(done.contains("\"stop_reason\":\"end_turn\""));
+        assert!(translator.is_finished());
+    }
+
+    #[test]
+    fn provider_sse_tool_call_stops_as_tool_use() {
+        let mut translator = ResponsesToAnthropic::for_provider("gpt-4.1");
+        translator.handle_event(
+            "response.output_item.added",
+            &json!({ "item": { "type": "function_call", "call_id": "c1", "name": "Read" } }),
+        );
+        let arguments = translator.handle_event(
+            "response.function_call_arguments.done",
+            &json!({ "arguments": "{\"path\":\"main.tex\"}" }),
+        );
+        assert!(arguments.contains("main.tex"), "{arguments}");
+        let done = translator.handle_event("response.completed", &json!({}));
+        assert!(done.contains("\"stop_reason\":\"tool_use\""));
+    }
+
+    #[test]
+    fn provider_reasoning_text_delta_becomes_thinking() {
+        let mut translator = ResponsesToAnthropic::for_provider("deepseek-v4-pro");
+        let out = translator.handle_event(
+            "response.reasoning_text.delta",
+            &json!({ "delta": "thinking aloud" }),
+        );
+        assert!(out.contains("thinking_delta"));
+        assert!(out.contains("thinking aloud"));
+    }
+
+    #[test]
+    fn provider_failed_and_error_events_finish_and_ignore_later_deltas() {
+        let mut failed = ResponsesToAnthropic::for_provider("gpt-4.1");
+        let out = failed.handle_event(
+            "response.failed",
+            &json!({ "response": { "error": { "message": "quota exceeded" } } }),
+        );
+        assert!(out.contains("quota exceeded"));
+        assert!(out.contains("\"type\":\"error\""));
+        assert!(failed.is_finished());
+        assert!(failed
+            .handle_event("response.output_text.delta", &json!({ "delta": "nope" }))
+            .is_empty());
+
+        let mut errored = ResponsesToAnthropic::for_provider("gpt-4.1");
+        let out = errored.handle_event("error", &json!({ "error": { "message": "bad request" } }));
+        assert!(out.contains("bad request"));
+        assert!(errored.is_finished());
+        assert!(errored
+            .handle_event("response.completed", &json!({}))
+            .is_empty());
+
+        let mut bare = ResponsesToAnthropic::for_provider("gpt-4.1");
+        let out = bare.handle_event("response.failed", &json!({}));
+        assert!(out.contains("Responses request failed"), "{out}");
+        assert!(!out.contains("Codex Responses request failed"));
+    }
+
+    #[test]
+    fn official_sse_keeps_fixed_id_and_end_turn_after_tools() {
+        let mut translator = ResponsesToAnthropic::for_model("gpt-5.6-sol");
+        translator.handle_event(
+            "response.created",
+            &json!({ "response": { "id": "resp_official" } }),
+        );
+        assert_eq!(translator.message_id(), "msg_localprism");
+        let start = translator.handle_event(
+            "response.output_item.added",
+            &json!({ "item": { "type": "function_call", "call_id": "c1", "name": "Read" } }),
+        );
+        assert!(start.contains("msg_localprism"));
+        let done = translator.handle_event("response.completed", &json!({}));
+        assert!(done.contains("\"stop_reason\":\"end_turn\""));
+        assert!(!done.contains("\"message\""));
+    }
+
+    #[test]
+    fn official_failed_before_completed_fails() {
+        let mut translator = ResponsesToAnthropic::for_model("gpt-5.6-sol");
+        let out = translator.handle_event(
+            "response.failed",
+            &json!({ "response": { "error": { "message": "upstream exploded" } } }),
+        );
+        assert!(out.contains("upstream exploded"), "{out}");
+        assert!(out.contains("\"type\":\"error\""));
+        assert!(translator.is_finished());
+
+        let mut fallback = ResponsesToAnthropic::for_model("gpt-5.6-sol");
+        let out = fallback.handle_event("error", &json!({}));
+        assert!(out.contains("Codex Responses request failed"), "{out}");
+        assert!(fallback.is_finished());
+    }
+
+    #[test]
+    fn finished_stream_ignores_late_failure() {
+        for mut translator in [
+            ResponsesToAnthropic::for_model("gpt-5.6-sol"),
+            ResponsesToAnthropic::for_provider("gpt-4.1"),
+        ] {
+            translator.handle_event("response.output_text.delta", &json!({ "delta": "ok" }));
+            let done = translator.handle_event("response.completed", &json!({}));
+            assert!(done.contains("message_stop"), "{done}");
+            assert!(translator.is_finished());
+            let ignored = translator.handle_event(
+                "response.failed",
+                &json!({ "error": { "message": "late failure" } }),
+            );
+            assert!(
+                ignored.is_empty(),
+                "finished guard should drop late failure, got {ignored}"
+            );
+            assert!(translator
+                .handle_event("error", &json!({ "message": "late error" }))
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn official_reasoning_text_delta_is_dropped() {
+        let mut translator = ResponsesToAnthropic::for_model("gpt-5.6-sol");
+        let dropped = translator.handle_event(
+            "response.reasoning_text.delta",
+            &json!({ "delta": "hidden chain" }),
+        );
+        assert!(dropped.is_empty(), "{dropped}");
+        let summary = translator.handle_event(
+            "response.reasoning_summary_text.delta",
+            &json!({ "delta": "visible summary" }),
+        );
+        assert!(summary.contains("thinking_delta"), "{summary}");
+        assert!(summary.contains("visible summary"));
+    }
+
+    #[test]
+    fn provider_message_id_updates_before_visible_output_only() {
+        let mut translator = ResponsesToAnthropic::for_provider("deepseek-v4-pro");
+        assert!(translator.message_id().starts_with("msg_"));
+        translator.handle_event("response.created", &json!({ "id": "resp_top" }));
+        assert_eq!(translator.message_id(), "resp_top");
+        translator.handle_event(
+            "response.in_progress",
+            &json!({ "response": { "id": "resp_live" } }),
+        );
+        assert_eq!(translator.message_id(), "resp_live");
+        let text = translator.handle_event("response.output_text.delta", &json!({ "delta": "Hi" }));
+        assert!(text.contains("\"id\":\"resp_live\""), "{text}");
+        translator.handle_event(
+            "response.created",
+            &json!({ "response": { "id": "resp_too_late" } }),
+        );
+        assert_eq!(translator.message_id(), "resp_live");
+    }
+
+    #[test]
+    fn provider_json_splits_usage_and_surfaces_failure() {
+        let message = responses_json_to_anthropic_message(
+            "deepseek-v4-pro",
+            &json!({
+                "id": "resp_json",
+                "status": "completed",
+                "output_text": "hello",
+                "output": [{
+                    "type": "message",
+                    "content": [{ "type": "output_text", "text": "hello" }]
+                }],
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 5,
+                    "input_tokens_details": { "cached_tokens": 40 }
+                }
+            }),
+        )
+        .expect("message");
+        assert_eq!(message["id"], "resp_json");
+        assert_eq!(message["usage"]["input_tokens"], 60);
+        assert_eq!(message["usage"]["cache_read_input_tokens"], 40);
+        assert_eq!(message["usage"]["output_tokens"], 5);
+        assert_eq!(message["content"].as_array().unwrap().len(), 1);
+
+        let error = responses_json_to_anthropic_message(
+            "deepseek-v4-pro",
+            &json!({
+                "status": "failed",
+                "error": { "message": "model not found" }
+            }),
+        )
+        .expect_err("failed status");
+        assert!(error.contains("model not found"));
     }
 }
