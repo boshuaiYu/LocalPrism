@@ -451,15 +451,9 @@ describe("chat token usage", () => {
       windowTokens: 272_000,
       messages: [
         { type: "user" },
-        {
-          type: "assistant",
-          message: { content: [{ type: "text", text: "calling a tool" }] },
-        },
+        { type: "assistant", message: {} },
         { type: "user" },
-        {
-          type: "assistant",
-          message: { content: [{ type: "text", text: "done" }] },
-        },
+        { type: "assistant", message: {} },
         { type: "result", usage: lastRequest },
       ],
     });
@@ -474,7 +468,7 @@ describe("chat token usage", () => {
       modelLabel: "gpt-6-luna",
       windowTokens: 272_000,
       messages: [
-        { type: "assistant", message: { content: [] } },
+        { type: "assistant", message: {} },
         { type: "result", usage: summedResult },
       ],
     });

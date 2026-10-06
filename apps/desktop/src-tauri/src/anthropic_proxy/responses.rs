@@ -4,6 +4,7 @@ use crate::providers::openai_oauth::{
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 #[derive(Clone, Debug)]
@@ -1348,36 +1349,30 @@ fn canonicalize_json(value: &mut Value) {
 
 struct ThreadRoute {
     turn_state: Option<String>,
-    item_hashes: Vec<String>,
+    prefix_len: usize,
+    prefix_hash: String,
+    touched: u64,
 }
+
+/// One desktop process can see many Claude sessions. Drop the least recently
+/// used routes so turn tokens and input fingerprints do not stay forever.
+const MAX_THREAD_ROUTES: usize = 64;
 
 static THREAD_ROUTES: LazyLock<Mutex<HashMap<String, ThreadRoute>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static THREAD_ROUTE_CLOCK: AtomicU64 = AtomicU64::new(1);
 
 /// `x-codex-turn-state` is a sticky routing token for requests inside one
 /// turn. Official Codex replays it only within the turn that received it.
-/// A tool loop extends the previous input with function calls and outputs;
-/// a new user message starts a turn and must not reuse the old token.
+/// A tool loop extends the previous input with the assistant text, the
+/// function calls, and the function outputs. A new user message starts a
+/// turn and must not reuse the old token.
 pub fn codex_turn_state_for_request(cache_key: &str, input: &[Value]) -> Option<String> {
     if cache_key.is_empty() {
         return None;
     }
     let mut routes = THREAD_ROUTES.lock().unwrap_or_else(|err| err.into_inner());
-    let entry = routes.entry(cache_key.to_string()).or_insert(ThreadRoute {
-        turn_state: None,
-        item_hashes: Vec::new(),
-    });
-    let continuation = is_tool_continuation(&entry.item_hashes, input);
-    if !continuation {
-        entry.turn_state = None;
-    }
-    let turn_state = if continuation {
-        entry.turn_state.clone()
-    } else {
-        None
-    };
-    entry.item_hashes = input.iter().map(hash_json).collect();
-    turn_state
+    load_turn_state(&mut routes, cache_key, input)
 }
 
 pub fn remember_codex_turn_state(cache_key: &str, state: &str) {
@@ -1389,32 +1384,108 @@ pub fn remember_codex_turn_state(cache_key: &str, state: &str) {
         return;
     }
     let mut routes = THREAD_ROUTES.lock().unwrap_or_else(|err| err.into_inner());
-    let entry = routes.entry(cache_key.to_string()).or_insert(ThreadRoute {
-        turn_state: None,
-        item_hashes: Vec::new(),
-    });
-    entry.turn_state = Some(state.to_string());
+    store_turn_state(&mut routes, cache_key, state);
 }
 
-fn is_tool_continuation(previous: &[String], input: &[Value]) -> bool {
-    if previous.is_empty() || input.len() <= previous.len() {
-        return false;
+fn load_turn_state(
+    routes: &mut HashMap<String, ThreadRoute>,
+    cache_key: &str,
+    input: &[Value],
+) -> Option<String> {
+    let now = THREAD_ROUTE_CLOCK.fetch_add(1, Ordering::Relaxed);
+    let continuation = routes.get(cache_key).is_some_and(|entry| {
+        entry.prefix_len > 0
+            && input.len() > entry.prefix_len
+            && input_fingerprint(&input[..entry.prefix_len]) == entry.prefix_hash
+            && is_tool_continuation(&input[entry.prefix_len..])
+    });
+    let turn_state = if continuation {
+        routes
+            .get(cache_key)
+            .and_then(|entry| entry.turn_state.clone())
+    } else {
+        None
+    };
+    {
+        let fingerprint = input_fingerprint(input);
+        let entry = routes.entry(cache_key.to_string()).or_insert(ThreadRoute {
+            turn_state: None,
+            prefix_len: 0,
+            prefix_hash: String::new(),
+            touched: now,
+        });
+        if !continuation {
+            entry.turn_state = None;
+        }
+        entry.prefix_len = input.len();
+        entry.prefix_hash = fingerprint;
+        entry.touched = now;
     }
-    for (index, hash) in previous.iter().enumerate() {
-        if &hash_json(&input[index]) != hash {
-            return false;
+    evict_thread_routes(routes, cache_key);
+    turn_state
+}
+
+fn store_turn_state(routes: &mut HashMap<String, ThreadRoute>, cache_key: &str, state: &str) {
+    let now = THREAD_ROUTE_CLOCK.fetch_add(1, Ordering::Relaxed);
+    {
+        let entry = routes.entry(cache_key.to_string()).or_insert(ThreadRoute {
+            turn_state: None,
+            prefix_len: 0,
+            prefix_hash: String::new(),
+            touched: now,
+        });
+        entry.turn_state = Some(state.to_string());
+        entry.touched = now;
+    }
+    evict_thread_routes(routes, cache_key);
+}
+
+fn evict_thread_routes(routes: &mut HashMap<String, ThreadRoute>, keep: &str) {
+    while routes.len() > MAX_THREAD_ROUTES {
+        let oldest = routes
+            .iter()
+            .filter(|(key, _)| key.as_str() != keep)
+            .min_by_key(|(_, route)| route.touched)
+            .map(|(key, _)| key.clone());
+        match oldest {
+            Some(key) => {
+                routes.remove(&key);
+            }
+            None => break,
         }
     }
-    input[previous.len()..].iter().all(|item| {
-        matches!(
-            item.get("type").and_then(Value::as_str),
-            Some("function_call") | Some("function_call_output")
-        )
-    })
 }
 
-fn hash_json(value: &Value) -> String {
-    sha256_hex(value.to_string().as_bytes())
+fn is_tool_continuation(added: &[Value]) -> bool {
+    !added.is_empty()
+        && added.iter().any(is_tool_exchange_item)
+        && added.iter().all(is_turn_continuation_item)
+}
+
+fn is_tool_exchange_item(item: &Value) -> bool {
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("function_call") | Some("function_call_output")
+    )
+}
+
+fn is_turn_continuation_item(item: &Value) -> bool {
+    if is_tool_exchange_item(item) {
+        return true;
+    }
+    // A Claude assistant message of text plus tool_use becomes an assistant
+    // item next to the function call. That text is still this turn.
+    item.get("type").is_none() && item.get("role").and_then(Value::as_str) == Some("assistant")
+}
+
+fn input_fingerprint(input: &[Value]) -> String {
+    let mut hasher = Sha256::new();
+    for item in input {
+        let encoded = item.to_string();
+        hasher.update((encoded.len() as u64).to_le_bytes());
+        hasher.update(encoded.as_bytes());
+    }
+    hex_encode(&hasher.finalize())
 }
 
 pub fn responses_headers(
@@ -2278,5 +2349,91 @@ mod tests {
             json!({"role": "user", "content": [{"type": "input_text", "text": "next"}]}),
         ];
         assert!(codex_turn_state_for_request(cache_key, &new_turn).is_none());
+
+        let text_key = "sess_text_only_turn_state";
+        assert!(codex_turn_state_for_request(text_key, &first).is_none());
+        remember_codex_turn_state(text_key, "turn-token");
+        let text_only = [
+            first[0].clone(),
+            json!({"role": "assistant", "content": [{"type": "output_text", "text": "done"}]}),
+        ];
+        assert!(codex_turn_state_for_request(text_key, &text_only).is_none());
+    }
+
+    #[test]
+    fn text_and_tool_use_replays_turn_state() {
+        let credential = cache_credential();
+        let first = json!({
+            "system": "You are a writer.",
+            "metadata": { "user_id": "{\"session_id\":\"sess_text_tool\"}" },
+            "messages": [{"role": "user", "content": "Read main.tex"}],
+        });
+        let second = json!({
+            "system": "You are a writer.",
+            "metadata": { "user_id": "{\"session_id\":\"sess_text_tool\"}" },
+            "messages": [
+                {"role": "user", "content": "Read main.tex"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "I'll read it."},
+                    {"type": "tool_use", "id": "call_1", "name": "Read", "input": {"path": "main.tex"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "call_1", "content": "file body"}
+                ]}
+            ],
+        });
+        let first_body = prepare_codex_request(&first, &credential, None, None).expect("first");
+        let key = first_body.body["prompt_cache_key"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let first_input = first_body.body["input"].as_array().unwrap().clone();
+        assert!(codex_turn_state_for_request(&key, &first_input).is_none());
+        remember_codex_turn_state(&key, "turn-token");
+        let second_body = prepare_codex_request(&second, &credential, None, None).expect("second");
+        let second_input = second_body.body["input"].as_array().unwrap().clone();
+        assert!(second_input.iter().any(|item| {
+            item.get("role").and_then(Value::as_str) == Some("assistant")
+                && item.get("type").is_none()
+        }));
+        assert!(second_input
+            .iter()
+            .any(|item| item.get("type").and_then(Value::as_str) == Some("function_call")));
+        assert_eq!(
+            codex_turn_state_for_request(&key, &second_input).as_deref(),
+            Some("turn-token")
+        );
+        let mut third = second_input.clone();
+        third.push(json!({"role": "user", "content": [{"type": "input_text", "text": "thanks"}]}));
+        assert!(codex_turn_state_for_request(&key, &third).is_none());
+    }
+
+    #[test]
+    fn thread_routes_evict_the_least_recently_used_session() {
+        let mut routes = HashMap::new();
+        let input = [json!({"role": "user", "content": [{"type": "input_text", "text": "hi"}]})];
+        for index in 0..MAX_THREAD_ROUTES {
+            let key = format!("sess_evict_{index}");
+            assert!(load_turn_state(&mut routes, &key, &input).is_none());
+            store_turn_state(&mut routes, &key, "token");
+        }
+        assert_eq!(routes.len(), MAX_THREAD_ROUTES);
+        assert!(routes.contains_key("sess_evict_0"));
+
+        assert!(load_turn_state(&mut routes, "sess_evict_new", &input).is_none());
+        assert_eq!(routes.len(), MAX_THREAD_ROUTES);
+        assert!(!routes.contains_key("sess_evict_0"));
+        assert!(routes.contains_key("sess_evict_new"));
+        let kept = format!("sess_evict_{}", MAX_THREAD_ROUTES - 1);
+        assert!(routes.contains_key(&kept));
+        let continued = [
+            input[0].clone(),
+            json!({"type": "function_call", "call_id": "c", "name": "Read", "arguments": "{}"}),
+            json!({"type": "function_call_output", "call_id": "c", "output": "body"}),
+        ];
+        assert_eq!(
+            load_turn_state(&mut routes, &kept, &continued).as_deref(),
+            Some("token")
+        );
     }
 }

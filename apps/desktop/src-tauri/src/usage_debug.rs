@@ -2,8 +2,8 @@
 //!
 //! Enabled only when `LOCALPRISM_DEBUG_USAGE=1`. The disabled path is a cached
 //! flag check: no JSON, no filesystem, and no request-sequence increment.
-//! Records contain usage objects only — never request bodies, prompts, or
-//! credentials.
+//! Records contain usage objects, or a request stage of hashes and routing
+//! metadata. Never request bodies, prompts, header secrets, or credentials.
 
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
