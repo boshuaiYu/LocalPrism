@@ -30,6 +30,7 @@ import {
 } from "@/lib/project-fs-operations";
 import { writeProjectTextFileInOrder } from "@/lib/project-file-writes";
 import { newProjectFileTemplate } from "@/lib/new-project-file";
+import { endProductTourSession } from "@/lib/product-tour";
 
 const log = createLogger("document");
 const PROJECT_RENAME_LOCK_RETRY_DELAYS_MS = [150, 300, 600, 1000];
@@ -931,6 +932,7 @@ export const useDocumentStore = create<DocumentState>()((set, get) => ({
     const finishClose = () => {
       const current = get();
       if (owner && !stillOwnsProject(current, owner)) return false;
+      endProductTourSession();
       log.info("Closing project");
       if (autoSaveTimer) {
         clearTimeout(autoSaveTimer);

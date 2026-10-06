@@ -1,4 +1,5 @@
 import type { MessageKey } from "@/lib/i18n";
+import { useChatLayoutStore } from "@/stores/chat-layout-store";
 
 export type ProductTourStatus = "pending" | "completed" | "skipped";
 
@@ -319,11 +320,75 @@ export function subscribeProductTourReplay(
   return () => replayListeners.delete(listener);
 }
 
+let abandonToken = 0;
+
 export function resetProductTourReplayForTests(): void {
   replaySerial = 0;
   dismissedReplaySerial = 0;
+  abandonToken += 1;
   resetTourChromeBaseline();
   emitProductTourReplay();
+}
+
+/**
+ * Drop a replay and put back the chrome captured when the tour appeared.
+ * Does not write `productTour`, so a still-pending first run stays pending.
+ */
+export function endProductTourSession(): void {
+  abandonToken += 1;
+  finishAbandonedProductTour(
+    { ...readTourChromeBaseline() },
+    isProductTourReplayRequested(),
+  );
+}
+
+/** StrictMode replays the unmount cleanup; a remount cancels the abandon. */
+export function cancelAbandonedProductTour(): void {
+  abandonToken += 1;
+}
+
+export function abandonProductTourOnUnmount(
+  snapshot: TourChromeBaseline,
+  replayWasActive: boolean,
+): void {
+  const frozen = { ...snapshot };
+  const token = ++abandonToken;
+  queueMicrotask(() => {
+    if (token !== abandonToken) return;
+    finishAbandonedProductTour(frozen, replayWasActive);
+  });
+}
+
+function finishAbandonedProductTour(
+  snapshot: TourChromeBaseline,
+  replayWasActive: boolean,
+): void {
+  if (
+    snapshot.chatVisible !== undefined &&
+    useChatLayoutStore.getState().visible !== snapshot.chatVisible
+  ) {
+    useChatLayoutStore.getState().setVisible(snapshot.chatVisible);
+  }
+  if (tourChromeHasSnapshot(readTourChromeBaseline())) {
+    dispatchProductTourCue("restore-workspace");
+  }
+  if (replayWasActive && isProductTourReplayRequested()) {
+    dismissProductTourReplay();
+  }
+  if (tourChromeHasSnapshot(snapshot) || replayWasActive) {
+    resetTourChromeBaseline();
+  }
+  setProductTourOverlayActive(false);
+}
+
+function tourChromeHasSnapshot(snapshot: TourChromeBaseline): boolean {
+  return (
+    snapshot.chatVisible !== undefined ||
+    snapshot.skillsOpen !== undefined ||
+    snapshot.settingsOpen !== undefined ||
+    snapshot.settingsTab !== undefined ||
+    snapshot.agentMenuOpen !== undefined
+  );
 }
 
 export type TourChromeBaseline = {
@@ -338,6 +403,10 @@ let tourChromeBaseline: TourChromeBaseline | null = null;
 
 export function resetTourChromeBaseline(): void {
   tourChromeBaseline = null;
+}
+
+export function rememberTourChrome(partial: TourChromeBaseline): void {
+  captureTourChromeBaseline(partial);
 }
 
 function captureTourChromeBaseline(partial: TourChromeBaseline): void {

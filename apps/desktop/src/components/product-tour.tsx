@@ -13,8 +13,11 @@ import { useI18n } from "@/lib/use-i18n";
 import {
   PRODUCT_TOUR_CUE_RETRY_MS,
   PRODUCT_TOUR_STEPS,
+  abandonProductTourOnUnmount,
+  cancelAbandonedProductTour,
   dismissProductTourReplay,
   dispatchProductTourCue,
+  endProductTourSession,
   findProductTourElement,
   isProductTourOverlayActive,
   isProductTourReplayRequested,
@@ -26,12 +29,15 @@ import {
   productTourRetryCues,
   productTourShieldRects,
   productTourStatusAfterDismiss,
+  readTourChromeBaseline,
+  rememberTourChrome,
   resetTourChromeBaseline,
   setProductTourOverlayActive,
   shouldAutoShowProductTour,
   subscribeProductTourOverlay,
   subscribeProductTourReplay,
 } from "@/lib/product-tour";
+import { useChatLayoutStore } from "@/stores/chat-layout-store";
 import { useSettingsStore } from "@/stores/settings-store";
 
 interface AnchorRect {
@@ -184,21 +190,32 @@ export function ProductTour() {
     });
   }, []);
 
+  useLayoutEffect(() => {
+    if (!visible || wasVisible.current) return;
+    resetTourChromeBaseline();
+    rememberTourChrome({
+      chatVisible: useChatLayoutStore.getState().visible,
+    });
+  }, [visible]);
+
   useEffect(() => {
     setProductTourOverlayActive(visible);
-    if (visible && !wasVisible.current) {
-      resetTourChromeBaseline();
-    }
     if (wasVisible.current && !visible) {
-      dispatchProductTourCue("restore-workspace");
-      resetTourChromeBaseline();
+      endProductTourSession();
     }
     wasVisible.current = visible;
     return () => setProductTourOverlayActive(false);
   }, [visible]);
 
   useEffect(() => {
-    return () => resetTourChromeBaseline();
+    cancelAbandonedProductTour();
+    return () => {
+      if (!wasVisible.current) return;
+      abandonProductTourOnUnmount(
+        { ...readTourChromeBaseline() },
+        isProductTourReplayRequested(),
+      );
+    };
   }, []);
 
   useEffect(() => {

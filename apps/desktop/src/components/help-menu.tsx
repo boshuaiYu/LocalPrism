@@ -1,5 +1,4 @@
 import { CircleQuestionMarkIcon } from "lucide-react";
-import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -21,6 +20,8 @@ export function HelpMenu({
 }) {
   const { t } = useI18n();
   const projectRoot = useDocumentStore((state) => state.projectRoot);
+  const tourDisabled = !projectRoot;
+  const tourHint = t("help.tourNeedsProject");
 
   return (
     <DropdownMenu>
@@ -34,19 +35,33 @@ export function HelpMenu({
           title={t("help.menu")}
           aria-label={t("help.menu")}
         >
-          <CircleQuestionMarkIcon className={cn("size-4", iconClassName)} />
+          <CircleQuestionMarkIcon
+            aria-hidden
+            className={cn("size-4", iconClassName)}
+          />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-40">
-        <DropdownMenuItem
-          data-testid="help-take-tour"
-          onSelect={() => {
-            requestProductTourReplay();
-            if (!projectRoot) toast.message(t("help.tourNeedsProject"));
-          }}
-        >
-          {t("help.takeTour")}
-        </DropdownMenuItem>
+        <span title={tourDisabled ? tourHint : undefined} className="block">
+          <DropdownMenuItem
+            data-testid="help-take-tour"
+            disabled={tourDisabled}
+            onSelect={() => {
+              if (!projectRoot) return;
+              requestProductTourReplay();
+            }}
+          >
+            {t("help.takeTour")}
+          </DropdownMenuItem>
+        </span>
+        {tourDisabled ? (
+          <p
+            data-testid="help-tour-hint"
+            className="px-2 pt-0.5 pb-1 text-muted-foreground text-xs"
+          >
+            {tourHint}
+          </p>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );

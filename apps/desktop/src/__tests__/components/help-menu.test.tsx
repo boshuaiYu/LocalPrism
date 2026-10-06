@@ -1,21 +1,14 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { HelpMenu } from "@/components/help-menu";
+import { ProductTour } from "@/components/product-tour";
 import {
   isProductTourReplayRequested,
   resetProductTourReplayForTests,
 } from "@/lib/product-tour";
 import { useDocumentStore } from "@/stores/document-store";
 import { useSettingsStore } from "@/stores/settings-store";
-
-const toastMessage = vi.fn();
-
-vi.mock("sonner", () => ({
-  toast: {
-    message: (...args: unknown[]) => toastMessage(...args),
-  },
-}));
 
 if (typeof globalThis.PointerEvent === "undefined") {
   class PointerEventPolyfill extends MouseEvent {}
@@ -37,7 +30,6 @@ describe("HelpMenu", () => {
 
   beforeEach(() => {
     resetProductTourReplayForTests();
-    toastMessage.mockReset();
     projectRoot = useDocumentStore.getState().projectRoot;
     useDocumentStore.setState({ projectRoot: null });
     useSettingsStore.setState({ uiLanguage: "en", productTour: "completed" });
@@ -54,7 +46,7 @@ describe("HelpMenu", () => {
     container.remove();
     resetProductTourReplayForTests();
     useDocumentStore.setState({ projectRoot });
-    useSettingsStore.setState({ uiLanguage: "en" });
+    useSettingsStore.setState({ uiLanguage: "en", productTour: "pending" });
     document.body
       .querySelectorAll("[data-slot='dropdown-menu-content']")
       .forEach((node) => node.remove());
@@ -66,7 +58,7 @@ describe("HelpMenu", () => {
     });
   }
 
-  it("opens a help menu and queues the existing tour", async () => {
+  it("disables the tour when no project is open and does not queue it", async () => {
     await renderMenu();
     const button = container.querySelector('[data-testid="help-menu"]');
     expect(button).toBeInstanceOf(HTMLButtonElement);
@@ -80,6 +72,13 @@ describe("HelpMenu", () => {
     });
     const item = document.body.querySelector('[data-testid="help-take-tour"]');
     expect(item?.textContent).toBe("Take a tour");
+    expect(item?.getAttribute("aria-disabled")).toBe("true");
+    expect(item?.getAttribute("data-disabled")).not.toBeNull();
+    const hint = document.body.querySelector('[data-testid="help-tour-hint"]');
+    expect(hint?.textContent).toBe("Open a project to take the tour.");
+    expect(item?.parentElement?.getAttribute("title")).toBe(
+      "Open a project to take the tour.",
+    );
     const menu = item?.closest("[data-slot='dropdown-menu-content']");
     expect(menu?.className).toContain("bg-popover");
     expect(menu?.className).toContain("text-popover-foreground");
@@ -87,15 +86,43 @@ describe("HelpMenu", () => {
     await act(async () => {
       (item as HTMLElement).click();
     });
-    expect(isProductTourReplayRequested()).toBe(true);
-    expect(toastMessage).toHaveBeenCalledWith(
-      "Open a project to start the tour.",
+    expect(isProductTourReplayRequested()).toBe(false);
+    expect(useSettingsStore.getState().productTour).toBe("completed");
+
+    await act(async () => {
+      root.render(
+        <>
+          <div data-tour="tour-files">Files</div>
+          <ProductTour />
+        </>,
+      );
+    });
+    expect(document.body.querySelector('[data-testid="product-tour"]')).toBe(
+      null,
     );
     expect(useSettingsStore.getState().productTour).toBe("completed");
   });
 
-  it("uses the Chinese label and does not toast inside a project", async () => {
+  it("uses the Chinese hint while the tour stays disabled", async () => {
     useSettingsStore.setState({ uiLanguage: "zh" });
+    await renderMenu();
+    const button = container.querySelector('[data-testid="help-menu"]');
+    await act(async () => {
+      openMenu(button as HTMLButtonElement);
+    });
+    const item = document.body.querySelector('[data-testid="help-take-tour"]');
+    expect(item?.textContent).toBe("查看引导");
+    expect(item?.getAttribute("aria-disabled")).toBe("true");
+    expect(button?.getAttribute("aria-label")).toBe("帮助");
+    expect(
+      document.body.querySelector('[data-testid="help-tour-hint"]')
+        ?.textContent,
+    ).toBe("打开项目后可查看引导");
+    expect(isProductTourReplayRequested()).toBe(false);
+    expect(useSettingsStore.getState().productTour).toBe("completed");
+  });
+
+  it("starts the existing tour inside an open project", async () => {
     useDocumentStore.setState({ projectRoot: "/paper" });
     await renderMenu();
 
@@ -104,14 +131,15 @@ describe("HelpMenu", () => {
       openMenu(button as HTMLButtonElement);
     });
     const item = document.body.querySelector('[data-testid="help-take-tour"]');
-    expect(item?.textContent).toBe("查看引导");
-    expect(button?.getAttribute("aria-label")).toBe("帮助");
+    expect(item?.getAttribute("aria-disabled")).not.toBe("true");
+    expect(
+      document.body.querySelector('[data-testid="help-tour-hint"]'),
+    ).toBeNull();
 
     await act(async () => {
       (item as HTMLElement).click();
     });
     expect(isProductTourReplayRequested()).toBe(true);
-    expect(toastMessage).not.toHaveBeenCalled();
     expect(useSettingsStore.getState().productTour).toBe("completed");
   });
 });
