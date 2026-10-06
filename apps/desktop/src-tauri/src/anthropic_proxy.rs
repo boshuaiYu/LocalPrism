@@ -9,7 +9,7 @@ pub(crate) mod usage;
 
 use self::messages::{
     anthropic_to_openai_request, hoist_anthropic_system_messages, normalize_openai_system_messages,
-    openai_to_anthropic_message,
+    openai_to_anthropic_message, stabilize_third_party_prompt_prefix,
 };
 use self::providers::apply_provider_request_transforms;
 use self::responses::{
@@ -41,6 +41,8 @@ pub(crate) struct OpenAiProxyCredential {
     pub(crate) model: String,
     pub(crate) transformers: Vec<String>,
     pub(crate) model_transformers: Vec<String>,
+    /// Claude spawn slot. `0` does not rewrite `result.usage`.
+    pub(crate) usage_slot: u64,
 }
 
 pub(crate) fn proxy_capability_token(proxy_url: &str) -> Option<String> {
@@ -193,6 +195,9 @@ async fn handle_anthropic_passthrough(
 ) -> Result<(), String> {
     let mut body = serde_json::from_slice::<Value>(&request.body)
         .map_err(|err| format!("Claude Code sent invalid Anthropic JSON: {err}"))?;
+    let subagent =
+        crate::codex_turn_usage::subagent_marker(claude_agent_header(request), &body).is_some();
+    stabilize_third_party_prompt_prefix(&mut body, claude_session_header(request));
     hoist_anthropic_system_messages(&mut body);
     tools::sanitize_tool_uses_in_messages(&mut body);
     if !credential.model.trim().is_empty() {
@@ -203,7 +208,9 @@ async fn handle_anthropic_passthrough(
     crate::providers::ensure_secure_provider_base_url(&credential.base_url)?;
     let client = crate::providers::bypass_system_proxy_for_loopback(
         reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
+            // Upper bound for the whole body. Chunk reads use a 45s/180s idle
+            // timeout and stop when the Claude client disconnects.
+            .timeout(std::time::Duration::from_secs(900))
             .redirect(reqwest::redirect::Policy::none()),
         &credential.base_url,
     )
@@ -249,28 +256,51 @@ async fn handle_anthropic_passthrough(
             .map_err(|err| format!("Failed to write Anthropic SSE headers: {err}"))?;
         let mut response = response;
         let mut filter = tools::AnthropicToolInputSseFilter::default();
+        let mut usage = usage::AnthropicStreamUsage::default();
+        let mut saw_bytes = false;
         loop {
-            match response.chunk().await {
-                Ok(Some(chunk)) => {
+            match read_provider_chunk(&mut response, stream, saw_bytes).await {
+                ProviderRead::Chunk(chunk) => {
+                    saw_bytes = true;
+                    usage.push_bytes(&chunk);
                     let rewritten = filter.push_bytes(&chunk);
                     if !rewritten.is_empty() {
-                        stream
-                            .write_all(&rewritten)
-                            .await
-                            .map_err(|err| format!("Failed to write Anthropic SSE chunk: {err}"))?;
+                        if let Err(err) = stream.write_all(&rewritten).await {
+                            usage.finish();
+                            usage.commit(&credential.model, credential.usage_slot, subagent);
+                            return Err(format!("Failed to write Anthropic SSE chunk: {err}"));
+                        }
                     }
                 }
-                Ok(None) => break,
-                Err(err) => return Err(format!("Provider stream error: {err}")),
+                ProviderRead::End => break,
+                ProviderRead::Failed(err) => {
+                    usage.finish();
+                    usage.commit(&credential.model, credential.usage_slot, subagent);
+                    return Err(format!("Provider stream error: {err}"));
+                }
+                ProviderRead::Idle => {
+                    usage.finish();
+                    usage.commit(&credential.model, credential.usage_slot, subagent);
+                    let _ = stream.write_all(provider_idle_sse().as_bytes()).await;
+                    return Ok(());
+                }
+                ProviderRead::ClientGone => {
+                    usage.finish();
+                    usage.commit(&credential.model, credential.usage_slot, subagent);
+                    return Ok(());
+                }
             }
         }
         let tail = filter.finish_bytes();
         if !tail.is_empty() {
-            stream
-                .write_all(&tail)
-                .await
-                .map_err(|err| format!("Failed to write Anthropic SSE tail: {err}"))?;
+            if let Err(err) = stream.write_all(&tail).await {
+                usage.finish();
+                usage.commit(&credential.model, credential.usage_slot, subagent);
+                return Err(format!("Failed to write Anthropic SSE tail: {err}"));
+            }
         }
+        usage.finish();
+        usage.commit(&credential.model, credential.usage_slot, subagent);
         return Ok(());
     }
 
@@ -279,6 +309,11 @@ async fn handle_anthropic_passthrough(
         .await
         .map_err(|err| format!("Failed to read provider response: {err}"))?;
     let response_text = if status.is_success() {
+        if let Ok(message) = serde_json::from_str::<Value>(&response_text) {
+            let mut usage = usage::AnthropicStreamUsage::default();
+            usage.observe_message(&message);
+            usage.commit(&credential.model, credential.usage_slot, subagent);
+        }
         tools::sanitize_anthropic_message_body(&response_text)
     } else {
         response_text
@@ -288,6 +323,55 @@ async fn handle_anthropic_passthrough(
         .await
         .map_err(|err| format!("Failed to write Anthropic proxy response: {err}"))?;
     Ok(())
+}
+
+pub(super) enum ProviderRead {
+    Chunk(Vec<u8>),
+    End,
+    Idle,
+    Failed(String),
+    ClientGone,
+}
+
+/// 45s until the first byte, then 180s between chunks. Matches the Codex proxy.
+pub(super) fn provider_stream_idle(saw_bytes: bool) -> Duration {
+    Duration::from_secs(if saw_bytes { 180 } else { 45 })
+}
+
+pub(super) async fn read_provider_chunk(
+    response: &mut reqwest::Response,
+    client: &TcpStream,
+    saw_bytes: bool,
+) -> ProviderRead {
+    let idle = provider_stream_idle(saw_bytes);
+    tokio::select! {
+        result = tokio::time::timeout(idle, response.chunk()) => match result {
+            Ok(Ok(Some(chunk))) => ProviderRead::Chunk(chunk.to_vec()),
+            Ok(Ok(None)) => ProviderRead::End,
+            Ok(Err(err)) => ProviderRead::Failed(err.to_string()),
+            Err(_) => ProviderRead::Idle,
+        },
+        () = wait_for_tcp_eof(client) => ProviderRead::ClientGone,
+    }
+}
+
+async fn wait_for_tcp_eof(stream: &TcpStream) {
+    let mut buf = [0u8; 1];
+    loop {
+        if stream.readable().await.is_err() {
+            return;
+        }
+        match stream.try_read(&mut buf) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => return,
+        }
+    }
+}
+
+fn provider_idle_sse() -> &'static str {
+    "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"timeout_error\",\"message\":\"Provider stream idle timeout\"}}\n\n"
 }
 
 fn request_header<'a>(request: &'a HttpRequest, name: &str) -> Option<&'a str> {
@@ -1037,12 +1121,16 @@ async fn handle_messages_to_stream(
     credential: &OpenAiProxyCredential,
     stream: &mut TcpStream,
 ) -> Result<(), String> {
-    let anthropic_request: Value = serde_json::from_slice(&request.body)
+    let mut anthropic_request: Value = serde_json::from_slice(&request.body)
         .map_err(|err| format!("Claude Code sent invalid Anthropic JSON: {}", err))?;
     let wants_stream = anthropic_request
         .get("stream")
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
+    let subagent =
+        crate::codex_turn_usage::subagent_marker(claude_agent_header(request), &anthropic_request)
+            .is_some();
+    stabilize_third_party_prompt_prefix(&mut anthropic_request, claude_session_header(request));
     let transformers = ProxyTransformerChain::for_credential(credential, wants_stream);
     let mut openai_request =
         anthropic_to_openai_request(&anthropic_request, credential, &transformers)?;
@@ -1067,7 +1155,9 @@ async fn handle_messages_to_stream(
     crate::providers::ensure_secure_provider_base_url(&credential.base_url)?;
     let client = crate::providers::bypass_system_proxy_for_loopback(
         reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
+            // Upper bound for the whole body. Chunk reads use a 45s/180s idle
+            // timeout and stop when the Claude client disconnects.
+            .timeout(std::time::Duration::from_secs(900))
             .redirect(reqwest::redirect::Policy::none()),
         &credential.base_url,
     )
@@ -1103,7 +1193,14 @@ async fn handle_messages_to_stream(
             .unwrap_or_default()
             .to_ascii_lowercase();
         if content_type.contains("stream") {
-            stream_openai_sse_to_anthropic(stream, response, &anthropic_request, credential).await
+            stream_openai_sse_to_anthropic(
+                stream,
+                response,
+                &anthropic_request,
+                credential,
+                subagent,
+            )
+            .await
         } else {
             let response_text = response
                 .text()
@@ -1113,6 +1210,7 @@ async fn handle_messages_to_stream(
                 .map_err(|err| format!("Provider returned invalid JSON: {}", err))?;
             let anthropic_response =
                 openai_to_anthropic_message(&anthropic_request, &openai_response, credential)?;
+            record_translated_message_usage(credential, &anthropic_response, subagent);
             stream
                 .write_all(sse_response(&anthropic_response).as_bytes())
                 .await
@@ -1127,11 +1225,27 @@ async fn handle_messages_to_stream(
             .map_err(|err| format!("Provider returned invalid JSON: {}", err))?;
         let anthropic_response =
             openai_to_anthropic_message(&anthropic_request, &openai_response, credential)?;
+        record_translated_message_usage(credential, &anthropic_response, subagent);
         stream
             .write_all(json_response(200, &anthropic_response).as_bytes())
             .await
             .map_err(|err| format!("Failed to write proxy JSON response: {}", err))
     }
+}
+
+fn record_translated_message_usage(
+    credential: &OpenAiProxyCredential,
+    message: &Value,
+    subagent: bool,
+) {
+    let Some(usage) = message.get("usage") else {
+        return;
+    };
+    usage::record_turn_usage(
+        credential.usage_slot,
+        usage::split_provider_usage(usage),
+        subagent,
+    );
 }
 
 fn openai_chat_completions_url(base_url: &str) -> String {
@@ -1275,6 +1389,7 @@ mod tests {
             model: "qwen-test".to_string(),
             transformers: Vec::new(),
             model_transformers: Vec::new(),
+            usage_slot: 0,
         };
         let request = json!({
             "system": "system prompt",
@@ -1328,6 +1443,7 @@ mod tests {
             model: "qwen-test".to_string(),
             transformers: Vec::new(),
             model_transformers: Vec::new(),
+            usage_slot: 0,
         };
         let request = json!({
             "messages": [
@@ -1378,6 +1494,7 @@ mod tests {
             model: "qwen-test".to_string(),
             transformers: Vec::new(),
             model_transformers: Vec::new(),
+            usage_slot: 0,
         };
         let request = json!({
             "messages": [
@@ -1418,6 +1535,7 @@ mod tests {
             model: "deepseek-test".to_string(),
             transformers: Vec::new(),
             model_transformers: Vec::new(),
+            usage_slot: 0,
         };
         let request = json!({ "model": "claude-sonnet-4" });
         let response = json!({
@@ -1453,6 +1571,7 @@ mod tests {
             model: "test-model".to_string(),
             transformers: Vec::new(),
             model_transformers: Vec::new(),
+            usage_slot: 0,
         }
     }
 
@@ -1731,5 +1850,23 @@ mod tests {
             text.contains("413") || text.contains("too large"),
             "unexpected response: {text}"
         );
+    }
+
+    #[test]
+    fn provider_stream_idle_matches_the_codex_windows() {
+        assert_eq!(provider_stream_idle(false), Duration::from_secs(45));
+        assert_eq!(provider_stream_idle(true), Duration::from_secs(180));
+    }
+
+    #[tokio::test]
+    async fn client_eof_finishes_the_disconnect_wait() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(2), wait_for_tcp_eof(&server))
+            .await
+            .expect("client close should unblock the read");
     }
 }

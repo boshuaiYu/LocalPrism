@@ -1270,6 +1270,8 @@ interface ClaudeChatState {
 
   // Internal actions (called by event hook, routed by tabId)
   _appendMessage: (tabId: string, msg: ClaudeStreamMessage) => void;
+  /** Merge one request's usage into the meter without counting it in session totals. */
+  _noteRequestUsage: (tabId: string, snapshot: TokenUsageSnapshot) => void;
   _setSessionId: (tabId: string, id: string) => void;
   _setSessionTitle: (sessionId: string, title: string) => void;
   _setConversationTitle: (reference: ConversationRef, title: string) => void;
@@ -3604,6 +3606,17 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         totalInputTokens: tab.totalInputTokens + inputDelta,
         totalOutputTokens: tab.totalOutputTokens + outputDelta,
         ...(lastTurnUsage ? { lastTurnUsage } : {}),
+      });
+    });
+  },
+
+  _noteRequestUsage: (tabId: string, snapshot: TokenUsageSnapshot) => {
+    if (!snapshotHasTokens(snapshot)) return;
+    set((state) => {
+      const tab = state.tabs.find((candidate) => candidate.id === tabId);
+      if (!tab) return {};
+      return applyTabUpdate(state, tabId, {
+        lastTurnUsage: mergeTokenUsageSnapshots(tab.lastTurnUsage, snapshot),
       });
     });
   },

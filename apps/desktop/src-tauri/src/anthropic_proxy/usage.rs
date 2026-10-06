@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// One provider usage object, split the way the context meter displays it.
 ///
@@ -146,6 +146,212 @@ pub(crate) fn split_provider_usage(usage: &Value) -> SplitUsage {
         cache_read_tokens: cache_read,
         cache_creation_tokens: cache_write,
     }
+}
+
+pub(super) fn record_turn_usage(slot: u64, usage: SplitUsage, subagent: bool) {
+    if subagent || slot == 0 {
+        return;
+    }
+    let cache_read = usage.cache_read_tokens.unwrap_or(0);
+    let cache_write = usage.cache_creation_tokens.unwrap_or(0);
+    if usage.input_tokens == 0 && usage.output_tokens == 0 && cache_read == 0 && cache_write == 0 {
+        return;
+    }
+    crate::codex_turn_usage::record(
+        slot,
+        crate::codex_turn_usage::CodexRequestUsage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_tokens: cache_read,
+            cache_creation_tokens: cache_write,
+        },
+    );
+}
+
+/// Anthropic Messages SSE usage, merged the way the meter needs it.
+///
+/// `message_start` usually carries input and cache with `output_tokens: 0`.
+/// `message_delta` then carries the real output, sometimes alone and sometimes
+/// as a full usage object. Fields that are present replace the previous
+/// value, including an explicit zero. Fields that are absent stay. The two
+/// events are not added together.
+#[derive(Default)]
+pub(crate) struct AnthropicStreamUsage {
+    buffer: Vec<u8>,
+    finished: bool,
+    committed: bool,
+    saw_usage: bool,
+    last_raw: Option<Value>,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+}
+
+impl AnthropicStreamUsage {
+    pub(crate) fn push_bytes(&mut self, chunk: &[u8]) {
+        if self.finished {
+            return;
+        }
+        self.buffer.extend_from_slice(chunk);
+        self.drain_blocks(false);
+    }
+
+    pub(crate) fn finish(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        self.drain_blocks(true);
+    }
+
+    pub(crate) fn observe_message(&mut self, message: &Value) {
+        if let Some(usage) = message.get("usage") {
+            self.observe_usage(usage);
+            return;
+        }
+        self.observe_event(message);
+    }
+
+    pub(crate) fn commit(&mut self, model: &str, slot: u64, subagent: bool) {
+        if self.committed {
+            return;
+        }
+        self.finish();
+        self.committed = true;
+        if !self.saw_usage {
+            return;
+        }
+        let anthropic = json!({
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_read_input_tokens": self.cache_read_tokens,
+            "cache_creation_input_tokens": self.cache_creation_tokens,
+        });
+        let raw = self.last_raw.clone().unwrap_or(Value::Null);
+        let model = if model.trim().is_empty() {
+            "unknown"
+        } else {
+            model
+        };
+        crate::usage_debug::log_translated(model, &raw, &anthropic);
+        record_turn_usage(
+            slot,
+            SplitUsage {
+                input_tokens: self.input_tokens,
+                output_tokens: self.output_tokens,
+                cache_read_tokens: Some(self.cache_read_tokens),
+                cache_creation_tokens: Some(self.cache_creation_tokens),
+            },
+            subagent,
+        );
+    }
+
+    fn drain_blocks(&mut self, flush: bool) {
+        while let Some((split_at, rest_at)) = split_sse_block(&self.buffer) {
+            let block: Vec<u8> = self.buffer.drain(..split_at).collect();
+            self.buffer.drain(..rest_at - split_at);
+            self.observe_block(&block);
+        }
+        if !flush {
+            return;
+        }
+        if self.buffer.iter().all(|byte| byte.is_ascii_whitespace()) {
+            self.buffer.clear();
+            return;
+        }
+        let block = std::mem::take(&mut self.buffer);
+        self.observe_block(&block);
+    }
+
+    fn observe_block(&mut self, block: &[u8]) {
+        let text = String::from_utf8_lossy(block);
+        let mut data = String::new();
+        for line in text.lines() {
+            let line = line.trim_end_matches('\r');
+            if let Some(rest) = line.strip_prefix("data:") {
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                data.push_str(rest.trim_start());
+            }
+        }
+        if data.is_empty() || data == "[DONE]" {
+            return;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&data) else {
+            return;
+        };
+        self.observe_event(&value);
+    }
+
+    fn observe_event(&mut self, value: &Value) {
+        match value.get("type").and_then(Value::as_str) {
+            Some("message_start") => {
+                if let Some(usage) = value.pointer("/message/usage") {
+                    self.observe_usage(usage);
+                }
+            }
+            Some("message_delta") | Some("message") => {
+                if let Some(usage) = value.get("usage") {
+                    self.observe_usage(usage);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn observe_usage(&mut self, usage: &Value) {
+        if !usage.is_object() {
+            return;
+        }
+        self.saw_usage = true;
+        self.last_raw = Some(usage.clone());
+        if let Some(value) = field_number(usage, &["input_tokens", "inputTokens"]) {
+            self.input_tokens = value;
+        }
+        if let Some(value) = field_number(usage, &["output_tokens", "outputTokens"]) {
+            self.output_tokens = value;
+        }
+        if let Some(value) = field_number(
+            usage,
+            &[
+                "cache_read_input_tokens",
+                "cacheReadInputTokens",
+                "prompt_cache_hit_tokens",
+            ],
+        ) {
+            self.cache_read_tokens = value;
+        }
+        if let Some(value) = field_number(
+            usage,
+            &[
+                "cache_creation_input_tokens",
+                "cacheCreationInputTokens",
+                "cache_write_input_tokens",
+            ],
+        ) {
+            self.cache_creation_tokens = value;
+        }
+    }
+}
+
+fn split_sse_block(buffer: &[u8]) -> Option<(usize, usize)> {
+    let newline = find_bytes(buffer, b"\n\n");
+    let crlf = find_bytes(buffer, b"\r\n\r\n");
+    match (newline, crlf) {
+        (Some(newline), Some(crlf)) if newline <= crlf => Some((newline, newline + 2)),
+        (Some(_), Some(crlf)) => Some((crlf, crlf + 4)),
+        (Some(newline), None) => Some((newline, newline + 2)),
+        (None, Some(crlf)) => Some((crlf, crlf + 4)),
+        (None, None) => None,
+    }
+}
+
+fn find_bytes(buffer: &[u8], needle: &[u8]) -> Option<usize> {
+    buffer
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn first_count(usage: &Value, pointers: &[&str], keys: &[&str]) -> Option<u64> {
@@ -302,5 +508,217 @@ mod tests {
         assert_eq!(split.input_tokens, 3_588);
         assert_eq!(split.cache_read_tokens, Some(20_992));
         assert_eq!(split.cache_creation_tokens, Some(640));
+    }
+
+    fn sse(event: &str, data: Value) -> String {
+        format!("event: {event}\ndata: {data}\n\n")
+    }
+
+    #[test]
+    fn merges_message_start_and_message_delta_without_summing() {
+        let mut usage = AnthropicStreamUsage::default();
+        let start = sse(
+            "message_start",
+            json!({
+                "type": "message_start",
+                "message": {
+                    "usage": {
+                        "input_tokens": 1406,
+                        "output_tokens": 0,
+                        "cache_read_input_tokens": 22912,
+                        "cache_creation_input_tokens": 0
+                    }
+                }
+            }),
+        );
+        let split_at = start.len() / 2;
+        usage.push_bytes(start[..split_at].as_bytes());
+        usage.push_bytes(start[split_at..].as_bytes());
+        usage.push_bytes(
+            sse(
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "delta": { "type": "thinking_delta", "thinking": "reading main.tex" }
+                }),
+            )
+            .as_bytes(),
+        );
+        usage.push_bytes(
+            sse(
+                "message_delta",
+                json!({
+                    "type": "message_delta",
+                    "delta": { "stop_reason": "tool_use" },
+                    "usage": { "output_tokens": 80 }
+                }),
+            )
+            .as_bytes(),
+        );
+        usage.finish();
+
+        assert_eq!(usage.input_tokens, 1_406);
+        assert_eq!(usage.cache_read_tokens, 22_912);
+        assert_eq!(usage.cache_creation_tokens, 0);
+        assert_eq!(usage.output_tokens, 80);
+        assert_eq!(
+            usage
+                .last_raw
+                .as_ref()
+                .and_then(|value| value.get("output_tokens")),
+            Some(&json!(80))
+        );
+        assert!(usage
+            .last_raw
+            .as_ref()
+            .and_then(|value| value.get("cache_read_input_tokens"))
+            .is_none());
+    }
+
+    #[test]
+    fn full_message_delta_replaces_message_start_instead_of_adding() {
+        let mut usage = AnthropicStreamUsage::default();
+        usage.push_bytes(
+            sse(
+                "message_start",
+                json!({
+                    "type": "message_start",
+                    "message": {
+                        "usage": {
+                            "input_tokens": 1406,
+                            "output_tokens": 1,
+                            "cache_read_input_tokens": 22912,
+                            "cache_creation_input_tokens": 0
+                        }
+                    }
+                }),
+            )
+            .as_bytes(),
+        );
+        usage.push_bytes(
+            sse(
+                "message_delta",
+                json!({
+                    "type": "message_delta",
+                    "usage": {
+                        "input_tokens": 1406,
+                        "output_tokens": 80,
+                        "cache_read_input_tokens": 22912,
+                        "cache_creation_input_tokens": 0
+                    }
+                }),
+            )
+            .as_bytes(),
+        );
+        usage.finish();
+        assert_eq!(usage.input_tokens, 1_406);
+        assert_eq!(usage.output_tokens, 80);
+        assert_eq!(usage.cache_read_tokens, 22_912);
+    }
+
+    #[test]
+    fn passthrough_commits_log_the_last_request_and_skip_subagents() {
+        struct EnvRestore(Option<String>);
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("LOCALPRISM_HOME", value),
+                    None => std::env::remove_var("LOCALPRISM_HOME"),
+                }
+            }
+        }
+        struct ForceRestore;
+        impl Drop for ForceRestore {
+            fn drop(&mut self) {
+                crate::usage_debug::force_for_test(None);
+            }
+        }
+
+        let _lock = crate::providers::paths::lock_provider_env();
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvRestore(std::env::var("LOCALPRISM_HOME").ok());
+        std::env::set_var("LOCALPRISM_HOME", home.path());
+        let _force = ForceRestore;
+        crate::usage_debug::force_for_test(Some(true));
+        crate::usage_debug::reset_seq_for_test();
+
+        let slot = crate::codex_turn_usage::register_slot();
+        let mut first = AnthropicStreamUsage::default();
+        first.observe_message(&json!({
+            "usage": {
+                "input_tokens": 22933,
+                "output_tokens": 47,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0
+            }
+        }));
+        first.commit("Qwen/Qwen3.5-35B-A3B", slot, false);
+
+        let mut subagent = AnthropicStreamUsage::default();
+        subagent.observe_message(&json!({
+            "usage": {
+                "input_tokens": 99,
+                "output_tokens": 9,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0
+            }
+        }));
+        subagent.commit("Qwen/Qwen3.5-35B-A3B", slot, true);
+
+        let mut second = AnthropicStreamUsage::default();
+        second.push_bytes(
+            sse(
+                "message_start",
+                json!({
+                    "type": "message_start",
+                    "message": {
+                        "usage": {
+                            "input_tokens": 1406,
+                            "output_tokens": 0,
+                            "cache_read_input_tokens": 22912,
+                            "cache_creation_input_tokens": 0
+                        }
+                    }
+                }),
+            )
+            .as_bytes(),
+        );
+        second.push_bytes(
+            sse(
+                "message_delta",
+                json!({
+                    "type": "message_delta",
+                    "usage": { "output_tokens": 64 }
+                }),
+            )
+            .as_bytes(),
+        );
+        second.commit("deepseek-chat", slot, false);
+        second.commit("deepseek-chat", slot, false);
+
+        let line = r#"{"type":"result","usage":{"input_tokens":54444,"output_tokens":111,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#;
+        let rewritten = crate::codex_turn_usage::rewrite_result_line(line, slot).unwrap();
+        let value: Value = serde_json::from_str(&rewritten).unwrap();
+        assert_eq!(value["usage"]["input_tokens"], 1_406);
+        assert_eq!(value["usage"]["cache_read_input_tokens"], 22_912);
+        assert_eq!(value["usage"]["cache_creation_input_tokens"], 0);
+        assert_eq!(value["usage"]["output_tokens"], 64);
+
+        let text =
+            std::fs::read_to_string(home.path().join("logs").join("usage-debug.jsonl")).unwrap();
+        let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
+        assert_eq!(lines.len(), 6);
+        let upstream: Value = serde_json::from_str(lines[4]).unwrap();
+        let anthropic: Value = serde_json::from_str(lines[5]).unwrap();
+        assert_eq!(upstream["stage"], "upstream");
+        assert_eq!(anthropic["stage"], "anthropic");
+        assert_eq!(upstream["seq"], anthropic["seq"]);
+        assert_eq!(upstream["model"], "deepseek-chat");
+        assert_eq!(upstream["usage"]["output_tokens"], 64);
+        assert!(upstream["usage"].get("input_tokens").is_none());
+        assert_eq!(anthropic["usage"]["input_tokens"], 1_406);
+        assert_eq!(anthropic["usage"]["cache_read_input_tokens"], 22_912);
+        assert_eq!(anthropic["usage"]["output_tokens"], 64);
+        crate::codex_turn_usage::drop_slot(slot);
     }
 }

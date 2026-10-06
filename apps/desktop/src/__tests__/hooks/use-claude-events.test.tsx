@@ -44,6 +44,7 @@ vi.mock("@/lib/latex-compiler", () => ({
 }));
 
 import { useClaudeEvents } from "@/hooks/use-claude-events";
+import { buildTokenMeterModel } from "@/lib/chat-token-usage";
 import {
   CLAUDE_CODE_PROVIDER_ID,
   type TabState,
@@ -1495,5 +1496,348 @@ describe("useClaudeEvents cancellation isolation", () => {
     expect(error).not.toMatch(
       /This may be due to rate limiting or an API error/,
     );
+  });
+
+  it("applies the last stream_event usage without appending partial events", async () => {
+    const output = callbacks.get("claude-output");
+    await act(async () => {
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "stream_event",
+            event: {
+              type: "message_start",
+              message: {
+                usage: {
+                  input_tokens: 1406,
+                  output_tokens: 0,
+                  cache_read_input_tokens: 22912,
+                  cache_creation_input_tokens: 0,
+                },
+              },
+            },
+          }),
+        ),
+      );
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "stream_event",
+            event: {
+              type: "message_delta",
+              usage: { output_tokens: 80 },
+            },
+          }),
+        ),
+      );
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "assistant",
+            message: {
+              usage: {
+                input_tokens: 24318,
+                output_tokens: 0,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+              },
+            },
+          }),
+        ),
+      );
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "result",
+            usage: {
+              input_tokens: 50000,
+              output_tokens: 200,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
+          }),
+        ),
+      );
+      await Promise.resolve();
+    });
+
+    const tab = useClaudeChatStore
+      .getState()
+      .tabs.find((candidate) => candidate.id === "tab-a");
+    expect(tab?.messages.map((message) => message.type)).toEqual([
+      "assistant",
+      "result",
+    ]);
+    expect(tab?.lastTurnUsage).toEqual({
+      inputTokens: 1406,
+      outputTokens: 80,
+      cacheReadTokens: 22912,
+      cacheCreationTokens: 0,
+    });
+    expect(tab?.totalInputTokens).toBe(24318 + 50000);
+    expect(tab?.totalOutputTokens).toBe(200);
+
+    await act(async () => {
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "stream_event",
+            parent_tool_use_id: "toolu_sub",
+            event: {
+              type: "message_delta",
+              usage: { output_tokens: 999 },
+            },
+          }),
+        ),
+      );
+      await Promise.resolve();
+    });
+    const afterSubagent = useClaudeChatStore
+      .getState()
+      .tabs.find((candidate) => candidate.id === "tab-a");
+    expect(afterSubagent?.lastTurnUsage?.outputTokens).toBe(80);
+    expect(afterSubagent?.messages).toHaveLength(2);
+
+    await act(async () => {
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "stream_event",
+            agent_id: "writer",
+            event: {
+              type: "message_delta",
+              usage: { output_tokens: 111 },
+            },
+          }),
+        ),
+      );
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "stream_event",
+            user_id: '{"parent_tool_use_id":"toolu_parent"}',
+            event: {
+              type: "message_start",
+              message: {
+                id: "msg_sub",
+                usage: {
+                  input_tokens: 50_000,
+                  output_tokens: 0,
+                  cache_read_input_tokens: 0,
+                  cache_creation_input_tokens: 0,
+                },
+              },
+            },
+          }),
+        ),
+      );
+      await Promise.resolve();
+    });
+    const afterMarkers = useClaudeChatStore
+      .getState()
+      .tabs.find((candidate) => candidate.id === "tab-a");
+    expect(afterMarkers?.lastTurnUsage?.outputTokens).toBe(80);
+    expect(afterMarkers?.lastTurnUsage?.inputTokens).toBe(1406);
+  });
+
+  it("counts a thinking-only stream_event as a started Claude turn", async () => {
+    const output = callbacks.get("claude-output");
+    const complete = callbacks.get("claude-complete");
+    await act(async () => {
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "stream_event",
+            event: {
+              type: "content_block_delta",
+              delta: { type: "thinking_delta", thinking: "..." },
+            },
+          }),
+        ),
+      );
+      complete?.({
+        event: "claude-complete",
+        id: 1,
+        payload: {
+          tab_id: "tab-a",
+          attempt_id: "tab-a-attempt-1",
+          success: false,
+          exit_code: 1,
+          stderr_tail: "boom",
+        },
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const error = useClaudeChatStore
+      .getState()
+      .tabs.find((tab) => tab.id === "tab-a")?.error;
+    expect(error).toMatch(/exited unexpectedly/i);
+    expect(error).not.toMatch(/failed to start/i);
+  });
+
+  it("drives the visible meter from the in-flight request", async () => {
+    await act(async () => {
+      useClaudeChatStore.setState((state) => ({
+        tabs: state.tabs.map((tab) =>
+          tab.id === "tab-a"
+            ? {
+                ...tab,
+                messages: [
+                  {
+                    type: "assistant",
+                    message: {
+                      usage: {
+                        input_tokens: 23_267,
+                        output_tokens: 94,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                      },
+                    },
+                  },
+                  { type: "user", message: { content: "next" } },
+                ] as TabState["messages"],
+              }
+            : tab,
+        ),
+      }));
+    });
+    const output = callbacks.get("claude-output");
+    await act(async () => {
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "stream_event",
+            event: {
+              type: "message_start",
+              message: {
+                id: "msg_next",
+                usage: {
+                  input_tokens: 27_350,
+                  output_tokens: 0,
+                  cache_read_input_tokens: 0,
+                  cache_creation_input_tokens: 0,
+                },
+              },
+            },
+          }),
+        ),
+      );
+      await Promise.resolve();
+    });
+    const tab = useClaudeChatStore
+      .getState()
+      .tabs.find((candidate) => candidate.id === "tab-a");
+    const meter = buildTokenMeterModel({
+      modelLabel: "Qwen/Qwen3.5-35B-A3B",
+      messages: tab?.messages,
+      lastUsage: tab?.lastTurnUsage,
+      inFlight: true,
+      windowTokens: 200_000,
+    });
+    expect(meter.inputTokens).toBe(27_350);
+    expect(meter.outputTokens).toBe(0);
+    expect(tab?.messages).toHaveLength(2);
+  });
+
+  it("counts thinking deltas as Claude reply progress for the 180s watchdog", async () => {
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+      container = document.createElement("div");
+      document.body.append(container);
+      root = createRoot(container);
+      await act(async () => {
+        root.render(<Probe />);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        useClaudeChatStore.setState((state) => ({
+          tabs: state.tabs.map((tab) =>
+            tab.id === "tab-a"
+              ? {
+                  ...tab,
+                  runtime: "claude" as const,
+                  isStreaming: true,
+                  activeAttemptId: "tab-a-attempt-1",
+                  streamingStartedAt: Date.now(),
+                  error: null,
+                }
+              : tab,
+          ),
+        }));
+      });
+
+      const output = callbacks.get("claude-output");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(90_000);
+      });
+
+      await act(async () => {
+        output?.(
+          dataEvent(
+            "claude-output",
+            "tab-a",
+            JSON.stringify({
+              type: "stream_event",
+              event: {
+                type: "content_block_delta",
+                delta: { type: "thinking_delta", thinking: "still working" },
+              },
+            }),
+          ),
+        );
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(90_000);
+      });
+
+      let tab = useClaudeChatStore
+        .getState()
+        .tabs.find((candidate) => candidate.id === "tab-a");
+      expect(tab?.isStreaming).toBe(true);
+      expect(tab?.error).toBeNull();
+      expect(tab?.messages).toHaveLength(0);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(180_000);
+      });
+
+      tab = useClaudeChatStore
+        .getState()
+        .tabs.find((candidate) => candidate.id === "tab-a");
+      expect(tab?.isStreaming).toBe(false);
+      expect(tab?.error).toMatch(/no reply for 180 seconds/i);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -81,6 +81,172 @@ pub(super) fn anthropic_to_openai_request(
 /// `400 System message must be at the beginning`. Fold every system-like
 /// turn into the top-level `system` field before the request is forwarded
 /// or converted to OpenAI.
+/// Drop Claude Code's per-request billing line and pin `metadata.user_id`
+/// to the session. DeepSeek ignores `cache_control` and isolates its disk
+/// cache by `user_id`, so a nonce at the start of `system` or a JSON
+/// `user_id` makes every turn miss.
+pub(super) fn stabilize_third_party_prompt_prefix(
+    request: &mut Value,
+    session_id: Option<&str>,
+) {
+    strip_system_attribution(request);
+    strip_inline_attribution_messages(request);
+    stabilize_metadata_user_id(request, session_id);
+}
+
+fn is_attribution_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty()
+        && !trimmed.contains('\n')
+        && trimmed.starts_with("x-anthropic-billing-header:")
+}
+
+fn without_attribution(text: &str) -> String {
+    let mut kept = Vec::new();
+    for paragraph in text.split("\n\n") {
+        let paragraph = paragraph.trim();
+        if paragraph.is_empty() || is_attribution_text(paragraph) {
+            continue;
+        }
+        if let Some((first, rest)) = paragraph.split_once('\n') {
+            if is_attribution_text(first) {
+                let rest = rest.trim();
+                if !rest.is_empty() {
+                    kept.push(rest.to_string());
+                }
+                continue;
+            }
+        }
+        kept.push(paragraph.to_string());
+    }
+    kept.join("\n\n")
+}
+
+fn strip_system_attribution(request: &mut Value) {
+    let Some(system) = request.get("system") else {
+        return;
+    };
+    if let Some(text) = system.as_str() {
+        let cleaned = without_attribution(text);
+        if cleaned != text {
+            request["system"] = Value::String(cleaned);
+        }
+        return;
+    }
+    let Some(blocks) = system.as_array() else {
+        return;
+    };
+    let mut kept = Vec::new();
+    let mut changed = false;
+    for block in blocks {
+        if block.as_str().is_some_and(is_attribution_text) {
+            changed = true;
+            continue;
+        }
+        let Some(text) = block.get("text").and_then(Value::as_str) else {
+            kept.push(block.clone());
+            continue;
+        };
+        if is_attribution_text(text) {
+            changed = true;
+            continue;
+        }
+        let cleaned = without_attribution(text);
+        if cleaned == text {
+            kept.push(block.clone());
+            continue;
+        }
+        changed = true;
+        if cleaned.is_empty() {
+            continue;
+        }
+        let mut copy = block.clone();
+        if let Some(object) = copy.as_object_mut() {
+            object.insert("text".to_string(), Value::String(cleaned));
+        }
+        kept.push(copy);
+    }
+    if changed {
+        request["system"] = Value::Array(kept);
+    }
+}
+
+fn strip_inline_attribution_messages(request: &mut Value) {
+    let Some(messages) = request.get("messages").and_then(Value::as_array).cloned() else {
+        return;
+    };
+    let mut kept = Vec::with_capacity(messages.len());
+    let mut changed = false;
+    for message in messages {
+        if is_system_like_message(&message) {
+            let text = message
+                .get("content")
+                .and_then(flatten_anthropic_content)
+                .unwrap_or_default();
+            if !text.trim().is_empty() && without_attribution(&text).is_empty() {
+                changed = true;
+                continue;
+            }
+        }
+        kept.push(message);
+    }
+    if changed {
+        request["messages"] = Value::Array(kept);
+    }
+}
+
+fn deepseek_user_id_ok(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
+fn deepseek_user_id_token(session_id: &str) -> Option<String> {
+    let mut out = String::new();
+    for ch in session_id.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else if !out.ends_with('_') {
+            out.push('_');
+        }
+        if out.len() == 512 {
+            break;
+        }
+    }
+    let out = out.trim_matches('_').to_string();
+    if deepseek_user_id_ok(&out) {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+fn stabilize_metadata_user_id(request: &mut Value, session_id: Option<&str>) {
+    let Some(metadata) = request.get_mut("metadata").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(user_id) = metadata
+        .get("user_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return;
+    };
+    if deepseek_user_id_ok(&user_id) {
+        return;
+    }
+    match session_id.and_then(deepseek_user_id_token) {
+        Some(token) => {
+            metadata.insert("user_id".to_string(), Value::String(token));
+        }
+        None => {
+            metadata.remove("user_id");
+        }
+    }
+}
+
 pub(super) fn hoist_anthropic_system_messages(request: &mut Value) {
     let Some(existing) = request
         .get("messages")
@@ -95,9 +261,9 @@ pub(super) fn hoist_anthropic_system_messages(request: &mut Value) {
 
     let mut system_parts = Vec::new();
     if let Some(system) = request.get("system").and_then(flatten_anthropic_content) {
-        let system = system.trim();
+        let system = without_attribution(system.trim());
         if !system.is_empty() {
-            system_parts.push(system.to_string());
+            system_parts.push(system);
         }
     }
 
@@ -106,9 +272,9 @@ pub(super) fn hoist_anthropic_system_messages(request: &mut Value) {
         if is_system_like_message(&message) {
             if let Some(text) = flatten_anthropic_content(message.get("content").unwrap_or(&Value::Null))
             {
-                let text = text.trim();
+                let text = without_attribution(text.trim());
                 if !text.is_empty() {
-                    system_parts.push(text.to_string());
+                    system_parts.push(text);
                 }
             }
             continue;
@@ -808,6 +974,7 @@ mod tests {
             model: "qwen-test".to_string(),
             transformers: Vec::new(),
             model_transformers: Vec::new(),
+            usage_slot: 0,
         }
     }
 
@@ -1108,6 +1275,55 @@ mod tests {
         let before = request.clone();
         hoist_anthropic_system_messages(&mut request);
         assert_eq!(request, before);
+    }
+
+    #[test]
+    fn strips_a_changing_billing_header_and_pins_user_id_to_the_session() {
+        let mut first = json!({
+            "system": [
+                {"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.289; cc_entrypoint=sdk-cli; cch=aaaa;"},
+                {"type": "text", "text": "You are a LaTeX assistant.", "cache_control": {"type": "ephemeral"}}
+            ],
+            "metadata": {"user_id": "{\"device_id\":\"d\",\"cch\":\"aaaa\"}"},
+            "messages": [
+                {"role": "user", "content": "Hi"},
+                {"role": "system", "content": "x-anthropic-billing-header: cc_version=2.1.289; cch=bbbb;"}
+            ]
+        });
+        stabilize_third_party_prompt_prefix(&mut first, Some("session-1"));
+        hoist_anthropic_system_messages(&mut first);
+
+        let mut second = json!({
+            "system": [
+                {"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.289; cc_entrypoint=sdk-cli; cch=cccc;"},
+                {"type": "text", "text": "You are a LaTeX assistant.", "cache_control": {"type": "ephemeral"}}
+            ],
+            "metadata": {"user_id": "{\"device_id\":\"d\",\"cch\":\"cccc\"}"},
+            "messages": [
+                {"role": "user", "content": "Hi"},
+                {"role": "system", "content": "Skill reminder."}
+            ]
+        });
+        stabilize_third_party_prompt_prefix(&mut second, Some("session-1"));
+        hoist_anthropic_system_messages(&mut second);
+
+        assert_eq!(first["system"][0]["text"], "You are a LaTeX assistant.");
+        assert!(first["system"][0].get("cache_control").is_some());
+        assert_eq!(first["system"].as_array().unwrap().len(), 1);
+        assert!(!first.to_string().contains("cch="));
+        assert_eq!(first["metadata"]["user_id"], "session-1");
+        assert_eq!(second["metadata"]["user_id"], "session-1");
+        let system = second["system"].as_str().unwrap();
+        assert!(system.contains("You are a LaTeX assistant."));
+        assert!(system.contains("Skill reminder."));
+        assert!(!system.contains("x-anthropic-billing-header"));
+
+        let mut stable = json!({
+            "metadata": {"user_id": "local-user"},
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        stabilize_third_party_prompt_prefix(&mut stable, Some("session-1"));
+        assert_eq!(stable["metadata"]["user_id"], "local-user");
     }
 
     #[test]
