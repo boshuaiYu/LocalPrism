@@ -13,19 +13,31 @@ import { useI18n } from "@/lib/use-i18n";
 import {
   PRODUCT_TOUR_CUE_RETRY_MS,
   PRODUCT_TOUR_STEPS,
+  abandonProductTourOnUnmount,
+  cancelAbandonedProductTour,
+  dismissProductTourReplay,
   dispatchProductTourCue,
+  endProductTourSession,
   findProductTourElement,
   isProductTourOverlayActive,
+  isProductTourReplayRequested,
   productTourAfterBack,
   productTourAfterNext,
   productTourCardPosition,
   productTourClickAdvances,
+  productTourReplaySerial,
   productTourRetryCues,
   productTourShieldRects,
+  productTourStatusAfterDismiss,
+  readTourChromeBaseline,
+  rememberTourChrome,
+  resetTourChromeBaseline,
   setProductTourOverlayActive,
   shouldAutoShowProductTour,
   subscribeProductTourOverlay,
+  subscribeProductTourReplay,
 } from "@/lib/product-tour";
+import { useChatLayoutStore } from "@/stores/chat-layout-store";
 import { useSettingsStore } from "@/stores/settings-store";
 
 interface AnchorRect {
@@ -94,18 +106,56 @@ export function ProductTour() {
   const rectRef = useRef<AnchorRect | null>(null);
   const scrolledStep = useRef<string | null>(null);
   const wasVisible = useRef(false);
+  const replayBaseline = useRef<typeof status | null>(null);
+  const seenReplaySerial = useRef(0);
+  const replayRequested = useSyncExternalStore(
+    subscribeProductTourReplay,
+    isProductTourReplayRequested,
+    () => false,
+  );
+  const replaySerial = useSyncExternalStore(
+    subscribeProductTourReplay,
+    productTourReplaySerial,
+    () => 0,
+  );
+  if (!replayRequested) {
+    replayBaseline.current = null;
+  } else if (hydrated && replayBaseline.current === null) {
+    replayBaseline.current = useSettingsStore.getState().productTour;
+  }
+  if (replayRequested && seenReplaySerial.current !== replaySerial) {
+    seenReplaySerial.current = replaySerial;
+    if (index !== 0) setIndex(0);
+  }
   const step = PRODUCT_TOUR_STEPS[index] ?? PRODUCT_TOUR_STEPS[0];
   const visible =
-    hydrated && shouldAutoShowProductTour(status) && Boolean(step);
+    hydrated &&
+    (shouldAutoShowProductTour(status) || replayRequested) &&
+    Boolean(step);
+
+  const dismiss = useCallback(
+    (outcome: "completed" | "skipped") => {
+      const replay = isProductTourReplayRequested();
+      const stored = replay
+        ? (replayBaseline.current ?? useSettingsStore.getState().productTour)
+        : useSettingsStore.getState().productTour;
+      const next = productTourStatusAfterDismiss(stored, outcome, replay);
+      if (next !== useSettingsStore.getState().productTour) {
+        setProductTour(next);
+      }
+      if (replay) dismissProductTourReplay();
+    },
+    [setProductTour],
+  );
 
   const goNext = useCallback(() => {
     const next = productTourAfterNext(index);
     if (next.status === "completed") {
-      setProductTour("completed");
+      dismiss("completed");
       return;
     }
     setIndex(next.index);
-  }, [index, setProductTour]);
+  }, [dismiss, index]);
 
   const refreshRect = useCallback(() => {
     if (!step) return;
@@ -140,14 +190,33 @@ export function ProductTour() {
     });
   }, []);
 
+  useLayoutEffect(() => {
+    if (!visible || wasVisible.current) return;
+    resetTourChromeBaseline();
+    rememberTourChrome({
+      chatVisible: useChatLayoutStore.getState().visible,
+    });
+  }, [visible]);
+
   useEffect(() => {
     setProductTourOverlayActive(visible);
     if (wasVisible.current && !visible) {
-      dispatchProductTourCue("close-overlays");
+      endProductTourSession();
     }
     wasVisible.current = visible;
     return () => setProductTourOverlayActive(false);
   }, [visible]);
+
+  useEffect(() => {
+    cancelAbandonedProductTour();
+    return () => {
+      if (!wasVisible.current) return;
+      abandonProductTourOnUnmount(
+        { ...readTourChromeBaseline() },
+        isProductTourReplayRequested(),
+      );
+    };
+  }, []);
 
   useEffect(() => {
     scrolledStep.current = null;
@@ -206,11 +275,13 @@ export function ProductTour() {
   useEffect(() => {
     if (!visible) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setProductTour("skipped");
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      dismiss("skipped");
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [setProductTour, visible]);
+  }, [dismiss, visible]);
 
   if (!visible || !step) return null;
 
@@ -284,7 +355,7 @@ export function ProductTour() {
             variant="ghost"
             className="h-8 px-2 text-xs"
             data-testid="product-tour-skip"
-            onClick={() => setProductTour("skipped")}
+            onClick={() => dismiss("skipped")}
           >
             {t("tour.skip")}
           </Button>

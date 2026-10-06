@@ -24,6 +24,7 @@ import { useDocumentStore } from "@/stores/document-store";
 import { getMupdfClient } from "@/lib/mupdf/mupdf-client";
 import { exists, join } from "@/lib/tauri/fs";
 import { AppStatusBar } from "@/components/app-status-cluster";
+import { HelpMenu } from "@/components/help-menu";
 import { SettingsDialog } from "@/components/settings/settings-dialog";
 import { OPEN_SETTINGS_EVENT } from "@/lib/settings-chrome";
 import { useI18n } from "@/lib/use-i18n";
@@ -232,6 +233,7 @@ export function ProjectPicker() {
         className="relative z-10 flex min-h-[calc(40px+var(--titlebar-height))] shrink-0 flex-wrap items-center justify-end gap-2 px-4 pt-[var(--titlebar-height)] pb-1"
       >
         <div className="flex shrink-0 items-center gap-2">
+          <HelpMenu />
           <Button
             variant="ghost"
             size="icon"

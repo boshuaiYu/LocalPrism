@@ -1,4 +1,4 @@
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -6,6 +6,22 @@ import {
   useProductTourDialogGuard,
 } from "@/components/product-tour";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import {
+  PRODUCT_TOUR_STEPS,
+  isProductTourReplayRequested,
+  requestProductTourReplay,
+  resetProductTourReplayForTests,
+} from "@/lib/product-tour";
+import {
+  isWelcomeCompleted,
+  markWelcomeCompleted,
+  resetWelcomeCompletedForTests,
+} from "@/lib/welcome";
+import {
+  resetChatLayoutStoreForTests,
+  useChatLayoutStore,
+} from "@/stores/chat-layout-store";
+import { useDocumentStore } from "@/stores/document-store";
 import { useSettingsStore } from "@/stores/settings-store";
 
 function GuardedDialog({
@@ -44,9 +60,18 @@ describe("ProductTour", () => {
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
+    await act(async () => {
+      root.unmount();
+    });
     container.remove();
-    useSettingsStore.setState({ productTour: "pending" });
+    resetChatLayoutStoreForTests();
+    resetProductTourReplayForTests();
+    resetWelcomeCompletedForTests();
+    useSettingsStore.setState({
+      productTour: "pending",
+      compilerBackend: "tectonic",
+      vimMode: false,
+    });
     vi.unstubAllGlobals();
   });
 
@@ -90,7 +115,7 @@ describe("ProductTour", () => {
     });
 
     expect(useSettingsStore.getState().productTour).toBe("skipped");
-    expect(cues).toContain("close-overlays");
+    expect(cues).toContain("restore-workspace");
     expect(tour()).toBeNull();
     window.removeEventListener("localprism-product-tour", onCue);
 
@@ -296,11 +321,276 @@ describe("ProductTour", () => {
       }
       expect(useSettingsStore.getState().productTour).toBe("completed");
       expect(cues).toContain("close-overlays");
+      expect(cues).toContain("restore-workspace");
       expect(tour()).toBeNull();
     } finally {
       timeoutSpy.mockRestore();
       window.removeEventListener("localprism-product-tour", onCue);
     }
+  });
+
+  it("replays a finished tour and leaves first-run status untouched", async () => {
+    resetWelcomeCompletedForTests();
+    markWelcomeCompleted();
+    useSettingsStore.setState({
+      productTour: "completed",
+      compilerBackend: "texlive",
+      vimMode: true,
+    });
+    await renderTour();
+    expect(tour()).toBeNull();
+
+    await act(async () => {
+      requestProductTourReplay();
+    });
+    expect(tour()).not.toBeNull();
+    expect(document.body.textContent).toContain("Project files");
+    expect(document.body.textContent).toContain("1 / 12");
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+
+    expect(tour()).toBeNull();
+    expect(useSettingsStore.getState().productTour).toBe("completed");
+    expect(useSettingsStore.getState().compilerBackend).toBe("texlive");
+    expect(useSettingsStore.getState().vimMode).toBe(true);
+    expect(isWelcomeCompleted()).toBe(true);
+
+    await renderTour();
+    expect(tour()).toBeNull();
+  });
+
+  it("finishes a replay without reopening a skipped first-run tour", async () => {
+    useSettingsStore.setState({ productTour: "skipped" });
+    await renderTour();
+    await act(async () => {
+      requestProductTourReplay();
+    });
+    for (let step = 0; step < PRODUCT_TOUR_STEPS.length; step += 1) {
+      const next = document.body.querySelector(
+        '[data-testid="product-tour-next"]',
+      );
+      await act(async () => {
+        (next as HTMLButtonElement).click();
+      });
+    }
+    expect(tour()).toBeNull();
+    expect(useSettingsStore.getState().productTour).toBe("skipped");
+    await renderTour();
+    expect(tour()).toBeNull();
+  });
+
+  it("starts a queued replay when the workspace tour mounts", async () => {
+    useSettingsStore.setState({ productTour: "skipped" });
+    requestProductTourReplay();
+    await renderTour();
+    expect(tour()).not.toBeNull();
+    expect(useSettingsStore.getState().productTour).toBe("skipped");
+
+    const skip = document.body.querySelector(
+      '[data-testid="product-tour-skip"]',
+    );
+    await act(async () => {
+      (skip as HTMLButtonElement).click();
+    });
+    expect(tour()).toBeNull();
+    expect(useSettingsStore.getState().productTour).toBe("skipped");
+  });
+
+  it("still records a skip when the first-run tour has not finished", async () => {
+    useSettingsStore.setState({ productTour: "pending" });
+    await renderTour();
+    await act(async () => {
+      requestProductTourReplay();
+    });
+    const skip = document.body.querySelector(
+      '[data-testid="product-tour-skip"]',
+    );
+    await act(async () => {
+      (skip as HTMLButtonElement).click();
+    });
+    expect(useSettingsStore.getState().productTour).toBe("skipped");
+    expect(tour()).toBeNull();
+  });
+
+  it("restores chat and drops a replay when the tour unmounts", async () => {
+    resetWelcomeCompletedForTests();
+    markWelcomeCompleted();
+    useSettingsStore.setState({
+      productTour: "completed",
+      compilerBackend: "texlive",
+      vimMode: true,
+    });
+    useChatLayoutStore.setState({ visible: false, suppressAutoOpen: true });
+    const cues: string[] = [];
+    const onCue = (event: Event) => {
+      cues.push(String((event as CustomEvent).detail));
+    };
+    window.addEventListener("localprism-product-tour", onCue);
+    try {
+      await renderTour();
+      await act(async () => {
+        requestProductTourReplay();
+      });
+      expect(tour()).not.toBeNull();
+      useChatLayoutStore.getState().setVisible(true);
+
+      await act(async () => {
+        root.unmount();
+      });
+      root = createRoot(container);
+
+      expect(cues).toContain("restore-workspace");
+      expect(isProductTourReplayRequested()).toBe(false);
+      expect(useChatLayoutStore.getState().visible).toBe(false);
+      expect(useSettingsStore.getState().productTour).toBe("completed");
+      expect(useSettingsStore.getState().compilerBackend).toBe("texlive");
+      expect(useSettingsStore.getState().vimMode).toBe(true);
+      expect(isWelcomeCompleted()).toBe(true);
+
+      await renderTour();
+      expect(tour()).toBeNull();
+    } finally {
+      window.removeEventListener("localprism-product-tour", onCue);
+    }
+  });
+
+  it("leaves a pending first-run tour pending when it unmounts", async () => {
+    resetWelcomeCompletedForTests();
+    useSettingsStore.setState({
+      productTour: "pending",
+      compilerBackend: "texlive",
+      vimMode: true,
+    });
+    await renderTour();
+    await act(async () => {
+      requestProductTourReplay();
+    });
+    expect(tour()).not.toBeNull();
+
+    await act(async () => {
+      root.unmount();
+    });
+    root = createRoot(container);
+
+    expect(useSettingsStore.getState().productTour).toBe("pending");
+    expect(isProductTourReplayRequested()).toBe(false);
+    expect(useSettingsStore.getState().compilerBackend).toBe("texlive");
+    expect(useSettingsStore.getState().vimMode).toBe(true);
+    expect(isWelcomeCompleted()).toBe(false);
+
+    await renderTour();
+    expect(tour()).not.toBeNull();
+  });
+
+  it("ends a replay when the project closes and keeps stored status", async () => {
+    const previous = useDocumentStore.getState();
+    resetWelcomeCompletedForTests();
+    markWelcomeCompleted();
+    useSettingsStore.setState({
+      productTour: "completed",
+      compilerBackend: "texlive",
+      vimMode: true,
+    });
+    useChatLayoutStore.setState({ visible: false, suppressAutoOpen: true });
+    useDocumentStore.setState({
+      projectRoot: "/paper",
+      initialized: true,
+      isProjectMutating: false,
+    });
+    try {
+      await renderTour();
+      await act(async () => {
+        requestProductTourReplay();
+      });
+      expect(tour()).not.toBeNull();
+      useChatLayoutStore.getState().setVisible(true);
+
+      await act(async () => {
+        const closed = useDocumentStore.getState().closeProject();
+        if (closed instanceof Promise) await closed;
+      });
+
+      expect(isProductTourReplayRequested()).toBe(false);
+      expect(useChatLayoutStore.getState().visible).toBe(false);
+      expect(useSettingsStore.getState().productTour).toBe("completed");
+      expect(useSettingsStore.getState().compilerBackend).toBe("texlive");
+      expect(useSettingsStore.getState().vimMode).toBe(true);
+      expect(isWelcomeCompleted()).toBe(true);
+      expect(tour()).toBeNull();
+
+      await renderTour();
+      expect(tour()).toBeNull();
+    } finally {
+      useDocumentStore.setState({
+        projectRoot: previous.projectRoot,
+        initialized: previous.initialized,
+        isProjectMutating: false,
+        projectGeneration: previous.projectGeneration,
+      });
+    }
+  });
+
+  it("keeps a pending tour pending when the project closes", async () => {
+    const previous = useDocumentStore.getState();
+    resetWelcomeCompletedForTests();
+    useSettingsStore.setState({
+      productTour: "pending",
+      compilerBackend: "texlive",
+      vimMode: true,
+    });
+    useChatLayoutStore.setState({ visible: false, suppressAutoOpen: true });
+    useDocumentStore.setState({
+      projectRoot: "/paper",
+      initialized: true,
+      isProjectMutating: false,
+    });
+    try {
+      await renderTour();
+      expect(tour()).not.toBeNull();
+      useChatLayoutStore.getState().setVisible(true);
+
+      await act(async () => {
+        const closed = useDocumentStore.getState().closeProject();
+        if (closed instanceof Promise) await closed;
+      });
+
+      expect(useSettingsStore.getState().productTour).toBe("pending");
+      expect(isProductTourReplayRequested()).toBe(false);
+      expect(useChatLayoutStore.getState().visible).toBe(false);
+      expect(useSettingsStore.getState().compilerBackend).toBe("texlive");
+      expect(useSettingsStore.getState().vimMode).toBe(true);
+      expect(isWelcomeCompleted()).toBe(false);
+    } finally {
+      useDocumentStore.setState({
+        projectRoot: previous.projectRoot,
+        initialized: previous.initialized,
+        isProjectMutating: false,
+        projectGeneration: previous.projectGeneration,
+      });
+    }
+  });
+
+  it("keeps a manual replay through StrictMode setup replay", async () => {
+    useSettingsStore.setState({ productTour: "completed" });
+    await act(async () => {
+      root.render(
+        <StrictMode>
+          <div data-tour="tour-files">Files</div>
+          <ProductTour />
+        </StrictMode>,
+      );
+    });
+    expect(tour()).toBeNull();
+    await act(async () => {
+      requestProductTourReplay();
+    });
+    expect(isProductTourReplayRequested()).toBe(true);
+    expect(tour()).not.toBeNull();
+    expect(useSettingsStore.getState().productTour).toBe("completed");
   });
 });
 

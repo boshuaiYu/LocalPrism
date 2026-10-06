@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { Sidebar } from "@/components/workspace/sidebar";
+import { resetTourChromeBaseline } from "@/lib/product-tour";
 
 vi.mock("@tauri-apps/api/app", () => ({
   getVersion: vi.fn().mockResolvedValue("1.0.8-10"),
@@ -29,6 +30,7 @@ describe("Sidebar chrome", () => {
   let root: Root;
 
   beforeEach(() => {
+    resetTourChromeBaseline();
     Object.defineProperty(window, "ResizeObserver", {
       configurable: true,
       writable: true,
@@ -93,6 +95,11 @@ describe("Sidebar chrome", () => {
     );
     expect(rail).not.toBeNull();
     expect(rail?.closest('[aria-hidden="true"]')).not.toBeNull();
+    const help = [
+      ...container.querySelectorAll('[data-testid="help-menu"]'),
+    ].filter((node) => !node.closest('[aria-hidden="true"]'));
+    expect(help).toHaveLength(1);
+    expect(help[0]?.getAttribute("aria-label")).toBe("Help");
   });
 
   it("keeps a settings gear on the collapsed rail", async () => {
@@ -194,5 +201,51 @@ describe("Sidebar chrome", () => {
     expect(
       document.body.querySelector('[data-tour="tour-skill-categories"]'),
     ).toBeNull();
+  });
+
+  it("restores a skills panel the user already had open", async () => {
+    vi.mocked(invoke).mockImplementation(() => Promise.resolve([]));
+    await act(async () =>
+      root.render(
+        <Sidebar
+          layoutControls={{
+            codeVisible: true,
+            chatVisible: true,
+            pdfVisible: true,
+            sidebarVisible: true,
+            setCodeVisible: vi.fn(),
+            setChatVisible: vi.fn(),
+            setPdfVisible: vi.fn(),
+            setSidebarVisible: vi.fn(),
+          }}
+        />,
+      ),
+    );
+
+    const skills = container.querySelector('[data-tour="tour-skills"]');
+    await act(async () => {
+      (skills as HTMLButtonElement).click();
+    });
+    expect(await waitForTourAnchor("tour-skill-categories")).not.toBeNull();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("localprism-product-tour", {
+          detail: "close-overlays",
+        }),
+      );
+    });
+    expect(
+      document.body.querySelector('[data-tour="tour-skill-categories"]'),
+    ).toBeNull();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("localprism-product-tour", {
+          detail: "restore-workspace",
+        }),
+      );
+    });
+    expect(await waitForTourAnchor("tour-skill-categories")).not.toBeNull();
   });
 });

@@ -91,6 +91,7 @@ import { SKILLS_LIST_UPDATED_EVENT } from "@/lib/skills-refresh";
 import { useAgentStore } from "@/stores/agent-store";
 import { useSkillStore } from "@/stores/skill-store";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
+import { HelpMenu } from "@/components/help-menu";
 import { ProjectCloseButton } from "@/components/workspace/project-close-button";
 import { UvSetupDialog } from "@/components/uv-setup";
 import { SettingsDialog } from "@/components/settings/settings-dialog";
@@ -98,6 +99,7 @@ import {
   PRODUCT_TOUR_EVENT,
   applyProductTourCue,
   initialTourWorkspaceChrome,
+  prepareTourCue,
   type ProductTourCue,
 } from "@/lib/product-tour";
 import { OPEN_SETTINGS_EVENT } from "@/lib/settings-chrome";
@@ -985,6 +987,18 @@ export function Sidebar({
     };
     const onTourCue = (event: Event) => {
       const cue = (event as CustomEvent<ProductTourCue>).detail;
+      const restore = prepareTourCue(cue, {
+        settingsOpen: settingsChrome.current.open,
+        settingsTab: settingsChrome.current.tab,
+      });
+      if (restore) {
+        const open = restore.settingsOpen ?? settingsChrome.current.open;
+        const tab = restore.settingsTab ?? settingsChrome.current.tab;
+        settingsChrome.current = { open, tab };
+        setSettingsOpen(open);
+        setSettingsTab(tab);
+        return;
+      }
       const next = applyProductTourCue(
         initialTourWorkspaceChrome({
           settingsOpen: settingsChrome.current.open,
@@ -1202,6 +1216,7 @@ export function Sidebar({
         />
       </div>
       <div className="flex min-h-0 flex-1 flex-col items-center gap-1.5 py-2">
+        <HelpMenu className="size-7" iconClassName="size-3.5" />
         <Button
           variant="ghost"
           size="icon"
@@ -1335,6 +1350,7 @@ export function Sidebar({
               <span className="block truncate">{projectName}</span>
             </button>
             <div className="flex items-center justify-end gap-1">
+              <HelpMenu className="size-6" iconClassName="size-3.5" />
               <LayoutPaneSwitcher
                 controls={layoutControls}
                 collapsed={collapsed}
@@ -2254,6 +2270,15 @@ function EnvironmentSection({
   useEffect(() => {
     const onTourCue = (event: Event) => {
       const cue = (event as CustomEvent<ProductTourCue>).detail;
+      const restore = prepareTourCue(cue, {
+        skillsOpen: skillsOpenRef.current,
+      });
+      if (restore) {
+        const open = restore.skillsOpen ?? skillsOpenRef.current;
+        skillsOpenRef.current = open;
+        setShowOnboarding(open);
+        return;
+      }
       const next = applyProductTourCue(
         initialTourWorkspaceChrome({ skillsOpen: skillsOpenRef.current }),
         cue,

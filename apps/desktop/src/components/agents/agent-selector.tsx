@@ -6,6 +6,7 @@ import {
   PRODUCT_TOUR_EVENT,
   applyProductTourCue,
   initialTourWorkspaceChrome,
+  prepareTourCue,
   type ProductTourCue,
 } from "@/lib/product-tour";
 import { useI18n } from "@/lib/use-i18n";
@@ -59,6 +60,15 @@ export function AgentSelector({
   useEffect(() => {
     const onTourCue = (event: Event) => {
       const cue = (event as CustomEvent<ProductTourCue>).detail;
+      const restore = prepareTourCue(cue, {
+        agentMenuOpen: menuOpenRef.current,
+      });
+      if (restore) {
+        const open = restore.agentMenuOpen ?? menuOpenRef.current;
+        menuOpenRef.current = open;
+        setOpen(open);
+        return;
+      }
       const next = applyProductTourCue(
         initialTourWorkspaceChrome({ agentMenuOpen: menuOpenRef.current }),
         cue,

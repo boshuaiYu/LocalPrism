@@ -170,6 +170,14 @@ describe("ProjectPicker runtime settings", () => {
     ).toBeNull();
     expect(container.textContent).not.toContain("Getting Started");
     const header = container.querySelector("[data-testid='app-chrome-header']");
+    expect(header?.querySelector('[data-testid="help-menu"]')).toBeInstanceOf(
+      HTMLButtonElement,
+    );
+    expect(
+      header
+        ?.querySelector('[data-testid="help-menu"]')
+        ?.getAttribute("aria-label"),
+    ).toBe("Help");
     expect(header?.textContent).not.toContain("Settings");
     expect(
       container.querySelector('[data-testid="runtime-settings"]'),

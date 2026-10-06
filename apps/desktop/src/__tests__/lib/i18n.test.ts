@@ -13,6 +13,16 @@ describe("translate", () => {
     expect(translate("zh", "chat.scrollToBottom")).toBe("跳到最新");
     expect(translate("en", "onboarding.skip")).toBe("Skip");
     expect(translate("en", "onboarding.getStarted")).toBe("Get started");
+    expect(translate("en", "help.takeTour")).toBe("Take a tour");
+    expect(translate("zh", "help.takeTour")).toBe("查看引导");
+    expect(translate("en", "help.menu")).toBe("Help");
+    expect(translate("zh", "help.menu")).toBe("帮助");
+    expect(translate("en", "help.tourNeedsProject")).toBe(
+      "Open a project to take the tour.",
+    );
+    expect(translate("zh", "help.tourNeedsProject")).toBe(
+      "打开项目后可查看引导",
+    );
     expect(translate("en", "chrome.outline")).toBe("Outline");
     expect(translate("zh", "chrome.outline")).toBe("大纲");
     expect(translate("en", "chrome.environment")).toBe("Environment");
