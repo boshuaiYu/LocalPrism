@@ -6,6 +6,7 @@
 //! credentials.
 
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -65,6 +66,108 @@ pub(crate) fn log_panel(model: &str, usage: &Value) {
     write_record(model, seq, "panel", &usage);
 }
 
+const INPUT_ITEMS_HASHED: usize = 8;
+
+/// Hash the upstream Responses body and the header names before the call.
+/// The line is metadata only: no instructions, tool text, input text, or
+/// credential values. Session and thread ids are the exception, because the
+/// next device run has to show whether the cache key moved.
+pub(crate) fn log_codex_request(
+    model: &str,
+    instructions: Option<&str>,
+    tools: Option<&Value>,
+    input: &[Value],
+    prompt_cache_key: &str,
+    prompt_cache_key_origin: &str,
+    headers: &[(String, String)],
+    subagent: bool,
+) {
+    if !enabled() {
+        return;
+    }
+    let tool_list = tools.and_then(Value::as_array);
+    let mut tool_hashes = Vec::new();
+    if let Some(tools) = tool_list {
+        for tool in tools {
+            let name = tool
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .chars()
+                .take(128)
+                .collect::<String>();
+            tool_hashes.push(json!({
+                "name": name,
+                "sha256": sha256_hex(tool.to_string().as_bytes()),
+            }));
+        }
+    }
+    let hashed = input.len().min(INPUT_ITEMS_HASHED);
+    let input_sha256: Vec<String> = input
+        .iter()
+        .take(hashed)
+        .map(|item| sha256_hex(item.to_string().as_bytes()))
+        .collect();
+    let mut header_names = Vec::new();
+    let mut session_id = None;
+    let mut thread_id = None;
+    for (name, value) in headers {
+        header_names.push(name.clone());
+        match name.to_ascii_lowercase().as_str() {
+            "session-id" | "session_id" => session_id = Some(bound_id(value)),
+            "thread-id" | "conversation-id" | "conversation_id" => {
+                thread_id = Some(bound_id(value));
+            }
+            _ => {}
+        }
+    }
+    let request = json!({
+        "instructions_sha256": sha256_hex(instructions.unwrap_or("").as_bytes()),
+        "tools_sha256": sha256_hex(tools.map(Value::to_string).unwrap_or_default().as_bytes()),
+        "tools": tool_hashes,
+        "input_sha256": input_sha256,
+        "input_items_hashed": hashed,
+        "input_items": input.len(),
+        "prompt_cache_key": bound_id(prompt_cache_key),
+        "prompt_cache_key_origin": prompt_cache_key_origin,
+        "headers": header_names,
+        "session_id": session_id,
+        "thread_id": thread_id,
+        "subagent": subagent,
+    });
+    let seq = next_seq();
+    write_request(model, seq, &request);
+}
+
+fn bound_id(value: &str) -> String {
+    value.trim().chars().take(128).collect()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn write_request(model: &str, seq: u64, request: &Value) {
+    let record = json!({
+        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "model": bounded_model(model),
+        "seq": seq,
+        "stage": "request",
+        "request": request,
+    });
+    let Ok(line) = serde_json::to_string(&record) else {
+        return;
+    };
+    append_line(&line);
+}
+
 fn next_seq() -> u64 {
     SEQ.fetch_add(1, Ordering::Relaxed) + 1
 }
@@ -80,6 +183,10 @@ fn write_record(model: &str, seq: u64, stage: &str, usage: &Value) {
     let Ok(line) = serde_json::to_string(&record) else {
         return;
     };
+    append_line(&line);
+}
+
+fn append_line(line: &str) {
     let Ok(home) = crate::providers::paths::localprism_home() else {
         return;
     };
@@ -301,5 +408,72 @@ mod tests {
         assert_eq!(panel["usage"]["cacheReadTokens"], 170000);
         assert!(panel["usage"].get("prompt").is_none());
         assert!(upstream["ts"].as_str().unwrap().contains('T'));
+    }
+
+    #[test]
+    fn request_stage_logs_hashes_and_session_ids_only() {
+        let _lock = lock_provider_env();
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvRestore::set(home.path());
+        let _force = ForceRestore;
+        force_for_test(Some(true));
+        reset_seq_for_test();
+
+        let instructions = "SECRET system prompt. Do not log this.";
+        let tools = json!([{
+            "name": "Read",
+            "description": "SECRET tool description",
+            "parameters": { "type": "object" }
+        }]);
+        let input = vec![json!({
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "SECRET user turn" }]
+        })];
+        log_codex_request(
+            "gpt-6-luna",
+            Some(instructions),
+            Some(&tools),
+            &input,
+            "sess_abc",
+            "body",
+            &[
+                ("Authorization".into(), "Bearer sk-live-secret".into()),
+                ("Content-Type".into(), "application/json".into()),
+                ("session-id".into(), "sess_abc".into()),
+                ("thread-id".into(), "sess_abc".into()),
+                ("x-client-request-id".into(), "sess_abc".into()),
+                ("ChatGPT-Account-Id".into(), "acct_secret".into()),
+                ("x-codex-turn-state".into(), "turn-secret".into()),
+            ],
+            false,
+        );
+
+        let text = std::fs::read_to_string(log_path(home.path())).unwrap();
+        assert!(!text.contains("SECRET"));
+        assert!(!text.contains("sk-live"));
+        assert!(!text.contains("Bearer"));
+        assert!(!text.contains("acct_secret"));
+        assert!(!text.contains("turn-secret"));
+        let record: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(record["stage"], "request");
+        assert_eq!(record["seq"], 1);
+        assert_eq!(record["request"]["prompt_cache_key"], "sess_abc");
+        assert_eq!(record["request"]["prompt_cache_key_origin"], "body");
+        assert_eq!(record["request"]["session_id"], "sess_abc");
+        assert_eq!(record["request"]["thread_id"], "sess_abc");
+        assert_eq!(record["request"]["subagent"], false);
+        assert_eq!(record["request"]["input_items"], 1);
+        assert_eq!(record["request"]["input_items_hashed"], 1);
+        assert_eq!(record["request"]["tools"][0]["name"], "Read");
+        let instructions_hash = record["request"]["instructions_sha256"].as_str().unwrap();
+        assert_eq!(instructions_hash.len(), 64);
+        assert_ne!(
+            record["request"]["tools"][0]["sha256"].as_str().unwrap(),
+            instructions_hash
+        );
+        let names = record["request"]["headers"].as_array().unwrap();
+        assert!(names.iter().any(|name| name == "Authorization"));
+        assert!(names.iter().any(|name| name == "session-id"));
+        assert!(names.iter().any(|name| name == "x-codex-turn-state"));
     }
 }

@@ -49,6 +49,71 @@ pub fn register_slot() -> u64 {
     id
 }
 
+/// Root conversation requests update the turn slot. A sub-agent (Task tool,
+/// teammate) shares the proxy and must not overwrite the root `result.usage`.
+///
+/// Claude Code marks those requests with an agent id header or with
+/// `agent_id` / `parent_tool_use_id` on the body or its metadata. Message
+/// text is not scanned.
+pub fn subagent_marker(header_agent_id: Option<&str>, body: &Value) -> Option<String> {
+    if let Some(marker) = header_agent_id.and_then(non_empty_text) {
+        return Some(marker);
+    }
+    agent_id_in(body)
+        .or_else(|| body.get("metadata").and_then(agent_id_in))
+        .or_else(|| marker_in_user_id(body.get("user_id")))
+        .or_else(|| {
+            body.get("metadata")
+                .and_then(|value| marker_in_user_id(value.get("user_id")))
+        })
+        .or_else(|| parent_tool_in(body))
+        .or_else(|| body.get("metadata").and_then(parent_tool_in))
+}
+
+fn agent_id_in(value: &Value) -> Option<String> {
+    field_in(value, &["agent_id", "agentId"])
+}
+
+fn parent_tool_in(value: &Value) -> Option<String> {
+    field_in(value, &["parent_tool_use_id", "parentToolUseId"])
+}
+
+fn field_in(value: &Value, keys: &[&str]) -> Option<String> {
+    let object = value.as_object()?;
+    for key in keys {
+        if let Some(marker) = object
+            .get(*key)
+            .and_then(Value::as_str)
+            .and_then(non_empty_text)
+        {
+            return Some(marker);
+        }
+    }
+    None
+}
+
+fn marker_in_user_id(value: Option<&Value>) -> Option<String> {
+    let text = value?.as_str()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if text.starts_with('{') {
+        if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+            return agent_id_in(&parsed).or_else(|| parent_tool_in(&parsed));
+        }
+    }
+    None
+}
+
+fn non_empty_text(value: &str) -> Option<String> {
+    let text = value.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
 pub fn record(slot: u64, usage: CodexRequestUsage) {
     if slot == 0 {
         return;
@@ -197,5 +262,72 @@ mod tests {
             .any(|(key, value)| key == "ANTHROPIC_BASE_URL" && value.is_some()));
         drop(guard);
         assert!(last(slot).is_none());
+    }
+
+    #[test]
+    fn interleaved_subagent_request_does_not_overwrite_root_usage() {
+        let slot = register_slot();
+        let root = json!({
+            "metadata": { "user_id": "{\"session_id\":\"sess_abc\"}" },
+            "messages": [{ "role": "user", "content": "Read main.tex" }]
+        });
+        let subagent = json!({
+            "metadata": {
+                "user_id": "{\"session_id\":\"sess_abc\",\"agent_id\":\"writer\"}",
+                "parent_tool_use_id": "toolu_sub"
+            },
+            "messages": [{ "role": "user", "content": "parent_tool_use_id is only metadata" }]
+        });
+        assert!(subagent_marker(None, &root).is_none());
+        assert_eq!(
+            subagent_marker(Some("writer"), &root).as_deref(),
+            Some("writer")
+        );
+        assert_eq!(subagent_marker(None, &subagent).as_deref(), Some("writer"));
+
+        let record_root = |usage: CodexRequestUsage, body: &Value, header: Option<&str>| {
+            if subagent_marker(header, body).is_none() {
+                record(slot, usage);
+            }
+        };
+        record_root(
+            CodexRequestUsage {
+                input_tokens: 18_894,
+                output_tokens: 32,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            },
+            &root,
+            None,
+        );
+        record_root(
+            CodexRequestUsage {
+                input_tokens: 99_999,
+                output_tokens: 10,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            },
+            &subagent,
+            Some("writer"),
+        );
+        record_root(
+            CodexRequestUsage {
+                input_tokens: 22_400,
+                output_tokens: 63,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            },
+            &root,
+            None,
+        );
+
+        let line = r#"{"type":"result","usage":{"input_tokens":41300,"output_tokens":95,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#;
+        let rewritten = rewrite_result_line(line, slot).expect("rewrite");
+        let value: Value = serde_json::from_str(&rewritten).expect("json");
+        assert_eq!(value["usage"]["input_tokens"], 22_400);
+        assert_eq!(value["usage"]["output_tokens"], 63);
+        assert_ne!(value["usage"]["input_tokens"], 99_999);
+        assert_ne!(value["usage"]["input_tokens"], 41_300);
+        drop_slot(slot);
     }
 }

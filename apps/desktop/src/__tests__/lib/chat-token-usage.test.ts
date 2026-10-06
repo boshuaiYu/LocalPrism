@@ -430,7 +430,22 @@ describe("chat token usage", () => {
     expect(meter.percent).toBe(8);
   });
 
-  it("uses the last request in a multi-request turn instead of the summed usage", () => {
+  it("shows the rewritten result usage instead of the summed turn", () => {
+    // Device run: one turn, two upstream calls (18,894 then 22,400). Claude's
+    // raw result.usage is the sum. These assistant messages carry no usage, so
+    // the meter can only display result.usage. The proxy rewrite is what
+    // replaces the sum with the last call before this fixture exists. Leaving
+    // the sum in result.usage fails the assertion below.
+    const lastRequest = {
+      input_tokens: 22_400,
+      output_tokens: 63,
+      cache_read_input_tokens: 0,
+    };
+    const summedResult = {
+      input_tokens: 18_894 + 22_400,
+      output_tokens: 32 + 63,
+      cache_read_input_tokens: 0,
+    };
     const meter = buildTokenMeterModel({
       modelLabel: "gpt-6-luna",
       windowTokens: 272_000,
@@ -438,52 +453,33 @@ describe("chat token usage", () => {
         { type: "user" },
         {
           type: "assistant",
-          message: {
-            usage: {
-              input_tokens: 18_898,
-              output_tokens: 20,
-              cache_read_input_tokens: 0,
-            },
-          },
+          message: { content: [{ type: "text", text: "calling a tool" }] },
         },
         { type: "user" },
         {
           type: "assistant",
-          message: {
-            usage: {
-              input_tokens: 19_731,
-              output_tokens: 222,
-              cache_read_input_tokens: 0,
-            },
-          },
+          message: { content: [{ type: "text", text: "done" }] },
         },
-        { type: "user" },
-        {
-          type: "assistant",
-          message: {
-            usage: {
-              input_tokens: 23_242,
-              output_tokens: 148,
-              cache_read_input_tokens: 0,
-            },
-          },
-        },
-        {
-          type: "result",
-          usage: {
-            input_tokens: 61_871,
-            output_tokens: 390,
-            cache_read_input_tokens: 0,
-          },
-        },
+        { type: "result", usage: lastRequest },
       ],
     });
-    expect(meter.inputTokens).toBe(23_242);
-    expect(meter.outputTokens).toBe(148);
+    expect(meter.inputTokens).toBe(lastRequest.input_tokens);
+    expect(meter.outputTokens).toBe(lastRequest.output_tokens);
     expect(meter.cacheReadTokens).toBe(0);
-    expect(meter.usedTokens).toBe(23_390);
-    expect(meter.inputTokens).not.toBe(61_871);
-    expect(meter.outputTokens).not.toBe(390);
+    expect(meter.usedTokens).toBe(22_463);
+    expect(meter.inputTokens).not.toBe(summedResult.input_tokens);
+    expect(meter.outputTokens).not.toBe(summedResult.output_tokens);
+
+    const unrewritten = buildTokenMeterModel({
+      modelLabel: "gpt-6-luna",
+      windowTokens: 272_000,
+      messages: [
+        { type: "assistant", message: { content: [] } },
+        { type: "result", usage: summedResult },
+      ],
+    });
+    expect(unrewritten.inputTokens).toBe(summedResult.input_tokens);
+    expect(unrewritten.outputTokens).toBe(summedResult.output_tokens);
   });
 
   it("ignores subagent usage when measuring the root context", () => {

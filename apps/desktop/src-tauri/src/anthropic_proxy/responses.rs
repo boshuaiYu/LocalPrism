@@ -1,8 +1,10 @@
 use crate::providers::openai_oauth::{
     OPENAI_CODEX_API_ENDPOINT, OPENAI_CODEX_ORIGINATOR, OPENAI_CODEX_USER_AGENT,
 };
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 
 #[derive(Clone, Debug)]
 pub struct CodexProxyCredential {
@@ -13,6 +15,13 @@ pub struct CodexProxyCredential {
     pub effort: Option<String>,
     /// Per Claude spawn. `0` does not record request usage.
     pub usage_slot: u64,
+}
+
+pub struct PreparedCodexRequest {
+    pub body: Value,
+    /// `header`, `body`, or `fallback`. Debug logs only; not sent upstream.
+    pub cache_key_origin: &'static str,
+    pub subagent: bool,
 }
 
 pub fn anthropic_to_codex_responses(
@@ -27,9 +36,19 @@ pub fn anthropic_to_codex_responses_for_session(
     credential: &CodexProxyCredential,
     header_session: Option<&str>,
 ) -> Result<Value, String> {
-    let mut request = request.clone();
-    super::messages::hoist_anthropic_system_messages(&mut request);
+    Ok(prepare_codex_request(request, credential, header_session, None)?.body)
+}
 
+pub fn prepare_codex_request(
+    request: &Value,
+    credential: &CodexProxyCredential,
+    header_session: Option<&str>,
+    header_agent_id: Option<&str>,
+) -> Result<PreparedCodexRequest, String> {
+    // Leave mid-transcript system/developer turns in `messages`. Hoisting them
+    // into `instructions` changes the cached prefix when a skill or ToolSearch
+    // block appears later in the conversation.
+    let subagent_marker = crate::codex_turn_usage::subagent_marker(header_agent_id, request);
     let instructions = flatten_text(request.get("system")).and_then(|system| {
         if system.trim().is_empty() {
             return None;
@@ -53,13 +72,29 @@ pub fn anthropic_to_codex_responses_for_session(
     }
 
     let mut tools = Vec::new();
+    let mut dynamic_notes = Vec::new();
     if let Some(raw_tools) = request.get("tools").and_then(Value::as_array) {
         tools = raw_tools
             .iter()
             .filter_map(anthropic_tool_to_function)
             .collect();
         for tool in &mut tools {
+            let name = tool
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("tool")
+                .to_string();
+            if let Some(description) = tool.get("description").and_then(Value::as_str) {
+                let (stable, notes) = peel_dynamic_tool_text(description);
+                tool["description"] = Value::String(stable);
+                dynamic_notes.extend(notes.into_iter().map(|note| format!("{name}: {note}")));
+            }
+            if let Some(parameters) = tool.get_mut("parameters") {
+                dynamic_notes.extend(detach_dynamic_enums(&name, parameters));
+                peel_dynamic_schema_text(parameters, &name, &mut dynamic_notes);
+            }
             stabilize_value_strings(tool, &["name"]);
+            canonicalize_json(tool);
         }
         tools.sort_by(|left, right| {
             let left_name = left.get("name").and_then(Value::as_str).unwrap_or("");
@@ -69,14 +104,29 @@ pub fn anthropic_to_codex_responses_for_session(
                 .then_with(|| left.to_string().cmp(&right.to_string()))
         });
     }
+    dynamic_notes.sort();
+    dynamic_notes.dedup();
+    if !dynamic_notes.is_empty() {
+        let note = stabilize_prompt_text(&dynamic_notes.join("\n"));
+        let note = note.trim();
+        if !note.is_empty() {
+            // Stable position: a change here does not rewrite `tools` or
+            // `instructions`, which are the bytes the cache has to reuse.
+            input.insert(0, developer_input(note));
+        }
+    }
 
-    let cache_key = prompt_cache_key(
-        &request,
+    let (cache_key, cache_key_origin) = prompt_cache_key(
+        request,
         header_session,
         instructions.as_deref().unwrap_or(""),
         &tools,
         &input,
     );
+    let cache_key = match subagent_marker.as_deref() {
+        Some(marker) => sanitize_cache_key(&format!("{cache_key}_agent_{marker}")),
+        None => cache_key,
+    };
 
     let mut body = json!({
         "model": credential.model,
@@ -95,7 +145,11 @@ pub fn anthropic_to_codex_responses_for_session(
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools);
     }
-    Ok(body)
+    Ok(PreparedCodexRequest {
+        body,
+        cache_key_origin,
+        subagent: subagent_marker.is_some(),
+    })
 }
 
 fn flatten_text(value: Option<&Value>) -> Option<String> {
@@ -123,15 +177,7 @@ fn append_input_for_message(input: &mut Vec<Value>, message: &Value) {
         .and_then(Value::as_str)
         .unwrap_or("user");
     match message.get("content") {
-        Some(Value::String(text)) => {
-            input.push(json!({
-                "role": if role == "assistant" { "assistant" } else { "user" },
-                "content": [{
-                    "type": if role == "assistant" { "output_text" } else { "input_text" },
-                    "text": text,
-                }],
-            }));
-        }
+        Some(Value::String(text)) => push_role_text(input, role, text),
         Some(Value::Array(blocks)) => {
             let mut texts = Vec::new();
             for block in blocks {
@@ -162,17 +208,41 @@ fn append_input_for_message(input: &mut Vec<Value>, message: &Value) {
                 }
             }
             if !texts.is_empty() {
-                input.push(json!({
-                    "role": if role == "assistant" { "assistant" } else { "user" },
-                    "content": [{
-                        "type": if role == "assistant" { "output_text" } else { "input_text" },
-                        "text": texts.join("\n"),
-                    }],
-                }));
+                push_role_text(input, role, &texts.join("\n"));
             }
         }
         _ => {}
     }
+}
+
+fn push_role_text(input: &mut Vec<Value>, role: &str, text: &str) {
+    let text = if role == "system" || role == "developer" {
+        stabilize_prompt_text(text)
+    } else {
+        text.to_string()
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    let (wire_role, content_type) = if role == "assistant" {
+        ("assistant", "output_text")
+    } else if role == "system" || role == "developer" {
+        ("developer", "input_text")
+    } else {
+        ("user", "input_text")
+    };
+    input.push(json!({
+        "role": wire_role,
+        "content": [{ "type": content_type, "text": text }],
+    }));
+}
+
+fn developer_input(text: &str) -> Value {
+    json!({
+        "role": "developer",
+        "content": [{ "type": "input_text", "text": text }],
+    })
 }
 
 fn anthropic_tool_to_function(tool: &Value) -> Option<Value> {
@@ -199,22 +269,27 @@ fn anthropic_tool_to_function(tool: &Value) -> Option<Value> {
 
 /// ChatGPT Codex sticks a conversation to one cache server with this key.
 /// It must be the Claude Code session id, never a fresh random value.
+/// The origin is `header`, `body`, or `fallback` for the debug log.
 fn prompt_cache_key(
     request: &Value,
     header_session: Option<&str>,
     instructions: &str,
     tools: &[Value],
     input: &[Value],
-) -> String {
+) -> (String, &'static str) {
     if let Some(session) = header_session
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .or_else(|| session_id_from_request(request))
     {
-        return sanitize_cache_key(&session);
+        return (sanitize_cache_key(session), "header");
     }
-    fallback_prompt_cache_key(instructions, tools, input)
+    if let Some(session) = session_id_from_request(request) {
+        return (sanitize_cache_key(&session), "body");
+    }
+    (
+        fallback_prompt_cache_key(instructions, tools, input),
+        "fallback",
+    )
 }
 
 fn session_id_from_request(request: &Value) -> Option<String> {
@@ -335,6 +410,10 @@ fn stabilize_instructions(text: &str) -> String {
 
 /// Drop per-request tokens from the cached prefix. Conversation input is left
 /// alone so tool ids and user text stay append-only.
+///
+/// An ISO timestamp keeps its calendar date (`2026-10-06`) and loses only the
+/// time and zone (`T09:10:09Z`). The date is part of what the model should
+/// know; the clock is what changes between requests.
 fn stabilize_prompt_text(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let bytes = input.as_bytes();
@@ -342,6 +421,12 @@ fn stabilize_prompt_text(input: &str) -> String {
     while index < bytes.len() {
         let previous_is_hex = index > 0 && bytes[index - 1].is_ascii_hexdigit();
         if !previous_is_hex {
+            if let Some(skip) = iso_time_suffix_len(&input[index..]) {
+                let date_end = index + 10;
+                out.push_str(&input[index..date_end]);
+                index = date_end + skip;
+                continue;
+            }
             if let Some(len) = volatile_span_len(&input[index..]) {
                 index += len;
                 continue;
@@ -357,9 +442,7 @@ fn stabilize_prompt_text(input: &str) -> String {
 }
 
 fn volatile_span_len(text: &str) -> Option<usize> {
-    uuid_len(text)
-        .or_else(|| iso_datetime_len(text))
-        .or_else(|| clock_time_len(text))
+    uuid_len(text).or_else(|| clock_time_len(text))
 }
 
 fn uuid_len(text: &str) -> Option<usize> {
@@ -386,7 +469,9 @@ fn uuid_len(text: &str) -> Option<usize> {
     Some(index)
 }
 
-fn iso_datetime_len(text: &str) -> Option<usize> {
+/// Length of the time/zone tail after a leading `YYYY-MM-DD`. `None` when the
+/// text is not an ISO timestamp, so a bare calendar date stays put.
+fn iso_time_suffix_len(text: &str) -> Option<usize> {
     let bytes = text.as_bytes();
     if bytes.len() < 19 {
         return None;
@@ -418,7 +503,7 @@ fn iso_datetime_len(text: &str) -> Option<usize> {
     } else if matches!(bytes.get(index), Some(b'+' | b'-')) {
         index = timezone_end(bytes, index);
     }
-    Some(index)
+    Some(index - 10)
 }
 
 fn timezone_end(bytes: &[u8], index: usize) -> usize {
@@ -1101,7 +1186,242 @@ pub fn parse_sse_block(block: &str) -> Option<(String, Value)> {
     Some((event, value))
 }
 
-pub fn responses_headers(credential: &CodexProxyCredential) -> Vec<(String, String)> {
+/// Claude Code embeds the live agent/skill list, cwd, and date in tool
+/// descriptions. That list is what changed the tools block by a few tokens
+/// between two calls in one turn (15,423 then 15,427). Official Claude Code
+/// keeps the tool description static and puts the list in a message so the
+/// tools prefix can cache. Do the same here.
+fn peel_dynamic_tool_text(text: &str) -> (String, Vec<String>) {
+    let (text, agent_list) = peel_headed_section(
+        text,
+        "Available agent types and the tools they have access to:",
+        "Available agent types are listed in messages in the conversation.",
+    );
+    let (text, short_agent_list) = if agent_list.is_none() {
+        peel_headed_section(
+            &text,
+            "Available agent types:",
+            "Available agent types are listed in messages in the conversation.",
+        )
+    } else {
+        (text, None)
+    };
+    let (text, skill_list) = peel_headed_section(
+        &text,
+        "Available skills:",
+        "Available skills are listed in messages in the conversation.",
+    );
+    let (text, lines) = peel_volatile_tool_lines(&text);
+    let mut notes = Vec::new();
+    if let Some(list) = agent_list.or(short_agent_list) {
+        notes.push(list);
+    }
+    if let Some(list) = skill_list {
+        notes.push(list);
+    }
+    notes.extend(lines);
+    (text, notes)
+}
+
+fn peel_headed_section(text: &str, header: &str, replacement: &str) -> (String, Option<String>) {
+    let Some(start) = text.find(header) else {
+        return (text.to_string(), None);
+    };
+    let after = start + header.len();
+    let rest = &text[after..];
+    let end = rest.find("\n\n").unwrap_or(rest.len());
+    let list = rest[..end].trim();
+    let mut stable = String::new();
+    stable.push_str(&text[..start]);
+    stable.push_str(replacement);
+    stable.push_str(&text[after + end..]);
+    let extracted = if list.is_empty() {
+        None
+    } else {
+        Some(format!("{header}\n{list}"))
+    };
+    (stable, extracted)
+}
+
+fn peel_volatile_tool_lines(text: &str) -> (String, Vec<String>) {
+    let mut kept = String::new();
+    let mut peeled = Vec::new();
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if is_volatile_tool_line(trimmed) {
+            if !trimmed.is_empty() {
+                peeled.push(trimmed.to_string());
+            }
+            continue;
+        }
+        kept.push_str(line);
+    }
+    (kept, peeled)
+}
+
+fn is_volatile_tool_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("current working directory")
+        || lower.starts_with("cwd:")
+        || lower.starts_with("cwd ")
+        || lower.contains("today's date")
+        || lower.contains("todays date")
+        || lower.starts_with("today is ")
+        || lower.starts_with("date:")
+}
+
+/// Agent and skill name enums grow when a plugin or skill loads. A four-token
+/// bump is enough to miss the whole tools prefix. The names move to the
+/// leading input note; the schema stays a plain string.
+fn detach_dynamic_enums(tool_name: &str, schema: &mut Value) -> Vec<String> {
+    let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) else {
+        return Vec::new();
+    };
+    let mut notes = Vec::new();
+    for key in ["subagent_type", "agent_type", "skill", "skill_name"] {
+        let Some(property) = properties.get_mut(key).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let Some(values) = property.get("enum").and_then(Value::as_array) else {
+            continue;
+        };
+        let names: Vec<&str> = values.iter().filter_map(Value::as_str).collect();
+        if names.is_empty() {
+            continue;
+        }
+        notes.push(format!("{tool_name}.{key}: {}", names.join(", ")));
+        property.remove("enum");
+    }
+    notes
+}
+
+fn peel_dynamic_schema_text(value: &mut Value, tool_name: &str, notes: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(text)) = map.get_mut("description") {
+                let (stable, peeled) = peel_dynamic_tool_text(text);
+                *text = stable;
+                notes.extend(
+                    peeled
+                        .into_iter()
+                        .map(|note| format!("{tool_name}: {note}")),
+                );
+            }
+            for (key, child) in map.iter_mut() {
+                if key == "description" {
+                    continue;
+                }
+                peel_dynamic_schema_text(child, tool_name, notes);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                peel_dynamic_schema_text(item, tool_name, notes);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn canonicalize_json(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<String> = map.keys().cloned().collect();
+            keys.sort();
+            let mut sorted = Map::new();
+            for key in keys {
+                if let Some(mut child) = map.remove(&key) {
+                    canonicalize_json(&mut child);
+                    sorted.insert(key, child);
+                }
+            }
+            *map = sorted;
+        }
+        Value::Array(items) => {
+            for item in items {
+                canonicalize_json(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+struct ThreadRoute {
+    turn_state: Option<String>,
+    item_hashes: Vec<String>,
+}
+
+static THREAD_ROUTES: LazyLock<Mutex<HashMap<String, ThreadRoute>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// `x-codex-turn-state` is a sticky routing token for requests inside one
+/// turn. Official Codex replays it only within the turn that received it.
+/// A tool loop extends the previous input with function calls and outputs;
+/// a new user message starts a turn and must not reuse the old token.
+pub fn codex_turn_state_for_request(cache_key: &str, input: &[Value]) -> Option<String> {
+    if cache_key.is_empty() {
+        return None;
+    }
+    let mut routes = THREAD_ROUTES.lock().unwrap_or_else(|err| err.into_inner());
+    let entry = routes.entry(cache_key.to_string()).or_insert(ThreadRoute {
+        turn_state: None,
+        item_hashes: Vec::new(),
+    });
+    let continuation = is_tool_continuation(&entry.item_hashes, input);
+    if !continuation {
+        entry.turn_state = None;
+    }
+    let turn_state = if continuation {
+        entry.turn_state.clone()
+    } else {
+        None
+    };
+    entry.item_hashes = input.iter().map(hash_json).collect();
+    turn_state
+}
+
+pub fn remember_codex_turn_state(cache_key: &str, state: &str) {
+    let state = state.trim();
+    if cache_key.is_empty() || state.is_empty() || state.len() > 512 {
+        return;
+    }
+    if state.chars().any(|ch| ch.is_control()) {
+        return;
+    }
+    let mut routes = THREAD_ROUTES.lock().unwrap_or_else(|err| err.into_inner());
+    let entry = routes.entry(cache_key.to_string()).or_insert(ThreadRoute {
+        turn_state: None,
+        item_hashes: Vec::new(),
+    });
+    entry.turn_state = Some(state.to_string());
+}
+
+fn is_tool_continuation(previous: &[String], input: &[Value]) -> bool {
+    if previous.is_empty() || input.len() <= previous.len() {
+        return false;
+    }
+    for (index, hash) in previous.iter().enumerate() {
+        if &hash_json(&input[index]) != hash {
+            return false;
+        }
+    }
+    input[previous.len()..].iter().all(|item| {
+        matches!(
+            item.get("type").and_then(Value::as_str),
+            Some("function_call") | Some("function_call_output")
+        )
+    })
+}
+
+fn hash_json(value: &Value) -> String {
+    sha256_hex(value.to_string().as_bytes())
+}
+
+pub fn responses_headers(
+    credential: &CodexProxyCredential,
+    session_id: Option<&str>,
+    turn_state: Option<&str>,
+) -> Vec<(String, String)> {
     let mut headers = vec![
         (
             "Authorization".into(),
@@ -1114,6 +1434,18 @@ pub fn responses_headers(credential: &CodexProxyCredential) -> Vec<(String, Stri
     ];
     if let Some(account_id) = credential.account_id.as_deref() {
         headers.push(("ChatGPT-Account-Id".into(), account_id.to_string()));
+    }
+    // Codex routes prompt cache with the conversation id on both session and
+    // thread headers, and sets `x-client-request-id` to that same thread id
+    // (not a fresh id per HTTP call). Underscore spellings were removed
+    // upstream because some proxies reject them.
+    if let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) {
+        headers.push(("session-id".into(), session_id.to_string()));
+        headers.push(("thread-id".into(), session_id.to_string()));
+        headers.push(("x-client-request-id".into(), session_id.to_string()));
+    }
+    if let Some(turn_state) = turn_state.map(str::trim).filter(|value| !value.is_empty()) {
+        headers.push(("x-codex-turn-state".into(), turn_state.to_string()));
     }
     let _ = OPENAI_CODEX_API_ENDPOINT;
     headers
@@ -1695,7 +2027,7 @@ mod tests {
         .expect("second");
         let again = anthropic_to_codex_responses(
             &json!({
-                "system": "Stable instructions. 33333333-3333-3333-3333-333333333333 09:12:13",
+                "system": "Stable instructions. 33333333-3333-3333-3333-333333333333 2026-10-06T09:12:13Z",
                 "messages": [{"role": "user", "content": "Read main.tex"}],
             }),
             &credential,
@@ -1720,5 +2052,231 @@ mod tests {
         let prefix = first["input"].as_array().expect("input");
         let next = second["input"].as_array().expect("input");
         assert_eq!(&next[..prefix.len()], prefix.as_slice());
+        let instructions = first["instructions"].as_str().expect("instructions");
+        assert!(instructions.contains("2026-10-06"));
+        assert!(!instructions.contains("T09"));
+    }
+
+    #[test]
+    fn iso_timestamp_keeps_the_calendar_date_without_a_today_line() {
+        let credential = cache_credential();
+        let body = anthropic_to_codex_responses(
+            &json!({
+                "system": "Session opened 2026-10-06T09:10:09.945Z. Clock 09:10:09.",
+                "messages": [{"role": "user", "content": "Hi"}],
+            }),
+            &credential,
+        )
+        .expect("body");
+        let instructions = body["instructions"].as_str().expect("instructions");
+        assert!(instructions.contains("2026-10-06"));
+        assert!(instructions.contains("Session opened"));
+        assert!(!instructions.contains("T09"));
+        assert!(!instructions.contains("09:10:09"));
+        assert!(!instructions.contains(".945"));
+    }
+
+    #[test]
+    fn later_system_messages_stay_in_input() {
+        let credential = cache_credential();
+        let base = json!({
+            "system": "You are a writer.",
+            "messages": [{"role": "user", "content": "Read main.tex"}],
+        });
+        let with_skill = json!({
+            "system": "You are a writer.",
+            "messages": [
+                {"role": "user", "content": "Read main.tex"},
+                {"role": "system", "content": "ToolSearch context.\nSkill: nature-writing.\nLoaded 2026-10-06T09:10:09Z."},
+                {"role": "user", "content": "Use the skill"}
+            ],
+        });
+        let first = anthropic_to_codex_responses(&base, &credential).expect("first");
+        let second = anthropic_to_codex_responses(&with_skill, &credential).expect("second");
+        assert_eq!(second["instructions"], first["instructions"]);
+        let instructions = first["instructions"].as_str().unwrap();
+        assert!(instructions.contains("You are a writer."));
+        assert!(!instructions.contains("ToolSearch"));
+        assert!(!second["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("ToolSearch"));
+        let input = second["input"].as_array().expect("input");
+        let note = input
+            .iter()
+            .find(|item| item.get("role").and_then(Value::as_str) == Some("developer"))
+            .expect("skill note");
+        let text = note
+            .pointer("/content/0/text")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(text.contains("ToolSearch context."));
+        assert!(text.contains("nature-writing"));
+        assert!(text.contains("2026-10-06"));
+        assert!(!text.contains("T09"));
+        let prefix = first["input"].as_array().unwrap();
+        assert_eq!(&input[..prefix.len()], prefix.as_slice());
+    }
+
+    #[test]
+    fn dynamic_agent_list_leaves_the_tools_prefix_unchanged() {
+        let credential = cache_credential();
+        let description = |agents: &str| {
+            format!(
+                "Launch a new agent.\n\nAvailable agent types and the tools they have access to:\n{agents}\n\nWhen using the Agent tool, specify a subagent_type.\nToday's date is 2026-10-06T09:10:09Z.\nCurrent working directory: /tmp/paper"
+            )
+        };
+        let request = |agents: &str, skills: &[&str]| {
+            json!({
+                "system": "You are a writer.",
+                "metadata": { "user_id": "{\"session_id\":\"sess_tools\"}" },
+                "messages": [{"role": "user", "content": "Read main.tex"}],
+                "tools": [{
+                    "name": "Agent",
+                    "description": description(agents),
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "subagent_type": {
+                                "type": "string",
+                                "enum": skills,
+                                "description": "Which agent to run"
+                            }
+                        }
+                    }
+                }, {
+                    "name": "Skill",
+                    "description": "Run a skill.\n\nAvailable skills:\n- nature-writing: papers\n- de-ai: polish",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "skill": { "type": "string", "enum": ["nature-writing", "de-ai"] }
+                        }
+                    }
+                }]
+            })
+        };
+        let first = anthropic_to_codex_responses(
+            &request("- Explore: search (Tools: Read)", &["Explore"]),
+            &credential,
+        )
+        .expect("first");
+        let second = anthropic_to_codex_responses(
+            &request(
+                "- Explore: search (Tools: Read, Glob)\n- writer: draft (Tools: *)",
+                &["Explore", "writer"],
+            ),
+            &credential,
+        )
+        .expect("second");
+        assert_eq!(first["tools"].to_string(), second["tools"].to_string());
+        let tools = first["tools"].to_string();
+        assert!(!tools.contains("Explore"));
+        assert!(!tools.contains("writer"));
+        assert!(!tools.contains("nature-writing"));
+        assert!(!tools.contains("/tmp/paper"));
+        assert!(!tools.contains("2026-10-06T09"));
+        assert!(tools.contains("listed in messages"));
+        let note = first["input"][0]
+            .pointer("/content/0/text")
+            .and_then(Value::as_str)
+            .unwrap();
+        let note_again = second["input"][0]
+            .pointer("/content/0/text")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(note.contains("Explore"));
+        assert!(note.contains("/tmp/paper"));
+        assert!(note.contains("2026-10-06"));
+        assert!(!note.contains("T09"));
+        assert!(note_again.contains("writer"));
+        assert_ne!(note, note_again);
+        assert_eq!(first["instructions"], second["instructions"]);
+    }
+
+    #[test]
+    fn subagent_requests_do_not_share_the_root_cache_key() {
+        let credential = cache_credential();
+        let root = json!({
+            "system": "You are a writer.",
+            "metadata": { "user_id": "{\"session_id\":\"sess_root\"}" },
+            "messages": [{"role": "user", "content": "Read main.tex"}],
+        });
+        let subagent = json!({
+            "system": "You are a writer.",
+            "metadata": {
+                "parent_tool_use_id": "toolu_sub",
+                "user_id": "{\"session_id\":\"sess_root\"}"
+            },
+            "messages": [{"role": "user", "content": "Look at one file"}],
+        });
+        let root_body = prepare_codex_request(&root, &credential, None, None).expect("root");
+        let sub_body =
+            prepare_codex_request(&subagent, &credential, None, Some("writer")).expect("sub");
+        assert!(!root_body.subagent);
+        assert!(sub_body.subagent);
+        assert_eq!(root_body.cache_key_origin, "body");
+        assert_ne!(
+            root_body.body["prompt_cache_key"],
+            sub_body.body["prompt_cache_key"]
+        );
+        assert!(root_body.body["prompt_cache_key"]
+            .as_str()
+            .unwrap()
+            .contains("sess_root"));
+    }
+
+    #[test]
+    fn session_headers_follow_the_codex_client_and_turn_state_stays_in_the_turn() {
+        let credential = CodexProxyCredential {
+            access_token: "token".into(),
+            refresh_token: None,
+            account_id: Some("acct_1".into()),
+            model: "gpt-6-luna".into(),
+            effort: None,
+            usage_slot: 0,
+        };
+        let cold = responses_headers(&credential, Some("sess_abc"), None);
+        assert!(cold
+            .iter()
+            .any(|(key, value)| key == "session-id" && value == "sess_abc"));
+        assert!(cold
+            .iter()
+            .any(|(key, value)| key == "thread-id" && value == "sess_abc"));
+        assert!(cold
+            .iter()
+            .any(|(key, value)| key == "x-client-request-id" && value == "sess_abc"));
+        assert!(cold
+            .iter()
+            .any(|(key, value)| key == "originator" && value == "codex_cli_rs"));
+        assert!(cold
+            .iter()
+            .any(|(key, value)| key == "OpenAI-Beta" && value == "responses=experimental"));
+        assert!(cold
+            .iter()
+            .any(|(key, value)| key == "ChatGPT-Account-Id" && value == "acct_1"));
+        assert!(!cold.iter().any(|(key, _)| key == "x-codex-turn-state"));
+        assert!(!cold.iter().any(|(key, _)| key == "session_id"));
+
+        let cache_key = "sess_turn_state_test";
+        let first = [json!({"role": "user", "content": [{"type": "input_text", "text": "hi"}]})];
+        assert!(codex_turn_state_for_request(cache_key, &first).is_none());
+        remember_codex_turn_state(cache_key, "turn-token");
+        let continued = [
+            first[0].clone(),
+            json!({"type": "function_call", "call_id": "call_1", "name": "Read", "arguments": "{}"}),
+            json!({"type": "function_call_output", "call_id": "call_1", "output": "body"}),
+        ];
+        assert_eq!(
+            codex_turn_state_for_request(cache_key, &continued).as_deref(),
+            Some("turn-token")
+        );
+        let new_turn = [
+            first[0].clone(),
+            json!({"type": "function_call", "call_id": "call_1", "name": "Read", "arguments": "{}"}),
+            json!({"type": "function_call_output", "call_id": "call_1", "output": "body"}),
+            json!({"role": "user", "content": [{"type": "input_text", "text": "next"}]}),
+        ];
+        assert!(codex_turn_state_for_request(cache_key, &new_turn).is_none());
     }
 }
