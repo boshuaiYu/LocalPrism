@@ -349,7 +349,9 @@ function ThirdPartySection({
             </div>
           )}
           <label className="block space-y-1">
-            <span className="text-lp-meta text-xs">{t("providers.apiFormat")}</span>
+            <span className="text-lp-meta text-xs">
+              {t("providers.apiFormat")}
+            </span>
             <select
               data-testid="provider-api-format"
               className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"

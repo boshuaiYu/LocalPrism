@@ -992,7 +992,9 @@ impl ResponsesToAnthropic {
     }
 
     pub fn handle_event(&mut self, event_name: &str, data: &Value) -> String {
-        if self.provider_mode && self.finished {
+        // Completed and failed streams ignore late events, including a trailing
+        // `response.failed`. Unfinished Official and third-party streams still fail.
+        if self.finished {
             return String::new();
         }
         let event_name = resolve_codex_event_name(event_name, data);
@@ -1002,6 +1004,7 @@ impl ResponsesToAnthropic {
             {
                 if let Some(id) = data
                     .pointer("/response/id")
+                    .or_else(|| data.get("id"))
                     .and_then(Value::as_str)
                     .filter(|id| !id.is_empty())
                 {
@@ -1024,9 +1027,13 @@ impl ResponsesToAnthropic {
                 let text = data.get("text").and_then(Value::as_str).unwrap_or("");
                 self.emit_text_delta(text)
             }
-            "response.reasoning_summary_text.delta"
-            | "response.reasoning_summary.delta"
-            | "response.reasoning_text.delta" => {
+            "response.reasoning_summary_text.delta" | "response.reasoning_summary.delta" => {
+                let text = data.get("delta").and_then(Value::as_str).unwrap_or("");
+                self.emit_thinking_delta(text)
+            }
+            // Codex Official streams reasoning summaries only. Raw reasoning text
+            // is a third-party Responses event (DeepSeek) and must stay dropped here.
+            "response.reasoning_text.delta" if self.provider_mode => {
                 let text = data.get("delta").and_then(Value::as_str).unwrap_or("");
                 self.emit_thinking_delta(text)
             }
@@ -1124,9 +1131,14 @@ impl ResponsesToAnthropic {
                 out.push_str(&self.finish(&stop_reason));
                 out
             }
-            "response.failed" | "error" if self.provider_mode => {
-                let message = responses_error_text(data, "Responses request failed")
-                    .unwrap_or_else(|| "Responses request failed".to_string());
+            "response.failed" | "error" => {
+                let fallback = if self.provider_mode {
+                    "Responses request failed"
+                } else {
+                    "Codex Responses request failed"
+                };
+                let message =
+                    responses_error_text(data, fallback).unwrap_or_else(|| fallback.to_string());
                 self.fail(&message)
             }
             _ => String::new(),
@@ -2996,11 +3008,21 @@ mod tests {
         assert!(errored
             .handle_event("response.completed", &json!({}))
             .is_empty());
+
+        let mut bare = ResponsesToAnthropic::for_provider("gpt-4.1");
+        let out = bare.handle_event("response.failed", &json!({}));
+        assert!(out.contains("Responses request failed"), "{out}");
+        assert!(!out.contains("Codex Responses request failed"));
     }
 
     #[test]
     fn official_sse_keeps_fixed_id_and_end_turn_after_tools() {
         let mut translator = ResponsesToAnthropic::for_model("gpt-5.6-sol");
+        translator.handle_event(
+            "response.created",
+            &json!({ "response": { "id": "resp_official" } }),
+        );
+        assert_eq!(translator.message_id(), "msg_localprism");
         let start = translator.handle_event(
             "response.output_item.added",
             &json!({ "item": { "type": "function_call", "call_id": "c1", "name": "Read" } }),
@@ -3009,11 +3031,83 @@ mod tests {
         let done = translator.handle_event("response.completed", &json!({}));
         assert!(done.contains("\"stop_reason\":\"end_turn\""));
         assert!(!done.contains("\"message\""));
-        let ignored = translator.handle_event(
+    }
+
+    #[test]
+    fn official_failed_before_completed_fails() {
+        let mut translator = ResponsesToAnthropic::for_model("gpt-5.6-sol");
+        let out = translator.handle_event(
             "response.failed",
-            &json!({ "response": { "error": { "message": "should stay official" } } }),
+            &json!({ "response": { "error": { "message": "upstream exploded" } } }),
         );
-        assert!(ignored.is_empty());
+        assert!(out.contains("upstream exploded"), "{out}");
+        assert!(out.contains("\"type\":\"error\""));
+        assert!(translator.is_finished());
+
+        let mut fallback = ResponsesToAnthropic::for_model("gpt-5.6-sol");
+        let out = fallback.handle_event("error", &json!({}));
+        assert!(out.contains("Codex Responses request failed"), "{out}");
+        assert!(fallback.is_finished());
+    }
+
+    #[test]
+    fn finished_stream_ignores_late_failure() {
+        for mut translator in [
+            ResponsesToAnthropic::for_model("gpt-5.6-sol"),
+            ResponsesToAnthropic::for_provider("gpt-4.1"),
+        ] {
+            translator.handle_event("response.output_text.delta", &json!({ "delta": "ok" }));
+            let done = translator.handle_event("response.completed", &json!({}));
+            assert!(done.contains("message_stop"), "{done}");
+            assert!(translator.is_finished());
+            let ignored = translator.handle_event(
+                "response.failed",
+                &json!({ "error": { "message": "late failure" } }),
+            );
+            assert!(
+                ignored.is_empty(),
+                "finished guard should drop late failure, got {ignored}"
+            );
+            assert!(translator
+                .handle_event("error", &json!({ "message": "late error" }))
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn official_reasoning_text_delta_is_dropped() {
+        let mut translator = ResponsesToAnthropic::for_model("gpt-5.6-sol");
+        let dropped = translator.handle_event(
+            "response.reasoning_text.delta",
+            &json!({ "delta": "hidden chain" }),
+        );
+        assert!(dropped.is_empty(), "{dropped}");
+        let summary = translator.handle_event(
+            "response.reasoning_summary_text.delta",
+            &json!({ "delta": "visible summary" }),
+        );
+        assert!(summary.contains("thinking_delta"), "{summary}");
+        assert!(summary.contains("visible summary"));
+    }
+
+    #[test]
+    fn provider_message_id_updates_before_visible_output_only() {
+        let mut translator = ResponsesToAnthropic::for_provider("deepseek-v4-pro");
+        assert!(translator.message_id().starts_with("msg_"));
+        translator.handle_event("response.created", &json!({ "id": "resp_top" }));
+        assert_eq!(translator.message_id(), "resp_top");
+        translator.handle_event(
+            "response.in_progress",
+            &json!({ "response": { "id": "resp_live" } }),
+        );
+        assert_eq!(translator.message_id(), "resp_live");
+        let text = translator.handle_event("response.output_text.delta", &json!({ "delta": "Hi" }));
+        assert!(text.contains("\"id\":\"resp_live\""), "{text}");
+        translator.handle_event(
+            "response.created",
+            &json!({ "response": { "id": "resp_too_late" } }),
+        );
+        assert_eq!(translator.message_id(), "resp_live");
     }
 
     #[test]

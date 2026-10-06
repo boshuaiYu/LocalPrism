@@ -102,7 +102,15 @@ pub async fn provider_upsert_third_party(
         return Err("API key is required".into());
     }
     ensure_secure_provider_base_url(&provider.base_url)?;
-    if provider.api_format == ApiFormat::OpenaiResponses {
+    let mut index = load_index()?;
+    let id = if provider.id.trim().is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        provider.id.clone()
+    };
+    if provider.api_format == ApiFormat::OpenaiResponses
+        && !responses_connection_unchanged(&index, &id, &provider)
+    {
         probe_openai_responses_connection(
             &provider.api_key,
             &provider.base_url,
@@ -110,12 +118,6 @@ pub async fn provider_upsert_third_party(
         )
         .await?;
     }
-    let mut index = load_index()?;
-    let id = if provider.id.trim().is_empty() {
-        uuid::Uuid::new_v4().to_string()
-    } else {
-        provider.id.clone()
-    };
     let mut stored = provider;
     stored.id = id.clone();
     index.upsert_third_party(stored);
@@ -125,6 +127,20 @@ pub async fn provider_upsert_third_party(
     save_index(&index)?;
     let _ = models::models_for_active_fresh().await;
     workspace_status().await
+}
+
+/// Name-only edits of an existing Responses provider skip the live `/responses` probe.
+fn responses_connection_unchanged(
+    index: &ProviderIndex,
+    id: &str,
+    provider: &SavedProvider,
+) -> bool {
+    index.third_party(id).is_some_and(|existing| {
+        existing.api_format == ApiFormat::OpenaiResponses
+            && existing.api_key == provider.api_key
+            && existing.base_url == provider.base_url
+            && existing.models.main == provider.models.main
+    })
 }
 
 #[tauri::command]
@@ -598,7 +614,7 @@ mod tests {
         let mut provider = sample_provider(&format!("http://{addr}/v1"));
         provider.api_format = ApiFormat::OpenaiResponses;
         provider.models.main = "gpt-4.1".into();
-        let status = provider_upsert_third_party(provider, true)
+        let status = provider_upsert_third_party(provider.clone(), true)
             .await
             .expect("openai_responses save should probe /responses");
         assert!(status.active_authenticated);
@@ -611,5 +627,46 @@ mod tests {
             paths.iter().all(|path| !path.contains("chat/completions")),
             "save must not probe chat completions, saw {paths:?}"
         );
+
+        let id = status.active_id.expect("saved provider id");
+        let responses = |seen: &std::sync::Mutex<Vec<String>>| {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|path| path.ends_with("/responses"))
+                .count()
+        };
+        let after_create = responses(&seen);
+
+        let mut renamed = provider.clone();
+        renamed.id = id.clone();
+        renamed.name = "Renamed".into();
+        provider_upsert_third_party(renamed, true)
+            .await
+            .expect("name-only save skips the probe");
+        assert_eq!(responses(&seen), after_create);
+
+        let mut remodeled = provider.clone();
+        remodeled.id = id.clone();
+        remodeled.models.main = "gpt-4.1-mini".into();
+        provider_upsert_third_party(remodeled, true)
+            .await
+            .expect("model change probes /responses");
+        assert_eq!(responses(&seen), after_create + 1);
+
+        let mut chat = provider.clone();
+        chat.id = id.clone();
+        chat.api_format = ApiFormat::OpenaiChat;
+        provider_upsert_third_party(chat, true)
+            .await
+            .expect("chat save does not probe /responses");
+        assert_eq!(responses(&seen), after_create + 1);
+
+        let mut back = provider;
+        back.id = id;
+        provider_upsert_third_party(back, true)
+            .await
+            .expect("switching back to responses probes again");
+        assert_eq!(responses(&seen), after_create + 2);
     }
 }
