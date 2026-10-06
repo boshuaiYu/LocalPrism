@@ -430,6 +430,62 @@ describe("chat token usage", () => {
     expect(meter.percent).toBe(8);
   });
 
+  it("uses the last request in a multi-request turn instead of the summed usage", () => {
+    const meter = buildTokenMeterModel({
+      modelLabel: "gpt-6-luna",
+      windowTokens: 272_000,
+      messages: [
+        { type: "user" },
+        {
+          type: "assistant",
+          message: {
+            usage: {
+              input_tokens: 18_898,
+              output_tokens: 20,
+              cache_read_input_tokens: 0,
+            },
+          },
+        },
+        { type: "user" },
+        {
+          type: "assistant",
+          message: {
+            usage: {
+              input_tokens: 19_731,
+              output_tokens: 222,
+              cache_read_input_tokens: 0,
+            },
+          },
+        },
+        { type: "user" },
+        {
+          type: "assistant",
+          message: {
+            usage: {
+              input_tokens: 23_242,
+              output_tokens: 148,
+              cache_read_input_tokens: 0,
+            },
+          },
+        },
+        {
+          type: "result",
+          usage: {
+            input_tokens: 61_871,
+            output_tokens: 390,
+            cache_read_input_tokens: 0,
+          },
+        },
+      ],
+    });
+    expect(meter.inputTokens).toBe(23_242);
+    expect(meter.outputTokens).toBe(148);
+    expect(meter.cacheReadTokens).toBe(0);
+    expect(meter.usedTokens).toBe(23_390);
+    expect(meter.inputTokens).not.toBe(61_871);
+    expect(meter.outputTokens).not.toBe(390);
+  });
+
   it("ignores subagent usage when measuring the root context", () => {
     const meter = buildTokenMeterModel({
       modelLabel: "sonnet",

@@ -2,6 +2,7 @@ use crate::providers::openai_oauth::{
     OPENAI_CODEX_API_ENDPOINT, OPENAI_CODEX_ORIGINATOR, OPENAI_CODEX_USER_AGENT,
 };
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug)]
 pub struct CodexProxyCredential {
@@ -10,22 +11,39 @@ pub struct CodexProxyCredential {
     pub account_id: Option<String>,
     pub model: String,
     pub effort: Option<String>,
+    /// Per Claude spawn. `0` does not record request usage.
+    pub usage_slot: u64,
 }
 
 pub fn anthropic_to_codex_responses(
     request: &Value,
     credential: &CodexProxyCredential,
 ) -> Result<Value, String> {
-    let mut input = Vec::new();
-    if let Some(system) = flatten_text(request.get("system")) {
-        if !system.trim().is_empty() {
-            let system = super::identity::bind_hosted_model_identity(&system, &credential.model);
-            input.push(json!({
-                "role": "developer",
-                "content": [{"type": "input_text", "text": system}],
-            }));
+    anthropic_to_codex_responses_for_session(request, credential, None)
+}
+
+pub fn anthropic_to_codex_responses_for_session(
+    request: &Value,
+    credential: &CodexProxyCredential,
+    header_session: Option<&str>,
+) -> Result<Value, String> {
+    let mut request = request.clone();
+    super::messages::hoist_anthropic_system_messages(&mut request);
+
+    let instructions = flatten_text(request.get("system")).and_then(|system| {
+        if system.trim().is_empty() {
+            return None;
         }
-    }
+        let bound = super::identity::bind_hosted_model_identity(&system, &credential.model);
+        let stable = stabilize_instructions(&bound);
+        if stable.trim().is_empty() {
+            None
+        } else {
+            Some(stable)
+        }
+    });
+
+    let mut input = Vec::new();
     for message in request
         .get("messages")
         .and_then(Value::as_array)
@@ -34,24 +52,48 @@ pub fn anthropic_to_codex_responses(
         append_input_for_message(&mut input, message);
     }
 
+    let mut tools = Vec::new();
+    if let Some(raw_tools) = request.get("tools").and_then(Value::as_array) {
+        tools = raw_tools
+            .iter()
+            .filter_map(anthropic_tool_to_function)
+            .collect();
+        for tool in &mut tools {
+            stabilize_value_strings(tool, &["name"]);
+        }
+        tools.sort_by(|left, right| {
+            let left_name = left.get("name").and_then(Value::as_str).unwrap_or("");
+            let right_name = right.get("name").and_then(Value::as_str).unwrap_or("");
+            left_name
+                .cmp(right_name)
+                .then_with(|| left.to_string().cmp(&right.to_string()))
+        });
+    }
+
+    let cache_key = prompt_cache_key(
+        &request,
+        header_session,
+        instructions.as_deref().unwrap_or(""),
+        &tools,
+        &input,
+    );
+
     let mut body = json!({
         "model": credential.model,
         "input": input,
         "stream": true,
         "store": false,
         "include": ["reasoning.encrypted_content"],
+        "prompt_cache_key": cache_key,
     });
+    if let Some(instructions) = instructions {
+        body["instructions"] = Value::String(instructions);
+    }
     if let Some(effort) = credential.effort.as_deref() {
         body["reasoning"] = json!({ "effort": coerce_codex_responses_effort(effort) });
     }
-    if let Some(tools) = request.get("tools").and_then(Value::as_array) {
-        let converted: Vec<Value> = tools
-            .iter()
-            .filter_map(anthropic_tool_to_function)
-            .collect();
-        if !converted.is_empty() {
-            body["tools"] = Value::Array(converted);
-        }
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(tools);
     }
     Ok(body)
 }
@@ -153,6 +195,300 @@ fn anthropic_tool_to_function(tool: &Value) -> Option<Value> {
         "description": description,
         "parameters": parameters,
     }))
+}
+
+/// ChatGPT Codex sticks a conversation to one cache server with this key.
+/// It must be the Claude Code session id, never a fresh random value.
+fn prompt_cache_key(
+    request: &Value,
+    header_session: Option<&str>,
+    instructions: &str,
+    tools: &[Value],
+    input: &[Value],
+) -> String {
+    if let Some(session) = header_session
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| session_id_from_request(request))
+    {
+        return sanitize_cache_key(&session);
+    }
+    fallback_prompt_cache_key(instructions, tools, input)
+}
+
+fn session_id_from_request(request: &Value) -> Option<String> {
+    if let Some(session) = non_empty_string(request.get("session_id")) {
+        return Some(session);
+    }
+    let metadata = request.get("metadata");
+    if let Some(session) = metadata.and_then(|value| non_empty_string(value.get("session_id"))) {
+        return Some(session);
+    }
+    if let Some(session) = metadata.and_then(|value| session_from_user_id(value.get("user_id"))) {
+        return Some(session);
+    }
+    session_from_user_id(request.get("user_id"))
+}
+
+fn session_from_user_id(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(text) => session_from_user_id_text(text),
+        Value::Object(map) => non_empty_string(map.get("session_id")),
+        _ => None,
+    }
+}
+
+fn session_from_user_id_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.starts_with('{') {
+        if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+            if let Some(session) = session_from_user_id(Some(&parsed)) {
+                return Some(session);
+            }
+        }
+    }
+    let marker = "session_";
+    let start = trimmed.find(marker)?;
+    let rest = &trimmed[start + marker.len()..];
+    let token: String = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
+        .collect();
+    if token.is_empty() {
+        None
+    } else {
+        Some(format!("session_{token}"))
+    }
+}
+
+fn non_empty_string(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn sanitize_cache_key(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let mut key = String::new();
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            key.push(ch);
+        }
+    }
+    if key.is_empty() || key.len() > 64 {
+        return sha256_hex(trimmed.as_bytes());
+    }
+    key
+}
+
+fn fallback_prompt_cache_key(instructions: &str, tools: &[Value], input: &[Value]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(instructions.as_bytes());
+    hasher.update([0xff]);
+    for tool in tools {
+        if let Some(name) = tool.get("name").and_then(Value::as_str) {
+            hasher.update(name.as_bytes());
+            hasher.update([0xff]);
+        }
+    }
+    hasher.update(first_user_text(input).as_bytes());
+    sha256_hex(&hasher.finalize())
+}
+
+fn first_user_text(input: &[Value]) -> String {
+    for item in input {
+        if item.get("role").and_then(Value::as_str) != Some("user") {
+            continue;
+        }
+        if let Some(text) = item.pointer("/content/0/text").and_then(Value::as_str) {
+            return text.to_string();
+        }
+    }
+    String::new()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex_encode(&Sha256::digest(bytes))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(*byte >> 4) as usize] as char);
+        out.push(HEX[(*byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn stabilize_instructions(text: &str) -> String {
+    text.split("\n\n")
+        .map(stabilize_prompt_text)
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Drop per-request tokens from the cached prefix. Conversation input is left
+/// alone so tool ids and user text stay append-only.
+fn stabilize_prompt_text(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let previous_is_hex = index > 0 && bytes[index - 1].is_ascii_hexdigit();
+        if !previous_is_hex {
+            if let Some(len) = volatile_span_len(&input[index..]) {
+                index += len;
+                continue;
+            }
+        }
+        let Some(ch) = input[index..].chars().next() else {
+            break;
+        };
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    out
+}
+
+fn volatile_span_len(text: &str) -> Option<usize> {
+    uuid_len(text)
+        .or_else(|| iso_datetime_len(text))
+        .or_else(|| clock_time_len(text))
+}
+
+fn uuid_len(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let groups = [8usize, 4, 4, 4, 12];
+    let mut index = 0;
+    for (group_index, length) in groups.iter().copied().enumerate() {
+        if group_index > 0 {
+            if bytes.get(index) != Some(&b'-') {
+                return None;
+            }
+            index += 1;
+        }
+        let end = index.checked_add(length)?;
+        let slice = bytes.get(index..end)?;
+        if !slice.iter().all(u8::is_ascii_hexdigit) {
+            return None;
+        }
+        index = end;
+    }
+    if bytes.get(index).is_some_and(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    Some(index)
+}
+
+fn iso_datetime_len(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 19 {
+        return None;
+    }
+    if !is_ascii_digits(&bytes[0..4])
+        || bytes[4] != b'-'
+        || !is_ascii_digits(&bytes[5..7])
+        || bytes[7] != b'-'
+        || !is_ascii_digits(&bytes[8..10])
+    {
+        return None;
+    }
+    if !matches!(bytes[10], b'T' | b't' | b' ') {
+        return None;
+    }
+    if clock_time_len_at(bytes, 11).is_none() {
+        return None;
+    }
+    let mut index = 19;
+    if bytes.get(index) == Some(&b'.') && bytes.get(index + 1).is_some_and(u8::is_ascii_digit) {
+        let mut fraction = index + 2;
+        while bytes.get(fraction).is_some_and(u8::is_ascii_digit) {
+            fraction += 1;
+        }
+        index = fraction;
+    }
+    if matches!(bytes.get(index), Some(b'Z' | b'z')) {
+        index += 1;
+    } else if matches!(bytes.get(index), Some(b'+' | b'-')) {
+        index = timezone_end(bytes, index);
+    }
+    Some(index)
+}
+
+fn timezone_end(bytes: &[u8], index: usize) -> usize {
+    let hour_end = index + 3;
+    if bytes.len() < hour_end || !is_ascii_digits(&bytes[index + 1..hour_end]) {
+        return index;
+    }
+    if bytes.len() >= index + 6
+        && bytes[hour_end] == b':'
+        && is_ascii_digits(&bytes[index + 4..index + 6])
+    {
+        return index + 6;
+    }
+    if bytes.len() >= index + 5 && is_ascii_digits(&bytes[hour_end..index + 5]) {
+        return index + 5;
+    }
+    hour_end
+}
+
+fn clock_time_len(text: &str) -> Option<usize> {
+    clock_time_len_at(text.as_bytes(), 0)
+}
+
+fn clock_time_len_at(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.len() < start + 8 {
+        return None;
+    }
+    if !is_ascii_digits(&bytes[start..start + 2])
+        || bytes[start + 2] != b':'
+        || !is_ascii_digits(&bytes[start + 3..start + 5])
+        || bytes[start + 5] != b':'
+        || !is_ascii_digits(&bytes[start + 6..start + 8])
+    {
+        return None;
+    }
+    let mut end = start + 8;
+    if bytes.get(end) == Some(&b'.') && bytes.get(end + 1).is_some_and(u8::is_ascii_digit) {
+        let mut fraction = end + 2;
+        while bytes.get(fraction).is_some_and(u8::is_ascii_digit) {
+            fraction += 1;
+        }
+        end = fraction;
+    }
+    Some(end - start)
+}
+
+fn is_ascii_digits(bytes: &[u8]) -> bool {
+    !bytes.is_empty() && bytes.iter().all(u8::is_ascii_digit)
+}
+
+fn stabilize_value_strings(value: &mut Value, skip_keys: &[&str]) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if child.is_string() && skip_keys.iter().any(|skip| *skip == key) {
+                    continue;
+                }
+                stabilize_value_strings(child, skip_keys);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                stabilize_value_strings(item, skip_keys);
+            }
+        }
+        Value::String(text) => {
+            *text = stabilize_prompt_text(text);
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
 }
 
 /// Stable token the desktop UI localizes. Never name a specific model here.
@@ -646,6 +982,22 @@ impl ResponsesToAnthropic {
         }
     }
 
+    pub fn request_usage(&self) -> Option<crate::codex_turn_usage::CodexRequestUsage> {
+        if self.input_tokens == 0
+            && self.output_tokens == 0
+            && self.cache_read_tokens == 0
+            && self.cache_creation_tokens == 0
+        {
+            return None;
+        }
+        Some(crate::codex_turn_usage::CodexRequestUsage {
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cache_read_tokens: self.cache_read_tokens,
+            cache_creation_tokens: self.cache_creation_tokens,
+        })
+    }
+
     fn emit_usage_debug(&mut self) {
         let Some(raw) = self.debug_raw_usage.take() else {
             return;
@@ -790,21 +1142,28 @@ mod tests {
                 account_id: Some("acc".into()),
                 model: "gpt-5.6-sol".into(),
                 effort: Some("high".into()),
+                usage_slot: 0,
             },
         )
         .expect("convert");
         assert_eq!(body["model"], "gpt-5.6-sol");
+        assert_eq!(body["store"], false);
         assert_eq!(body["reasoning"]["effort"], "high");
         assert!(body["tools"]
             .as_array()
             .is_some_and(|tools| tools.len() == 1));
         assert!(body["input"]
             .as_array()
-            .is_some_and(|items| items.len() == 2));
-        let developer = body["input"][0]["content"][0]["text"].as_str().unwrap();
-        assert!(developer.contains("IDENTITY OVERRIDE"));
-        assert!(developer.contains("gpt-5.6-sol"));
-        assert!(developer.contains("You are a writer"));
+            .is_some_and(|items| items.len() == 1));
+        assert_eq!(body["input"][0]["role"], "user");
+        let instructions = body["instructions"].as_str().unwrap();
+        assert!(instructions.contains("IDENTITY OVERRIDE"));
+        assert!(instructions.contains("gpt-5.6-sol"));
+        assert!(instructions.contains("You are a writer"));
+        assert!(!body["input"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("IDENTITY OVERRIDE"));
     }
 
     #[test]
@@ -820,13 +1179,15 @@ mod tests {
                 account_id: None,
                 model: "gpt-5.6-terra".into(),
                 effort: None,
+                usage_slot: 0,
             },
         )
         .expect("convert");
-        let developer = body["input"][0]["content"][0]["text"].as_str().unwrap();
-        assert!(developer.contains("gpt-5.6-terra"));
-        assert!(!developer.contains("created by Anthropic"));
-        assert!(!developer.contains("You are Claude, an AI"));
+        let instructions = body["instructions"].as_str().unwrap();
+        assert!(instructions.contains("gpt-5.6-terra"));
+        assert!(!instructions.contains("created by Anthropic"));
+        assert!(!instructions.contains("You are Claude, an AI"));
+        assert_eq!(body["input"][0]["role"], "user");
     }
 
     #[test]
@@ -842,6 +1203,7 @@ mod tests {
                 account_id: None,
                 model: "gpt-5.4".into(),
                 effort: None,
+                usage_slot: 0,
             },
         )
         .expect("convert");
@@ -858,6 +1220,7 @@ mod tests {
                 account_id: None,
                 model: "gpt-5.6-sol".into(),
                 effort: Some("max".into()),
+                usage_slot: 0,
             },
         )
         .expect("convert");
@@ -1120,6 +1483,7 @@ mod tests {
                 account_id: None,
                 model: "gpt-5.6-sol".into(),
                 effort: None,
+                usage_slot: 0,
             },
         )
         .expect("convert");
@@ -1203,5 +1567,158 @@ mod tests {
         assert_eq!(anthropic["usage"]["input_tokens"], 19600);
         assert_eq!(anthropic["usage"]["cache_read_input_tokens"], 170000);
         assert!(upstream["usage"].get("output").is_none());
+    }
+
+    fn cache_credential() -> CodexProxyCredential {
+        CodexProxyCredential {
+            access_token: "t".into(),
+            refresh_token: None,
+            account_id: None,
+            model: "gpt-6-luna".into(),
+            effort: None,
+            usage_slot: 0,
+        }
+    }
+
+    #[test]
+    fn consecutive_requests_share_prompt_cache_prefix() {
+        let tools_first: Value = serde_json::from_str(
+            r#"[{"name":"Read","description":"Read a file","input_schema":{"type":"object","properties":{"path":{"type":"string"},"limit":{"type":"number"}}}},{"name":"Bash","description":"Run a command","input_schema":{"type":"object","properties":{"command":{"type":"string"}}}}]"#,
+        )
+        .expect("tools");
+        let tools_second: Value = serde_json::from_str(
+            r#"[{"input_schema":{"properties":{"command":{"type":"string"}},"type":"object"},"description":"Run a command","name":"Bash"},{"name":"Read","description":"Read a file","input_schema":{"properties":{"limit":{"type":"number"},"path":{"type":"string"}},"type":"object"}}]"#,
+        )
+        .expect("tools");
+        let system_first = "You are a writer. Today is 2026-10-06. Request 11111111-1111-1111-1111-111111111111 at 2026-10-06T09:10:09Z and 09:10:09.";
+        let system_second = "You are a writer. Today is 2026-10-06. Request 22222222-2222-2222-2222-222222222222 at 2026-10-06T09:10:20.945Z and 09:10:20.";
+        let request_first = json!({
+            "system": system_first,
+            "metadata": { "user_id": "{\"session_id\":\"sess_abc\"}" },
+            "messages": [
+                {"role": "user", "content": "Read main.tex"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "call_1", "name": "Read", "input": {"limit": 10, "path": "main.tex"}}
+                ]}
+            ],
+            "tools": tools_first,
+        });
+        let request_second = json!({
+            "system": system_second,
+            "metadata": { "user_id": "{\"device_id\":\"dev\",\"session_id\":\"sess_abc\"}" },
+            "messages": [
+                {"role": "user", "content": "Read main.tex"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "call_1", "name": "Read", "input": {"path": "main.tex", "limit": 10}}
+                ]},
+                {"role": "system", "content": "2026-10-06T09:10:20.945Z"},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "call_1", "content": "file body"},
+                    {"type": "text", "text": "Now edit it"}
+                ]}
+            ],
+            "tools": tools_second,
+        });
+        let credential = cache_credential();
+        let first = anthropic_to_codex_responses(&request_first, &credential).expect("first");
+        let second = anthropic_to_codex_responses(&request_second, &credential).expect("second");
+
+        assert_eq!(first["prompt_cache_key"], "sess_abc");
+        assert_eq!(first["prompt_cache_key"], second["prompt_cache_key"]);
+        assert_eq!(first["store"], false);
+        assert_eq!(second["store"], false);
+        assert_eq!(first["instructions"], second["instructions"]);
+        let instructions = first["instructions"].as_str().expect("instructions");
+        assert!(instructions.contains("2026-10-06"));
+        assert!(instructions.contains("You are a writer"));
+        assert!(!instructions.contains("11111111-1111-1111-1111-111111111111"));
+        assert!(!instructions.contains("22222222-2222-2222-2222-222222222222"));
+        assert!(!instructions.contains("09:10:09"));
+        assert!(!instructions.contains("09:10:20"));
+        assert!(!instructions.contains("T09"));
+        assert_eq!(first["tools"].to_string(), second["tools"].to_string());
+        assert_eq!(first["tools"][0]["name"], "Bash");
+        assert_eq!(first["tools"][1]["name"], "Read");
+
+        let prefix = first["input"].as_array().expect("input");
+        let next = second["input"].as_array().expect("input");
+        assert!(next.len() > prefix.len());
+        assert_eq!(&next[..prefix.len()], prefix.as_slice());
+        assert_eq!(
+            next[1]["arguments"].as_str(),
+            prefix[1]["arguments"].as_str()
+        );
+        assert!(!next
+            .iter()
+            .any(|item| item.get("role").and_then(Value::as_str) == Some("system")));
+
+        let header = anthropic_to_codex_responses_for_session(
+            &request_second,
+            &credential,
+            Some("header_session_1"),
+        )
+        .expect("header");
+        let header_again = anthropic_to_codex_responses_for_session(
+            &request_first,
+            &credential,
+            Some("header_session_1"),
+        )
+        .expect("header again");
+        assert_eq!(header["prompt_cache_key"], "header_session_1");
+        assert_eq!(header["prompt_cache_key"], header_again["prompt_cache_key"]);
+        assert_eq!(header["instructions"], header_again["instructions"]);
+        assert_eq!(header["tools"], header_again["tools"]);
+    }
+
+    #[test]
+    fn same_conversation_without_session_id_reuses_prompt_cache_key() {
+        let credential = cache_credential();
+        let first = anthropic_to_codex_responses(
+            &json!({
+                "system": "Stable instructions. 11111111-1111-1111-1111-111111111111 2026-10-06T09:10:09Z",
+                "messages": [{"role": "user", "content": "Read main.tex"}],
+            }),
+            &credential,
+        )
+        .expect("first");
+        let second = anthropic_to_codex_responses(
+            &json!({
+                "system": "Stable instructions. 22222222-2222-2222-2222-222222222222 2026-10-06T09:11:10Z",
+                "messages": [
+                    {"role": "user", "content": "Read main.tex"},
+                    {"role": "assistant", "content": "Done"},
+                    {"role": "user", "content": "Edit it"}
+                ],
+            }),
+            &credential,
+        )
+        .expect("second");
+        let again = anthropic_to_codex_responses(
+            &json!({
+                "system": "Stable instructions. 33333333-3333-3333-3333-333333333333 09:12:13",
+                "messages": [{"role": "user", "content": "Read main.tex"}],
+            }),
+            &credential,
+        )
+        .expect("again");
+        let other = anthropic_to_codex_responses(
+            &json!({
+                "system": "Stable instructions.",
+                "messages": [{"role": "user", "content": "A different conversation"}],
+            }),
+            &credential,
+        )
+        .expect("other");
+
+        let key = first["prompt_cache_key"].as_str().expect("key");
+        assert_eq!(key.len(), 64);
+        assert!(key.chars().all(|ch| ch.is_ascii_hexdigit()));
+        assert_eq!(first["prompt_cache_key"], second["prompt_cache_key"]);
+        assert_eq!(first["prompt_cache_key"], again["prompt_cache_key"]);
+        assert_ne!(first["prompt_cache_key"], other["prompt_cache_key"]);
+        assert_eq!(first["instructions"], second["instructions"]);
+        let prefix = first["input"].as_array().expect("input");
+        let next = second["input"].as_array().expect("input");
+        assert_eq!(&next[..prefix.len()], prefix.as_slice());
     }
 }

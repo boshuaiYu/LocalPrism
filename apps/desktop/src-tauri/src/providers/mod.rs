@@ -337,16 +337,22 @@ pub async fn apply_managed_provider(
     match managed.proxy_kind {
         Some(ProxyKind::CodexResponses { model, effort }) => {
             let tokens = openai_oauth::ensure_fresh_tokens().await?;
+            let usage_slot = crate::codex_turn_usage::register_slot();
             let proxy = start_codex_responses_proxy(CodexProxyCredential {
                 access_token: tokens.access_token,
                 refresh_token: tokens.refresh_token,
                 account_id: tokens.account_id,
                 model,
                 effort,
+                usage_slot,
             })
             .await?;
             attach_proxy_capability(&mut values, &proxy);
             values.push(("ANTHROPIC_BASE_URL".into(), proxy));
+            values.push((
+                "LOCALPRISM_CODEX_USAGE_SLOT".into(),
+                usage_slot.to_string(),
+            ));
         }
         Some(ProxyKind::OpenaiChat(provider)) => {
             ensure_secure_provider_base_url(&provider.base_url)?;

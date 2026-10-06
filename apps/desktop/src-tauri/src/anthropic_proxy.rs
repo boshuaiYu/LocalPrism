@@ -13,8 +13,8 @@ use self::messages::{
 };
 use self::providers::apply_provider_request_transforms;
 use self::responses::{
-    anthropic_to_codex_responses, parse_sse_block, responses_headers, CodexProxyCredential,
-    NO_OUTPUT_TIMEOUT_PREFIX, ResponsesToAnthropic,
+    anthropic_to_codex_responses_for_session, parse_sse_block, responses_headers,
+    CodexProxyCredential, NO_OUTPUT_TIMEOUT_PREFIX, ResponsesToAnthropic,
 };
 use self::stream::{sse_response, stream_openai_sse_to_anthropic};
 use self::transformers::ProxyTransformerChain;
@@ -422,7 +422,12 @@ async fn handle_codex_messages(
 ) -> Result<(), String> {
     let anthropic_request: Value = serde_json::from_slice(&request.body)
         .map_err(|err| format!("Claude Code sent invalid Anthropic JSON: {err}"))?;
-    let body = anthropic_to_codex_responses(&anthropic_request, credential)?;
+    let header_session = claude_session_header(request);
+    let body = anthropic_to_codex_responses_for_session(
+        &anthropic_request,
+        credential,
+        header_session,
+    )?;
     let client = crate::providers::bypass_system_proxy_for_loopback(
         reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(15))
@@ -482,6 +487,7 @@ async fn handle_codex_messages(
     let mut translator = ResponsesToAnthropic::for_model(&credential.model);
     let mut buffer = String::new();
     let mut saw_output = false;
+    let mut usage_recorded = false;
     loop {
         let idle = if saw_output {
             std::time::Duration::from_secs(180)
@@ -492,6 +498,9 @@ async fn handle_codex_messages(
             Ok(Ok(Some(bytes))) => bytes,
             Ok(Ok(None)) => break,
             Ok(Err(err)) => {
+                if !usage_recorded {
+                    record_codex_request_usage(&credential, &translator);
+                }
                 write_proxy_sse(
                     stream,
                     &translator.fail(&format!(
@@ -511,6 +520,9 @@ async fn handle_codex_messages(
                         credential.model
                     ))
                 };
+                if !usage_recorded {
+                    record_codex_request_usage(&credential, &translator);
+                }
                 write_proxy_sse(stream, &payload).await?;
                 return Ok(());
             }
@@ -520,6 +532,9 @@ async fn handle_codex_messages(
             buffer = rest;
             if let Some((event, data)) = parse_sse_block(&block) {
                 let translated = translator.handle_event(&event, &data);
+                if !usage_recorded {
+                    usage_recorded = record_codex_request_usage(&credential, &translator);
+                }
                 if !translated.is_empty() {
                     saw_output = true;
                 }
@@ -530,11 +545,44 @@ async fn handle_codex_messages(
     if !buffer.trim().is_empty() {
         if let Some((event, data)) = parse_sse_block(&buffer) {
             let translated = translator.handle_event(&event, &data);
+            if !usage_recorded {
+                usage_recorded = record_codex_request_usage(&credential, &translator);
+            }
             write_proxy_sse(stream, &translated).await?;
         }
     }
+    if !usage_recorded {
+        record_codex_request_usage(&credential, &translator);
+    }
     write_proxy_sse(stream, &translator.close_stream()).await?;
     Ok(())
+}
+
+fn claude_session_header(request: &HttpRequest) -> Option<&str> {
+    [
+        "x-claude-code-session-id",
+        "x-session-id",
+        "session-id",
+        "x-claude-session-id",
+    ]
+    .into_iter()
+    .find_map(|name| request_header(request, name))
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+}
+
+fn record_codex_request_usage(
+    credential: &CodexProxyCredential,
+    translator: &ResponsesToAnthropic,
+) -> bool {
+    if credential.usage_slot == 0 {
+        return false;
+    }
+    let Some(usage) = translator.request_usage() else {
+        return false;
+    };
+    crate::codex_turn_usage::record(credential.usage_slot, usage);
+    true
 }
 
 fn take_sse_block(buffer: &str) -> Option<(String, String)> {
