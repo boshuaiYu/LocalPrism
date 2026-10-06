@@ -19,7 +19,9 @@ export type ProductTourCue =
   | "open-skills"
   | "open-agents"
   | "show-chat"
-  | "open-agent-menu";
+  | "open-agent-menu"
+  /** End of a tour. Listeners put back the chrome captured before it. */
+  | "restore-workspace";
 
 export type ProductTourStepId =
   | "files"
@@ -205,6 +207,8 @@ export function applyProductTourCue(
       return { ...chrome, chatVisible: true, tourOpenedChat: true };
     case "open-agent-menu":
       return { ...chrome, agentMenuOpen: true };
+    case "restore-workspace":
+      return chrome;
   }
 }
 
@@ -243,6 +247,19 @@ export function shouldAutoShowProductTour(status: unknown): boolean {
   return normalizeProductTourStatus(status) === "pending";
 }
 
+/**
+ * A manual replay must not put a finished tour back to pending.
+ * A tour that is still pending records skip or finish, same as first run.
+ */
+export function productTourStatusAfterDismiss(
+  stored: ProductTourStatus,
+  outcome: "completed" | "skipped",
+  manualReplay: boolean,
+): ProductTourStatus {
+  if (manualReplay && stored !== "pending") return stored;
+  return outcome;
+}
+
 export function productTourAfterNext(
   index: number,
   stepCount = PRODUCT_TOUR_STEPS.length,
@@ -259,6 +276,95 @@ export function productTourAfterBack(index: number): number {
 
 export function productTourAfterSkip(): ProductTourStatus {
   return "skipped";
+}
+
+export const PRODUCT_TOUR_REPLAY_EVENT = "localprism:replay-product-tour";
+
+type ReplayListener = () => void;
+const replayListeners = new Set<ReplayListener>();
+let replaySerial = 0;
+let dismissedReplaySerial = 0;
+
+function emitProductTourReplay(): void {
+  for (const listener of replayListeners) listener();
+}
+
+/** Ask the mounted workspace tour to start again. Does not touch settings. */
+export function requestProductTourReplay(): void {
+  replaySerial += 1;
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(PRODUCT_TOUR_REPLAY_EVENT));
+  }
+  emitProductTourReplay();
+}
+
+export function dismissProductTourReplay(): void {
+  if (dismissedReplaySerial === replaySerial) return;
+  dismissedReplaySerial = replaySerial;
+  emitProductTourReplay();
+}
+
+export function isProductTourReplayRequested(): boolean {
+  return replaySerial > dismissedReplaySerial;
+}
+
+export function productTourReplaySerial(): number {
+  return replaySerial;
+}
+
+export function subscribeProductTourReplay(
+  listener: ReplayListener,
+): () => void {
+  replayListeners.add(listener);
+  return () => replayListeners.delete(listener);
+}
+
+export function resetProductTourReplayForTests(): void {
+  replaySerial = 0;
+  dismissedReplaySerial = 0;
+  resetTourChromeBaseline();
+  emitProductTourReplay();
+}
+
+export type TourChromeBaseline = {
+  skillsOpen?: boolean;
+  settingsOpen?: boolean;
+  settingsTab?: TourSettingsTab;
+  chatVisible?: boolean;
+  agentMenuOpen?: boolean;
+};
+
+let tourChromeBaseline: TourChromeBaseline | null = null;
+
+export function resetTourChromeBaseline(): void {
+  tourChromeBaseline = null;
+}
+
+function captureTourChromeBaseline(partial: TourChromeBaseline): void {
+  if (!tourChromeBaseline) tourChromeBaseline = {};
+  for (const key of Object.keys(partial) as (keyof TourChromeBaseline)[]) {
+    if (tourChromeBaseline[key] !== undefined) continue;
+    const value = partial[key];
+    if (value === undefined) continue;
+    tourChromeBaseline[key] = value as never;
+  }
+}
+
+export function readTourChromeBaseline(): TourChromeBaseline {
+  return tourChromeBaseline ?? {};
+}
+
+/**
+ * First cue of a tour records the chrome the user already had.
+ * `restore-workspace` returns that snapshot and does not overwrite it.
+ */
+export function prepareTourCue(
+  cue: ProductTourCue,
+  current: TourChromeBaseline,
+): TourChromeBaseline | null {
+  if (cue === "restore-workspace") return readTourChromeBaseline();
+  captureTourChromeBaseline(current);
+  return null;
 }
 
 export function dispatchProductTourCue(cue: ProductTourCue): void {

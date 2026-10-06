@@ -9,6 +9,7 @@ import {
 import { useDocumentStore } from "@/stores/document-store";
 import { usePreviewStore } from "@/stores/preview-store";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
+import { resetTourChromeBaseline } from "@/lib/product-tour";
 import { useSettingsStore } from "@/stores/settings-store";
 
 vi.mock("@/hooks/use-runtime-events", () => ({
@@ -50,6 +51,7 @@ describe("WorkspaceLayout chat pane", () => {
     documentSnapshot = useDocumentStore.getState();
     chatSnapshot = useClaudeChatStore.getState();
     resetChatLayoutStoreForTests();
+    resetTourChromeBaseline();
     usePreviewStore.setState({ visible: true });
     useDocumentStore.setState({ initialized: true, projectRoot: "C:/paper" });
     useSettingsStore.setState({ productTour: "completed", uiLanguage: "en" });
@@ -270,6 +272,28 @@ describe("WorkspaceLayout chat pane", () => {
       window.dispatchEvent(
         new CustomEvent("localprism-product-tour", {
           detail: "close-overlays",
+        }),
+      );
+    });
+    expect(useChatLayoutStore.getState().visible).toBe(false);
+  });
+
+  it("restores chat that was closed before the tour opened it", async () => {
+    useChatLayoutStore.setState({ visible: false, suppressAutoOpen: true });
+    await act(async () => root.render(<WorkspaceLayout />));
+    expect(useChatLayoutStore.getState().visible).toBe(false);
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("localprism-product-tour", { detail: "show-chat" }),
+      );
+    });
+    expect(useChatLayoutStore.getState().visible).toBe(true);
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("localprism-product-tour", {
+          detail: "restore-workspace",
         }),
       );
     });

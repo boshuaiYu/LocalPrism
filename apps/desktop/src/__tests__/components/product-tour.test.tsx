@@ -6,6 +6,16 @@ import {
   useProductTourDialogGuard,
 } from "@/components/product-tour";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import {
+  PRODUCT_TOUR_STEPS,
+  requestProductTourReplay,
+  resetProductTourReplayForTests,
+} from "@/lib/product-tour";
+import {
+  isWelcomeCompleted,
+  markWelcomeCompleted,
+  resetWelcomeCompletedForTests,
+} from "@/lib/welcome";
 import { useSettingsStore } from "@/stores/settings-store";
 
 function GuardedDialog({
@@ -46,7 +56,13 @@ describe("ProductTour", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
-    useSettingsStore.setState({ productTour: "pending" });
+    resetProductTourReplayForTests();
+    resetWelcomeCompletedForTests();
+    useSettingsStore.setState({
+      productTour: "pending",
+      compilerBackend: "tectonic",
+      vimMode: false,
+    });
     vi.unstubAllGlobals();
   });
 
@@ -90,7 +106,7 @@ describe("ProductTour", () => {
     });
 
     expect(useSettingsStore.getState().productTour).toBe("skipped");
-    expect(cues).toContain("close-overlays");
+    expect(cues).toContain("restore-workspace");
     expect(tour()).toBeNull();
     window.removeEventListener("localprism-product-tour", onCue);
 
@@ -296,11 +312,99 @@ describe("ProductTour", () => {
       }
       expect(useSettingsStore.getState().productTour).toBe("completed");
       expect(cues).toContain("close-overlays");
+      expect(cues).toContain("restore-workspace");
       expect(tour()).toBeNull();
     } finally {
       timeoutSpy.mockRestore();
       window.removeEventListener("localprism-product-tour", onCue);
     }
+  });
+
+  it("replays a finished tour and leaves first-run status untouched", async () => {
+    resetWelcomeCompletedForTests();
+    markWelcomeCompleted();
+    useSettingsStore.setState({
+      productTour: "completed",
+      compilerBackend: "texlive",
+      vimMode: true,
+    });
+    await renderTour();
+    expect(tour()).toBeNull();
+
+    await act(async () => {
+      requestProductTourReplay();
+    });
+    expect(tour()).not.toBeNull();
+    expect(document.body.textContent).toContain("Project files");
+    expect(document.body.textContent).toContain("1 / 12");
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+
+    expect(tour()).toBeNull();
+    expect(useSettingsStore.getState().productTour).toBe("completed");
+    expect(useSettingsStore.getState().compilerBackend).toBe("texlive");
+    expect(useSettingsStore.getState().vimMode).toBe(true);
+    expect(isWelcomeCompleted()).toBe(true);
+
+    await renderTour();
+    expect(tour()).toBeNull();
+  });
+
+  it("finishes a replay without reopening a skipped first-run tour", async () => {
+    useSettingsStore.setState({ productTour: "skipped" });
+    await renderTour();
+    await act(async () => {
+      requestProductTourReplay();
+    });
+    for (let step = 0; step < PRODUCT_TOUR_STEPS.length; step += 1) {
+      const next = document.body.querySelector(
+        '[data-testid="product-tour-next"]',
+      );
+      await act(async () => {
+        (next as HTMLButtonElement).click();
+      });
+    }
+    expect(tour()).toBeNull();
+    expect(useSettingsStore.getState().productTour).toBe("skipped");
+    await renderTour();
+    expect(tour()).toBeNull();
+  });
+
+  it("starts a queued replay when the workspace tour mounts", async () => {
+    useSettingsStore.setState({ productTour: "skipped" });
+    requestProductTourReplay();
+    await renderTour();
+    expect(tour()).not.toBeNull();
+    expect(useSettingsStore.getState().productTour).toBe("skipped");
+
+    const skip = document.body.querySelector(
+      '[data-testid="product-tour-skip"]',
+    );
+    await act(async () => {
+      (skip as HTMLButtonElement).click();
+    });
+    expect(tour()).toBeNull();
+    expect(useSettingsStore.getState().productTour).toBe("skipped");
+  });
+
+  it("still records a skip when the first-run tour has not finished", async () => {
+    useSettingsStore.setState({ productTour: "pending" });
+    await renderTour();
+    await act(async () => {
+      requestProductTourReplay();
+    });
+    const skip = document.body.querySelector(
+      '[data-testid="product-tour-skip"]',
+    );
+    await act(async () => {
+      (skip as HTMLButtonElement).click();
+    });
+    expect(useSettingsStore.getState().productTour).toBe("skipped");
+    expect(tour()).toBeNull();
   });
 });
 

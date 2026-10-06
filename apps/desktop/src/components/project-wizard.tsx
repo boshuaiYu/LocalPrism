@@ -16,6 +16,7 @@ import {
   MapPinIcon,
   Loader2Icon,
 } from "lucide-react";
+import { HelpMenu } from "@/components/help-menu";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
@@ -75,6 +76,9 @@ export function ProjectWizard({ mode, onBack }: ProjectWizardProps) {
             <ArrowLeftIcon className="size-4" />
           </Button>
           <span className="lp-heading">Choose a Template</span>
+          <div className="ml-auto">
+            <HelpMenu />
+          </div>
         </div>
         <div className="border-border/60 border-b px-4 py-2">
           <OnboardingStepper active="template" />
@@ -339,6 +343,9 @@ function ScratchForm({ onBack }: { onBack: () => void }) {
           <ArrowLeftIcon className="size-4" />
         </Button>
         <span className="lp-heading">New Document</span>
+        <div className="ml-auto">
+          <HelpMenu />
+        </div>
       </div>
       <div className="border-border/60 border-b px-4 py-2">
         <OnboardingStepper active={activeStep} />

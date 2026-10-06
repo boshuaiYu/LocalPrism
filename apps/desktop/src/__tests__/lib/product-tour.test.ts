@@ -7,12 +7,15 @@ import {
   isVisibleTourElement,
   productTourAfterBack,
   productTourAfterNext,
+  prepareTourCue,
   productTourAfterSkip,
   productTourCardPosition,
   productTourClickAdvances,
   productTourRetryCues,
   productTourSelectors,
   productTourShieldRects,
+  productTourStatusAfterDismiss,
+  resetTourChromeBaseline,
   resolveStoredProductTour,
   shouldAutoShowProductTour,
 } from "@/lib/product-tour";
@@ -39,6 +42,27 @@ describe("product tour persistence", () => {
     expect(productTourAfterBack(0)).toBe(0);
     expect(productTourAfterBack(2)).toBe(1);
     expect(productTourAfterSkip()).toBe("skipped");
+  });
+
+  it("keeps a finished tour finished when a replay is dismissed", () => {
+    expect(productTourStatusAfterDismiss("completed", "skipped", true)).toBe(
+      "completed",
+    );
+    expect(productTourStatusAfterDismiss("skipped", "completed", true)).toBe(
+      "skipped",
+    );
+    expect(productTourStatusAfterDismiss("pending", "skipped", true)).toBe(
+      "skipped",
+    );
+    expect(productTourStatusAfterDismiss("pending", "completed", true)).toBe(
+      "completed",
+    );
+    expect(productTourStatusAfterDismiss("pending", "skipped", false)).toBe(
+      "skipped",
+    );
+    expect(productTourStatusAfterDismiss("completed", "skipped", false)).toBe(
+      "skipped",
+    );
   });
 
   it("walks skills and agents after the workspace and ignores an older tour", () => {
@@ -109,6 +133,33 @@ function box(node: HTMLElement, width = 48, height = 24) {
       },
     }) as DOMRect;
 }
+
+describe("product tour chrome restore", () => {
+  it("keeps the chrome from the first cue and hands it back at the end", () => {
+    resetTourChromeBaseline();
+    expect(
+      prepareTourCue("close-overlays", {
+        skillsOpen: true,
+        settingsOpen: true,
+        settingsTab: "skills",
+        chatVisible: false,
+      }),
+    ).toBeNull();
+    expect(
+      prepareTourCue("open-agents", {
+        skillsOpen: false,
+        settingsOpen: false,
+        chatVisible: true,
+      }),
+    ).toBeNull();
+    expect(prepareTourCue("restore-workspace", {})).toEqual({
+      skillsOpen: true,
+      settingsOpen: true,
+      settingsTab: "skills",
+      chatVisible: false,
+    });
+  });
+});
 
 describe("product tour anchors", () => {
   it("targets the mounted check-update control and ignores hidden copies", () => {

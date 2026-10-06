@@ -21,6 +21,7 @@ import {
   PRODUCT_TOUR_EVENT,
   applyProductTourCue,
   initialTourWorkspaceChrome,
+  prepareTourCue,
   type ProductTourCue,
 } from "@/lib/product-tour";
 import { useRuntimeEvents } from "@/hooks/use-runtime-events";
@@ -232,6 +233,20 @@ export function WorkspaceLayout() {
   useEffect(() => {
     const onTourCue = (event: Event) => {
       const cue = (event as CustomEvent<ProductTourCue>).detail;
+      const restore = prepareTourCue(cue, {
+        chatVisible: chatVisibleRef.current,
+      });
+      if (restore) {
+        tourOpenedChatRef.current = false;
+        if (
+          restore.chatVisible !== undefined &&
+          restore.chatVisible !== chatVisibleRef.current
+        ) {
+          chatVisibleRef.current = restore.chatVisible;
+          setChatPaneVisible(restore.chatVisible);
+        }
+        return;
+      }
       const next = applyProductTourCue(
         initialTourWorkspaceChrome({
           chatVisible: chatVisibleRef.current,
