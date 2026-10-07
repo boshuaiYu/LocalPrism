@@ -13,6 +13,7 @@ import {
 } from "react-resizable-panels";
 import { Sidebar } from "./sidebar";
 import { LatexEditor } from "./editor/latex-editor";
+import { TeachPanel } from "./editor/teach-panel";
 import { PdfPreview } from "./preview/pdf-preview";
 import { ChatRestoreButton } from "@/components/claude-chat/chat-restore-button";
 import { ClaudeChatDrawer } from "@/components/claude-chat/claude-chat-drawer";
@@ -458,6 +459,7 @@ export function WorkspaceLayout() {
             </PanelGroup>
             {!codeVisible && !previewVisible && chatRestoreButton}
             <ProductTour />
+            <TeachPanel />
           </>
         )}
       </div>

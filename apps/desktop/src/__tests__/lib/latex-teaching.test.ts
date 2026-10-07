@@ -10,7 +10,10 @@ import {
   shouldShowTeachPanel,
   teachActionForDiagnostic,
 } from "@/lib/latex-teaching";
-import { useLatexTeachStore } from "@/stores/latex-teach-store";
+import {
+  bindTeachDocumentScope,
+  useLatexTeachStore,
+} from "@/stores/latex-teach-store";
 import { useSettingsStore } from "@/stores/settings-store";
 
 const figureLine = String.raw`  \begin{figure}[htbp]`;
@@ -158,4 +161,162 @@ Hello
     expect(useLatexTeachStore.getState().open).toBe(false);
     expect(useLatexTeachStore.getState().lesson).toBeNull();
   });
+
+  it("keeps an explain lesson ahead of a selection that is still active", () => {
+    const figure = lessonRefForSelection({
+      selected: String.raw`\begin{figure}`,
+      line: String.raw`\begin{figure}`,
+      selectionStartInLine: 0,
+      selectionEndInLine: 13,
+    })!;
+    const missing = lessonRefForDiagnostic("File `miss.png' not found");
+    useSettingsStore.getState().setLatexTeaching(true);
+
+    useLatexTeachStore.getState().present(figure, "sel:1:14", {
+      x: 10,
+      y: 20,
+      width: 30,
+      height: 8,
+    });
+    expect(useLatexTeachStore.getState().lesson?.id).toBe("figure");
+
+    useLatexTeachStore
+      .getState()
+      .forcePresent(missing, "compile:0:File `miss.png' not found", {
+        x: 200,
+        y: 40,
+        width: 48,
+        height: 16,
+      });
+    expect(useLatexTeachStore.getState().lesson?.id).toBe("file-not-found");
+    expect(useLatexTeachStore.getState().anchor).toMatchObject({
+      x: 200,
+      y: 40,
+    });
+
+    useLatexTeachStore.getState().present(figure, "sel:1:14", {
+      x: 1,
+      y: 1,
+      width: 1,
+      height: 1,
+    });
+    useLatexTeachStore.getState().present(figure, "sel:20:34", {
+      x: 2,
+      y: 2,
+      width: 2,
+      height: 2,
+    });
+    expect(useLatexTeachStore.getState().lesson?.id).toBe("file-not-found");
+    expect(useLatexTeachStore.getState().anchor).toMatchObject({
+      x: 200,
+      y: 40,
+    });
+    expect(useLatexTeachStore.getState().sourceKey).toBe(
+      "compile:0:File `miss.png' not found",
+    );
+
+    useLatexTeachStore.getState().dismiss();
+    useLatexTeachStore.getState().present(figure, "sel:1:14");
+    expect(useLatexTeachStore.getState().open).toBe(true);
+    expect(useLatexTeachStore.getState().lesson?.id).toBe("figure");
+  });
+
+  it("lets a selection replace an open guide", () => {
+    const figure = lessonRefForSelection({
+      selected: String.raw`\begin{figure}`,
+      line: String.raw`\begin{figure}`,
+      selectionStartInLine: 0,
+      selectionEndInLine: 13,
+    })!;
+    useSettingsStore.getState().setLatexTeaching(true);
+    useLatexTeachStore
+      .getState()
+      .forcePresent({ kind: "guide", id: "empty-project" }, "guide:empty");
+
+    useLatexTeachStore.getState().present(figure, "sel:0:13");
+    expect(useLatexTeachStore.getState().lesson?.id).toBe("figure");
+  });
+
+  it("clears an open lesson when the project or active file changes", () => {
+    const scope = createTeachScope();
+    bindTeachDocumentScope(scope);
+    useSettingsStore.getState().setLatexTeaching(true);
+    const missing = lessonRefForDiagnostic("File `miss.png' not found");
+    const show = () => {
+      useLatexTeachStore
+        .getState()
+        .forcePresent(missing, "diag:11:File `miss.png' not found", {
+          x: 40,
+          y: 80,
+          width: 20,
+          height: 12,
+        });
+    };
+
+    show();
+    expect(useLatexTeachStore.getState().open).toBe(true);
+    expect(useLatexTeachStore.getState().anchor).toMatchObject({ x: 40 });
+
+    scope.setState({ activeFileId: "chapter.tex" });
+    expect(useLatexTeachStore.getState().open).toBe(false);
+    expect(useLatexTeachStore.getState().lesson).toBeNull();
+    expect(useLatexTeachStore.getState().sourceKey).toBeNull();
+    expect(useLatexTeachStore.getState().anchor).toBeNull();
+
+    show();
+    scope.setState({ projectRoot: "/tmp/localprism-b" });
+    expect(useLatexTeachStore.getState().lesson).toBeNull();
+
+    show();
+    scope.setState({ projectGeneration: 2 });
+    expect(useLatexTeachStore.getState().open).toBe(false);
+
+    show();
+    scope.setState({ cursorPosition: 40 });
+    expect(useLatexTeachStore.getState().open).toBe(true);
+    expect(useLatexTeachStore.getState().lesson?.id).toBe("file-not-found");
+
+    scope.setState({ activeFileId: "chapter.tex" });
+    expect(useLatexTeachStore.getState().lesson?.id).toBe("file-not-found");
+
+    const ignored = createTeachScope();
+    bindTeachDocumentScope(ignored);
+    ignored.setState({ activeFileId: "other.tex" });
+    expect(useLatexTeachStore.getState().open).toBe(true);
+  });
 });
+
+interface TeachScopeState {
+  projectRoot: string | null;
+  projectGeneration: number;
+  activeFileId: string;
+  cursorPosition: number;
+}
+
+function createTeachScope() {
+  let state: TeachScopeState = {
+    projectRoot: "/tmp/localprism-a",
+    projectGeneration: 1,
+    activeFileId: "main.tex",
+    cursorPosition: 0,
+  };
+  const listeners = new Set<
+    (state: TeachScopeState, previous: TeachScopeState) => void
+  >();
+  return {
+    getState: () => state,
+    setState(partial: Partial<TeachScopeState>) {
+      const previous = state;
+      state = { ...state, ...partial };
+      for (const listener of listeners) listener(state, previous);
+    },
+    subscribe(
+      listener: (state: TeachScopeState, previous: TeachScopeState) => void,
+    ) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+}

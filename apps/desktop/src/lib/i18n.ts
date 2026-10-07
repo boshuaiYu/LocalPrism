@@ -558,10 +558,11 @@ const en = {
   "teach.enable": "Enable LaTeX teaching",
   "teach.previewBadge": "Preview",
   "teach.enableHelp":
-    "Selecting a command or environment, a compile error, or an empty project shows an explanation beside the editor. AI chat stays independent.",
+    "Selecting a command or environment, a compile error, or an empty project opens a floating explanation near that spot. It does not resize the editor, and AI chat stays independent.",
   "teach.callout":
     "Teaching is not only for errors. Selecting a construct can open it, and an empty project can show a short guide.",
   "teach.panelTitle": "Learn while writing",
+  "teach.drag": "Drag",
   "teach.close": "Close teaching panel",
   "teach.what": "What it is",
   "teach.patterns": "Common patterns",
@@ -1104,10 +1105,11 @@ const zh: Record<MessageKey, string> = {
   "teach.enable": "启用 LaTeX 教学",
   "teach.previewBadge": "预览 · 超前功能",
   "teach.enableHelp":
-    "选中命令/环境、编译报错或打开空项目时，在右侧展示讲解面板；不影响 AI 对话与主编辑流程。",
+    "选中命令或环境、编译报错或空白项目时，在锚点附近弹出讲解卡片。它不挤压编辑器，也不影响 AI 对话。",
   "teach.callout":
     "不报错也会讲——选中即讲；报错只是入口之一。空项目时也可出现引导讲解。",
   "teach.panelTitle": "边写边学",
+  "teach.drag": "拖动",
   "teach.close": "关闭讲解",
   "teach.what": "是什么",
   "teach.patterns": "常见写法",
