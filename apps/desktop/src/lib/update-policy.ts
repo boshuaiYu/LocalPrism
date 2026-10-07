@@ -438,3 +438,30 @@ export function chooseUpdateOffer(input: {
 
   return { action: "none" };
 }
+
+/**
+ * True when at least one published beta candidate could be compared and
+ * none is newer than `currentVersion`.
+ * An empty list, drafts, or candidates without a usable manifest do not
+ * prove the install is current.
+ */
+export function installCoversLoadedBetas(
+  currentVersion: string,
+  betas: readonly ReleaseCandidate[],
+): boolean {
+  const current = parseSemver(currentVersion);
+  if (!current) return false;
+  let comparable = 0;
+  for (const beta of betas) {
+    if (beta.draft) continue;
+    if (!isBetaRelease(beta)) continue;
+    if (!beta.manifestUrl || !isAllowedBetaManifestUrl(beta.manifestUrl)) {
+      continue;
+    }
+    const parsed = parseSemver(beta.version);
+    if (!parsed) continue;
+    comparable += 1;
+    if (compareSemver(parsed, current) > 0) return false;
+  }
+  return comparable > 0;
+}

@@ -13,6 +13,7 @@ import {
   betaCandidatesFromGithub,
   chooseUpdateOffer,
   GITHUB_RELEASES_API,
+  installCoversLoadedBetas,
   releasePageUrl,
   STABLE_UPDATER_ENDPOINT,
   updateApplyMode,
@@ -277,16 +278,27 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
           });
         }
 
-        if (!stableResult.ok && betas.length === 0) {
-          throw stableResult.error;
-        }
-
-        const stableUpdate = stableResult.ok ? stableResult.value : null;
+        // Verification is soft. An unsigned or unreachable stable manifest
+        // must not abort the check before a newer beta can be offered, and
+        // the unverified payload must not be downloaded.
+        const stablePayload = stableResult.ok ? stableResult.value : null;
+        let stableUpdate = stablePayload;
+        let stableVerifyError: unknown = null;
         if (stableUpdate) {
-          await invoke("verify_bound_updater_manifest", {
-            manifestUrl: STABLE_UPDATER_ENDPOINT,
-            expectedVersion: stableUpdate.version,
-          });
+          try {
+            await invoke("verify_bound_updater_manifest", {
+              manifestUrl: STABLE_UPDATER_ENDPOINT,
+              expectedVersion: stableUpdate.version,
+            });
+          } catch (error) {
+            stableVerifyError = error;
+            log.error("Stable updater manifest verification failed", {
+              message: formatUpdateError(error),
+              version: stableUpdate.version,
+            });
+            await stableUpdate.close().catch(() => undefined);
+            stableUpdate = null;
+          }
         }
         const currentVersion = await currentAppVersion(stableUpdate);
         const offer: UpdateOffer = chooseUpdateOffer({
@@ -303,7 +315,30 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
 
         if (offer.action === "none") {
           if (stableUpdate) await stableUpdate.close().catch(() => undefined);
-          if (!stableResult.ok) throw stableResult.error;
+          // Stable check() failed. That is a real error only when no beta
+          // list was available to judge. A loaded list with nothing newer
+          // means this install is already current.
+          if (
+            !stableResult.ok &&
+            !installCoversLoadedBetas(currentVersion, betas)
+          ) {
+            throw stableResult.error;
+          }
+          // The stable payload was dropped after verify failed. Report that
+          // only when policy would have installed it. Plain 1.0.8 over a
+          // newer 1.0.8-N build is already declined.
+          if (stableVerifyError && stablePayload) {
+            const unverified = chooseUpdateOffer({
+              currentVersion,
+              stable: {
+                version: stablePayload.version,
+                notes: notesFrom(stablePayload),
+              },
+              betas,
+              allowPrerelease,
+            });
+            if (unverified.action !== "none") throw stableVerifyError;
+          }
           set({
             status: { state: explicit ? "up-to-date" : "idle" },
           });
