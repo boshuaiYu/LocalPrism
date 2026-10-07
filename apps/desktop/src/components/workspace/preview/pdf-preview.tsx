@@ -76,7 +76,12 @@ import {
 import { resolveTexRoot, type ProjectFile } from "@/stores/document-store";
 import { MarkdownPreviewPane } from "@/components/workspace/preview/markdown-preview-pane";
 import { createLogger } from "@/lib/debug/logger";
-import { pdfChromeCompactStatus, pdfZoomLabel } from "@/lib/pdf-chrome-status";
+import {
+  pdfChromeCompactStatus,
+  pdfZoomLabel,
+  previewSurfaceForFileType,
+  showsPdfPageChrome,
+} from "@/lib/pdf-chrome-status";
 import {
   PDF_PREVIEW_DEFAULT_FIT_MODE,
   fitPreviewScale,
@@ -138,7 +143,9 @@ export function PdfPreview() {
   const isTexActive = activeFileType === "tex";
   const isMarkdownActive = activeFileType === "markdown";
   const isSourcePdfActive = activeFileType === "pdf";
-  const showCompiledPreview = !isMarkdownActive && !isSourcePdfActive;
+  const previewSurface = previewSurfaceForFileType(activeFileType);
+  const showPdfPageChrome = showsPdfPageChrome(previewSurface);
+  const showCompiledPreview = showPdfPageChrome;
   const requestJumpToPosition = useDocumentStore(
     (s) => s.requestJumpToPosition,
   );
@@ -936,8 +943,9 @@ export function PdfPreview() {
     hasError: Boolean(compileError),
     currentPage,
     numPages,
+    surface: previewSurface,
   });
-  const pdfStatusIsPage = /^\d+\/\d+$/.test(pdfStatus);
+  const pdfStatusIsPage = pdfStatus != null && /^\d+\/\d+$/.test(pdfStatus);
 
   return (
     <div
@@ -945,16 +953,18 @@ export function PdfPreview() {
       className="@container/pv relative flex h-full flex-col bg-muted/50"
     >
       <div className="lp-chrome flex min-h-[calc(var(--workspace-topbar-height)+var(--titlebar-height))] shrink-0 flex-wrap items-center gap-x-1 gap-y-1 border-b px-2 py-1">
-        <span
-          data-testid="pdf-chrome-status"
-          className={`lp-meta max-w-24 truncate px-1 tabular-nums ${
-            pdfStatusIsPage
-              ? "font-normal text-muted-foreground/70"
-              : "font-medium"
-          }`}
-        >
-          {pdfStatus}
-        </span>
+        {pdfStatus ? (
+          <span
+            data-testid="pdf-chrome-status"
+            className={`lp-meta max-w-24 truncate px-1 tabular-nums ${
+              pdfStatusIsPage
+                ? "font-normal text-muted-foreground/70"
+                : "font-medium"
+            }`}
+          >
+            {pdfStatus}
+          </span>
+        ) : null}
         <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
           {isMarkdownActive ? (
             <span className="px-1 font-medium text-muted-foreground text-xs">
@@ -1070,7 +1080,7 @@ export function PdfPreview() {
           )}
         </div>
         <div className="ml-auto flex shrink-0 items-center justify-end gap-0.5">
-          {showCompiledPreview && pdfData && (
+          {showPdfPageChrome && pdfData && (
             <>
               <div className="@[22rem]/pv:flex hidden items-center gap-0.5">
                 <Button
