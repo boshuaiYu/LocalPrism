@@ -831,4 +831,154 @@ describe("useClaudeChatStore.resumeSession", () => {
     expect(state.activeProjectPath).toBe("/other-project");
     expect(state.messages).toEqual([]);
   });
+
+  it("keeps the previous turn usage until the next request reports usage", async () => {
+    const previous = {
+      inputTokens: 12_000,
+      outputTokens: 400,
+      cacheReadTokens: 8_000,
+      cacheCreationTokens: 0,
+      requestKey: "msg_prev",
+    };
+    useClaudeChatStore.setState((state) => ({
+      lastTurnUsage: previous,
+      tabs: state.tabs.map((tab) =>
+        tab.id === state.activeTabId
+          ? {
+              ...tab,
+              lastTurnUsage: previous,
+              messages: [
+                {
+                  type: "assistant" as const,
+                  message: {
+                    content: [{ type: "text" as const, text: "done" }],
+                  },
+                },
+              ],
+            }
+          : tab,
+      ),
+    }));
+
+    await useClaudeChatStore.getState().sendPrompt("next question");
+
+    const streaming = useClaudeChatStore
+      .getState()
+      .tabs.find((tab) => tab.id === "tab-default");
+    expect(streaming?.isStreaming).toBe(true);
+    expect(streaming?.lastTurnUsage).toEqual(previous);
+    expect(streaming?.usageFromPreviousTurn).toBe(true);
+
+    useClaudeChatStore.getState()._noteRequestUsage("tab-default", {
+      inputTokens: 21_000,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      requestKey: "msg_next",
+    });
+    const reported = useClaudeChatStore
+      .getState()
+      .tabs.find((tab) => tab.id === "tab-default");
+    expect(reported?.lastTurnUsage?.inputTokens).toBe(21_000);
+    expect(reported?.lastTurnUsage?.outputTokens).toBe(0);
+    expect(reported?.lastTurnUsage?.cacheReadTokens).toBe(0);
+    expect(reported?.usageFromPreviousTurn).toBe(false);
+  });
+
+  it("clears usage on a model change and keeps it when only effort changes", () => {
+    const previous = {
+      inputTokens: 100,
+      outputTokens: 10,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+    };
+    useClaudeChatStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === "tab-default"
+          ? {
+              ...tab,
+              runtimeModel: "gpt-6-luna",
+              reasoningEffort: "low",
+              lastTurnUsage: previous,
+              contextWindowTokens: 272_000,
+              usageFromPreviousTurn: true,
+            }
+          : tab,
+      ),
+    }));
+
+    expect(
+      useClaudeChatStore.getState().updateTabRuntimeSelection("tab-default", {
+        runtimeModel: "gpt-6-luna",
+        reasoningEffort: "high",
+        agentId: null,
+      }),
+    ).toBe("changed");
+    const afterEffort = useClaudeChatStore
+      .getState()
+      .tabs.find((tab) => tab.id === "tab-default");
+    expect(afterEffort?.lastTurnUsage).toEqual(previous);
+    expect(afterEffort?.contextWindowTokens).toBe(272_000);
+    expect(afterEffort?.usageFromPreviousTurn).toBe(true);
+
+    expect(
+      useClaudeChatStore.getState().updateTabRuntimeSelection("tab-default", {
+        runtimeModel: "deepseek-chat",
+        reasoningEffort: "high",
+        agentId: null,
+      }),
+    ).toBe("changed");
+    const afterModel = useClaudeChatStore
+      .getState()
+      .tabs.find((tab) => tab.id === "tab-default");
+    expect(afterModel?.lastTurnUsage).toBeNull();
+    expect(afterModel?.usageFromPreviousTurn).toBe(false);
+    expect(afterModel?.contextWindowTokens).toBeNull();
+    expect(afterModel?.runtimeModel).toBe("deepseek-chat");
+  });
+
+  it("shrinks the meter when a compact boundary reports post tokens", () => {
+    const previous = {
+      inputTokens: 180_000,
+      outputTokens: 2_000,
+      cacheReadTokens: 10_000,
+      cacheCreationTokens: 0,
+    };
+    useClaudeChatStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === "tab-default"
+          ? { ...tab, lastTurnUsage: previous, isStreaming: true }
+          : tab,
+      ),
+    }));
+
+    useClaudeChatStore.getState()._noteCompact("tab-default", {
+      kind: "compacting",
+    });
+    useClaudeChatStore.getState()._noteCompact("tab-default", {
+      kind: "boundary",
+      trigger: "manual",
+      preTokens: 192_000,
+      postTokens: 14_684,
+    });
+    const tab = useClaudeChatStore
+      .getState()
+      .tabs.find((candidate) => candidate.id === "tab-default");
+    expect(tab?.streamingStatus).toBeNull();
+    expect(tab?.messages).toHaveLength(1);
+    expect(tab?.messages[0]?.compactNotice).toEqual({
+      pending: false,
+      trigger: "manual",
+      preTokens: 192_000,
+      postTokens: 14_684,
+      summary: null,
+    });
+    expect(tab?.lastTurnUsage).toEqual({
+      inputTokens: 14_684,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+    });
+    expect(tab?.usageFromPreviousTurn).toBe(false);
+  });
 });

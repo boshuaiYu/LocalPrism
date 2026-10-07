@@ -151,6 +151,35 @@ pub fn cached_models_for_active() -> Vec<ProviderModel> {
         .unwrap_or_else(|| fallback_models(id))
 }
 
+/// Context window from the active provider catalog, when that model lists one.
+pub(crate) fn catalog_context_window(model: &str) -> Option<u64> {
+    let needle = normalize_model_key(model);
+    if needle.is_empty() {
+        return None;
+    }
+    let models = cached_models_for_active();
+    let exact = models.iter().find(|candidate| {
+        normalize_model_key(&candidate.id) == needle
+            || normalize_model_key(&candidate.display_name) == needle
+    });
+    exact
+        .and_then(|candidate| candidate.context_window)
+        .filter(|window| *window > 0)
+}
+
+fn normalize_model_key(value: &str) -> String {
+    let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let base = lower
+        .strip_suffix("[1m]")
+        .map(|stripped| trimmed[..stripped.len()].trim())
+        .unwrap_or(trimmed);
+    base.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
 pub fn save_cached_models(id: &str, models: &[ProviderModel]) -> Result<(), String> {
     let path = models_cache_path()?;
     let mut file = load_cache_file();

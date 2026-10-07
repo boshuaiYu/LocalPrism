@@ -118,8 +118,16 @@ export function ChatTokenMeter() {
         lastUsage,
         windowTokens,
         inFlight: Boolean(activeTab?.isStreaming),
+        previousTurn: Boolean(activeTab?.usageFromPreviousTurn),
       }),
-    [activeTab?.isStreaming, lastUsage, messages, modelLabel, windowTokens],
+    [
+      activeTab?.isStreaming,
+      activeTab?.usageFromPreviousTurn,
+      lastUsage,
+      messages,
+      modelLabel,
+      windowTokens,
+    ],
   );
 
   useEffect(() => {
@@ -177,12 +185,16 @@ export function ChatTokenMeter() {
         ref={buttonRef}
         type="button"
         data-testid="chat-token-meter-trigger"
+        data-usage={meter.previousTurn ? "previous" : "current"}
         aria-label={t("chat.contextPercent", { percent: meter.percent })}
         aria-expanded={open}
         aria-haspopup="dialog"
         aria-controls="chat-token-meter-panel"
         title={t("chat.contextPercent", { percent: meter.percent })}
-        className="flex size-6 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        className={cn(
+          "flex size-6 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
+          meter.previousTurn && "opacity-70",
+        )}
         onClick={() => setOpen((value) => !value)}
       >
         <ContextRing percent={meter.percent} estimated={meter.estimated} />
@@ -193,6 +205,7 @@ export function ChatTokenMeter() {
               ref={panelRef}
               id="chat-token-meter-panel"
               data-testid="chat-token-meter"
+              data-usage={meter.previousTurn ? "previous" : "current"}
               role="dialog"
               aria-label={t("chat.tokenUsage")}
               className="fixed w-64 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-xl border border-border bg-popover p-3 text-popover-foreground shadow-lg"
@@ -207,7 +220,12 @@ export function ChatTokenMeter() {
                 <p className="font-medium text-foreground text-xs">
                   {t("chat.context")}
                 </p>
-                <p className="font-medium text-foreground text-sm tabular-nums">
+                <p
+                  className={cn(
+                    "font-medium text-foreground text-sm tabular-nums",
+                    meter.previousTurn && "opacity-70",
+                  )}
+                >
                   {meter.percent}%
                 </p>
               </div>
@@ -227,7 +245,12 @@ export function ChatTokenMeter() {
                   style={{ width: `${meter.percent}%` }}
                 />
               </div>
-              <dl className="mt-2.5 space-y-1.5 text-xs">
+              <dl
+                className={cn(
+                  "mt-2.5 space-y-1.5 text-xs",
+                  meter.previousTurn && "opacity-80",
+                )}
+              >
                 <div className="grid grid-cols-2 gap-x-4">
                   <div>
                     <dt className="text-muted-foreground">{t("chat.used")}</dt>
@@ -268,9 +291,11 @@ export function ChatTokenMeter() {
                 />
               </dl>
               <p className="mt-2 text-[11px] text-muted-foreground">
-                {meter.estimated
-                  ? t("chat.waitingUsage")
-                  : t("chat.thisConversation")}
+                {meter.previousTurn
+                  ? t("chat.previousTurn")
+                  : meter.estimated
+                    ? t("chat.waitingUsage")
+                    : t("chat.thisConversation")}
               </p>
             </aside>,
             document.body,

@@ -151,4 +151,64 @@ describe("ChatTokenMeter", () => {
     expect(ring?.querySelectorAll("circle")).toHaveLength(1);
     expect(trigger?.querySelector(".animate-spin")).toBeNull();
   });
+
+  it("keeps the previous turn visible while the next turn is thinking", async () => {
+    const usage = {
+      inputTokens: 12_000,
+      outputTokens: 400,
+      cacheReadTokens: 8_000,
+      cacheCreationTokens: 0,
+    };
+    useClaudeChatStore.setState((state) => ({
+      selectedModel: "gpt-6-luna",
+      lastTurnUsage: usage,
+      tabs: state.tabs.map((tab) =>
+        tab.id === state.activeTabId
+          ? {
+              ...tab,
+              runtimeModel: "gpt-6-luna",
+              contextWindowTokens: 272_000,
+              isStreaming: true,
+              usageFromPreviousTurn: true,
+              lastTurnUsage: usage,
+              messages: [
+                {
+                  type: "assistant",
+                  message: {
+                    content: [{ type: "text", text: "done" }],
+                  },
+                },
+                {
+                  type: "user",
+                  message: {
+                    content: [{ type: "text", text: "next" }],
+                  },
+                },
+              ],
+            }
+          : tab,
+      ),
+    }));
+
+    await act(async () => root.render(<ChatTokenMeter />));
+    const trigger = container.querySelector(
+      '[data-testid="chat-token-meter-trigger"]',
+    );
+    expect(trigger?.getAttribute("data-usage")).toBe("previous");
+    expect(trigger?.className).toContain("opacity-70");
+    expect(trigger?.getAttribute("aria-label")).toBe("Context 8%");
+    const ring = trigger?.querySelector(
+      '[data-testid="chat-token-meter-ring"]',
+    );
+    expect(ring?.getAttribute("data-state")).toBe("used");
+
+    if (!(trigger instanceof HTMLButtonElement)) {
+      throw new Error("Context circle missing");
+    }
+    await act(async () => trigger.click());
+    const meter = document.querySelector('[data-testid="chat-token-meter"]');
+    expect(meter?.textContent).toContain("Previous turn");
+    expect(meter?.textContent).toContain("20,400");
+    expect(meter?.textContent).not.toContain("Waiting for usage");
+  });
 });

@@ -1840,4 +1840,114 @@ describe("useClaudeEvents cancellation isolation", () => {
       vi.useRealTimers();
     }
   });
+
+  it("turns compact stream events into a transcript notice and a smaller meter", async () => {
+    useClaudeChatStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === "tab-a"
+          ? {
+              ...tab,
+              lastTurnUsage: {
+                inputTokens: 180_000,
+                outputTokens: 2_000,
+                cacheReadTokens: 10_000,
+                cacheCreationTokens: 0,
+              },
+            }
+          : tab,
+      ),
+    }));
+    const output = callbacks.get("claude-output");
+    const summary =
+      "This session is being continued from a previous conversation.";
+
+    await act(async () => {
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "system",
+            subtype: "status",
+            status: "compacting",
+          }),
+        ),
+      );
+      await Promise.resolve();
+    });
+    let tab = useClaudeChatStore
+      .getState()
+      .tabs.find((candidate) => candidate.id === "tab-a");
+    expect(tab?.streamingStatus).toBe("compact:compacting");
+    expect(tab?.messages).toHaveLength(1);
+    expect(tab?.messages[0]?.compactNotice?.pending).toBe(true);
+    expect(tab?.lastTurnUsage?.inputTokens).toBe(180_000);
+
+    await act(async () => {
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "system",
+            subtype: "compact_boundary",
+            compactMetadata: {
+              trigger: "auto",
+              preTokens: 192_000,
+              postTokens: 14_684,
+            },
+          }),
+        ),
+      );
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "user",
+            isCompactSummary: true,
+            message: { content: [{ type: "text", text: summary }] },
+          }),
+        ),
+      );
+      await Promise.resolve();
+    });
+    tab = useClaudeChatStore
+      .getState()
+      .tabs.find((candidate) => candidate.id === "tab-a");
+    expect(tab?.messages).toHaveLength(1);
+    expect(tab?.messages[0]?.subtype).toBe("compact-notice");
+    expect(tab?.messages[0]?.compactNotice?.pending).toBe(false);
+    expect(tab?.messages[0]?.compactNotice?.summary).toBe(summary);
+    expect(tab?.messages[0]?.compactNotice?.preTokens).toBe(192_000);
+    expect(tab?.lastTurnUsage).toEqual({
+      inputTokens: 14_684,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+    });
+    expect(tab?.streamingStatus).toBeNull();
+
+    await act(async () => {
+      output?.(
+        dataEvent(
+          "claude-output",
+          "tab-a",
+          JSON.stringify({
+            type: "system",
+            subtype: "status",
+            status: "compacting",
+            agent_id: "writer",
+          }),
+        ),
+      );
+      await Promise.resolve();
+    });
+    tab = useClaudeChatStore
+      .getState()
+      .tabs.find((candidate) => candidate.id === "tab-a");
+    expect(
+      tab?.messages.filter((message) => message.subtype === "compact-notice"),
+    ).toHaveLength(1);
+  });
 });

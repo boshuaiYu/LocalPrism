@@ -25,6 +25,8 @@ export type TokenMeterModel = {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   estimated: boolean;
+  /** The ring is showing the previous request while this turn has no usage yet. */
+  previousTurn: boolean;
 };
 
 type UsageDetail = {
@@ -197,10 +199,17 @@ export function conversationUsage(
   const fromMessages = lastTurnUsage(scoped);
   const fromStore =
     lastUsage && snapshotHasTokens(lastUsage) ? lastUsage : null;
-  if (!fromMessages) return fromStore;
+  if (!fromMessages) {
+    if (fromStore) return fromStore;
+    // The new turn has not reported usage. Keep the last request already in
+    // the transcript so the ring does not fall to zero.
+    if (!options?.inFlight) return null;
+    const carried = lastTurnUsage(messages);
+    return carried && snapshotHasTokens(carried) ? carried : null;
+  }
   if (!fromStore) return fromMessages;
-  // While the turn is in flight the store is the live request. The previous
-  // assistant is outside `scoped`, and a new message_start must replace it.
+  // While the turn is in flight the store is the live request. A new
+  // message_start replaces the previous assistant, which sits outside `scoped`.
   if (options?.inFlight) {
     return mergeTokenUsageSnapshots(fromMessages, fromStore);
   }
@@ -607,6 +616,7 @@ export function buildTokenMeterModel(options: {
   lastUsage?: TokenUsageSnapshot | null;
   windowTokens?: number | null;
   inFlight?: boolean;
+  previousTurn?: boolean;
 }): TokenMeterModel {
   const last = conversationUsage(options.messages, options.lastUsage, {
     inFlight: options.inFlight,
@@ -646,5 +656,6 @@ export function buildTokenMeterModel(options: {
     cacheReadTokens,
     cacheCreationTokens,
     estimated: !last,
+    previousTurn: Boolean(options.previousTurn && options.inFlight && last),
   };
 }

@@ -31,6 +31,7 @@ import {
 import { createStreamDeltaBatcher } from "@/hooks/stream-delta-batch";
 import { shouldRefreshSkillsAfterTool } from "@/lib/skills-refresh";
 import { scheduleSkillsRefresh } from "@/stores/skill-store";
+import { parseCompactStreamMessage } from "@/lib/chat-compact";
 import {
   isSubagentUsageMessage,
   streamEventCountsAsReplyProgress,
@@ -617,6 +618,14 @@ export function useClaudeEvents() {
             }
           }
         }
+      }
+
+      const compactEvent = parseCompactStreamMessage(msg);
+      if (compactEvent) {
+        if (!isSubagentUsageMessage(msg)) {
+          chatStore._noteCompact(tabId, compactEvent);
+        }
+        return;
       }
 
       // Skip duplicate user messages we already added locally

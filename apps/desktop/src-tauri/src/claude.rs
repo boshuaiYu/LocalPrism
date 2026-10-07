@@ -3473,12 +3473,14 @@ async fn execute_openai_compatible_via_claude_proxy(
     let claude_path = find_claude_binary()?;
 
     let (mut args, stdin_payload) = with_prompt_transport(args_prefix, prompt);
+    let context_window = local_context_window(credential.model.as_str(), None);
+    let model_alias = crate::context_window::model_id_for_claude_context("sonnet", context_window);
     extend_provider_claude_args(
         &mut args,
         exposure.agent_id.as_deref(),
         permission_mode.as_deref(),
         credential.model.as_str(),
-        Some("sonnet"),
+        Some(model_alias.as_str()),
     );
 
     let mut cmd = create_command(
@@ -3494,6 +3496,7 @@ async fn execute_openai_compatible_via_claude_proxy(
     cmd.env("LOCALPRISM_CODEX_USAGE_SLOT", usage_slot.to_string());
     cmd.env("CLAUDE_CODE_ATTRIBUTION_HEADER", "0");
     cmd.env_remove("CLAUDE_MODEL");
+    apply_auto_compact_window(&mut cmd, context_window);
 
     spawn_claude_process(
         window,
@@ -3621,6 +3624,80 @@ async fn execute_openai_compatible_via_native_anthropic(
     .await
 }
 
+const AUTO_COMPACT_MODEL_ENVS: &[&str] = &[
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+];
+
+fn command_env(cmd: &Command, key: &str) -> Option<String> {
+    cmd.as_std().get_envs().find_map(|(name, value)| {
+        if name == key {
+            value.map(|value| value.to_string_lossy().into_owned())
+        } else {
+            None
+        }
+    })
+}
+
+fn local_context_window(model: &str, hint: Option<&str>) -> u64 {
+    let catalog = crate::providers::catalog_context_window(model);
+    crate::context_window::window_for_model(model, catalog, hint)
+}
+
+fn publishes_local_context_window() -> bool {
+    matches!(
+        crate::providers::active_provider_identity(),
+        crate::providers::ActiveProviderIdentity::ChatGptOfficial
+            | crate::providers::ActiveProviderIdentity::ThirdParty
+    )
+}
+
+/// `--model` Claude Code uses for its own context-window detection.
+/// Official Claude keeps the selected id. Third-party spawns opt into `[1m]`
+/// when LocalPrism's window is larger than Claude Code's 200k default.
+fn cli_model_arg(model: &str) -> String {
+    if !publishes_local_context_window() {
+        return model.to_string();
+    }
+    let window = local_context_window(model, None);
+    crate::context_window::model_id_for_claude_context(model, window)
+}
+
+fn publish_spawn_context_window(cmd: &mut Command, model: Option<&str>) {
+    if !publishes_local_context_window() {
+        return;
+    }
+    let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    apply_auto_compact_window(cmd, local_context_window(model, None));
+}
+
+/// Tell Claude Code the LocalPrism window via `CLAUDE_CODE_AUTO_COMPACT_WINDOW`.
+/// Above 200k, model env vars gain `[1m]` so the env var is not capped.
+fn apply_auto_compact_window(cmd: &mut Command, window: u64) {
+    if window == 0 {
+        return;
+    }
+    cmd.env("CLAUDE_CODE_AUTO_COMPACT_WINDOW", window.to_string());
+    if window <= crate::context_window::CLAUDE_CODE_UNKNOWN_MODEL_WINDOW {
+        return;
+    }
+    for key in AUTO_COMPACT_MODEL_ENVS {
+        let Some(current) = command_env(cmd, key) else {
+            continue;
+        };
+        let next = crate::context_window::model_id_for_claude_context(&current, window);
+        if next != current {
+            cmd.env(*key, next);
+        }
+    }
+}
+
 fn apply_native_anthropic_provider_env(
     cmd: &mut Command,
     credential: &StoredOpenAiCompatibleCredential,
@@ -3637,9 +3714,10 @@ fn apply_native_anthropic_provider_env(
     cmd.env("CLAUDE_CODE_SUBAGENT_MODEL", credential.model.as_str());
     if native_anthropic_provider_kind(anthropic_base_url) == Some("moonshot") {
         cmd.env("ENABLE_TOOL_SEARCH", "false");
-        cmd.env("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "262144");
     }
     cmd.env_remove("CLAUDE_MODEL");
+    let hint = native_anthropic_provider_kind(anthropic_base_url);
+    apply_auto_compact_window(cmd, local_context_window(&credential.model, hint));
 }
 
 fn uses_native_anthropic_route(credential: &StoredOpenAiCompatibleCredential) -> bool {
@@ -3812,7 +3890,7 @@ pub async fn execute_claude_code(
         let (mut args, stdin_payload) = with_prompt_transport(Vec::new(), prompt);
         if let Some(m) = model {
             args.push("--model".to_string());
-            args.push(m);
+            args.push(cli_model_arg(&m));
         }
         push_agent_arg(&mut args, agent_id.as_deref());
         args.extend(common_claude_args_for_turn(
@@ -3834,6 +3912,7 @@ pub async fn execute_claude_code(
             effort_level.as_deref(),
         )
         .await?;
+        publish_spawn_context_window(&mut cmd, selected_model.as_deref());
         spawn_claude_process(window, cmd, tab_id, reservation, stdin_payload, None).await
     }
     .await;
@@ -3901,7 +3980,7 @@ pub async fn continue_claude_code(
         let (mut args, stdin_payload) = with_prompt_transport(vec!["-c".to_string()], prompt);
         if let Some(m) = model {
             args.push("--model".to_string());
-            args.push(m);
+            args.push(cli_model_arg(&m));
         }
         args.extend(common_claude_args_for_turn(
             permission_mode.as_deref(),
@@ -3922,6 +4001,7 @@ pub async fn continue_claude_code(
             effort_level.as_deref(),
         )
         .await?;
+        publish_spawn_context_window(&mut cmd, selected_model.as_deref());
         spawn_claude_process(window, cmd, tab_id, reservation, stdin_payload, None).await
     }
     .await;
@@ -3995,7 +4075,7 @@ pub async fn resume_claude_code(
             with_prompt_transport(vec!["--resume".to_string(), session_id], prompt);
         if let Some(m) = model {
             args.push("--model".to_string());
-            args.push(m);
+            args.push(cli_model_arg(&m));
         }
         push_agent_arg(&mut args, agent_id.as_deref());
         args.extend(common_claude_args_for_turn(
@@ -4017,6 +4097,7 @@ pub async fn resume_claude_code(
             effort_level.as_deref(),
         )
         .await?;
+        publish_spawn_context_window(&mut cmd, selected_model.as_deref());
         spawn_claude_process(window, cmd, tab_id, reservation, stdin_payload, None).await
     }
     .await;
@@ -7572,5 +7653,37 @@ Hello abstract
         // Paths are single-quoted to handle spaces
         assert!(script.contains("'/Users/my user/.local/bin'"));
         assert!(script.contains("'/Users/my user/.local'"));
+    }
+
+    #[test]
+    fn auto_compact_window_suffixes_model_env_above_200k() {
+        let mut wide = Command::new("claude");
+        wide.env("ANTHROPIC_MODEL", "gpt-5.6-luna");
+        wide.env("ANTHROPIC_DEFAULT_HAIKU_MODEL", "gpt-5.6-luna");
+        apply_auto_compact_window(&mut wide, 272_000);
+        assert_eq!(
+            command_env(&wide, "CLAUDE_CODE_AUTO_COMPACT_WINDOW").as_deref(),
+            Some("272000")
+        );
+        assert_eq!(
+            command_env(&wide, "ANTHROPIC_MODEL").as_deref(),
+            Some("gpt-5.6-luna[1m]")
+        );
+        assert_eq!(
+            command_env(&wide, "ANTHROPIC_DEFAULT_HAIKU_MODEL").as_deref(),
+            Some("gpt-5.6-luna[1m]")
+        );
+
+        let mut narrow = Command::new("claude");
+        narrow.env("ANTHROPIC_MODEL", "deepseek-chat");
+        apply_auto_compact_window(&mut narrow, 200_000);
+        assert_eq!(
+            command_env(&narrow, "CLAUDE_CODE_AUTO_COMPACT_WINDOW").as_deref(),
+            Some("200000")
+        );
+        assert_eq!(
+            command_env(&narrow, "ANTHROPIC_MODEL").as_deref(),
+            Some("deepseek-chat")
+        );
     }
 }
