@@ -7,6 +7,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { EditorSettings } from "@/components/settings/editor-settings";
 import { RuntimeSettings } from "@/components/runtime/runtime-settings";
 import { SkillLibrary } from "@/components/skills/skill-library";
 import { AgentLibrary } from "@/components/agents/agent-library";
@@ -44,6 +45,8 @@ export function SettingsDialog({
             {t("settings.description")}
           </DialogDescription>
         </DialogHeader>
+
+        <EditorSettings />
 
         <Tabs
           key={defaultTab}

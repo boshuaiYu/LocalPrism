@@ -28,6 +28,12 @@ interface SettingsState {
   /** Join GitHub prerelease builds such as v1.0.8beta3. Default off. */
   joinBetaChannel: boolean;
   setJoinBetaChannel: (enabled: boolean) => void;
+  /**
+   * Contextual LaTeX explanations beside the editor. Default off.
+   * Chat is never opened by this flag.
+   */
+  latexTeaching: boolean;
+  setLatexTeaching: (enabled: boolean) => void;
   /** True after a built-in agent preset install has finished at least once. */
   builtinAgentPresetsSeeded: boolean;
   setBuiltinAgentPresetsSeeded: (seeded: boolean) => void;
@@ -74,6 +80,8 @@ export const useSettingsStore = create<SettingsState>()(
       joinBetaChannel: false,
       setJoinBetaChannel: (enabled) =>
         set({ joinBetaChannel: enabled === true }),
+      latexTeaching: false,
+      setLatexTeaching: (enabled) => set({ latexTeaching: enabled === true }),
       builtinAgentPresetsSeeded: false,
       setBuiltinAgentPresetsSeeded: (seeded) =>
         set({ builtinAgentPresetsSeeded: seeded }),
@@ -93,7 +101,7 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: "claude-prism-settings",
-      version: 6,
+      version: 7,
       migrate: (persisted, fromVersion) => {
         const state = persisted as Partial<SettingsState>;
         const storedTourVersion =
@@ -106,6 +114,7 @@ export const useSettingsStore = create<SettingsState>()(
           permissionMode: normalizePermissionMode(state.permissionMode),
           uiLanguage: isUiLanguage(state.uiLanguage) ? state.uiLanguage : "en",
           joinBetaChannel: state.joinBetaChannel === true,
+          latexTeaching: state.latexTeaching === true,
           builtinAgentPresetsSeeded: state.builtinAgentPresetsSeeded === true,
           builtinAgentPresetsSeedVersion: normalizeSeedVersion(state),
           productTour: resolveStoredProductTour(
@@ -128,6 +137,7 @@ export const useSettingsStore = create<SettingsState>()(
             ? state.uiLanguage
             : current.uiLanguage,
           joinBetaChannel: state.joinBetaChannel === true,
+          latexTeaching: state.latexTeaching === true,
           builtinAgentPresetsSeeded:
             seedVersion > 0 || state.builtinAgentPresetsSeeded === true,
           builtinAgentPresetsSeedVersion: seedVersion,
