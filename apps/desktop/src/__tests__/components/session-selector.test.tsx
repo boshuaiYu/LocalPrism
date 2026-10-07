@@ -20,50 +20,6 @@ vi.mock("@/runtime/commands", () => ({
   runtimeArchiveConversation,
 }));
 
-vi.mock("@/components/ui/dropdown-menu", () => ({
-  DropdownMenu: ({
-    children,
-    onOpenChange,
-  }: {
-    children: ReactNode;
-    onOpenChange?: (open: boolean) => void;
-  }) => (
-    <div>
-      <button
-        type="button"
-        aria-label="Open test session menu"
-        onClick={() => onOpenChange?.(true)}
-      />
-      {children}
-    </div>
-  ),
-  DropdownMenuTrigger: ({ children }: { children: ReactNode }) => children,
-  DropdownMenuContent: ({ children }: { children: ReactNode }) => (
-    <div>{children}</div>
-  ),
-  DropdownMenuItem: ({
-    children,
-    disabled,
-    onSelect,
-  }: {
-    children: ReactNode;
-    disabled?: boolean;
-    onSelect?: () => void;
-  }) => (
-    <div
-      role="menuitem"
-      aria-disabled={disabled ? "true" : "false"}
-      onClick={() => !disabled && onSelect?.()}
-    >
-      {children}
-    </div>
-  ),
-  DropdownMenuSeparator: () => <hr />,
-  DropdownMenuLabel: ({ children }: { children: ReactNode }) => (
-    <div>{children}</div>
-  ),
-}));
-
 vi.mock("@/components/ui/dialog", () => ({
   Dialog: ({ open, children }: { open: boolean; children: ReactNode }) =>
     open ? <div>{children}</div> : null,
@@ -83,7 +39,10 @@ vi.mock("@/components/ui/dialog", () => ({
 }));
 
 import { invoke } from "@tauri-apps/api/core";
-import { SessionSelector } from "@/components/claude-chat/session-selector";
+import {
+  SessionSelector,
+  sessionHistoryPanelStyle,
+} from "@/components/claude-chat/session-selector";
 import { DISMISSED_FOREIGN_SESSIONS_KEY } from "@/lib/dismissed-foreign-sessions";
 import { type TabState, useClaudeChatStore } from "@/stores/claude-chat-store";
 import { useDocumentStore } from "@/stores/document-store";
@@ -117,6 +76,24 @@ function conversation(
   };
 }
 
+function historyTrigger(): HTMLButtonElement {
+  const button = document.querySelector(
+    "[data-testid='session-history-trigger']",
+  );
+  if (!(button instanceof HTMLButtonElement)) {
+    throw new Error("Session history trigger not found");
+  }
+  return button;
+}
+
+function openHistoryMenu() {
+  const trigger = historyTrigger();
+  if (document.querySelector("[data-testid='session-history-panel']")) {
+    trigger.click();
+  }
+  trigger.click();
+}
+
 function findButton(label: string): HTMLButtonElement {
   const button = document.querySelector(`button[aria-label="${label}"]`);
   if (!(button instanceof HTMLButtonElement)) {
@@ -144,6 +121,20 @@ function findMenuItem(title: string): HTMLElement {
     throw new Error(`Menu item not found: ${title}`);
   }
   return item;
+}
+
+function searchInput(): HTMLInputElement {
+  const input = document.querySelector('input[type="search"]');
+  if (!(input instanceof HTMLInputElement)) {
+    throw new Error("Search chats input not found");
+  }
+  return input;
+}
+
+function pressKey(target: EventTarget, key: string) {
+  target.dispatchEvent(
+    new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
+  );
 }
 
 function setSearchQuery(value: string) {
@@ -219,7 +210,7 @@ describe("SessionSelector runtime conversation ownership", () => {
   async function renderAndOpen() {
     await act(async () => root.render(<SessionSelector />));
     await act(async () => {
-      findButton("Open test session menu").click();
+      openHistoryMenu();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -309,7 +300,7 @@ describe("SessionSelector runtime conversation ownership", () => {
       switchActiveContext(reference("codex", "/project-b", "same-id"));
     });
     await act(async () => {
-      findButton("Open test session menu").click();
+      openHistoryMenu();
       projectB.resolve([
         conversation(
           reference("codex", "/project-b", "same-id"),
@@ -490,7 +481,7 @@ describe("SessionSelector runtime conversation ownership", () => {
       switchActiveContext(newRef);
     });
     await act(async () => {
-      findButton("Open test session menu").click();
+      openHistoryMenu();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -531,13 +522,13 @@ describe("SessionSelector runtime conversation ownership", () => {
 
     await act(async () => switchActiveContext(otherContext));
     await act(async () => {
-      findButton("Open test session menu").click();
+      openHistoryMenu();
       await Promise.resolve();
       await Promise.resolve();
     });
     await act(async () => switchActiveContext(target));
     await act(async () => {
-      findButton("Open test session menu").click();
+      openHistoryMenu();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -566,7 +557,7 @@ describe("SessionSelector runtime conversation ownership", () => {
     await renderAndOpen();
     await act(async () => findButton("Delete Archive me").click());
     await act(async () => findDialogButton("Delete").click());
-    await act(async () => findButton("Open test session menu").click());
+    await act(async () => openHistoryMenu());
 
     await act(async () => {
       staleList.resolve([conversation(target, "Resurrected")]);
@@ -976,5 +967,202 @@ describe("SessionSelector runtime conversation ownership", () => {
     root = createRoot(container);
     await renderAndOpen();
     expect(document.body.textContent).not.toContain("Other account");
+  });
+
+  it("keeps history sessions out of the header and scrolls them in an overlay", async () => {
+    runtimeListConversations.mockImplementation((runtime) => {
+      if (runtime === "codex") return Promise.resolve([]);
+      return Promise.resolve([
+        conversation(
+          reference("claude", "/project-a", "stacked-session"),
+          "Stacked session",
+        ),
+        conversation(
+          reference("claude", "/project-a", "another-session"),
+          "Another session",
+        ),
+      ]);
+    });
+
+    await renderAndOpen();
+
+    const panel = document.querySelector(
+      "[data-testid='session-history-panel']",
+    );
+    const list = document.querySelector("[data-testid='session-history-list']");
+    expect(panel).toBeInstanceOf(HTMLElement);
+    expect(container.contains(panel)).toBe(false);
+    expect(panel?.parentElement).toBe(document.body);
+    expect(panel?.className.split(/\s+/)).toEqual(
+      expect.arrayContaining(["fixed", "z-50", "overflow-hidden", "flex-col"]),
+    );
+    expect(panel?.className).not.toContain("overflow-y-auto");
+    expect(list?.className.split(/\s+/)).toContain("overflow-y-auto");
+    expect(container.querySelector(".overflow-y-auto")).toBeNull();
+    expect(container.textContent).not.toContain("Stacked session");
+    expect(panel?.textContent).toContain("Stacked session");
+    expect(panel?.textContent).toContain("Another session");
+    for (const item of panel?.querySelectorAll("[role='menuitem']") ?? []) {
+      expect(item).toBeInstanceOf(HTMLButtonElement);
+      expect(item.className).toContain("focus:bg-accent");
+      expect(item.className).not.toMatch(/\babsolute\b/);
+    }
+    expect((panel as HTMLElement).style.maxHeight).toBe("");
+    expect((list as HTMLElement).style.maxHeight).toBe(
+      `${window.innerHeight - 4 - 8}px`,
+    );
+
+    await act(async () => {
+      historyTrigger().click();
+    });
+    expect(
+      document.querySelector("[data-testid='session-history-panel']"),
+    ).toBeNull();
+    expect(container.querySelector(".overflow-y-auto")).toBeNull();
+  });
+
+  it("closes history when Escape is pressed in the search box", async () => {
+    await renderAndOpen();
+    const input = searchInput();
+    await act(async () => {
+      input.focus();
+    });
+    expect(document.activeElement).toBe(input);
+
+    await act(async () => {
+      pressKey(input, "Escape");
+    });
+    expect(
+      document.querySelector("[data-testid='session-history-panel']"),
+    ).toBeNull();
+  });
+
+  it("clears a search query on Escape before closing history", async () => {
+    runtimeListConversations.mockResolvedValue([
+      conversation(
+        reference("claude", "/project-a", "search-session"),
+        "Search me",
+      ),
+    ]);
+    await renderAndOpen();
+    await act(async () => setSearchQuery("search"));
+    const input = searchInput();
+
+    await act(async () => {
+      input.focus();
+      pressKey(input, "Escape");
+    });
+    expect(
+      document.querySelector("[data-testid='session-history-panel']"),
+    ).not.toBeNull();
+    expect(input.value).toBe("");
+
+    await act(async () => {
+      pressKey(input, "Escape");
+    });
+    expect(
+      document.querySelector("[data-testid='session-history-panel']"),
+    ).toBeNull();
+  });
+
+  it("lets the delete confirm consume the first dismiss", async () => {
+    const target = reference("claude", "/project-a", "dismiss-session");
+    runtimeListConversations.mockResolvedValue([
+      conversation(target, "Dismiss session"),
+    ]);
+    await renderAndOpen();
+    await act(async () => findButton("Delete Dismiss session").click());
+    expect(document.body.textContent).toContain("Delete Chat");
+    expect(
+      document.querySelector("[data-testid='session-history-panel']"),
+    ).not.toBeNull();
+
+    const overlay = document.createElement("div");
+    overlay.setAttribute("data-slot", "dialog-overlay");
+    document.body.append(overlay);
+    try {
+      await act(async () => {
+        overlay.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+        pressKey(document, "Escape");
+      });
+      expect(
+        document.querySelector("[data-testid='session-history-panel']"),
+      ).not.toBeNull();
+      expect(document.body.textContent).toContain("Delete Chat");
+
+      await act(async () => findDialogButton("Cancel").click());
+      expect(document.body.textContent).not.toContain("Delete Chat");
+      expect(
+        document.querySelector("[data-testid='session-history-panel']"),
+      ).not.toBeNull();
+
+      await act(async () => {
+        pressKey(document, "Escape");
+      });
+      expect(
+        document.querySelector("[data-testid='session-history-panel']"),
+      ).toBeNull();
+    } finally {
+      overlay.remove();
+    }
+  });
+
+  it("selects a history row when Enter is pressed", async () => {
+    const listed = reference("claude", "/project-a", "enter-session");
+    const resumeConversation = vi.fn();
+    useClaudeChatStore.setState({ resumeConversation });
+    runtimeListConversations.mockImplementation((runtime) =>
+      runtime === "claude"
+        ? Promise.resolve([conversation(listed, "Pick me")])
+        : Promise.resolve([]),
+    );
+    await renderAndOpen();
+    const item = findMenuItem("Pick me");
+    expect(item).toBeInstanceOf(HTMLButtonElement);
+
+    await act(async () => {
+      pressKey(item, "Enter");
+    });
+    expect(resumeConversation).toHaveBeenCalledWith(listed, "Pick me");
+    expect(
+      document.querySelector("[data-testid='session-history-panel']"),
+    ).toBeNull();
+  });
+});
+
+describe("sessionHistoryPanelStyle", () => {
+  it("opens below the header row instead of filling it", () => {
+    const trigger = { bottom: 76, left: 640, right: 672 };
+    const style = sessionHistoryPanelStyle(trigger, {
+      width: 1200,
+      height: 800,
+    });
+    expect(style.top).toBeGreaterThanOrEqual(trigger.bottom);
+    expect(style.maxHeight).toBe(800 - (76 + 4) - 8);
+    expect(Number(style.maxHeight)).toBeLessThan(800);
+    expect(Number(style.left)).toBeGreaterThanOrEqual(8);
+    expect(Number(style.left) + Number(style.width)).toBeLessThanOrEqual(1200);
+    expect(Number(style.width)).toBeLessThanOrEqual(384);
+  });
+
+  it("stays inside a narrow viewport", () => {
+    const style = sessionHistoryPanelStyle(
+      { bottom: 40, left: 0, right: 32 },
+      { width: 280, height: 500 },
+    );
+    expect(Number(style.left)).toBeGreaterThanOrEqual(8);
+    expect(Number(style.left) + Number(style.width)).toBeLessThanOrEqual(272);
+    expect(style.top).toBeGreaterThanOrEqual(40);
+  });
+
+  it("does not floor the scrolling list past a short viewport", () => {
+    const style = sessionHistoryPanelStyle(
+      { bottom: 300, left: 8, right: 40 },
+      { width: 800, height: 500 },
+      52,
+    );
+    expect(style.top).toBe(304);
+    expect(style.maxHeight).toBe(500 - 304 - 8 - 52);
+    expect(Number(style.maxHeight)).toBeLessThan(160);
   });
 });

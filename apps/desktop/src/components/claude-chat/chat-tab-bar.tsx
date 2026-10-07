@@ -205,15 +205,17 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
       />
       <div
         data-testid="chat-tab-toolbar"
-        className="flex h-11 min-w-0 items-center"
+        className="flex h-11 min-w-0 items-center overflow-hidden"
       >
         <div className={cn("shrink-0", chrome.hideLabel && "[&_span]:sr-only")}>
           {leading}
         </div>
+        {/* Horizontal tab scroll only. overflow-x:auto would otherwise
+            compute overflow-y to auto and paint a second scrollbar in the bar. */}
         <div
           ref={scrollRef}
           data-testid="chat-tab-scroller"
-          className="scrollbar-none flex min-w-[4.5rem] flex-1 items-center self-stretch overflow-x-auto"
+          className="scrollbar-none flex min-w-[4.5rem] flex-1 items-center self-stretch overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         >
           {tabs.map((tab) => (
             <TabButton

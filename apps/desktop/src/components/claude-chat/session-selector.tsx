@@ -1,4 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
+import { createPortal } from "react-dom";
 import {
   CheckIcon,
   HistoryIcon,
@@ -7,14 +17,6 @@ import {
   SearchIcon,
   Trash2Icon,
 } from "lucide-react";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -50,6 +52,52 @@ const RECENCY_LABELS: Record<RecencyGroup, string> = {
   week: "Previous 7 days",
   older: "Older",
 };
+
+const HISTORY_PANEL_MARGIN = 8;
+const HISTORY_PANEL_WIDTH = 384;
+
+const HISTORY_MENU_ITEM_CLASS =
+  "cursor-default rounded-sm text-left outline-hidden hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground";
+
+/**
+ * Overlay below the history button, using the viewport rather than the
+ * header's clipping box. The tab bar is only one row tall; sizing the list
+ * to that box piles sessions into the title bar and paints a scrollbar there.
+ *
+ * `maxHeight` is the room left for the scrolling list after `reservedHeight`
+ * (search row and panel border). It is not floored, so a short window cannot
+ * push the overlay past the viewport.
+ */
+export function sessionHistoryPanelStyle(
+  rect: { bottom: number; left: number; right: number },
+  viewport: { width: number; height: number },
+  reservedHeight = 0,
+): CSSProperties {
+  const top = rect.bottom + 4;
+  const width = Math.min(
+    HISTORY_PANEL_WIDTH,
+    Math.max(0, viewport.width - HISTORY_PANEL_MARGIN * 2),
+  );
+  const left = Math.min(
+    Math.max(HISTORY_PANEL_MARGIN, rect.right - width),
+    Math.max(
+      HISTORY_PANEL_MARGIN,
+      viewport.width - HISTORY_PANEL_MARGIN - width,
+    ),
+  );
+  const maxHeight = Math.max(
+    0,
+    viewport.height - top - HISTORY_PANEL_MARGIN - reservedHeight,
+  );
+  return { top, left, width, maxHeight };
+}
+
+function activateMenuButton(event: ReactKeyboardEvent<HTMLButtonElement>) {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  if (event.repeat) return;
+  event.currentTarget.click();
+}
 
 function startOfLocalDay(ms: number): number {
   const date = new Date(ms);
@@ -241,7 +289,14 @@ export function SessionSelector() {
     null,
   );
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [panelStyle, setPanelStyle] = useState<CSSProperties>({});
   const searchRef = useRef<HTMLInputElement>(null);
+  const searchChromeRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const menuOpenRef = useRef(false);
+  const deleteDialogOpenRef = useRef(false);
+  deleteDialogOpenRef.current = deleteTarget != null;
 
   const needsLiveTabs = menuOpen || deleteTarget != null;
   const projectPath = useClaudeChatStore(
@@ -357,22 +412,86 @@ export function SessionSelector() {
     }
   }, [projectPath, setConversationTitle]);
 
-  const handleOpenChange = useCallback(
-    (open: boolean) => {
-      setMenuOpen(open);
-      setSearchQuery("");
-      if (open) void loadConversations();
-    },
-    [loadConversations],
-  );
+  const setHistoryOpen = useCallback((open: boolean) => {
+    menuOpenRef.current = open;
+    setMenuOpen(open);
+    if (!open) setSearchQuery("");
+  }, []);
+
+  const toggleHistory = useCallback(() => {
+    const next = !menuOpenRef.current;
+    menuOpenRef.current = next;
+    setMenuOpen(next);
+    setSearchQuery("");
+    if (next) void loadConversations();
+  }, [loadConversations]);
+
+  useLayoutEffect(() => {
+    if (!menuOpen) return;
+    const place = () => {
+      const rect = triggerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const panel = panelRef.current;
+      const reservedHeight =
+        (searchChromeRef.current?.offsetHeight ?? 0) +
+        (panel ? panel.offsetHeight - panel.clientHeight : 0);
+      setPanelStyle(
+        sessionHistoryPanelStyle(
+          rect,
+          {
+            width: window.innerWidth,
+            height: window.innerHeight,
+          },
+          reservedHeight,
+        ),
+      );
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [menuOpen]);
 
   useEffect(() => {
     if (!menuOpen) return;
     const frame = window.requestAnimationFrame(() => {
       searchRef.current?.focus();
     });
-    return () => window.cancelAnimationFrame(frame);
-  }, [menuOpen]);
+    const onPointerDown = (event: PointerEvent) => {
+      if (deleteDialogOpenRef.current) return;
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (triggerRef.current?.contains(target)) return;
+      if (panelRef.current?.contains(target)) return;
+      if (
+        target instanceof Element &&
+        target.closest(
+          "[role='dialog'], [data-slot='dialog-content'], [data-slot='dialog-overlay']",
+        )
+      ) {
+        return;
+      }
+      setHistoryOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || deleteDialogOpenRef.current) return;
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement &&
+        target === searchRef.current &&
+        target.value.trim()
+      ) {
+        return;
+      }
+      setHistoryOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [menuOpen, setHistoryOpen]);
 
   const visibleConversations = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -522,29 +641,38 @@ export function SessionSelector() {
     const action = isCodex ? "Archive" : "Delete";
     const actionLower = action.toLowerCase();
     return (
-      <DropdownMenuItem
-        key={key}
-        onSelect={() => handleSelectConversation(conversation)}
-        disabled={isDeleting}
-        className="group flex min-h-12 items-start gap-2 px-2.5 py-2.5"
-      >
-        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="truncate text-sm leading-snug">{title}</span>
-          {isCodex ? (
+      <div key={key} className="group flex min-h-12 items-start">
+        <button
+          type="button"
+          role="menuitem"
+          tabIndex={isDeleting ? -1 : 0}
+          aria-disabled={isDeleting ? "true" : "false"}
+          onKeyDown={activateMenuButton}
+          onClick={() => {
+            if (isDeleting) return;
+            handleSelectConversation(conversation);
+            setHistoryOpen(false);
+          }}
+          className={`flex min-w-0 flex-1 items-start gap-2 px-2.5 py-2.5 ${HISTORY_MENU_ITEM_CLASS}`}
+        >
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="truncate text-sm leading-snug">{title}</span>
+            {isCodex ? (
+              <span className="text-muted-foreground text-xs">
+                {t("chat.readOnly")}
+              </span>
+            ) : null}
             <span className="text-muted-foreground text-xs">
-              {t("chat.readOnly")}
+              {formatRelativeTime(conversation.updatedAt)}
             </span>
-          ) : null}
-          <span className="text-muted-foreground text-xs">
-            {formatRelativeTime(conversation.updatedAt)}
-          </span>
-        </div>
-        <div className="flex shrink-0 items-center gap-1">
+          </div>
           {isBusy ? (
-            <Loader2Icon className="size-4 animate-spin text-primary" />
+            <Loader2Icon className="size-4 shrink-0 animate-spin text-primary" />
           ) : (
-            isCurrent && <CheckIcon className="size-4 text-primary" />
+            isCurrent && <CheckIcon className="size-4 shrink-0 text-primary" />
           )}
+        </button>
+        <div className="flex shrink-0 items-center py-2.5 pr-1.5">
           <button
             type="button"
             className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40"
@@ -577,7 +705,7 @@ export function SessionSelector() {
             )}
           </button>
         </div>
-      </DropdownMenuItem>
+      </div>
     );
   };
 
@@ -603,9 +731,9 @@ export function SessionSelector() {
       .filter((group) => group.items.length > 0)
       .map((group) => (
         <div key={group.id}>
-          <DropdownMenuLabel className="px-2.5 py-1.5 font-medium text-[11px] text-muted-foreground uppercase tracking-wide">
+          <div className="px-2.5 py-1.5 font-medium text-[11px] text-muted-foreground uppercase tracking-wide">
             {RECENCY_LABELS[group.id]}
-          </DropdownMenuLabel>
+          </div>
           {group.items.map(({ conversation, title }) =>
             renderConversation(conversation, title),
           )}
@@ -613,106 +741,155 @@ export function SessionSelector() {
       ));
   };
 
+  const historyPanel =
+    menuOpen && typeof document !== "undefined"
+      ? createPortal(
+          <div
+            ref={panelRef}
+            data-testid="session-history-panel"
+            role="menu"
+            aria-label={t("chat.sessionHistory")}
+            className="fixed z-50 flex flex-col overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md"
+            style={{
+              top: panelStyle.top,
+              left: panelStyle.left,
+              width: panelStyle.width,
+            }}
+          >
+            <div
+              ref={searchChromeRef}
+              className="shrink-0 border-border/70 border-b p-2"
+            >
+              <div className="relative">
+                <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <input
+                  ref={searchRef}
+                  type="search"
+                  aria-label={t("chat.search")}
+                  placeholder={t("chat.search")}
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      if (deleteDialogOpenRef.current) return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      if (event.currentTarget.value.trim()) {
+                        setSearchQuery("");
+                        return;
+                      }
+                      setHistoryOpen(false);
+                      return;
+                    }
+                    event.stopPropagation();
+                    if (event.key !== "ArrowDown") return;
+                    event.preventDefault();
+                    const root = event.currentTarget.closest(
+                      "[data-testid='session-history-panel']",
+                    );
+                    const first = root?.querySelector<HTMLElement>(
+                      '[role="menuitem"]:not([aria-disabled="true"])',
+                    );
+                    first?.focus();
+                  }}
+                  className="h-9 w-full rounded-md border border-border/70 bg-background pr-3 pl-8 text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                />
+              </div>
+            </div>
+
+            <div
+              data-testid="session-history-list"
+              className="overflow-y-auto p-1"
+              style={
+                panelStyle.maxHeight == null
+                  ? undefined
+                  : { maxHeight: panelStyle.maxHeight }
+              }
+            >
+              <button
+                type="button"
+                role="menuitem"
+                onKeyDown={activateMenuButton}
+                className={`flex min-h-10 w-full items-center gap-2 px-2.5 ${HISTORY_MENU_ITEM_CLASS}`}
+                onClick={() => {
+                  newSession();
+                  setHistoryOpen(false);
+                }}
+              >
+                <PlusIcon className="size-4" />
+                <span>{t("chat.newChat")}</span>
+              </button>
+              <div role="separator" className="-mx-1 my-1 h-px bg-border" />
+
+              {isLoading ? (
+                <div className="flex items-center justify-center py-6">
+                  <Loader2Icon className="size-4 animate-spin text-muted-foreground" />
+                </div>
+              ) : conversations.length === 0 ? (
+                <div className="px-2 py-6 text-center text-muted-foreground text-sm">
+                  {t("chat.noSessions")}
+                </div>
+              ) : visibleConversations.length === 0 ? (
+                <div className="px-2 py-6 text-center text-muted-foreground text-sm">
+                  {t("chat.noMatches")}
+                </div>
+              ) : (
+                (() => {
+                  const writable = visibleConversations.filter(
+                    ({ conversation }) =>
+                      conversation.reference.runtime !== "codex",
+                  );
+                  const readOnly = visibleConversations.filter(
+                    ({ conversation }) =>
+                      conversation.reference.runtime === "codex",
+                  );
+                  return (
+                    <>
+                      {renderGrouped(writable)}
+                      {readOnly.length > 0 ? (
+                        <>
+                          {writable.length > 0 ? (
+                            <div
+                              role="separator"
+                              className="-mx-1 my-1 h-px bg-border"
+                            />
+                          ) : null}
+                          <div className="px-2.5 py-1.5 font-medium text-sm">
+                            {t("chat.readOnly")}
+                          </div>
+                          {renderGrouped(readOnly)}
+                        </>
+                      ) : null}
+                    </>
+                  );
+                })()
+              )}
+            </div>
+          </div>,
+          document.body,
+        )
+      : null;
+
   return (
     <>
-      <DropdownMenu open={menuOpen} onOpenChange={handleOpenChange}>
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            className="flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            aria-label={t("chat.sessionHistory")}
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={(event) => event.stopPropagation()}
-          >
-            <HistoryIcon className="size-4" />
-          </button>
-        </DropdownMenuTrigger>
-
-        <DropdownMenuContent
-          align="end"
-          side="bottom"
-          className="flex w-96 flex-col overflow-hidden p-0"
-          onCloseAutoFocus={(event) => event.preventDefault()}
-        >
-          <div className="border-border/70 border-b p-2">
-            <div className="relative">
-              <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
-              <input
-                ref={searchRef}
-                type="search"
-                aria-label={t("chat.search")}
-                placeholder={t("chat.search")}
-                value={searchQuery}
-                onChange={(event) => setSearchQuery(event.target.value)}
-                onPointerDown={(event) => event.stopPropagation()}
-                onKeyDown={(event) => {
-                  event.stopPropagation();
-                  if (event.key !== "ArrowDown") return;
-                  event.preventDefault();
-                  const root = event.currentTarget.closest(
-                    "[data-slot='dropdown-menu-content']",
-                  );
-                  const first = root?.querySelector<HTMLElement>(
-                    '[role="menuitem"]:not([aria-disabled="true"])',
-                  );
-                  first?.focus();
-                }}
-                className="h-9 w-full rounded-md border border-border/70 bg-background pr-3 pl-8 text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-              />
-            </div>
-          </div>
-
-          <div className="max-h-80 overflow-y-auto p-1">
-            <DropdownMenuItem
-              onSelect={newSession}
-              className="min-h-10 gap-2 px-2.5"
-            >
-              <PlusIcon className="size-4" />
-              <span>{t("chat.newChat")}</span>
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-
-            {isLoading ? (
-              <div className="flex items-center justify-center py-6">
-                <Loader2Icon className="size-4 animate-spin text-muted-foreground" />
-              </div>
-            ) : conversations.length === 0 ? (
-              <div className="px-2 py-6 text-center text-muted-foreground text-sm">
-                {t("chat.noSessions")}
-              </div>
-            ) : visibleConversations.length === 0 ? (
-              <div className="px-2 py-6 text-center text-muted-foreground text-sm">
-                {t("chat.noMatches")}
-              </div>
-            ) : (
-              (() => {
-                const writable = visibleConversations.filter(
-                  ({ conversation }) =>
-                    conversation.reference.runtime !== "codex",
-                );
-                const readOnly = visibleConversations.filter(
-                  ({ conversation }) =>
-                    conversation.reference.runtime === "codex",
-                );
-                return (
-                  <>
-                    {renderGrouped(writable)}
-                    {readOnly.length > 0 ? (
-                      <>
-                        {writable.length > 0 ? <DropdownMenuSeparator /> : null}
-                        <DropdownMenuLabel className="px-2.5 py-1.5">
-                          {t("chat.readOnly")}
-                        </DropdownMenuLabel>
-                        {renderGrouped(readOnly)}
-                      </>
-                    ) : null}
-                  </>
-                );
-              })()
-            )}
-          </div>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <button
+        ref={triggerRef}
+        type="button"
+        data-testid="session-history-trigger"
+        className="flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        aria-label={t("chat.sessionHistory")}
+        aria-expanded={menuOpen}
+        aria-haspopup="menu"
+        onMouseDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          toggleHistory();
+        }}
+      >
+        <HistoryIcon className="size-4" />
+      </button>
+      {historyPanel}
 
       <Dialog
         open={!!deleteTarget}
