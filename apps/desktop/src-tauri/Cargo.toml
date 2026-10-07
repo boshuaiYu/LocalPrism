@@ -1,6 +1,6 @@
 [package]
 name = "claude-prism-desktop"
-version = "1.0.8-12"
+version = "1.0.9"
 description = "AI-powered LaTeX writing workspace"
 edition = "2021"
 
