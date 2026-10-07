@@ -19,7 +19,10 @@ import {
 } from "lucide-react";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Button } from "@/components/ui/button";
-import codexIcon from "@/assets/codex.svg";
+// Official Codex.app dock icons, downscaled from the macOS bundle
+// resources icon-codex-light.png and icon-codex-dark-color.png.
+import codexIconDark from "@/assets/codex-app-dark.png";
+import codexIconLight from "@/assets/codex-app-light.png";
 import cursorIcon from "@/assets/cursor.svg";
 import vscodeIcon from "@/assets/vscode.svg";
 import {
@@ -62,7 +65,6 @@ const PREFERRED_EDITOR_STORAGE_KEY = "localprism.preferredEditor";
 
 const MONO_EDITOR_ICONS: Record<string, string> = {
   cursor: cursorIcon,
-  codex: codexIcon,
 };
 
 function readPreferredEditorId(): string {
@@ -94,6 +96,28 @@ function preferredEditor(
 }
 
 function EditorBrandIcon({ editor }: { editor: EditorInfo }) {
+  if (editor.id === "codex") {
+    return (
+      <span
+        aria-hidden="true"
+        data-editor-icon="codex"
+        className="inline-block size-4 shrink-0"
+      >
+        <img
+          src={codexIconLight}
+          alt=""
+          draggable={false}
+          className="block size-4 dark:hidden"
+        />
+        <img
+          src={codexIconDark}
+          alt=""
+          draggable={false}
+          className="hidden size-4 dark:block"
+        />
+      </span>
+    );
+  }
   const mono = MONO_EDITOR_ICONS[editor.id];
   if (mono) {
     return (
