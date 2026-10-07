@@ -82,6 +82,7 @@ import {
 } from "./chat-persistence";
 import { useApprovalStore } from "./approval-store";
 import { visibleUserPromptText } from "@/lib/chat-visible-prompt";
+import { builtInDefaultAgentId } from "@/lib/default-agent";
 import { applyReplyStyleToPrompt } from "@/lib/reply-mode";
 import { useAgentStore } from "./agent-store";
 
@@ -403,6 +404,14 @@ export function chatPeerForTab(
   return peerFromTab(tab);
 }
 
+function freshClaudeAgentId(): string | null {
+  return builtInDefaultAgentId(
+    useAgentStore
+      .getState()
+      .agents.filter((agent) => agent.runtime === "claude"),
+  );
+}
+
 function inheritWritableTabSelection(
   source: TabState | undefined,
   selectedProviderCredentialId: string | null,
@@ -423,7 +432,6 @@ function inheritWritableTabSelection(
     }),
     runtimeModel: source.runtimeModel,
     reasoningEffort: source.reasoningEffort,
-    agentId: source.agentId,
     providerKey: inheritedProviderKey,
   };
 }
@@ -2552,7 +2560,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         chatPeer: chatPeerForTab(activeTab),
         runtimeModel: activeTab.runtimeModel,
         reasoningEffort: activeTab.reasoningEffort,
-        agentId: activeTab.agentId,
+        agentId: freshClaudeAgentId(),
         providerKey: activeTab.providerKey,
         ...currentAccountOwnership(get()),
       };
@@ -2594,6 +2602,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         lastTurnUsage: null,
         usageFromPreviousTurn: false,
         ignoreTranscriptUsage: false,
+        agentId: freshClaudeAgentId(),
         title: STORED_CHAT_TITLE_PLACEHOLDER,
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
@@ -3384,6 +3393,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         activeTab,
         state.selectedProviderCredentialId,
       ),
+      agentId: freshClaudeAgentId(),
       ...currentAccountOwnership(state),
     };
     set((s) => ({
@@ -3457,6 +3467,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       const replacement = {
         ...makeDefaultTab(nextTabId(), projectPath),
         ...inheritWritableTabSelection(tab, state.selectedProviderCredentialId),
+        agentId: freshClaudeAgentId(),
         ...currentAccountOwnership(state),
       };
       const nextSelectedProviderCredentialId =

@@ -9,6 +9,10 @@ import {
   prepareTourCue,
   type ProductTourCue,
 } from "@/lib/product-tour";
+import {
+  findBuiltInDefaultAgent,
+  resolveOpenAgentId,
+} from "@/lib/default-agent";
 import { useI18n } from "@/lib/use-i18n";
 import { cn } from "@/lib/utils";
 import {
@@ -41,17 +45,53 @@ export function AgentSelector({
   const agents = useAgentStore((state) => state.agents);
   const loading = useAgentStore((state) => state.loading);
   const refresh = useAgentStore((state) => state.refresh);
+  const [listReady, setListReady] = useState(false);
 
   useEffect(() => {
-    void refresh(runtime, projectPath ?? undefined);
+    let cancelled = false;
+    setListReady(false);
+    void refresh(runtime, projectPath ?? undefined).finally(() => {
+      if (!cancelled) setListReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [runtime, projectPath, refresh]);
 
   const options = useMemo(
     () => (agents ?? []).filter((agent) => agent.runtime === runtime),
     [agents, runtime],
   );
+  const builtinDefault = useMemo(
+    () => findBuiltInDefaultAgent(options),
+    [options],
+  );
+  const orderedOptions = useMemo(() => {
+    if (!builtinDefault) return options;
+    return [
+      builtinDefault,
+      ...options.filter(
+        (agent) =>
+          !(
+            agent.id === builtinDefault.id &&
+            agent.scope === builtinDefault.scope
+          ),
+      ),
+    ];
+  }, [builtinDefault, options]);
+  const resolvedAgentId = resolveOpenAgentId(agentId, options);
+  const selected =
+    options.find((agent) => agent.id === resolvedAgentId) ?? null;
 
-  const selected = options.find((agent) => agent.id === agentId) ?? null;
+  useEffect(() => {
+    if (busy || loading || !listReady) return;
+    const next = resolveOpenAgentId(agentId, options);
+    const current = agentId?.trim() || null;
+    if (next === current) return;
+    onAgentChange(
+      next ? (options.find((agent) => agent.id === next) ?? null) : null,
+    );
+  }, [agentId, busy, listReady, loading, onAgentChange, options]);
   const [open, setOpen] = useState(false);
   const menuOpenRef = useRef(open);
   menuOpenRef.current = open;
@@ -149,8 +189,16 @@ export function AgentSelector({
                 {t("agents.one")}
               </p>
               {[
-                { id: "", name: t("agents.default"), scope: "user" as const },
-                ...options,
+                ...(builtinDefault
+                  ? []
+                  : [
+                      {
+                        id: "",
+                        name: t("agents.default"),
+                        scope: "user" as const,
+                      },
+                    ]),
+                ...orderedOptions,
               ].map((agent) => {
                 const active = (selected?.id ?? "") === agent.id;
                 return (
@@ -219,8 +267,10 @@ export function AgentSelector({
           onAgentChange(options.find((agent) => agent.id === next) ?? null);
         }}
       >
-        <option value="">{t("agents.default")}</option>
-        {options.map((agent) => (
+        {builtinDefault ? null : (
+          <option value="">{t("agents.default")}</option>
+        )}
+        {orderedOptions.map((agent) => (
           <option key={`${agent.scope}:${agent.id}`} value={agent.id}>
             {agent.name}
             {agent.scope === "project" ? ` ${t("agents.projectBadge")}` : ""}

@@ -212,4 +212,83 @@ describe("ChatComposer agent label", () => {
     expect(agentButton().textContent?.trim()).toBe("论文抛光机");
     expect(document.querySelector('[data-testid="reply-mode"]')).toBeNull();
   });
+
+  it("checks the built-in default agent when the tab has no selection", async () => {
+    useSettingsStore.setState({ uiLanguage: "zh" });
+    useClaudeChatStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === "tab-agent" ? { ...tab, agentId: null } : tab,
+      ),
+    }));
+
+    await renderComposer();
+
+    await vi.waitFor(() => {
+      expect(agentButton().textContent?.trim()).toBe("默认智能体");
+    });
+
+    await act(async () => {
+      agentButton().click();
+    });
+    const checked = document.querySelector(
+      '[role="menuitemradio"][aria-checked="true"]',
+    );
+    expect(checked?.textContent?.replace("✓", "").trim()).toBe("默认智能体");
+  });
+
+  it("selects a listed 默认智能体 instead of leaving the picker empty", async () => {
+    const agents = [
+      presetAgent("default-agent", "默认智能体"),
+      ...builtinAgents,
+    ];
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "list_agents") return Promise.resolve(agents);
+      return Promise.resolve([]);
+    });
+    useAgentStore.setState({ agents, loading: false, error: null });
+    useClaudeChatStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === "tab-agent" ? { ...tab, agentId: null } : tab,
+      ),
+    }));
+
+    await renderComposer();
+
+    await vi.waitFor(() => {
+      expect(
+        useClaudeChatStore.getState().tabs.find((tab) => tab.id === "tab-agent")
+          ?.agentId,
+      ).toBe("default-agent");
+    });
+    expect(agentButton().textContent?.trim()).toBe("默认智能体");
+  });
+
+  it("keeps a listed agent selected while the agent list is still loading", async () => {
+    let release: (agents: AgentProfile[]) => void = () => {};
+    const pending = new Promise<AgentProfile[]>((resolve) => {
+      release = resolve;
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "list_agents") return pending;
+      return Promise.resolve([]);
+    });
+    useAgentStore.setState({ agents: [], loading: false, error: null });
+
+    await renderComposer();
+    expect(
+      useClaudeChatStore.getState().tabs.find((tab) => tab.id === "tab-agent")
+        ?.agentId,
+    ).toBe("de-ai");
+
+    release(builtinAgents);
+    await act(async () => {
+      await pending;
+    });
+
+    expect(
+      useClaudeChatStore.getState().tabs.find((tab) => tab.id === "tab-agent")
+        ?.agentId,
+    ).toBe("de-ai");
+    expect(agentButton().textContent?.trim()).toBe("AI消除器");
+  });
 });
