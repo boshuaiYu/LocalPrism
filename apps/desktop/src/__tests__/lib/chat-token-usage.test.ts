@@ -3,6 +3,7 @@ import {
   buildTokenMeterModel,
   catalogContextWindow,
   estimateContextWindow,
+  MOONSHOT_CONTEXT_WINDOW,
   formatTokenCount,
   isSubagentUsageMessage,
   lastTurnUsage,
@@ -178,6 +179,18 @@ describe("chat token usage", () => {
 
   it("does not treat session totals as context occupancy", () => {
     expect(estimateContextWindow("sonnet")).toBe(200_000);
+    expect(estimateContextWindow("kimi-k2.5")).toBe(MOONSHOT_CONTEXT_WINDOW);
+    expect(estimateContextWindow("moonshot-v1-128k")).toBe(
+      MOONSHOT_CONTEXT_WINDOW,
+    );
+    expect(estimateContextWindow("kimi-k2.5", 128_000)).toBe(128_000);
+    const kimi = buildTokenMeterModel({ modelLabel: "kimi-k2.5" });
+    const moonshot = buildTokenMeterModel({
+      modelLabel: "moonshot-v1-128k",
+    });
+    expect(kimi.windowTokens).toBe(262_144);
+    expect(moonshot.windowTokens).toBe(262_144);
+    expect(kimi.usedTokens).toBe(0);
     const meter = buildTokenMeterModel({
       modelLabel: "sonnet",
     });
@@ -1005,5 +1018,68 @@ describe("chat token usage", () => {
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
     });
+  });
+
+  it("keeps the previous request while a new turn is waiting for usage", () => {
+    const meter = buildTokenMeterModel({
+      modelLabel: "gpt-6-luna",
+      windowTokens: 272_000,
+      inFlight: true,
+      previousTurn: true,
+      lastUsage: null,
+      messages: [
+        {
+          type: "assistant",
+          message: {
+            usage: {
+              input_tokens: 12_000,
+              output_tokens: 400,
+              cache_read_input_tokens: 8_000,
+              cache_creation_input_tokens: 0,
+            },
+          },
+        },
+        { type: "user" },
+      ],
+    });
+    expect(meter.inputTokens).toBe(12_000);
+    expect(meter.outputTokens).toBe(400);
+    expect(meter.cacheReadTokens).toBe(8_000);
+    expect(meter.usedTokens).toBe(20_400);
+    expect(meter.estimated).toBe(false);
+    expect(meter.previousTurn).toBe(true);
+    expect(meter.percent).toBe(8);
+  });
+
+  it("uses the stored previous snapshot when the new turn has no usage yet", () => {
+    const meter = buildTokenMeterModel({
+      modelLabel: "gpt-6-luna",
+      windowTokens: 272_000,
+      inFlight: true,
+      previousTurn: true,
+      messages: [{ type: "user" }],
+      lastUsage: {
+        inputTokens: 5_000,
+        outputTokens: 20,
+        cacheReadTokens: 1_000,
+        cacheCreationTokens: 0,
+      },
+    });
+    expect(meter.usedTokens).toBe(6_020);
+    expect(meter.estimated).toBe(false);
+    expect(meter.previousTurn).toBe(true);
+  });
+
+  it("does not label an empty in-flight meter as the previous turn", () => {
+    const meter = buildTokenMeterModel({
+      modelLabel: "gpt-6-luna",
+      inFlight: true,
+      previousTurn: true,
+      messages: [{ type: "user" }],
+      lastUsage: null,
+    });
+    expect(meter.usedTokens).toBe(0);
+    expect(meter.estimated).toBe(true);
+    expect(meter.previousTurn).toBe(false);
   });
 });

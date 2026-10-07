@@ -16,6 +16,14 @@ import {
   type TokenUsageSnapshot,
 } from "@/lib/chat-token-usage";
 import {
+  applyCompactEvent,
+  COMPACTING_STATUS,
+  compactUsageUpdate,
+  dropPendingCompactNotices,
+  type CompactNoticeState,
+  type CompactStreamEvent,
+} from "@/lib/chat-compact";
+import {
   FALLBACK_REASONING_EFFORTS,
   resolveReasoningEffort,
 } from "@/lib/reasoning-effort";
@@ -184,6 +192,8 @@ export interface ClaudeStreamMessage {
     originals: ClaudeStreamMessage[];
     coveredCount: number;
   };
+  /** Divider inserted when Claude Code compacts this transcript. */
+  compactNotice?: CompactNoticeState;
 }
 
 // ─── Tab Types ───
@@ -299,6 +309,17 @@ export interface TabState {
   totalInputTokens: number;
   totalOutputTokens: number;
   lastTurnUsage?: TokenUsageSnapshot | null;
+  /**
+   * Set while a new turn is in flight and `lastTurnUsage` still belongs to
+   * the previous request. Cleared once that turn reports prompt usage.
+   */
+  usageFromPreviousTurn?: boolean;
+  /**
+   * Set when the model changes. The transcript still holds the previous
+   * model's request, so the ring reads only `lastTurnUsage` until a new
+   * prompt usage is appended.
+   */
+  ignoreTranscriptUsage?: boolean;
   /** Context window reported by the runtime for this conversation. */
   contextWindowTokens?: number | null;
   /** Codex turn that later messages in this tab should inherit. */
@@ -1272,6 +1293,7 @@ interface ClaudeChatState {
   _appendMessage: (tabId: string, msg: ClaudeStreamMessage) => void;
   /** Merge one request's usage into the meter without counting it in session totals. */
   _noteRequestUsage: (tabId: string, snapshot: TokenUsageSnapshot) => void;
+  _noteCompact: (tabId: string, event: CompactStreamEvent) => void;
   _setSessionId: (tabId: string, id: string) => void;
   _setSessionTitle: (sessionId: string, title: string) => void;
   _setConversationTitle: (reference: ConversationRef, title: string) => void;
@@ -1714,7 +1736,10 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         streamingStartedAt,
         streamingStatus: null,
         error: null,
-        lastTurnUsage: null,
+        usageFromPreviousTurn: Boolean(
+          currentTab?.lastTurnUsage &&
+            snapshotHasTokens(currentTab.lastTurnUsage),
+        ),
         pendingTemporaryFilePaths: temporaryFilePathsForAttempt,
         attemptEpoch,
         activeAttemptId: attemptId,
@@ -2386,6 +2411,8 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         totalInputTokens: 0,
         totalOutputTokens: 0,
         lastTurnUsage: null,
+        usageFromPreviousTurn: false,
+        ignoreTranscriptUsage: false,
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
         forcedQueuedGuidanceId: null,
@@ -2565,6 +2592,8 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         totalInputTokens: 0,
         totalOutputTokens: 0,
         lastTurnUsage: null,
+        usageFromPreviousTurn: false,
+        ignoreTranscriptUsage: false,
         title: STORED_CHAT_TITLE_PLACEHOLDER,
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
@@ -2788,6 +2817,8 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
           totalInputTokens: totals.inputTokens,
           totalOutputTokens: totals.outputTokens,
           lastTurnUsage: lastTurnUsageFromMessages(messages),
+          usageFromPreviousTurn: false,
+          ignoreTranscriptUsage: false,
           activeCodexTurnId: null,
           error: null,
           compressionCarryover: keptSummary
@@ -2958,6 +2989,8 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         totalInputTokens: 0,
         totalOutputTokens: 0,
         lastTurnUsage: null,
+        usageFromPreviousTurn: false,
+        ignoreTranscriptUsage: false,
         title: STORED_CHAT_TITLE_PLACEHOLDER,
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
@@ -3000,7 +3033,18 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       }
 
       result = "changed";
-      return applyTabUpdate(state, tabId, selection);
+      const modelChanged = tab.runtimeModel !== selection.runtimeModel;
+      return applyTabUpdate(state, tabId, {
+        ...selection,
+        ...(modelChanged
+          ? {
+              lastTurnUsage: null,
+              usageFromPreviousTurn: false,
+              contextWindowTokens: null,
+              ignoreTranscriptUsage: true,
+            }
+          : {}),
+      });
     });
     return result;
   },
@@ -3163,6 +3207,8 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         totalInputTokens: 0,
         totalOutputTokens: 0,
         lastTurnUsage: null,
+        usageFromPreviousTurn: false,
+        ignoreTranscriptUsage: false,
         title: sessionTitle ?? STORED_CHAT_TITLE_PLACEHOLDER,
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
@@ -3281,6 +3327,8 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
           totalInputTokens: totals.inputTokens,
           totalOutputTokens: totals.outputTokens,
           lastTurnUsage: lastTurnUsageFromMessages(messages),
+          usageFromPreviousTurn: false,
+          ignoreTranscriptUsage: false,
           resumeRequestId: null,
         });
         return reference.runtime === "claude" && s.activeTabId === activeTabId
@@ -3549,6 +3597,17 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         !cumulativeResult && snapshotHasTokens(incomingUsage)
           ? mergeTokenUsageSnapshots(tab.lastTurnUsage, incomingUsage)
           : undefined;
+      const usageFields = lastTurnUsage
+        ? {
+            lastTurnUsage,
+            ...(snapshotHasPromptTokens(incomingUsage)
+              ? {
+                  usageFromPreviousTurn: false as const,
+                  ignoreTranscriptUsage: false as const,
+                }
+              : {}),
+          }
+        : {};
 
       if (
         stamped.type === "assistant" &&
@@ -3570,7 +3629,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
               messages: [...tab.messages.slice(0, -1), merged],
               totalInputTokens: tab.totalInputTokens + inputDelta,
               totalOutputTokens: tab.totalOutputTokens + outputDelta,
-              ...(lastTurnUsage ? { lastTurnUsage } : {}),
+              ...usageFields,
             });
           }
         }
@@ -3596,7 +3655,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
             messages: [...tab.messages.slice(0, -1), finalized],
             totalInputTokens: tab.totalInputTokens + inputDelta,
             totalOutputTokens: tab.totalOutputTokens + outputDelta,
-            ...(lastTurnUsage ? { lastTurnUsage } : {}),
+            ...usageFields,
           });
         }
       }
@@ -3605,7 +3664,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         messages: [...tab.messages, stamped],
         totalInputTokens: tab.totalInputTokens + inputDelta,
         totalOutputTokens: tab.totalOutputTokens + outputDelta,
-        ...(lastTurnUsage ? { lastTurnUsage } : {}),
+        ...usageFields,
       });
     });
   },
@@ -3617,6 +3676,32 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       if (!tab) return {};
       return applyTabUpdate(state, tabId, {
         lastTurnUsage: mergeTokenUsageSnapshots(tab.lastTurnUsage, snapshot),
+        ...(snapshotHasPromptTokens(snapshot)
+          ? { usageFromPreviousTurn: false }
+          : {}),
+      });
+    });
+  },
+
+  _noteCompact: (tabId: string, event: CompactStreamEvent) => {
+    set((state) => {
+      const tab = state.tabs.find((candidate) => candidate.id === tabId);
+      if (!tab || event.kind === "compact-idle") return {};
+      const messages = applyCompactEvent(tab.messages, event);
+      if (event.kind === "compacting") {
+        return applyTabUpdate(state, tabId, {
+          streamingStatus: COMPACTING_STATUS,
+          ...(messages !== tab.messages ? { messages } : {}),
+        });
+      }
+      const nextUsage = compactUsageUpdate(tab.lastTurnUsage, event, messages);
+      const clearStatus = tab.streamingStatus === COMPACTING_STATUS;
+      return applyTabUpdate(state, tabId, {
+        ...(messages !== tab.messages ? { messages } : {}),
+        ...(nextUsage
+          ? { lastTurnUsage: nextUsage, usageFromPreviousTurn: false }
+          : {}),
+        ...(clearStatus ? { streamingStatus: null } : {}),
       });
     });
   },
@@ -3673,16 +3758,19 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
   _setStreaming: (tabId: string, streaming: boolean) => {
     set((state) => {
       const tab = state.tabs.find((t) => t.id === tabId);
-      const messages =
+      const settled =
         !streaming && tab
           ? collapseRepeatedSkillToolMessages(settleChatMessages(tab.messages))
           : tab?.messages;
+      const messages =
+        !streaming && settled ? dropPendingCompactNotices(settled) : settled;
       return applyTabUpdate(state, tabId, {
         isStreaming: streaming,
         streamingStartedAt: streaming
           ? (tab?.streamingStartedAt ?? Date.now())
           : null,
         streamingStatus: streaming ? (tab?.streamingStatus ?? null) : null,
+        ...(!streaming ? { usageFromPreviousTurn: false } : {}),
         ...(messages && messages !== tab?.messages ? { messages } : {}),
       });
     });
@@ -3721,7 +3809,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     set((state) => {
       const tab = state.tabs.find((candidate) => candidate.id === tabId);
       if (!tab) return {};
-      const lastTurnUsage = mergeTokenUsageSnapshots(tab.lastTurnUsage, {
+      const incomingUsage = {
         inputTokens,
         outputTokens,
         cacheReadTokens: extras?.cacheReadTokens ?? 0,
@@ -3732,7 +3820,11 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         ...(extras?.cacheCreationTokens === undefined
           ? { cacheCreationKnown: false }
           : {}),
-      });
+      };
+      const lastTurnUsage = mergeTokenUsageSnapshots(
+        tab.lastTurnUsage,
+        incomingUsage,
+      );
       const contextWindow =
         extras?.contextWindow && extras.contextWindow > 0
           ? extras.contextWindow
@@ -3741,6 +3833,9 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         totalInputTokens: tab.totalInputTokens + inputTokens,
         totalOutputTokens: tab.totalOutputTokens + outputTokens,
         lastTurnUsage,
+        ...(snapshotHasPromptTokens(incomingUsage)
+          ? { usageFromPreviousTurn: false }
+          : {}),
         ...(contextWindow ? { contextWindowTokens: contextWindow } : {}),
       });
     });

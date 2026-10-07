@@ -1,4 +1,6 @@
 import { type FC, memo, useEffect, useState } from "react";
+import { COMPACTING_STATUS } from "@/lib/chat-compact";
+import { useI18n } from "@/lib/use-i18n";
 
 // ─── Streaming Indicator (isolated to prevent re-render storms) ───
 
@@ -10,6 +12,7 @@ export const StreamingIndicator: FC<{
   status?: string | null;
   runtime?: "claude" | "codex";
 }> = memo(({ startedAt, status, runtime = "claude" }) => {
+  const { t } = useI18n();
   const calculateElapsed = () =>
     startedAt ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000)) : 0;
 
@@ -25,6 +28,9 @@ export const StreamingIndicator: FC<{
 
   const normalizedStatus = status?.trim() || "";
   const label = (() => {
+    if (normalizedStatus === COMPACTING_STATUS) {
+      return t("chat.compacting");
+    }
     if (normalizedStatus && !GENERIC_WORKING_STATUS.test(normalizedStatus)) {
       return normalizedStatus;
     }

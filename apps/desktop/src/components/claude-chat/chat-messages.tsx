@@ -16,6 +16,7 @@ import {
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
 import { MarkdownRenderer } from "./markdown-renderer";
+import { CompactNotice } from "./compact-notice";
 import { StreamingIndicator } from "./streaming-indicator";
 import { ThinkingWidget, ToolWidget } from "./tool-widgets";
 import { parseDisplayedCompileBullet } from "@/lib/compile-fix-prompt";
@@ -250,6 +251,7 @@ export const ChatMessages: FC = () => {
         )
         .filter((msg) => {
           if (msg.subtype === "context-summary") return true;
+          if (msg.subtype === "compact-notice") return true;
           if (msg.type === "system" && msg.subtype === "init") return false;
           if (
             msg.type !== "user" &&
@@ -496,6 +498,9 @@ const MessageBubble: FC<{
   live?: boolean;
 }> = memo(
   ({ message, toolResultMap, live = false }) => {
+    if (message.subtype === "compact-notice") {
+      return <CompactNotice message={message} />;
+    }
     if (message.subtype === "context-summary") {
       return <SummaryMessage message={message} toolResultMap={toolResultMap} />;
     }

@@ -4,6 +4,7 @@ mod agents;
 mod anthropic_proxy;
 mod claude;
 mod codex_turn_usage;
+mod context_window;
 mod claude_permissions;
 mod claude_process;
 mod editors;

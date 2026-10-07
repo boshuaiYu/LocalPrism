@@ -58,4 +58,21 @@ describe("StreamingIndicator", () => {
       /Still waiting \(reconnects can take 1–2 minutes\)/i,
     );
   });
+
+  it("shows auto-compact copy instead of the long-wait fallback", async () => {
+    const startedAt = Date.now() - 50_000;
+
+    await act(async () => {
+      root.render(
+        <StreamingIndicator
+          startedAt={startedAt}
+          status="compact:compacting"
+          runtime="claude"
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Auto-compacting context…");
+    expect(container.textContent).not.toMatch(/Still waiting/i);
+  });
 });

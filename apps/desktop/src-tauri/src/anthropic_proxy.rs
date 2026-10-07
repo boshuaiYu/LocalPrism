@@ -229,6 +229,20 @@ async fn handle_anthropic_passthrough_connection(
     Ok(())
 }
 
+const CONTEXT_1M_BETA: &str = "context-1m-2025-08-07";
+
+/// Claude Code adds this beta when the spawn model ends in `[1m]`.
+/// Third-party Anthropic endpoints reject the header, and the proxy already
+/// rewrites `model` to the credential id.
+fn strip_context_1m_beta(header: &str) -> String {
+    header
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty() && !token.eq_ignore_ascii_case(CONTEXT_1M_BETA))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 async fn handle_anthropic_passthrough(
     request: &HttpRequest,
     path: &str,
@@ -274,7 +288,10 @@ async fn handle_anthropic_passthrough(
         builder = builder.header("anthropic-version", "2023-06-01");
     }
     if let Some(beta) = request_header(request, "anthropic-beta") {
-        builder = builder.header("anthropic-beta", beta);
+        let beta = strip_context_1m_beta(&beta);
+        if !beta.is_empty() {
+            builder = builder.header("anthropic-beta", beta);
+        }
     }
 
     let response = builder
@@ -2532,5 +2549,22 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_live\",\"usag
         assert_eq!(captured.authorization, "Bearer sk-test");
         assert!(captured.body.contains("Reply with exactly: ok"));
         assert!(captured.body.contains("\"stream\":false"));
+    }
+
+    #[test]
+    fn strips_context_1m_beta_and_keeps_other_betas() {
+        assert_eq!(strip_context_1m_beta("context-1m-2025-08-07"), "");
+        assert_eq!(
+            strip_context_1m_beta("fine-grained-tool-streaming-2025-05-14, context-1m-2025-08-07"),
+            "fine-grained-tool-streaming-2025-05-14"
+        );
+        assert_eq!(
+            strip_context_1m_beta("CONTEXT-1M-2025-08-07,oauth-2025-04-20"),
+            "oauth-2025-04-20"
+        );
+        assert_eq!(
+            strip_context_1m_beta("oauth-2025-04-20"),
+            "oauth-2025-04-20"
+        );
     }
 }

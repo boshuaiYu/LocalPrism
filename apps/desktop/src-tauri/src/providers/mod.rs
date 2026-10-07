@@ -25,6 +25,7 @@ pub use env::{
     active_provider_identity, build_managed_env, resolve_active_spawn_model,
     ActiveProviderIdentity, ProxyKind,
 };
+pub(crate) use models::catalog_context_window;
 pub use types::{
     is_legacy_claude_alias, workspace_ready, ProviderCard, ProviderKind, ProviderModel,
     ProviderWorkspaceStatus, SavedProvider, CHATGPT_OFFICIAL_ID, CLAUDE_OFFICIAL_ID,
