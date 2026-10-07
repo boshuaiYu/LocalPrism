@@ -1579,7 +1579,6 @@ export function Sidebar({
           />
 
           <AppStatusBar
-            layout="stack"
             className="border-sidebar-border bg-sidebar text-sidebar-foreground"
             trailing={
               <>

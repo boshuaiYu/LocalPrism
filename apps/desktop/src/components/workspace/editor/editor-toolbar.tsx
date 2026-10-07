@@ -21,6 +21,9 @@ import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button
 import { Button } from "@/components/ui/button";
 // Official Codex.app dock icons, downscaled from the macOS bundle
 // resources icon-codex-light.png and icon-codex-dark-color.png.
+// The cloud glyph occupies ~70% of the tile (the light tile is near-white
+// and disappears on light menus), so scale it to the same 1rem box as
+// the Cursor and VS Code marks.
 import codexIconDark from "@/assets/codex-app-dark.png";
 import codexIconLight from "@/assets/codex-app-light.png";
 import cursorIcon from "@/assets/cursor.svg";
@@ -101,19 +104,19 @@ function EditorBrandIcon({ editor }: { editor: EditorInfo }) {
       <span
         aria-hidden="true"
         data-editor-icon="codex"
-        className="inline-block size-4 shrink-0"
+        className="inline-block size-4 shrink-0 overflow-hidden"
       >
         <img
           src={codexIconLight}
           alt=""
           draggable={false}
-          className="block size-4 dark:hidden"
+          className="block size-4 origin-center scale-[1.4] dark:hidden"
         />
         <img
           src={codexIconDark}
           alt=""
           draggable={false}
-          className="hidden size-4 dark:block"
+          className="hidden size-4 origin-center scale-[1.4] dark:block"
         />
       </span>
     );

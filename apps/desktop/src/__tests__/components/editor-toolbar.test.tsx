@@ -88,6 +88,8 @@ describe("EditorToolbar external editors", () => {
     });
     const triggerIcon = button.querySelector('[data-editor-icon="codex"]');
     expect(triggerIcon?.querySelectorAll("img")).toHaveLength(2);
+    expect(triggerIcon?.className).toContain("overflow-hidden");
+    expect(triggerIcon?.className).toContain("size-4");
     await vi.waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("detect_editors");
     });
@@ -143,6 +145,13 @@ describe("EditorToolbar external editors", () => {
     ]);
     expect(codexImages[0]?.className).toContain("dark:hidden");
     expect(codexImages[1]?.className).toContain("dark:block");
+    for (const img of codexImages) {
+      expect(img.className).toContain("size-4");
+      expect(img.className).toContain("scale-[1.4]");
+    }
+    expect(
+      item("Codex").querySelector('[data-editor-icon="codex"]')?.className,
+    ).toContain("overflow-hidden");
   });
 
   it("remembers the editor chosen from the menu", async () => {

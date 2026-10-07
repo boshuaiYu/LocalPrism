@@ -53,12 +53,9 @@ function noticeMode(status: UpdateStatus): "blink" | "steady" | "hidden" {
 export function AppStatusBar({
   className,
   trailing,
-  layout = "inline",
 }: {
   className?: string;
   trailing?: ReactNode;
-  /** Sidebar bars stack so version text cannot push actions past the pane. */
-  layout?: "inline" | "stack";
 }) {
   const version = useAppVersion();
   const { t } = useI18n();
@@ -110,100 +107,113 @@ export function AppStatusBar({
     (status.state === "error" &&
       classifyUpdateError(status.message) === "missing-platform");
 
-  const stacked = layout === "stack";
+  const versionLabel = `LocalPrism${version ? ` v${version}` : ""}`;
 
   return (
     <div
       data-testid="app-status-bar"
-      data-layout={layout}
+      data-layout="inline"
       className={cn(
-        "w-full min-w-0 shrink-0 border-t text-muted-foreground text-xs",
-        stacked
-          ? "flex flex-col gap-1 overflow-x-hidden px-1.5 py-1"
-          : "flex min-h-9 items-center gap-1.5 px-2 py-1",
+        "@container/status w-full min-w-0 shrink-0 border-t text-muted-foreground text-xs",
         className,
       )}
     >
+      {/* One row until the pane is narrower than the fixed controls
+          (language, Beta, refresh, trailing chrome ≈ 13.75rem). Version
+          text truncates. Stacking only below that keeps those controls
+          from being clipped on a narrow sidebar. */}
       <div
+        data-testid="app-status-bar-row"
         className={cn(
-          "flex min-w-0 items-center gap-1.5",
-          stacked ? "w-full" : "flex-1",
+          "flex min-h-9 w-full min-w-0 items-center gap-1.5 overflow-x-hidden px-2 py-1",
+          "@max-[13.75rem]/status:flex-col @max-[13.75rem]/status:items-stretch @max-[13.75rem]/status:gap-1 @max-[13.75rem]/status:px-1.5",
         )}
       >
-        <span className="min-w-0 truncate" data-testid="app-version">
-          LocalPrism{version ? ` v${version}` : ""}
-        </span>
-        {notice ? (
-          noticeInteractive ? (
-            <button
-              type="button"
-              data-testid="update-flash"
-              className={cn(
-                "min-w-0 truncate rounded px-1 text-left text-foreground hover:bg-muted/70",
-                blink && "lp-update-flash",
-              )}
-              title={notice.title}
-              onClick={onNotice}
-            >
-              {notice.label}
-            </button>
-          ) : (
-            <span
-              data-testid="update-flash"
-              className="min-w-0 truncate text-foreground"
-              title={notice.title}
-            >
-              {notice.label}
-            </span>
-          )
-        ) : null}
-      </div>
-      <div
-        data-testid="app-status-actions"
-        className={cn(
-          "flex min-w-0 items-center gap-0.5 [&>*]:shrink-0",
-          stacked ? "w-full flex-wrap" : "ml-auto shrink-0",
-        )}
-      >
-        <LanguageSwitch compact />
-        <button
-          type="button"
-          role="switch"
-          aria-checked={joinBeta}
-          aria-label={betaChannelLabel}
-          title={betaChannelLabel}
-          data-testid="beta-channel-toggle"
-          disabled={busy}
+        <div
           className={cn(
-            "h-6 rounded-md px-1.5 font-medium text-[11px] disabled:cursor-not-allowed disabled:opacity-40",
-            joinBeta
-              ? "bg-foreground text-background"
-              : "text-muted-foreground hover:bg-muted/70 hover:text-foreground",
+            "flex min-w-0 flex-1 items-center gap-1.5",
+            "@max-[13.75rem]/status:w-full @max-[13.75rem]/status:flex-none",
           )}
-          onClick={() => {
-            setJoinBetaChannel(!joinBeta);
-            void checkForUpdate({ explicit: true });
-          }}
         >
-          {t("updates.beta")}
-        </button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="size-6"
-          data-testid="check-for-updates"
-          data-tour="tour-updates"
-          title={t("updates.check")}
-          aria-label={t("updates.check")}
-          disabled={busy}
-          onClick={() => void checkForUpdate({ explicit: true })}
+          <span
+            className="min-w-0 truncate"
+            data-testid="app-version"
+            title={versionLabel}
+          >
+            {versionLabel}
+          </span>
+          {notice ? (
+            noticeInteractive ? (
+              <button
+                type="button"
+                data-testid="update-flash"
+                className={cn(
+                  "min-w-0 truncate rounded px-1 text-left text-foreground hover:bg-muted/70",
+                  blink && "lp-update-flash",
+                )}
+                title={notice.title}
+                onClick={onNotice}
+              >
+                {notice.label}
+              </button>
+            ) : (
+              <span
+                data-testid="update-flash"
+                className="min-w-0 truncate text-foreground"
+                title={notice.title}
+              >
+                {notice.label}
+              </span>
+            )
+          ) : null}
+        </div>
+        <div
+          data-testid="app-status-actions"
+          className={cn(
+            "ml-auto flex shrink-0 items-center gap-0.5 [&>*]:shrink-0",
+            "@max-[13.75rem]/status:ml-0 @max-[13.75rem]/status:w-full @max-[13.75rem]/status:flex-wrap",
+          )}
         >
-          <RefreshCwIcon
-            className={busy ? "size-3.5 animate-spin" : "size-3.5"}
-          />
-        </Button>
-        {trailing}
+          <LanguageSwitch compact />
+          <button
+            type="button"
+            role="switch"
+            aria-checked={joinBeta}
+            aria-label={betaChannelLabel}
+            title={betaChannelLabel}
+            data-testid="beta-channel-toggle"
+            disabled={busy}
+            className={cn(
+              "h-6 rounded-md px-1.5 font-medium text-[11px] disabled:cursor-not-allowed disabled:opacity-40",
+              joinBeta
+                ? "bg-foreground text-background"
+                : "text-muted-foreground hover:bg-muted/70 hover:text-foreground",
+            )}
+            onClick={() => {
+              setJoinBetaChannel(!joinBeta);
+              void checkForUpdate({ explicit: true });
+            }}
+          >
+            {t("updates.beta")}
+          </button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-6"
+            data-testid="check-for-updates"
+            data-tour="tour-updates"
+            title={t("updates.check")}
+            aria-label={t("updates.check")}
+            disabled={busy}
+            onClick={() => void checkForUpdate({ explicit: true })}
+          >
+            <RefreshCwIcon
+              className={busy ? "size-3.5 animate-spin" : "size-3.5"}
+            />
+          </Button>
+          {trailing}
+        </div>
       </div>
     </div>
   );

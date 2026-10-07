@@ -100,6 +100,19 @@ describe("Sidebar chrome", () => {
     ].filter((node) => !node.closest('[aria-hidden="true"]'));
     expect(help).toHaveLength(1);
     expect(help[0]?.getAttribute("aria-label")).toBe("Help");
+
+    const visibleBar = [
+      ...container.querySelectorAll('[data-testid="app-status-bar"]'),
+    ].find((node) => !node.closest('[aria-hidden="true"]'));
+    expect(visibleBar?.getAttribute("data-layout")).toBe("inline");
+    const row = visibleBar?.querySelector('[data-testid="app-status-bar-row"]');
+    expect(row?.className).toContain("items-center");
+    expect(row?.className).not.toMatch(/(^|\s)flex-col(\s|$)/);
+    expect(row?.className).toContain("@max-[13.75rem]/status:flex-col");
+    expect(
+      visibleBar?.querySelector('[data-testid="app-status-actions"]')
+        ?.className,
+    ).toContain("ml-auto");
   });
 
   it("keeps a settings gear on the collapsed rail", async () => {
