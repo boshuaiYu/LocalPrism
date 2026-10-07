@@ -235,7 +235,21 @@ fn configured_third_party_models(provider: &SavedProvider) -> Vec<ProviderModel>
         push_unique_model(&mut models, haiku, false);
     }
     apply_preferred_default(&mut models, Some(provider.models.main.as_str()));
+    apply_known_reasoning_efforts(&provider.base_url, &mut models);
     models
+}
+
+fn apply_known_reasoning_efforts(base_url: &str, models: &mut [ProviderModel]) {
+    for model in models {
+        if !model.reasoning_efforts.is_empty() {
+            continue;
+        }
+        if let Some(efforts) =
+            crate::anthropic_proxy::reasoning::known_reasoning_efforts(base_url, &model.id)
+        {
+            model.reasoning_efforts = efforts.iter().map(|value| (*value).to_string()).collect();
+        }
+    }
 }
 
 fn push_unique_model(models: &mut Vec<ProviderModel>, id: &str, is_default: bool) {
@@ -336,6 +350,7 @@ async fn live_third_party_models(provider: &SavedProvider) -> Result<Vec<Provide
                     continue;
                 }
                 merge_configured_models(&mut parsed, provider);
+                apply_known_reasoning_efforts(&provider.base_url, &mut parsed);
                 return Ok(parsed);
             }
             Err(error) => last_error = format!("{url}: {error}"),
@@ -783,6 +798,64 @@ mod tests {
         assert_eq!(metadata["capabilities"]["thinking"]["max"], 64);
         assert_eq!(metadata["capabilities"]["thinking"]["step"], 8);
         assert_eq!(metadata["id"], "claude-opus-4-6");
+    }
+
+    #[test]
+    fn known_provider_ladders_fill_empty_catalogs_and_keep_advertised_efforts() {
+        let mut models = vec![
+            ProviderModel {
+                id: "deepseek-v4-pro".into(),
+                display_name: "deepseek-v4-pro".into(),
+                reasoning_efforts: Vec::new(),
+                is_default: true,
+                context_window: None,
+                metadata: None,
+            },
+            ProviderModel {
+                id: "deepseek-ai/DeepSeek-V4-Flash".into(),
+                display_name: "V4 Flash".into(),
+                reasoning_efforts: Vec::new(),
+                is_default: false,
+                context_window: None,
+                metadata: None,
+            },
+            ProviderModel {
+                id: "Qwen/Qwen3-32B".into(),
+                display_name: "Qwen3".into(),
+                reasoning_efforts: Vec::new(),
+                is_default: false,
+                context_window: None,
+                metadata: None,
+            },
+            ProviderModel {
+                id: "deepseek-ai/DeepSeek-V3".into(),
+                display_name: "V3".into(),
+                reasoning_efforts: Vec::new(),
+                is_default: false,
+                context_window: None,
+                metadata: None,
+            },
+            ProviderModel {
+                id: "custom-effort".into(),
+                display_name: "custom".into(),
+                reasoning_efforts: vec!["low".into(), "high".into()],
+                is_default: false,
+                context_window: None,
+                metadata: None,
+            },
+        ];
+
+        apply_known_reasoning_efforts("https://api.deepseek.com/anthropic", &mut models[..1]);
+        assert_eq!(models[0].reasoning_efforts, vec!["low", "high", "max"]);
+
+        apply_known_reasoning_efforts("https://api.siliconflow.cn/v1", &mut models[1..]);
+        assert_eq!(models[1].reasoning_efforts, vec!["high", "max"]);
+        assert_eq!(
+            models[2].reasoning_efforts,
+            vec!["low", "medium", "high", "max"]
+        );
+        assert!(models[3].reasoning_efforts.is_empty());
+        assert_eq!(models[4].reasoning_efforts, vec!["low", "high"]);
     }
 
     #[test]
