@@ -5,6 +5,7 @@ import {
   chooseUpdateOffer,
   classifyUpdateError,
   compareSemver,
+  installCoversLoadedBetas,
   isAllowedBetaManifestUrl,
   isBetaRelease,
   isNewerVersion,
@@ -485,5 +486,40 @@ describe("beta update detection", () => {
         allowPrerelease: false,
       }),
     ).toEqual({ action: "none" });
+  });
+});
+
+describe("installCoversLoadedBetas", () => {
+  const loaded = betaCandidatesFromGithub([
+    { tag_name: "v1.0.8beta11", prerelease: true, draft: false },
+    { tag_name: "v1.0.8beta12", prerelease: true, draft: false },
+  ]);
+
+  it("is true when every comparable beta is the same build or older", () => {
+    expect(installCoversLoadedBetas("1.0.8-12", loaded)).toBe(true);
+    expect(installCoversLoadedBetas("1.0.8beta12", loaded)).toBe(true);
+  });
+
+  it("is false when a loaded beta is newer, or nothing comparable was loaded", () => {
+    expect(installCoversLoadedBetas("1.0.8-11", loaded)).toBe(false);
+    expect(installCoversLoadedBetas("1.0.8-12", [])).toBe(false);
+    expect(installCoversLoadedBetas("", loaded)).toBe(false);
+    expect(
+      installCoversLoadedBetas(
+        "1.0.8-12",
+        betaCandidatesFromGithub([
+          { tag_name: "v1.0.8beta13", prerelease: true, draft: true },
+        ]),
+      ),
+    ).toBe(false);
+    expect(
+      installCoversLoadedBetas("1.0.8-12", [
+        {
+          version: "1.0.8beta12",
+          prerelease: true,
+          manifestUrl: "https://example.invalid/latest.json",
+        },
+      ]),
+    ).toBe(false);
   });
 });
