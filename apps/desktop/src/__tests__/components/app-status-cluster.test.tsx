@@ -63,23 +63,30 @@ describe("AppStatusBar tour anchor", () => {
     expect(findProductTourElement(step!)).toBe(button);
   });
 
-  it("stacks a narrow sidebar bar so actions wrap instead of overflowing", async () => {
+  it("keeps version and actions on one row, stacking only on a narrow pane", async () => {
     await act(async () => {
-      root.render(<AppStatusBar layout="stack" />);
+      root.render(<AppStatusBar />);
     });
 
     const bar = container.querySelector('[data-testid="app-status-bar"]');
+    const row = container.querySelector('[data-testid="app-status-bar-row"]');
     const version = container.querySelector('[data-testid="app-version"]');
     const actions = container.querySelector(
       '[data-testid="app-status-actions"]',
     );
-    expect(bar?.getAttribute("data-layout")).toBe("stack");
-    expect(bar?.className).toContain("flex-col");
-    expect(bar?.className).toContain("overflow-x-hidden");
+    expect(bar?.getAttribute("data-layout")).toBe("inline");
+    expect(bar?.className).toContain("@container/status");
+    expect(row?.className).toContain("flex");
+    expect(row?.className).toContain("items-center");
+    expect(row?.className).toContain("overflow-x-hidden");
+    expect(row?.className).not.toMatch(/(^|\s)flex-col(\s|$)/);
+    expect(row?.className).toContain("@max-[13.75rem]/status:flex-col");
     expect(version?.className).toContain("truncate");
     expect(version?.className).not.toContain("shrink-0");
-    expect(actions?.className).toContain("flex-wrap");
-    expect(actions?.className).not.toContain("ml-auto");
+    expect(version?.getAttribute("title")).toContain("LocalPrism");
+    expect(actions?.className).toContain("ml-auto");
+    expect(actions?.className).toContain("shrink-0");
+    expect(actions?.className).toContain("@max-[13.75rem]/status:flex-wrap");
     expect(
       actions?.querySelector('[data-testid="beta-channel-toggle"]'),
     ).not.toBeNull();
