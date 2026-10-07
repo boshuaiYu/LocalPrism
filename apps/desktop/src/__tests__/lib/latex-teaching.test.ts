@@ -10,7 +10,10 @@ import {
   shouldShowTeachPanel,
   teachActionForDiagnostic,
 } from "@/lib/latex-teaching";
-import { useLatexTeachStore } from "@/stores/latex-teach-store";
+import {
+  bindTeachDocumentScope,
+  useLatexTeachStore,
+} from "@/stores/latex-teach-store";
 import { useSettingsStore } from "@/stores/settings-store";
 
 const figureLine = String.raw`  \begin{figure}[htbp]`;
@@ -158,4 +161,118 @@ Hello
     expect(useLatexTeachStore.getState().open).toBe(false);
     expect(useLatexTeachStore.getState().lesson).toBeNull();
   });
+
+  it("keeps an explain lesson ahead of a selection that is still active", () => {
+    const figure = lessonRefForSelection({
+      selected: String.raw`\begin{figure}`,
+      line: String.raw`\begin{figure}`,
+      selectionStartInLine: 0,
+      selectionEndInLine: 13,
+    })!;
+    const missing = lessonRefForDiagnostic("File `miss.png' not found");
+    useSettingsStore.getState().setLatexTeaching(true);
+
+    useLatexTeachStore.getState().present(figure, "sel:1:14");
+    expect(useLatexTeachStore.getState().lesson?.id).toBe("figure");
+
+    useLatexTeachStore
+      .getState()
+      .forcePresent(missing, "compile:0:File `miss.png' not found");
+    expect(useLatexTeachStore.getState().lesson?.id).toBe("file-not-found");
+
+    useLatexTeachStore.getState().present(figure, "sel:1:14");
+    useLatexTeachStore.getState().present(figure, "sel:20:34");
+    expect(useLatexTeachStore.getState().lesson?.id).toBe("file-not-found");
+    expect(useLatexTeachStore.getState().sourceKey).toBe(
+      "compile:0:File `miss.png' not found",
+    );
+
+    useLatexTeachStore.getState().dismiss();
+    useLatexTeachStore.getState().present(figure, "sel:1:14");
+    expect(useLatexTeachStore.getState().open).toBe(true);
+    expect(useLatexTeachStore.getState().lesson?.id).toBe("figure");
+  });
+
+  it("lets a selection replace an open guide", () => {
+    const figure = lessonRefForSelection({
+      selected: String.raw`\begin{figure}`,
+      line: String.raw`\begin{figure}`,
+      selectionStartInLine: 0,
+      selectionEndInLine: 13,
+    })!;
+    useSettingsStore.getState().setLatexTeaching(true);
+    useLatexTeachStore
+      .getState()
+      .forcePresent({ kind: "guide", id: "empty-project" }, "guide:empty");
+
+    useLatexTeachStore.getState().present(figure, "sel:0:13");
+    expect(useLatexTeachStore.getState().lesson?.id).toBe("figure");
+  });
+
+  it("clears an open lesson when the project or active file changes", () => {
+    const scope = createTeachScope();
+    bindTeachDocumentScope(scope);
+    useSettingsStore.getState().setLatexTeaching(true);
+    const missing = lessonRefForDiagnostic("File `miss.png' not found");
+    const show = () => {
+      useLatexTeachStore
+        .getState()
+        .forcePresent(missing, "diag:11:File `miss.png' not found");
+    };
+
+    show();
+    expect(useLatexTeachStore.getState().open).toBe(true);
+
+    scope.setState({ activeFileId: "chapter.tex" });
+    expect(useLatexTeachStore.getState().open).toBe(false);
+    expect(useLatexTeachStore.getState().lesson).toBeNull();
+    expect(useLatexTeachStore.getState().sourceKey).toBeNull();
+
+    show();
+    scope.setState({ projectRoot: "/tmp/localprism-b" });
+    expect(useLatexTeachStore.getState().lesson).toBeNull();
+
+    show();
+    scope.setState({ projectGeneration: 2 });
+    expect(useLatexTeachStore.getState().open).toBe(false);
+
+    show();
+    scope.setState({ cursorPosition: 40 });
+    expect(useLatexTeachStore.getState().open).toBe(true);
+    expect(useLatexTeachStore.getState().lesson?.id).toBe("file-not-found");
+
+    scope.setState({ activeFileId: "chapter.tex" });
+    expect(useLatexTeachStore.getState().lesson?.id).toBe("file-not-found");
+
+    const ignored = createTeachScope();
+    bindTeachDocumentScope(ignored);
+    ignored.setState({ activeFileId: "other.tex" });
+    expect(useLatexTeachStore.getState().open).toBe(true);
+  });
 });
+
+function createTeachScope() {
+  let state = {
+    projectRoot: "/tmp/localprism-a" as string | null,
+    projectGeneration: 1,
+    activeFileId: "main.tex",
+    cursorPosition: 0,
+  };
+  const listeners = new Set<
+    (state: typeof state, previous: typeof state) => void
+  >();
+  return {
+    getState: () => state,
+    setState(partial: Partial<typeof state>) {
+      const previous = state;
+      state = { ...state, ...partial };
+      for (const listener of listeners) listener(state, previous);
+    },
+    subscribe(listener: (state: typeof state, previous: typeof state) => void) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+}

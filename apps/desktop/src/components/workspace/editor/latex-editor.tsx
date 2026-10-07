@@ -86,12 +86,18 @@ import { SearchPanel } from "./search-panel";
 import { ProblemsPanel, type DiagnosticItem } from "./problems-panel";
 import { TeachEmptyEntry, TeachPanel } from "./teach-panel";
 import { lessonRefForSelection } from "@/lib/latex-teaching";
-import { useLatexTeachStore } from "@/stores/latex-teach-store";
+import {
+  bindTeachDocumentScope,
+  useLatexTeachStore,
+} from "@/stores/latex-teach-store";
 import { PdfViewer } from "@/components/workspace/preview/pdf-viewer";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { createLogger } from "@/lib/debug/logger";
 
 const log = createLogger("merge-view");
+
+// Lessons belong to the open project and the active file.
+bindTeachDocumentScope(useDocumentStore);
 
 function getActiveFileContent(): string {
   const state = useDocumentStore.getState();

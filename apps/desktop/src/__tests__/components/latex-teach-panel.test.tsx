@@ -166,4 +166,51 @@ Hello
       detail: "miss.png",
     });
   });
+
+  it("keeps the diagnostic lesson when the open selection is presented again", async () => {
+    const onNavigate = vi.fn();
+    const onFixWithChat = vi.fn();
+    const diagnostics = [
+      {
+        from: 10,
+        to: 20,
+        severity: "error",
+        message: "File `miss.png' not found",
+        line: 9,
+      },
+    ];
+    useSettingsStore.setState({ latexTeaching: true, uiLanguage: "zh" });
+    useLatexTeachStore.getState().present(figure, "sel:0:20");
+
+    await act(async () => {
+      root.render(
+        <ProblemsPanel
+          diagnostics={diagnostics}
+          fileName="main.tex"
+          onFixWithChat={onFixWithChat}
+          onNavigate={onNavigate}
+        />,
+      );
+    });
+    const teach = document.body.querySelector(
+      '[data-testid="latex-teach-diagnostic"]',
+    );
+    await act(async () => {
+      if (teach instanceof HTMLButtonElement) teach.click();
+    });
+    useLatexTeachStore.getState().present(figure, "sel:0:20");
+    useLatexTeachStore.getState().present(figure, "sel:4:18");
+
+    expect(onNavigate).not.toHaveBeenCalled();
+    expect(useLatexTeachStore.getState().lesson?.id).toBe("file-not-found");
+
+    await act(async () => {
+      root.render(<TeachPanel />);
+    });
+    const panel = document.body.querySelector(
+      '[data-testid="latex-teach-panel"]',
+    );
+    expect(panel?.textContent).toContain("找不到文件");
+    expect(panel?.textContent).not.toContain("浮动图片环境");
+  });
 });
