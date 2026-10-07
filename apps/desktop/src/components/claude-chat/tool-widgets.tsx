@@ -23,6 +23,8 @@ import {
 import { toolResultDisplayText, toolResultText } from "@/lib/tool-result-text";
 import { isSkillToolName, skillToolDisplayName } from "@/lib/skill-tool-result";
 import { toolActivityPhase } from "@/lib/chat-turn-settlement";
+import { permissionModeAfterPlanDecision } from "@/lib/permission-mode";
+import { useSettingsStore } from "@/stores/settings-store";
 
 interface ToolWidgetProps {
   toolUse: ContentBlock;
@@ -486,11 +488,23 @@ const ExitPlanModeWidget: FC<{ input: any; result?: ContentBlock }> = ({
     !answered && !isStreaming && (!result || result.is_error);
   const plan = input?.plan || input?.content || "";
 
-  const sendPlanResponse = (text: string) => {
+  const sendPlanResponse = (decision: "approve" | "revise") => {
     const { sendPrompt, isStreaming } = useClaudeChatStore.getState();
     if (isStreaming) return;
     setAnswered(true);
-    sendPrompt(text);
+    const settings = useSettingsStore.getState();
+    const nextMode = permissionModeAfterPlanDecision(
+      settings.permissionMode,
+      decision,
+    );
+    if (nextMode !== settings.permissionMode) {
+      settings.setPermissionMode(nextMode);
+    }
+    sendPrompt(
+      decision === "approve"
+        ? "Approved. Continue implementing the plan."
+        : "Revise the plan before implementing. Keep it concise and address any missing risks.",
+    );
   };
 
   return (
@@ -523,20 +537,14 @@ const ExitPlanModeWidget: FC<{ input: any; result?: ContentBlock }> = ({
           <button
             type="button"
             className="rounded-md bg-amber-500 px-2.5 py-1 font-medium text-background text-xs hover:bg-amber-500/90"
-            onClick={() =>
-              sendPlanResponse("Approved. Continue implementing the plan.")
-            }
+            onClick={() => sendPlanResponse("approve")}
           >
-            Approve
+            Approve and edit
           </button>
           <button
             type="button"
             className="rounded-md border border-amber-500/30 px-2.5 py-1 text-amber-700 text-xs hover:bg-amber-500/10 dark:text-amber-300"
-            onClick={() =>
-              sendPlanResponse(
-                "Revise the plan before implementing. Keep it concise and address any missing risks.",
-              )
-            }
+            onClick={() => sendPlanResponse("revise")}
           >
             Revise
           </button>

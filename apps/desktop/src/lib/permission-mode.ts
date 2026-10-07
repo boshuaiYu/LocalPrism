@@ -36,9 +36,22 @@ export const PERMISSION_MODE_OPTIONS: readonly {
     id: "plan",
     label: "Plan only",
     description:
-      "Same as Claude Code plan mode: read and plan this turn, do not edit or run commands.",
+      "Claude Code plan mode. This turn explores and writes a plan; source edits stay blocked. Approving the plan switches this workspace to Allow edits.",
   },
 ];
+
+/**
+ * Approving an ExitPlanMode card leaves plan mode the way Claude Code does:
+ * the next turn must be able to edit. Revise stays in plan. Other modes are
+ * left alone so Full access is not downgraded.
+ */
+export function permissionModeAfterPlanDecision(
+  current: PermissionMode,
+  decision: "approve" | "revise",
+): PermissionMode {
+  if (decision === "approve" && current === "plan") return "acceptEdits";
+  return current;
+}
 
 export function isPermissionMode(
   value: string | null | undefined,

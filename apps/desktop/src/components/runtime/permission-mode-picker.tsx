@@ -82,7 +82,8 @@ export function PermissionModePicker({ busy = false }: { busy?: boolean }) {
             <p className="px-2 pb-1.5 text-[11px] text-muted-foreground leading-snug">
               Passed to Claude Code as --permission-mode. Allow edits
               auto-accepts file edits and asks you about other tools. Full
-              access skips the prompt.
+              access skips the prompt. Plan only blocks source edits until you
+              approve the plan, which switches to Allow edits.
             </p>
             {PERMISSION_MODE_OPTIONS.map((option) => (
               <button
