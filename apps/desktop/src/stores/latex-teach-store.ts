@@ -1,22 +1,51 @@
 import { create } from "zustand";
 import { sameTeachLesson, type TeachLessonRef } from "@/lib/latex-teaching";
+import type { TeachAnchor } from "@/lib/teach-float";
 import { useSettingsStore } from "@/stores/settings-store";
 
 interface LatexTeachState {
   open: boolean;
   lesson: TeachLessonRef | null;
   sourceKey: string | null;
-  present: (lesson: TeachLessonRef, sourceKey: string) => void;
-  forcePresent: (lesson: TeachLessonRef, sourceKey: string) => void;
+  anchor: TeachAnchor | null;
+  /** Bumps on every accepted lesson so the float can drop a drag offset. */
+  placement: number;
+  insertReady: boolean;
+  present: (
+    lesson: TeachLessonRef,
+    sourceKey: string,
+    anchor?: TeachAnchor | null,
+  ) => void;
+  forcePresent: (
+    lesson: TeachLessonRef,
+    sourceKey: string,
+    anchor?: TeachAnchor | null,
+  ) => void;
   dismiss: () => void;
   reset: () => void;
+  setInsertReady: (ready: boolean) => void;
 }
 
 const closed = {
   open: false,
   lesson: null,
   sourceKey: null,
+  anchor: null,
+  placement: 0,
 } as const;
+
+let teachInserter: ((snippet: string) => void) | null = null;
+
+export function registerTeachInsert(
+  handler: ((snippet: string) => void) | null,
+): void {
+  teachInserter = handler;
+  useLatexTeachStore.getState().setInsertReady(handler != null);
+}
+
+export function insertRegisteredTeachSnippet(snippet: string): void {
+  teachInserter?.(snippet);
+}
 
 interface TeachDocumentScope {
   projectRoot: string | null;
@@ -39,9 +68,32 @@ function teachSourcePriority(sourceKey: string): number {
   return 1;
 }
 
+function showLesson(
+  get: () => LatexTeachState,
+  set: (
+    partial: Pick<
+      LatexTeachState,
+      "open" | "lesson" | "sourceKey" | "anchor" | "placement"
+    >,
+  ) => void,
+  lesson: TeachLessonRef,
+  sourceKey: string,
+  anchor: TeachAnchor | null,
+) {
+  set({
+    open: true,
+    lesson,
+    sourceKey,
+    anchor,
+    placement: get().placement + 1,
+  });
+}
+
 export const useLatexTeachStore = create<LatexTeachState>((set, get) => ({
   ...closed,
-  present: (lesson, sourceKey) => {
+  insertReady: false,
+  setInsertReady: (ready) => set({ insertReady: ready }),
+  present: (lesson, sourceKey, anchor = null) => {
     if (!teachingEnabled()) return;
     const current = get();
     const activePriority = current.sourceKey
@@ -58,11 +110,11 @@ export const useLatexTeachStore = create<LatexTeachState>((set, get) => ({
     ) {
       return;
     }
-    set({ open: true, lesson, sourceKey });
+    showLesson(get, set, lesson, sourceKey, anchor);
   },
-  forcePresent: (lesson, sourceKey) => {
+  forcePresent: (lesson, sourceKey, anchor = null) => {
     if (!teachingEnabled()) return;
-    set({ open: true, lesson, sourceKey });
+    showLesson(get, set, lesson, sourceKey, anchor);
   },
   dismiss: () => {
     set({ open: false });

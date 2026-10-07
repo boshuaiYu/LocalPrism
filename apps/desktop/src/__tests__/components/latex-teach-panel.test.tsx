@@ -52,7 +52,11 @@ describe("LaTeX teach panel", () => {
     const panel = document.body.querySelector(
       '[data-testid="latex-teach-panel"]',
     );
+    expect(panel?.className).toContain("fixed");
+    expect(panel?.className).not.toContain("shrink-0");
+    expect(panel?.getAttribute("role")).toBe("dialog");
     expect(panel?.textContent).toContain("边写边学");
+    expect(panel?.textContent).toContain("拖动");
     expect(panel?.textContent).toContain("浮动图片环境");
     expect(panel?.textContent).toContain("插入示例到光标处");
     const insert = [...document.body.querySelectorAll("button")].find(
@@ -165,6 +169,61 @@ Hello
       id: "file-not-found",
       detail: "miss.png",
     });
+    expect(useLatexTeachStore.getState().anchor).not.toBeNull();
+  });
+
+  it("drags from the header without docking beside the editor", async () => {
+    useSettingsStore.setState({ latexTeaching: true, uiLanguage: "zh" });
+    useLatexTeachStore.getState().forcePresent(figure, "sel:0:20", {
+      x: 40,
+      y: 120,
+      width: 80,
+      height: 18,
+    });
+
+    await act(async () => {
+      root.render(<TeachPanel />);
+    });
+
+    const panel = document.body.querySelector(
+      '[data-testid="latex-teach-panel"]',
+    );
+    const handle = document.body.querySelector(
+      '[data-testid="latex-teach-drag"]',
+    );
+    expect(panel).toBeInstanceOf(HTMLElement);
+    expect(handle).toBeInstanceOf(HTMLElement);
+    if (!(panel instanceof HTMLElement) || !(handle instanceof HTMLElement)) {
+      return;
+    }
+    const start = Number.parseFloat(panel.style.left);
+    expect(start).toBe(40 + 80 + 12);
+
+    const pointer = (type: string, clientX: number, clientY: number) =>
+      new MouseEvent(type, {
+        bubbles: true,
+        button: 0,
+        clientX,
+        clientY,
+      });
+    await act(async () => {
+      handle.dispatchEvent(pointer("pointerdown", 10, 10));
+      handle.dispatchEvent(pointer("pointermove", 28, 24));
+    });
+
+    expect(Number.parseFloat(panel.style.left)).toBe(start + 18);
+    expect(Number.parseFloat(panel.style.top)).toBe(120 + 14);
+
+    const close = document.body.querySelector(
+      '[data-testid="latex-teach-close"]',
+    );
+    await act(async () => {
+      if (close instanceof HTMLButtonElement) close.click();
+    });
+    expect(useLatexTeachStore.getState().open).toBe(false);
+    expect(
+      document.body.querySelector('[data-testid="latex-teach-panel"]'),
+    ).toBeNull();
   });
 
   it("keeps the diagnostic lesson when the open selection is presented again", async () => {

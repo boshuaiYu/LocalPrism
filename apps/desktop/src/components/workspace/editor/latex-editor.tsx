@@ -84,10 +84,11 @@ import { ProposedChangesPanel } from "@/components/claude-chat/proposed-changes-
 import { ImagePreview } from "./image-preview";
 import { SearchPanel } from "./search-panel";
 import { ProblemsPanel, type DiagnosticItem } from "./problems-panel";
-import { TeachEmptyEntry, TeachPanel } from "./teach-panel";
+import { TeachEmptyEntry } from "./teach-panel";
 import { lessonRefForSelection } from "@/lib/latex-teaching";
 import {
   bindTeachDocumentScope,
+  registerTeachInsert,
   useLatexTeachStore,
 } from "@/stores/latex-teach-store";
 import { PdfViewer } from "@/components/workspace/preview/pdf-viewer";
@@ -539,9 +540,24 @@ export function LatexEditor() {
               selectionEndInLine: Math.min(to, line.to) - line.from,
             });
             if (lesson) {
+              const anchor =
+                startCoords && endCoords
+                  ? {
+                      x: Math.min(startCoords.left, endCoords.left),
+                      y: Math.min(startCoords.top, endCoords.top),
+                      width: Math.abs(
+                        Math.max(startCoords.right, endCoords.right) -
+                          Math.min(startCoords.left, endCoords.left),
+                      ),
+                      height: Math.abs(
+                        Math.max(startCoords.bottom, endCoords.bottom) -
+                          Math.min(startCoords.top, endCoords.top),
+                      ),
+                    }
+                  : null;
               useLatexTeachStore
                 .getState()
-                .present(lesson, `sel:${from}:${to}`);
+                .present(lesson, `sel:${from}:${to}`, anchor);
             }
           }
         } else if (!toolbarStickyRef.current) {
@@ -1190,6 +1206,11 @@ export function LatexEditor() {
     view.focus();
   }, []);
 
+  useEffect(() => {
+    registerTeachInsert(insertTeachSnippet);
+    return () => registerTeachInsert(null);
+  }, [insertTeachSnippet]);
+
   const isPdf = activeFile?.type === "pdf";
   const isImage = !isTextFile && !isPdf && !!activeFile;
 
@@ -1546,7 +1567,6 @@ export function LatexEditor() {
           </DialogContent>
         </Dialog>
       </div>
-      <TeachPanel onInsert={insertTeachSnippet} />
     </div>
   );
 }
