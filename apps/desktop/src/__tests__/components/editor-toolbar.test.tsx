@@ -86,7 +86,8 @@ describe("EditorToolbar external editors", () => {
       }
       return node;
     });
-    expect(button.querySelector('[data-editor-icon="codex"]')).toBeTruthy();
+    const triggerIcon = button.querySelector('[data-editor-icon="codex"]');
+    expect(triggerIcon?.querySelectorAll("img")).toHaveLength(2);
     await vi.waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("detect_editors");
     });
@@ -131,10 +132,17 @@ describe("EditorToolbar external editors", () => {
     expect(
       item("VS Code").querySelector('img[data-editor-icon="vscode"]'),
     ).toBeTruthy();
-    expect(
-      item("Codex").querySelector('[data-editor-icon="codex"]'),
-    ).toBeTruthy();
-    expect(item("Codex").querySelector("img")).toBeNull();
+    const codexImages = [
+      ...(item("Codex")
+        .querySelector('[data-editor-icon="codex"]')
+        ?.querySelectorAll("img") ?? []),
+    ];
+    expect(codexImages.map((img) => img.getAttribute("src"))).toEqual([
+      expect.stringContaining("codex-app-light"),
+      expect.stringContaining("codex-app-dark"),
+    ]);
+    expect(codexImages[0]?.className).toContain("dark:hidden");
+    expect(codexImages[1]?.className).toContain("dark:block");
   });
 
   it("remembers the editor chosen from the menu", async () => {
