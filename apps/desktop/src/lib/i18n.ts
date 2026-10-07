@@ -558,9 +558,9 @@ const en = {
   "teach.enable": "Enable LaTeX teaching",
   "teach.previewBadge": "Preview",
   "teach.enableHelp":
-    "Selecting a command or environment, a compile error, or an empty project opens a floating explanation near that spot. It does not resize the editor, and AI chat stays independent.",
+    "After you select a command or environment, choose Explain beside Proofread on the selection toolbar. Compile errors and an empty project still open a floating card near that spot. The card does not resize the editor, and AI chat stays independent.",
   "teach.callout":
-    "Teaching is not only for errors. Selecting a construct can open it, and an empty project can show a short guide.",
+    "Teaching is not only for errors. Select a construct, then choose Explain on the selection toolbar so it does not cover Proofread. An empty project can still show a short guide.",
   "teach.panelTitle": "Learn while writing",
   "teach.drag": "Drag",
   "teach.close": "Close teaching panel",
@@ -1105,9 +1105,9 @@ const zh: Record<MessageKey, string> = {
   "teach.enable": "启用 LaTeX 教学",
   "teach.previewBadge": "预览 · 超前功能",
   "teach.enableHelp":
-    "选中命令或环境、编译报错或空白项目时，在锚点附近弹出讲解卡片。它不挤压编辑器，也不影响 AI 对话。",
+    "选中命令或环境后，在选区工具条的校对旁边点「讲解」。编译报错或空白项目仍会在锚点附近弹出讲解卡片。卡片不挤压编辑器，也不影响 AI 对话。",
   "teach.callout":
-    "不报错也会讲——选中即讲；报错只是入口之一。空项目时也可出现引导讲解。",
+    "不报错也会讲。选中结构后，用工具条上的「讲解」打开，这样不会盖住校对。空项目时仍可出现引导讲解。",
   "teach.panelTitle": "边写边学",
   "teach.drag": "拖动",
   "teach.close": "关闭讲解",

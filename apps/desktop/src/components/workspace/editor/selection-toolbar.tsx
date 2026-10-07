@@ -85,6 +85,7 @@ export function SelectionToolbar({
     <div
       ref={toolbarRef}
       className="absolute z-30 w-64 rounded-lg border border-border bg-background shadow-xl"
+      data-testid="selection-toolbar"
       style={{
         top: position.top,
         left: position.left,
@@ -117,6 +118,7 @@ export function SelectionToolbar({
           {actions.map((action) => (
             <button
               key={action.id}
+              data-testid={`selection-action-${action.id}`}
               onClick={() => onAction(action.id)}
               className="flex items-center gap-2.5 px-3 py-1.5 text-left text-foreground text-sm transition-colors hover:bg-muted"
             >

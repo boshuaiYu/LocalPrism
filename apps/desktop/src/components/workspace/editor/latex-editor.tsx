@@ -75,6 +75,7 @@ import {
 } from "@/components/ui/dialog";
 import {
   SpellCheckIcon,
+  BookOpenIcon,
   RotateCcwIcon,
   TagIcon,
   CopyIcon,
@@ -85,7 +86,12 @@ import { ImagePreview } from "./image-preview";
 import { SearchPanel } from "./search-panel";
 import { ProblemsPanel, type DiagnosticItem } from "./problems-panel";
 import { TeachEmptyEntry } from "./teach-panel";
-import { lessonRefForSelection } from "@/lib/latex-teaching";
+import {
+  releaseSelectionLessonForToolbar,
+  selectionExplainAction,
+} from "@/lib/latex-selection-teach";
+import type { TeachAnchor } from "@/lib/teach-float";
+import { useI18n } from "@/lib/use-i18n";
 import {
   bindTeachDocumentScope,
   registerTeachInsert,
@@ -111,6 +117,57 @@ function activeFileIsTex(): boolean {
   return (
     state.files.find((file) => file.id === state.activeFileId)?.type === "tex"
   );
+}
+
+function selectionSnapshot(
+  view: EditorView,
+  range: { start: number; end: number },
+): {
+  from: number;
+  to: number;
+  selected: string;
+  line: string;
+  selectionStartInLine: number;
+  selectionEndInLine: number;
+} | null {
+  try {
+    const from = Math.min(range.start, range.end);
+    const to = Math.max(range.start, range.end);
+    if (from === to) return null;
+    const line = view.state.doc.lineAt(from);
+    return {
+      from,
+      to,
+      selected: view.state.sliceDoc(from, to),
+      line: line.text,
+      selectionStartInLine: from - line.from,
+      selectionEndInLine: Math.min(to, line.to) - line.from,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function teachAnchorForRange(
+  view: EditorView,
+  from: number,
+  to: number,
+): TeachAnchor | null {
+  const startCoords = view.coordsAtPos(from);
+  const endCoords = view.coordsAtPos(to);
+  if (!startCoords || !endCoords) return null;
+  return {
+    x: Math.min(startCoords.left, endCoords.left),
+    y: Math.min(startCoords.top, endCoords.top),
+    width: Math.abs(
+      Math.max(startCoords.right, endCoords.right) -
+        Math.min(startCoords.left, endCoords.left),
+    ),
+    height: Math.abs(
+      Math.max(startCoords.bottom, endCoords.bottom) -
+        Math.min(startCoords.top, endCoords.top),
+    ),
+  };
 }
 
 export { clearEditorStateCache } from "./editor-state-cache";
@@ -174,6 +231,8 @@ export function LatexEditor() {
 
   const { resolvedTheme } = useTheme();
   const vimMode = useSettingsStore((s) => s.vimMode);
+  const latexTeaching = useSettingsStore((s) => s.latexTeaching);
+  const { t } = useI18n();
 
   const compileRef = useRef<() => void>(() => {});
   const isSearchOpenRef = useRef(false);
@@ -531,34 +590,10 @@ export function LatexEditor() {
             });
           }
           toolbarStickyRef.current = true;
-          if (activeFileIsTex() && useSettingsStore.getState().latexTeaching) {
-            const line = update.state.doc.lineAt(from);
-            const lesson = lessonRefForSelection({
-              selected: update.state.sliceDoc(from, to),
-              line: line.text,
-              selectionStartInLine: from - line.from,
-              selectionEndInLine: Math.min(to, line.to) - line.from,
-            });
-            if (lesson) {
-              const anchor =
-                startCoords && endCoords
-                  ? {
-                      x: Math.min(startCoords.left, endCoords.left),
-                      y: Math.min(startCoords.top, endCoords.top),
-                      width: Math.abs(
-                        Math.max(startCoords.right, endCoords.right) -
-                          Math.min(startCoords.left, endCoords.left),
-                      ),
-                      height: Math.abs(
-                        Math.max(startCoords.bottom, endCoords.bottom) -
-                          Math.min(startCoords.top, endCoords.top),
-                      ),
-                    }
-                  : null;
-              useLatexTeachStore
-                .getState()
-                .present(lesson, `sel:${from}:${to}`, anchor);
-            }
+          // The Proofread toolbar occupies this selection. Teaching waits
+          // for Explain on that toolbar instead of opening the float here.
+          if (!isMergeActiveRef.current && !isSearchOpenRef.current) {
+            releaseSelectionLessonForToolbar(useLatexTeachStore.getState());
           }
         } else if (!toolbarStickyRef.current) {
           // Only clear selection/coords if the toolbar is not being interacted with.
@@ -1129,16 +1164,35 @@ export function LatexEditor() {
     [sendToolbarPromptWithSelectionContext],
   );
 
-  const editorToolbarActions: ToolbarAction[] = useMemo(
-    () => [
+  const selectionExplain = useMemo(() => {
+    const view = viewRef.current;
+    if (!selectionRange || !view) return null;
+    const snapshot = selectionSnapshot(view, selectionRange);
+    if (!snapshot) return null;
+    return selectionExplainAction({
+      teachingEnabled: latexTeaching === true,
+      isTex: activeFile?.type === "tex",
+      ...snapshot,
+    });
+  }, [activeFile, latexTeaching, selectionRange]);
+
+  const editorToolbarActions: ToolbarAction[] = useMemo(() => {
+    const actions: ToolbarAction[] = [
       {
         id: "proofread",
         label: "Proofread",
         icon: <SpellCheckIcon className="size-4" />,
       },
-    ],
-    [],
-  );
+    ];
+    if (selectionExplain) {
+      actions.push({
+        id: "explain",
+        label: t("teach.entry"),
+        icon: <BookOpenIcon className="size-4" />,
+      });
+    }
+    return actions;
+  }, [selectionExplain, t]);
 
   const handleToolbarAction = useCallback(
     (actionId: string) => {
@@ -1146,9 +1200,32 @@ export function LatexEditor() {
         sendToolbarPromptWithSelectionContext(
           "Proofread and fix any errors in this text",
         );
+        return;
       }
+      if (actionId !== "explain") return;
+      const view = viewRef.current;
+      const range = useDocumentStore.getState().selectionRange;
+      if (!view || !range) return;
+      const snapshot = selectionSnapshot(view, range);
+      if (!snapshot) return;
+      const action = selectionExplainAction({
+        teachingEnabled: useSettingsStore.getState().latexTeaching === true,
+        isTex: activeFileIsTex(),
+        ...snapshot,
+      });
+      if (!action) return;
+      useLatexTeachStore
+        .getState()
+        .forcePresent(
+          action.lesson,
+          action.sourceKey,
+          teachAnchorForRange(view, snapshot.from, snapshot.to),
+        );
+      toolbarStickyRef.current = false;
+      setSelectionCoords(null);
+      setSelectionRange(null);
     },
-    [sendToolbarPromptWithSelectionContext],
+    [sendToolbarPromptWithSelectionContext, setSelectionRange],
   );
 
   const handleToolbarDismiss = useCallback(() => {
