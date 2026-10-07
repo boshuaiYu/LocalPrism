@@ -1,10 +1,14 @@
-import { useEffect } from "react";
+import { useEffect, type MouseEvent } from "react";
 
 import { MarkdownDocument } from "@/components/workspace/preview/markdown-document";
+import { markdownClickSourceOffset } from "@/lib/markdown-source-position";
 import { useDocumentStore, type ProjectFile } from "@/stores/document-store";
 
 export function MarkdownPreviewPane({ file }: { file: ProjectFile | null }) {
   const loadFileContent = useDocumentStore((state) => state.loadFileContent);
+  const requestJumpToPosition = useDocumentStore(
+    (state) => state.requestJumpToPosition,
+  );
   const liveFile = useDocumentStore((state) => {
     if (!file) return null;
     return state.files.find((candidate) => candidate.id === file.id) ?? file;
@@ -40,8 +44,26 @@ export function MarkdownPreviewPane({ file }: { file: ProjectFile | null }) {
     );
   }
 
+  const handleSourceClick = (event: MouseEvent<HTMLElement>) => {
+    if (event.button !== 0 || !liveFile.content) return;
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const offset = markdownClickSourceOffset(
+      liveFile.content,
+      target,
+      event.currentTarget,
+    );
+    if (offset == null) return;
+    // Same character-offset jump SyncTeX uses to focus the source editor.
+    requestJumpToPosition(offset);
+  };
+
   return (
-    <div className="md-preview-stage" data-testid="md-preview-stage">
+    <div
+      className="md-preview-stage"
+      data-testid="md-preview-stage"
+      onClick={handleSourceClick}
+    >
       <article className="md-preview-paper" data-testid="md-preview-paper">
         <MarkdownDocument
           content={liveFile.content}
