@@ -744,7 +744,7 @@ async fn ping_local_zotero_connector() -> Option<(HashMap<String, String>, Strin
         .ok()?;
     let response = client
         .get(ZOTERO_CONNECTOR_PING)
-        .header("User-Agent", "LocalPrism/1.0.8-11")
+        .header("User-Agent", "LocalPrism/1.0.8-12")
         .send()
         .await
         .ok()?;
@@ -810,7 +810,7 @@ async fn fetch_zotero_source(
         .header("Zotero-API-Version", "3")
         .header("Cache-Control", "no-cache, no-store")
         .header("Pragma", "no-cache")
-        .header("User-Agent", "LocalPrism/1.0.8-11");
+        .header("User-Agent", "LocalPrism/1.0.8-12");
     if should_attach_zotero_api_key(source) && !api_key.is_empty() {
         request = request.header("Zotero-API-Key", api_key);
     }
