@@ -32,8 +32,9 @@ export type AccountHeaderChrome = {
 };
 
 /**
- * Wide bars keep new-tab and history beside a provider · account label that
- * uses the leftover width and ellipsizes only when that width runs out.
+ * Wide bars keep new-tab, history, and the account chip as a tight group on
+ * the right. Tabs take the leftover width and scroll. The chip stays as wide
+ * as its label and ellipsizes only when the bar cannot fit that label.
  * Mid bars drop those icons so the label can show `SiliconFlow · Qw…`.
  * Very narrow bars keep the provider name only.
  */
@@ -211,7 +212,8 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
         </div>
         <div
           ref={scrollRef}
-          className="scrollbar-none flex min-w-[4.5rem] items-center self-stretch overflow-x-auto"
+          data-testid="chat-tab-scroller"
+          className="scrollbar-none flex min-w-[4.5rem] flex-1 items-center self-stretch overflow-x-auto"
         >
           {tabs.map((tab) => (
             <TabButton
@@ -231,7 +233,7 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
         <div
           data-testid="chat-account-cluster"
           className={cn(
-            "flex min-w-0 flex-1 items-center gap-1 overflow-hidden pr-2.5",
+            "flex w-max min-w-0 max-w-full shrink grow-0 items-center gap-1 overflow-hidden pr-2.5",
             chrome.accountMin,
           )}
         >
@@ -246,7 +248,10 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
             </button>
           ) : null}
           {chrome.utilities ? <SessionSelector /> : null}
-          <div className="min-w-0 flex-1 overflow-hidden">
+          <div
+            data-testid="chat-account-chip"
+            className="min-w-0 max-w-full shrink overflow-hidden"
+          >
             <WorkspaceAccountButton density={chrome.density} />
           </div>
         </div>
