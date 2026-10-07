@@ -122,10 +122,22 @@ describe("ChatTabBar runtime badges", () => {
       "[data-testid='chat-account-cluster']",
     );
     const tab = tabButton(container, "tab-claude");
+    const scroller = container.querySelector(
+      "[data-testid='chat-tab-scroller']",
+    );
     expect(band?.className).toContain("--titlebar-height");
     expect(toolbar?.className ?? "").not.toContain("window-controls-inset");
-    expect(cluster?.className).toContain("flex-1");
-    expect(cluster?.className).not.toContain("shrink-0");
+    expect(scroller?.className.split(/\s+/)).toContain("flex-1");
+    expect(scroller?.className.split(/\s+/)).toContain("overflow-x-auto");
+    expect(cluster?.className.split(/\s+/)).toContain("w-max");
+    expect(cluster?.className.split(/\s+/)).toContain("grow-0");
+    expect(cluster?.className.split(/\s+/)).not.toContain("flex-1");
+    expect(cluster?.className.split(/\s+/)).not.toContain("shrink-0");
+    expect(
+      container
+        .querySelector("[data-testid='chat-account-chip']")
+        ?.className.split(/\s+/),
+    ).not.toContain("flex-1");
     expect(tab.className.split(/\s+/)).toContain("shrink-0");
     expect(tab.className.split(/\s+/)).not.toContain("min-w-0");
     expect(
@@ -295,6 +307,8 @@ describe("ChatTabBar runtime badges", () => {
 
   it("gives the account chip room once the header gets narrow", () => {
     expect(accountHeaderChrome(0).utilities).toBe(true);
+    expect(accountHeaderChrome(420).utilities).toBe(true);
+    expect(accountHeaderChrome(419).utilities).toBe(false);
     expect(accountHeaderChrome(234)).toMatchObject({
       utilities: false,
       density: "full",
@@ -377,18 +391,51 @@ describe("ChatTabBar runtime badges", () => {
     };
   }
 
-  it("gives the account label the leftover width on a wide bar", async () => {
+  it("keeps new-tab, history, and the account chip tight on a wide bar", async () => {
     const restore = installWidthObserver(560);
     try {
-      await renderTabs([makeTab("tab-wide", "你好", "claude")]);
+      await renderTabs([
+        makeTab("tab-wide", "你好", "claude"),
+        makeTab("tab-two", "润色", "claude"),
+        makeTab("tab-three", "翻译", "claude"),
+        makeTab("tab-four", "摘要", "claude"),
+        makeTab("tab-five", "校对", "claude"),
+      ]);
+      const toolbar = container.querySelector(
+        "[data-testid='chat-tab-toolbar']",
+      );
+      const cluster = container.querySelector(
+        "[data-testid='chat-account-cluster']",
+      );
+      const scroller = container.querySelector(
+        "[data-testid='chat-tab-scroller']",
+      );
+      const chip = container.querySelector("[data-testid='chat-account-chip']");
+      expect(
+        [...(toolbar?.children ?? [])].map((node) =>
+          node.getAttribute("data-testid"),
+        ),
+      ).toEqual([null, "chat-tab-scroller", "chat-account-cluster"]);
       expect(container.querySelector("[aria-label='New tab']")).toBeInstanceOf(
         HTMLButtonElement,
       );
       expect(
-        container.querySelector("[data-testid='chat-account-cluster']")
-          ?.className,
-      ).toContain("flex-1");
+        container.querySelector("[data-testid='session-selector']"),
+      ).not.toBeNull();
+      expect(
+        chip?.querySelector("[data-testid='workspace-account-button']"),
+      ).not.toBeNull();
+      expect(scroller?.className.split(/\s+/)).toContain("flex-1");
+      expect(cluster?.className.split(/\s+/)).toContain("w-max");
+      expect(cluster?.className.split(/\s+/)).not.toContain("flex-1");
+      expect(chip?.className.split(/\s+/)).not.toContain("flex-1");
+      expect(
+        [...(cluster?.children ?? [])].map((node) =>
+          node.getAttribute("data-testid"),
+        ),
+      ).toEqual([null, "session-selector", "chat-account-chip"]);
       expect(tabButton(container, "tab-wide").textContent).toContain("你好");
+      expect(tabButton(container, "tab-five").textContent).toContain("校对");
     } finally {
       restore();
     }
