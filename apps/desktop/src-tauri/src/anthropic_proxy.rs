@@ -1,6 +1,7 @@
 mod identity;
 mod messages;
 mod providers;
+pub(crate) mod reasoning;
 pub(crate) mod responses;
 mod stream;
 pub(crate) mod tools;
@@ -259,6 +260,7 @@ async fn handle_anthropic_passthrough(
     if !credential.model.trim().is_empty() {
         body["model"] = Value::String(credential.model.clone());
     }
+    reasoning::rewrite_anthropic_reasoning(&mut body, &credential.base_url, &credential.model);
     let wants_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
 
     crate::providers::ensure_secure_provider_base_url(&credential.base_url)?;
@@ -1403,6 +1405,12 @@ async fn handle_openai_responses_messages(
             .is_some();
     stabilize_third_party_prompt_prefix(&mut anthropic_request, claude_session_header(request));
     let mut body = anthropic_to_provider_responses(&anthropic_request, &credential.model)?;
+    reasoning::apply_responses_reasoning(
+        &mut body,
+        &anthropic_request,
+        &credential.base_url,
+        &credential.model,
+    );
     body["stream"] = Value::Bool(wants_stream);
     log_provider_responses_request(&credential.model, &body, subagent);
 

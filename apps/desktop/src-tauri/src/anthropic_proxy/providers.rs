@@ -23,7 +23,14 @@ pub(super) fn apply_provider_request_transforms(
         cap_number_field(openai_request, "max_tokens", DEEPSEEK_MAX_TOKENS);
     }
 
-    apply_reasoning_budget(openai_request, anthropic_request);
+    if !super::reasoning::apply_openai_chat_reasoning(
+        openai_request,
+        anthropic_request,
+        &credential.base_url,
+        &credential.model,
+    ) {
+        apply_reasoning_budget(openai_request, anthropic_request);
+    }
     apply_max_completion_tokens_compat(openai_request, credential);
     clean_null_optional_fields(openai_request);
 }
@@ -151,6 +158,25 @@ mod tests {
         );
 
         assert_eq!(body["max_tokens"], DEEPSEEK_MAX_TOKENS);
+    }
+
+    #[test]
+    fn deepseek_effort_does_not_become_reasoning_max_tokens() {
+        let mut body = json!({});
+        apply_provider_request_transforms(
+            &mut body,
+            &json!({
+                "output_config": { "effort": "xhigh" },
+                "thinking": { "type": "enabled", "budget_tokens": 4096 }
+            }),
+            &credential("https://api.deepseek.com", "deepseek-v4-pro"),
+            false,
+            &ProxyTransformerChain::from_names(&["deepseek"]),
+        );
+
+        assert_eq!(body["reasoning_effort"], "max");
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert!(body.get("reasoning").is_none());
     }
 
     #[test]

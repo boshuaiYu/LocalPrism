@@ -27,12 +27,13 @@ pub(super) fn anthropic_to_openai_request(
         }
     }
 
+    let replay_reasoning = super::reasoning::replays_reasoning_content(&credential.base_url);
     for message in request
         .get("messages")
         .and_then(|value| value.as_array())
         .ok_or_else(|| "Anthropic request is missing messages[]".to_string())?
     {
-        append_openai_messages_for_anthropic_message(&mut messages, message);
+        append_openai_messages_for_anthropic_message(&mut messages, message, replay_reasoning);
     }
     let messages = normalize_openai_tool_message_pairs(messages);
 
@@ -303,7 +304,13 @@ pub(super) fn openai_to_anthropic_message(
     let mut content = Vec::new();
 
     if let Some(reasoning) = openai_message_thinking(message) {
-        content.push(json!({ "type": "thinking", "thinking": reasoning }));
+        // Claude Code drops unsigned thinking blocks. Streaming already emits a
+        // synthetic signature; non-streaming messages need the same field.
+        content.push(json!({
+            "type": "thinking",
+            "thinking": reasoning,
+            "signature": format!("ccr_{}", uuid::Uuid::new_v4().simple()),
+        }));
     }
 
     if let Some(text) = openai_message_text(message).filter(|value| !value.trim().is_empty()) {
@@ -385,7 +392,11 @@ pub(super) fn openai_to_anthropic_message(
     }))
 }
 
-fn append_openai_messages_for_anthropic_message(messages: &mut Vec<Value>, message: &Value) {
+fn append_openai_messages_for_anthropic_message(
+    messages: &mut Vec<Value>,
+    message: &Value,
+    replay_reasoning_content: bool,
+) {
     let role = message
         .get("role")
         .and_then(|value| value.as_str())
@@ -402,7 +413,17 @@ fn append_openai_messages_for_anthropic_message(messages: &mut Vec<Value>, messa
             openai_message["tool_calls"] = Value::Array(tool_calls);
         }
         if let Some(thinking) = thinking {
-            openai_message["thinking"] = thinking;
+            if replay_reasoning_content {
+                if let Some(text) = thinking
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                {
+                    openai_message["reasoning_content"] = Value::String(text.to_string());
+                }
+            } else {
+                openai_message["thinking"] = thinking;
+            }
         }
         messages.push(openai_message);
         return;
@@ -1100,6 +1121,74 @@ mod tests {
             "I inspected the files."
         );
         assert_eq!(converted["messages"][0]["thinking"]["signature"], "sig_1");
+    }
+
+    #[test]
+    fn deepseek_and_siliconflow_replay_reasoning_content_for_tool_turns() {
+        let request = json!({
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "Need the file before answering.",
+                        "signature": "sig_1"
+                    },
+                    { "type": "tool_use", "id": "call_1", "name": "Read", "input": { "path": "main.tex" } }
+                ]
+            }]
+        });
+        let mut deepseek = credential();
+        deepseek.base_url = "https://api.deepseek.com".into();
+        deepseek.model = "deepseek-v4-pro".into();
+        let converted =
+            anthropic_to_openai_request(&request, &deepseek, &transformers(&[])).unwrap();
+        assert_eq!(
+            converted["messages"][0]["reasoning_content"],
+            "Need the file before answering."
+        );
+        assert!(converted["messages"][0].get("thinking").is_none());
+        assert_eq!(converted["messages"][0]["tool_calls"][0]["id"], "call_1");
+
+        let mut siliconflow = credential();
+        siliconflow.base_url = "https://api.siliconflow.cn/v1".into();
+        siliconflow.model = "deepseek-ai/DeepSeek-V4-Flash".into();
+        let converted =
+            anthropic_to_openai_request(&request, &siliconflow, &transformers(&[])).unwrap();
+        assert_eq!(
+            converted["messages"][0]["reasoning_content"],
+            "Need the file before answering."
+        );
+    }
+
+    #[test]
+    fn non_streaming_reasoning_content_becomes_a_thinking_block() {
+        let anthropic = json!({ "model": "deepseek-v4-pro" });
+        let openai = json!({
+            "id": "chatcmpl_1",
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "4",
+                    "reasoning_content": "Count the letters."
+                }
+            }],
+            "usage": {
+                "prompt_tokens": 15,
+                "completion_tokens": 20,
+                "completion_tokens_details": { "reasoning_tokens": 12 }
+            }
+        });
+        let message = openai_to_anthropic_message(&anthropic, &openai, &credential()).unwrap();
+        assert_eq!(message["content"][0]["type"], "thinking");
+        assert_eq!(message["content"][0]["thinking"], "Count the letters.");
+        assert!(message["content"][0]["signature"]
+            .as_str()
+            .is_some_and(|signature| signature.starts_with("ccr_")));
+        assert_eq!(message["content"][1]["type"], "text");
+        assert_eq!(message["content"][1]["text"], "4");
+        assert_eq!(message["usage"]["output_tokens"], 20);
     }
 
     #[test]
