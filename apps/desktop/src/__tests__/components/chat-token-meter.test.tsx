@@ -211,4 +211,66 @@ describe("ChatTokenMeter", () => {
     expect(meter?.textContent).toContain("20,400");
     expect(meter?.textContent).not.toContain("Waiting for usage");
   });
+
+  it("clears the ring when the model changes and uses the new window", async () => {
+    const activeTabId = useClaudeChatStore.getState().activeTabId;
+    useClaudeChatStore.setState((state) => ({
+      selectedModel: "gpt-6-luna",
+      tabs: state.tabs.map((tab) =>
+        tab.id === activeTabId
+          ? {
+              ...tab,
+              runtimeModel: "gpt-6-luna",
+              contextWindowTokens: 272_000,
+              isStreaming: false,
+              lastTurnUsage: {
+                inputTokens: 180_000,
+                outputTokens: 2_000,
+                cacheReadTokens: 0,
+                cacheCreationTokens: 0,
+              },
+              messages: [
+                {
+                  type: "assistant",
+                  message: {
+                    usage: {
+                      input_tokens: 180_000,
+                      output_tokens: 2_000,
+                    },
+                  },
+                },
+              ],
+            }
+          : tab,
+      ),
+    }));
+    expect(
+      useClaudeChatStore.getState().updateTabRuntimeSelection(activeTabId, {
+        runtimeModel: "kimi-k2.5",
+        reasoningEffort: null,
+        agentId: null,
+      }),
+    ).toBe("changed");
+
+    await act(async () => root.render(<ChatTokenMeter />));
+    const trigger = container.querySelector(
+      '[data-testid="chat-token-meter-trigger"]',
+    );
+    expect(trigger?.getAttribute("aria-label")).toBe("Context 0%");
+    expect(trigger?.getAttribute("data-usage")).toBe("current");
+    const ring = trigger?.querySelector(
+      '[data-testid="chat-token-meter-ring"]',
+    );
+    expect(ring?.getAttribute("data-state")).toBe("empty");
+    if (!(trigger instanceof HTMLButtonElement)) {
+      throw new Error("Context circle missing");
+    }
+    await act(async () => trigger.click());
+    const meter = document.querySelector('[data-testid="chat-token-meter"]');
+    expect(meter?.textContent).toContain("kimi-k2.5");
+    expect(meter?.textContent).toContain("262,144");
+    expect(meter?.textContent).toContain("Waiting for usage");
+    expect(meter?.textContent).not.toContain("182,000");
+    expect(meter?.textContent).not.toContain("180,000");
+  });
 });

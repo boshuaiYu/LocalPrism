@@ -2,12 +2,18 @@
 //! auto-compact to use that window.
 //!
 //! Claude Code compacts from its own detected window, not from the ring
-//! LocalPrism draws. Unknown model ids (gpt-6-luna, deepseek-chat, …) detect
-//! as 200_000. `CLAUDE_CODE_AUTO_COMPACT_WINDOW` can only shrink that number
-//! (`min(detected, env)`). A larger LocalPrism window is visible to Claude
-//! Code only after the spawn model opts into the `[1m]` detector (1_000_000),
-//! which the env var then shrinks back down. Claude Code strips `[1m]` before
-//! the provider request; the passthrough proxy also drops the 1M beta header.
+//! LocalPrism draws. Unrecognized ids detect as 200_000.
+//! `CLAUDE_CODE_AUTO_COMPACT_WINDOW` can only shrink that number
+//! (`min(detected, env)`), and the detected window caps at 1_000_000.
+//! Windows above 200k therefore opt into the `[1m]` detector, which this env
+//! var then shrinks back down. Current docs also let
+//! `CLAUDE_CODE_MAX_CONTEXT_TOKENS` set the assumed window directly for an
+//! unrecognized id that does not contain `[1m]`; an id that contains `[1m]`
+//! is treated as 1M unless `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`, and a
+//! recognized Claude id honors the override only together with
+//! `DISABLE_COMPACT`. This path does not set those variables.
+//! Claude Code strips `[1m]` before the provider request; the passthrough
+//! proxy also drops the 1M beta header. Official Claude is not overridden.
 
 /// Claude Code's fallback when it does not recognize the model.
 pub const CLAUDE_CODE_UNKNOWN_MODEL_WINDOW: u64 = 200_000;

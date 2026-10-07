@@ -150,6 +150,60 @@ describe("applyCompactEvent", () => {
     });
   });
 
+  it("appends a second compact instead of rewriting a finished divider", () => {
+    const first = applyCompactEvent(
+      applyCompactEvent([], {
+        kind: "boundary",
+        trigger: "auto",
+        preTokens: 190_000,
+        postTokens: 14_000,
+      }),
+      { kind: "summary", text: "First summary." },
+    );
+    const second = applyCompactEvent(first, {
+      kind: "boundary",
+      trigger: "manual",
+      preTokens: 80_000,
+      postTokens: 9_000,
+    });
+    expect(second).toHaveLength(2);
+    expect(second[0]?.compactNotice).toMatchObject({
+      pending: false,
+      trigger: "auto",
+      preTokens: 190_000,
+      postTokens: 14_000,
+      summary: "First summary.",
+    });
+    expect(second[1]?.compactNotice).toMatchObject({
+      pending: false,
+      trigger: "manual",
+      preTokens: 80_000,
+      postTokens: 9_000,
+      summary: null,
+    });
+
+    const summarized = applyCompactEvent(second, {
+      kind: "summary",
+      text: "Second summary.",
+    });
+    expect(summarized).toHaveLength(2);
+    expect(summarized[0]?.compactNotice?.summary).toBe("First summary.");
+    expect(summarized[1]?.compactNotice?.summary).toBe("Second summary.");
+
+    const third = applyCompactEvent(summarized, {
+      kind: "summary",
+      text: "Third summary.",
+    });
+    expect(third).toHaveLength(3);
+    expect(third[1]?.compactNotice?.summary).toBe("Second summary.");
+    expect(third[2]?.compactNotice).toMatchObject({
+      pending: false,
+      preTokens: null,
+      postTokens: null,
+      summary: "Third summary.",
+    });
+  });
+
   it("drops an unfinished notice and keeps a completed one", () => {
     const pending = applyCompactEvent([], { kind: "compacting" });
     const dropped = dropPendingCompactNotices(pending);

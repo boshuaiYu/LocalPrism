@@ -314,6 +314,12 @@ export interface TabState {
    * the previous request. Cleared once that turn reports prompt usage.
    */
   usageFromPreviousTurn?: boolean;
+  /**
+   * Set when the model changes. The transcript still holds the previous
+   * model's request, so the ring reads only `lastTurnUsage` until a new
+   * prompt usage is appended.
+   */
+  ignoreTranscriptUsage?: boolean;
   /** Context window reported by the runtime for this conversation. */
   contextWindowTokens?: number | null;
   /** Codex turn that later messages in this tab should inherit. */
@@ -2406,6 +2412,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         totalOutputTokens: 0,
         lastTurnUsage: null,
         usageFromPreviousTurn: false,
+        ignoreTranscriptUsage: false,
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
         forcedQueuedGuidanceId: null,
@@ -2586,6 +2593,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         totalOutputTokens: 0,
         lastTurnUsage: null,
         usageFromPreviousTurn: false,
+        ignoreTranscriptUsage: false,
         title: STORED_CHAT_TITLE_PLACEHOLDER,
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
@@ -2810,6 +2818,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
           totalOutputTokens: totals.outputTokens,
           lastTurnUsage: lastTurnUsageFromMessages(messages),
           usageFromPreviousTurn: false,
+          ignoreTranscriptUsage: false,
           activeCodexTurnId: null,
           error: null,
           compressionCarryover: keptSummary
@@ -2981,6 +2990,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         totalOutputTokens: 0,
         lastTurnUsage: null,
         usageFromPreviousTurn: false,
+        ignoreTranscriptUsage: false,
         title: STORED_CHAT_TITLE_PLACEHOLDER,
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
@@ -3031,6 +3041,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
               lastTurnUsage: null,
               usageFromPreviousTurn: false,
               contextWindowTokens: null,
+              ignoreTranscriptUsage: true,
             }
           : {}),
       });
@@ -3197,6 +3208,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         totalOutputTokens: 0,
         lastTurnUsage: null,
         usageFromPreviousTurn: false,
+        ignoreTranscriptUsage: false,
         title: sessionTitle ?? STORED_CHAT_TITLE_PLACEHOLDER,
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
@@ -3315,6 +3327,8 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
           totalInputTokens: totals.inputTokens,
           totalOutputTokens: totals.outputTokens,
           lastTurnUsage: lastTurnUsageFromMessages(messages),
+          usageFromPreviousTurn: false,
+          ignoreTranscriptUsage: false,
           resumeRequestId: null,
         });
         return reference.runtime === "claude" && s.activeTabId === activeTabId
@@ -3587,7 +3601,10 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         ? {
             lastTurnUsage,
             ...(snapshotHasPromptTokens(incomingUsage)
-              ? { usageFromPreviousTurn: false as const }
+              ? {
+                  usageFromPreviousTurn: false as const,
+                  ignoreTranscriptUsage: false as const,
+                }
               : {}),
           }
         : {};

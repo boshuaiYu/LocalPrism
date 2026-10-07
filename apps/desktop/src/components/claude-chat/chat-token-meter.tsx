@@ -119,8 +119,10 @@ export function ChatTokenMeter() {
         windowTokens,
         inFlight: Boolean(activeTab?.isStreaming),
         previousTurn: Boolean(activeTab?.usageFromPreviousTurn),
+        ignoreTranscript: Boolean(activeTab?.ignoreTranscriptUsage),
       }),
     [
+      activeTab?.ignoreTranscriptUsage,
       activeTab?.isStreaming,
       activeTab?.usageFromPreviousTurn,
       lastUsage,

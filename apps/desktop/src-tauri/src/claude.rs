@@ -3648,19 +3648,27 @@ fn local_context_window(model: &str, hint: Option<&str>) -> u64 {
     crate::context_window::window_for_model(model, catalog, hint)
 }
 
-fn publishes_local_context_window() -> bool {
+fn publishes_for(identity: crate::providers::ActiveProviderIdentity) -> bool {
     matches!(
-        crate::providers::active_provider_identity(),
+        identity,
         crate::providers::ActiveProviderIdentity::ChatGptOfficial
             | crate::providers::ActiveProviderIdentity::ThirdParty
     )
+}
+
+fn publishes_local_context_window() -> bool {
+    publishes_for(crate::providers::active_provider_identity())
 }
 
 /// `--model` Claude Code uses for its own context-window detection.
 /// Official Claude keeps the selected id. Third-party spawns opt into `[1m]`
 /// when LocalPrism's window is larger than Claude Code's 200k default.
 fn cli_model_arg(model: &str) -> String {
-    if !publishes_local_context_window() {
+    cli_model_for_publish(model, publishes_local_context_window())
+}
+
+fn cli_model_for_publish(model: &str, publish: bool) -> String {
+    if !publish {
         return model.to_string();
     }
     let window = local_context_window(model, None);
@@ -3668,7 +3676,11 @@ fn cli_model_arg(model: &str) -> String {
 }
 
 fn publish_spawn_context_window(cmd: &mut Command, model: Option<&str>) {
-    if !publishes_local_context_window() {
+    publish_context_window(cmd, model, publishes_local_context_window());
+}
+
+fn publish_context_window(cmd: &mut Command, model: Option<&str>, publish: bool) {
+    if !publish {
         return;
     }
     let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -7684,6 +7696,41 @@ Hello abstract
         assert_eq!(
             command_env(&narrow, "ANTHROPIC_MODEL").as_deref(),
             Some("deepseek-chat")
+        );
+    }
+
+    #[test]
+    fn official_claude_spawn_does_not_set_auto_compact_or_append_1m() {
+        use crate::providers::ActiveProviderIdentity::{
+            ChatGptOfficial, ClaudeOfficial, ThirdParty, Unknown,
+        };
+        assert!(!publishes_for(ClaudeOfficial));
+        assert!(!publishes_for(Unknown));
+        assert!(publishes_for(ThirdParty));
+        assert!(publishes_for(ChatGptOfficial));
+
+        assert_eq!(
+            cli_model_for_publish("claude-opus-4-6", false),
+            "claude-opus-4-6"
+        );
+        assert_eq!(cli_model_for_publish("gpt-6-luna", false), "gpt-6-luna");
+        assert_eq!(
+            cli_model_for_publish("gpt-6-luna", true),
+            "gpt-6-luna[1m]"
+        );
+
+        let mut cmd = Command::new("claude");
+        cmd.env("ANTHROPIC_MODEL", "claude-opus-4-6");
+        cmd.env("ANTHROPIC_DEFAULT_OPUS_MODEL", "claude-opus-4-6");
+        publish_context_window(&mut cmd, Some("claude-opus-4-6"), false);
+        assert!(command_env(&cmd, "CLAUDE_CODE_AUTO_COMPACT_WINDOW").is_none());
+        assert_eq!(
+            command_env(&cmd, "ANTHROPIC_MODEL").as_deref(),
+            Some("claude-opus-4-6")
+        );
+        assert_eq!(
+            command_env(&cmd, "ANTHROPIC_DEFAULT_OPUS_MODEL").as_deref(),
+            Some("claude-opus-4-6")
         );
     }
 }

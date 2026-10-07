@@ -140,6 +140,25 @@ function lastNoticeIndex(messages: readonly ClaudeStreamMessage[]): number {
   return -1;
 }
 
+/**
+ * True when this event still belongs to the open compact divider.
+ * A finished divider is left alone so the next compact appends its own row.
+ * The summary that follows a boundary may still fill the divider it just closed
+ * when that divider is the last message and has no summary yet.
+ */
+function belongsToOpenNotice(
+  messages: readonly ClaudeStreamMessage[],
+  index: number,
+  notice: CompactNoticeState | undefined,
+  event: CompactStreamEvent,
+): notice is CompactNoticeState {
+  if (!notice || index < 0) return false;
+  if (notice.pending) return true;
+  return (
+    event.kind === "summary" && !notice.summary && index === messages.length - 1
+  );
+}
+
 /** Insert or update the compact divider. Does not append the raw CLI event. */
 export function applyCompactEvent(
   messages: readonly ClaudeStreamMessage[],
@@ -168,7 +187,7 @@ export function applyCompactEvent(
   if (event.kind === "summary") {
     const text = event.text.trim();
     if (!text) return messages as ClaudeStreamMessage[];
-    if (current && index >= 0) {
+    if (belongsToOpenNotice(next, index, current, event)) {
       next[index] = noticeMessage({
         ...current,
         pending: false,
@@ -188,21 +207,25 @@ export function applyCompactEvent(
     return next;
   }
 
-  const merged: CompactNoticeState = {
-    pending: false,
-    trigger:
-      event.trigger === "unknown"
-        ? (current?.trigger ?? "unknown")
-        : event.trigger,
-    preTokens: event.preTokens ?? current?.preTokens ?? null,
-    postTokens: event.postTokens ?? current?.postTokens ?? null,
-    summary: current?.summary ?? null,
-  };
-  if (index >= 0) {
-    next[index] = noticeMessage(merged);
+  if (belongsToOpenNotice(next, index, current, event)) {
+    next[index] = noticeMessage({
+      pending: false,
+      trigger: event.trigger === "unknown" ? current.trigger : event.trigger,
+      preTokens: event.preTokens ?? current.preTokens,
+      postTokens: event.postTokens ?? current.postTokens,
+      summary: current.summary,
+    });
     return next;
   }
-  next.push(noticeMessage(merged));
+  next.push(
+    noticeMessage({
+      pending: false,
+      trigger: event.trigger,
+      preTokens: event.preTokens,
+      postTokens: event.postTokens,
+      summary: null,
+    }),
+  );
   return next;
 }
 

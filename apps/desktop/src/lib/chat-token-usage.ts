@@ -192,13 +192,16 @@ export function parseUsageFields(
 export function conversationUsage(
   messages?: ReadonlyArray<UsageMessage> | null,
   lastUsage?: TokenUsageSnapshot | null,
-  options?: { inFlight?: boolean },
+  options?: { inFlight?: boolean; ignoreTranscript?: boolean },
 ): TokenUsageSnapshot | null {
+  const fromStore =
+    lastUsage && snapshotHasTokens(lastUsage) ? lastUsage : null;
+  // A model switch clears the store, but the transcript still holds the
+  // previous model's request. Until a new prompt usage arrives, ignore it.
+  if (options?.ignoreTranscript) return fromStore;
   if (messages && messages.length === 0) return null;
   const scoped = options?.inFlight ? messagesAfterLastUser(messages) : messages;
   const fromMessages = lastTurnUsage(scoped);
-  const fromStore =
-    lastUsage && snapshotHasTokens(lastUsage) ? lastUsage : null;
   if (!fromMessages) {
     if (fromStore) return fromStore;
     // The new turn has not reported usage. Keep the last request already in
@@ -592,6 +595,17 @@ export function catalogContextWindow(
   return window && window > 0 ? window : null;
 }
 
+/**
+ * Moonshot / Kimi's 256k window. Same value as `MOONSHOT_CONTEXT_WINDOW` in
+ * `apps/desktop/src-tauri/src/context_window.rs`, which is what Claude Code
+ * compacts against when the catalog has no window.
+ */
+export const MOONSHOT_CONTEXT_WINDOW = 262_144;
+
+/**
+ * Window the context ring draws when the catalog has no positive value.
+ * Family sizes match `known_context_window` in `context_window.rs`.
+ */
 export function estimateContextWindow(
   model: string | null | undefined,
   catalogWindow?: number | null,
@@ -601,6 +615,7 @@ export function estimateContextWindow(
   if (!id) return 200_000;
   if (/gpt-4\.1/.test(id)) return 1_047_576;
   if (/gpt-/.test(id)) return 272_000;
+  if (/kimi|moonshot/.test(id)) return MOONSHOT_CONTEXT_WINDOW;
   if (/1m/.test(id) && /claude|opus|sonnet/.test(id)) return 1_000_000;
   if (/opus|sonnet|haiku|claude/.test(id)) return 200_000;
   return 200_000;
@@ -617,9 +632,11 @@ export function buildTokenMeterModel(options: {
   windowTokens?: number | null;
   inFlight?: boolean;
   previousTurn?: boolean;
+  ignoreTranscript?: boolean;
 }): TokenMeterModel {
   const last = conversationUsage(options.messages, options.lastUsage, {
     inFlight: options.inFlight,
+    ignoreTranscript: options.ignoreTranscript,
   });
   const inputTokens = last ? last.inputTokens : 0;
   const outputTokens = last ? last.outputTokens : 0;

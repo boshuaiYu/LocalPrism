@@ -23,6 +23,7 @@ vi.mock("@/stores/history-store", () => ({
   },
 }));
 
+import { buildTokenMeterModel } from "@/lib/chat-token-usage";
 import {
   CLAUDE_CODE_PROVIDER_ID,
   useClaudeChatStore,
@@ -892,6 +893,17 @@ describe("useClaudeChatStore.resumeSession", () => {
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
     };
+    const oldMessages = [
+      {
+        type: "assistant" as const,
+        message: {
+          usage: {
+            input_tokens: 180_000,
+            output_tokens: 2_000,
+          },
+        },
+      },
+    ];
     useClaudeChatStore.setState((state) => ({
       tabs: state.tabs.map((tab) =>
         tab.id === "tab-default"
@@ -902,6 +914,7 @@ describe("useClaudeChatStore.resumeSession", () => {
               lastTurnUsage: previous,
               contextWindowTokens: 272_000,
               usageFromPreviousTurn: true,
+              messages: oldMessages,
             }
           : tab,
       ),
@@ -920,10 +933,11 @@ describe("useClaudeChatStore.resumeSession", () => {
     expect(afterEffort?.lastTurnUsage).toEqual(previous);
     expect(afterEffort?.contextWindowTokens).toBe(272_000);
     expect(afterEffort?.usageFromPreviousTurn).toBe(true);
+    expect(afterEffort?.ignoreTranscriptUsage).toBeFalsy();
 
     expect(
       useClaudeChatStore.getState().updateTabRuntimeSelection("tab-default", {
-        runtimeModel: "deepseek-chat",
+        runtimeModel: "kimi-k2.5",
         reasoningEffort: "high",
         agentId: null,
       }),
@@ -934,7 +948,22 @@ describe("useClaudeChatStore.resumeSession", () => {
     expect(afterModel?.lastTurnUsage).toBeNull();
     expect(afterModel?.usageFromPreviousTurn).toBe(false);
     expect(afterModel?.contextWindowTokens).toBeNull();
-    expect(afterModel?.runtimeModel).toBe("deepseek-chat");
+    expect(afterModel?.ignoreTranscriptUsage).toBe(true);
+    expect(afterModel?.runtimeModel).toBe("kimi-k2.5");
+    expect(afterModel?.messages).toEqual(oldMessages);
+    const meter = buildTokenMeterModel({
+      modelLabel: afterModel?.runtimeModel,
+      messages: afterModel?.messages,
+      lastUsage: afterModel?.lastTurnUsage,
+      windowTokens: afterModel?.contextWindowTokens,
+      ignoreTranscript: afterModel?.ignoreTranscriptUsage,
+    });
+    expect(meter.usedTokens).toBe(0);
+    expect(meter.inputTokens).toBe(0);
+    expect(meter.outputTokens).toBe(0);
+    expect(meter.estimated).toBe(true);
+    expect(meter.percent).toBe(0);
+    expect(meter.windowTokens).toBe(262_144);
   });
 
   it("shrinks the meter when a compact boundary reports post tokens", () => {

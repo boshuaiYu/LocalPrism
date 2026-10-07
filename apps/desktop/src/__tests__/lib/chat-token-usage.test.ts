@@ -3,6 +3,7 @@ import {
   buildTokenMeterModel,
   catalogContextWindow,
   estimateContextWindow,
+  MOONSHOT_CONTEXT_WINDOW,
   formatTokenCount,
   isSubagentUsageMessage,
   lastTurnUsage,
@@ -178,6 +179,18 @@ describe("chat token usage", () => {
 
   it("does not treat session totals as context occupancy", () => {
     expect(estimateContextWindow("sonnet")).toBe(200_000);
+    expect(estimateContextWindow("kimi-k2.5")).toBe(MOONSHOT_CONTEXT_WINDOW);
+    expect(estimateContextWindow("moonshot-v1-128k")).toBe(
+      MOONSHOT_CONTEXT_WINDOW,
+    );
+    expect(estimateContextWindow("kimi-k2.5", 128_000)).toBe(128_000);
+    const kimi = buildTokenMeterModel({ modelLabel: "kimi-k2.5" });
+    const moonshot = buildTokenMeterModel({
+      modelLabel: "moonshot-v1-128k",
+    });
+    expect(kimi.windowTokens).toBe(262_144);
+    expect(moonshot.windowTokens).toBe(262_144);
+    expect(kimi.usedTokens).toBe(0);
     const meter = buildTokenMeterModel({
       modelLabel: "sonnet",
     });
