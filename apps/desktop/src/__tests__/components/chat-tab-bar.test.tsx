@@ -129,6 +129,10 @@ describe("ChatTabBar runtime badges", () => {
     expect(toolbar?.className ?? "").not.toContain("window-controls-inset");
     expect(scroller?.className.split(/\s+/)).toContain("flex-1");
     expect(scroller?.className.split(/\s+/)).toContain("overflow-x-auto");
+    expect(scroller?.className.split(/\s+/)).toContain("overflow-y-hidden");
+    expect(scroller?.className).not.toContain("overflow-y-auto");
+    expect(toolbar?.className.split(/\s+/)).toContain("overflow-hidden");
+    expect(toolbar?.className).not.toContain("overflow-y-auto");
     expect(cluster?.className.split(/\s+/)).toContain("w-max");
     expect(cluster?.className.split(/\s+/)).toContain("grow-0");
     expect(cluster?.className.split(/\s+/)).not.toContain("flex-1");
@@ -426,6 +430,10 @@ describe("ChatTabBar runtime badges", () => {
         chip?.querySelector("[data-testid='workspace-account-button']"),
       ).not.toBeNull();
       expect(scroller?.className.split(/\s+/)).toContain("flex-1");
+      expect(scroller?.className.split(/\s+/)).toContain("overflow-y-hidden");
+      expect(scroller?.className).not.toContain("overflow-y-auto");
+      expect(toolbar?.className).not.toContain("overflow-y-auto");
+      expect(cluster?.className).not.toContain("overflow-y-auto");
       expect(cluster?.className.split(/\s+/)).toContain("w-max");
       expect(cluster?.className.split(/\s+/)).not.toContain("flex-1");
       expect(chip?.className.split(/\s+/)).not.toContain("flex-1");
