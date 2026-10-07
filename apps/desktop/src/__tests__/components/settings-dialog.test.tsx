@@ -46,6 +46,7 @@ describe("SettingsDialog", () => {
     await act(async () => root.unmount());
     container.remove();
     document.body.querySelector("[role='dialog']")?.remove();
+    useSettingsStore.setState({ latexTeaching: false, uiLanguage: "en" });
   });
 
   it("omits the language switch and does not put updates in Providers", async () => {
@@ -90,5 +91,30 @@ describe("SettingsDialog", () => {
     expect(providers.textContent).not.toContain("Debian");
     expect(providers.textContent).not.toContain("Check for updates");
     expect(providers.textContent).not.toContain("Agents body");
+  });
+
+  it("persists the LaTeX teaching toggle from the settings dialog", async () => {
+    useSettingsStore.setState({ latexTeaching: false, uiLanguage: "zh" });
+    await act(async () => {
+      root.render(<SettingsDialog open onOpenChange={vi.fn()} />);
+    });
+
+    expect(document.body.textContent).toContain("启用 LaTeX 教学");
+    expect(document.body.textContent).toContain("预览 · 超前功能");
+    const toggle = document.body.querySelector(
+      '[data-testid="latex-teaching-toggle"]',
+    );
+    expect(toggle?.getAttribute("aria-checked")).toBe("false");
+
+    await act(async () => {
+      if (toggle instanceof HTMLButtonElement) toggle.click();
+    });
+    expect(useSettingsStore.getState().latexTeaching).toBe(true);
+    expect(toggle?.getAttribute("aria-checked")).toBe("true");
+
+    await act(async () => {
+      if (toggle instanceof HTMLButtonElement) toggle.click();
+    });
+    expect(useSettingsStore.getState().latexTeaching).toBe(false);
   });
 });

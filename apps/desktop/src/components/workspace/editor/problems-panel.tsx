@@ -8,6 +8,7 @@ import {
   MessageSquareIcon,
   MousePointerClickIcon,
 } from "lucide-react";
+import { TeachDiagnosticButton } from "./teach-panel";
 
 export interface DiagnosticItem {
   from: number;
@@ -109,6 +110,10 @@ export function ProblemsPanel({
               <span className="shrink-0 text-muted-foreground">
                 {fileName}:{d.line}
               </span>
+              <TeachDiagnosticButton
+                message={d.message}
+                sourceKey={`diag:${d.line}:${d.message}`}
+              />
               <button
                 onClick={(e) => {
                   e.stopPropagation();

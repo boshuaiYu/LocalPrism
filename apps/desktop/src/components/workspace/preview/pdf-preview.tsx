@@ -28,6 +28,7 @@ import { useHistoryStore } from "@/stores/history-store";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import { useChatLayoutStore } from "@/stores/chat-layout-store";
 import { useSettingsStore } from "@/stores/settings-store";
+import { TeachDiagnosticButton } from "@/components/workspace/editor/teach-panel";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -736,7 +737,13 @@ export function PdfPreview() {
                 {errors.map((error, i) => (
                   <div key={i} className="flex items-start gap-2.5 px-3 py-2.5">
                     <AlertCircleIcon className="mt-0.5 size-3.5 shrink-0 text-destructive/70" />
-                    <span className="text-foreground text-sm">{error}</span>
+                    <span className="min-w-0 flex-1 text-foreground text-sm">
+                      {error}
+                    </span>
+                    <TeachDiagnosticButton
+                      message={error}
+                      sourceKey={`compile:${i}:${error}`}
+                    />
                   </div>
                 ))}
               </div>
@@ -908,7 +915,13 @@ export function PdfPreview() {
                 {compileErrors.map((error, i) => (
                   <div key={i} className="flex items-start gap-2 px-2 py-1.5">
                     <AlertCircleIcon className="mt-0.5 size-3 shrink-0 text-destructive/70" />
-                    <span className="text-foreground text-xs">{error}</span>
+                    <span className="min-w-0 flex-1 text-foreground text-xs">
+                      {error}
+                    </span>
+                    <TeachDiagnosticButton
+                      message={error}
+                      sourceKey={`compile-overlay:${i}:${error}`}
+                    />
                   </div>
                 ))}
               </div>

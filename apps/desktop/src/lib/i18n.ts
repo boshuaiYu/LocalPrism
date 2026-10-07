@@ -553,6 +553,26 @@ const en = {
   "agents.saving": "Saving…",
   "agents.overwrite": "Overwrite if an agent with the same name already exists",
   "agents.projectBadge": "(project)",
+
+  "teach.section": "Editor and teaching",
+  "teach.enable": "Enable LaTeX teaching",
+  "teach.previewBadge": "Preview",
+  "teach.enableHelp":
+    "Selecting a command or environment, a compile error, or an empty project shows an explanation beside the editor. AI chat stays independent.",
+  "teach.callout":
+    "Teaching is not only for errors. Selecting a construct can open it, and an empty project can show a short guide.",
+  "teach.panelTitle": "Learn while writing",
+  "teach.close": "Close teaching panel",
+  "teach.what": "What it is",
+  "teach.patterns": "Common patterns",
+  "teach.example": "Minimal example",
+  "teach.insert": "Insert example at cursor",
+  "teach.emptyEntry": "Blank file · see a short guide",
+  "teach.entry": "Explain",
+  "teach.entryHint": "Explain this message",
+  "teach.kind.construct": "Selection",
+  "teach.kind.error": "Error",
+  "teach.kind.guide": "Guide",
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -1079,6 +1099,26 @@ const zh: Record<MessageKey, string> = {
   "agents.saving": "正在保存…",
   "agents.overwrite": "若已有同名智能体则覆盖",
   "agents.projectBadge": "（项目）",
+
+  "teach.section": "编辑器与教学",
+  "teach.enable": "启用 LaTeX 教学",
+  "teach.previewBadge": "预览 · 超前功能",
+  "teach.enableHelp":
+    "选中命令/环境、编译报错或打开空项目时，在右侧展示讲解面板；不影响 AI 对话与主编辑流程。",
+  "teach.callout":
+    "不报错也会讲——选中即讲；报错只是入口之一。空项目时也可出现引导讲解。",
+  "teach.panelTitle": "边写边学",
+  "teach.close": "关闭讲解",
+  "teach.what": "是什么",
+  "teach.patterns": "常见写法",
+  "teach.example": "最小例子",
+  "teach.insert": "插入示例到光标处",
+  "teach.emptyEntry": "空白文稿 · 查看入门讲解",
+  "teach.entry": "讲解",
+  "teach.entryHint": "点击讲解",
+  "teach.kind.construct": "选中",
+  "teach.kind.error": "报错",
+  "teach.kind.guide": "入门",
 };
 
 function interpolate(

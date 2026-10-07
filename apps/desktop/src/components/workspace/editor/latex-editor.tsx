@@ -84,6 +84,9 @@ import { ProposedChangesPanel } from "@/components/claude-chat/proposed-changes-
 import { ImagePreview } from "./image-preview";
 import { SearchPanel } from "./search-panel";
 import { ProblemsPanel, type DiagnosticItem } from "./problems-panel";
+import { TeachEmptyEntry, TeachPanel } from "./teach-panel";
+import { lessonRefForSelection } from "@/lib/latex-teaching";
+import { useLatexTeachStore } from "@/stores/latex-teach-store";
 import { PdfViewer } from "@/components/workspace/preview/pdf-viewer";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { createLogger } from "@/lib/debug/logger";
@@ -94,6 +97,13 @@ function getActiveFileContent(): string {
   const state = useDocumentStore.getState();
   const activeFile = state.files.find((f) => f.id === state.activeFileId);
   return activeFile?.content ?? "";
+}
+
+function activeFileIsTex(): boolean {
+  const state = useDocumentStore.getState();
+  return (
+    state.files.find((file) => file.id === state.activeFileId)?.type === "tex"
+  );
 }
 
 export { clearEditorStateCache } from "./editor-state-cache";
@@ -514,6 +524,20 @@ export function LatexEditor() {
             });
           }
           toolbarStickyRef.current = true;
+          if (activeFileIsTex() && useSettingsStore.getState().latexTeaching) {
+            const line = update.state.doc.lineAt(from);
+            const lesson = lessonRefForSelection({
+              selected: update.state.sliceDoc(from, to),
+              line: line.text,
+              selectionStartInLine: from - line.from,
+              selectionEndInLine: Math.min(to, line.to) - line.from,
+            });
+            if (lesson) {
+              useLatexTeachStore
+                .getState()
+                .present(lesson, `sel:${from}:${to}`);
+            }
+          }
         } else if (!toolbarStickyRef.current) {
           // Only clear selection/coords if the toolbar is not being interacted with.
           // Clicking the toolbar input causes CM to lose focus and collapse the selection,
@@ -1144,355 +1168,379 @@ export function LatexEditor() {
     useHistoryStore.getState().stopReview();
   }, []);
 
+  const insertTeachSnippet = useCallback((snippet: string) => {
+    const view = viewRef.current;
+    if (!view || isMergeActiveRef.current) return;
+    if (useDocumentStore.getState().isProjectMutating) return;
+    const insertAt = view.state.selection.main.to;
+    const before =
+      insertAt > 0 ? view.state.sliceDoc(insertAt - 1, insertAt) : "\n";
+    const body = snippet.replace(/\s+$/, "");
+    const text = `${before === "\n" ? "" : "\n"}${body}\n`;
+    view.dispatch({
+      changes: { from: insertAt, insert: text },
+      selection: { anchor: insertAt + text.length },
+    });
+    view.focus();
+  }, []);
+
   const isPdf = activeFile?.type === "pdf";
   const isImage = !isTextFile && !isPdf && !!activeFile;
 
   return (
-    <div
-      className="relative flex h-full min-w-0 flex-col bg-background"
-      aria-busy={isProjectMutating}
-      data-tour="tour-latex"
-    >
-      {/* Toolbar — adapts to file type */}
-      <EditorToolbar
-        editorView={viewRef}
-        fileType={isPdf || isImage ? "image" : undefined}
-        imageScale={isPdf || isImage ? imageScale : undefined}
-        onImageScaleChange={isPdf || isImage ? setImageScale : undefined}
-        cropMode={isImage ? cropMode : undefined}
-        onCropToggle={isImage ? () => setCropMode((v) => !v) : undefined}
-      />
-      {isProjectMutating && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/65 text-muted-foreground text-sm backdrop-blur-[1px]">
-          Updating project…
-        </div>
-      )}
-      {/* Text-editor-only panels */}
-      {!isPdf && !isImage && !isLargeFileNotLoaded && isSearchOpen && (
-        <SearchPanel
-          searchQuery={searchQuery}
-          onSearchQueryChange={setSearchQuery}
-          onClose={() => {
-            setIsSearchOpen(false);
-            setSearchQuery("");
-            viewRef.current?.focus();
-          }}
-          onFindNext={handleFindNext}
-          onFindPrevious={handleFindPrevious}
-          matchCount={matchCount}
-          currentMatch={currentMatch}
-        />
-      )}
-      {!isPdf && !isImage && !isLargeFileNotLoaded && reviewingSnapshot && (
-        <div className="flex h-9 shrink-0 items-center justify-between border-border border-b bg-amber-500/10 px-3">
-          <div className="flex items-center gap-2 text-xs">
-            <RotateCcwIcon className="size-3.5 text-amber-600 dark:text-amber-400" />
-            <span className="font-medium text-amber-700 dark:text-amber-300">
-              Reviewing history
-            </span>
-            <span className="text-muted-foreground">
-              {reviewingSnapshot.message.replace(/^\[.*?\]\s*/, "")} &middot;{" "}
-              {reviewingSnapshot.id.slice(0, 7)}
-            </span>
-          </div>
-          <div className="flex items-center gap-1">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-6 gap-1 px-2 text-xs"
-              onClick={handleHistoryRestore}
-            >
-              <RotateCcwIcon className="size-3" />
-              Restore
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-6 gap-1 px-2 text-xs"
-              onClick={() => {
-                setHistoryLabelDialogOpen(true);
-                setHistoryLabelValue("");
-              }}
-            >
-              <TagIcon className="size-3" />
-              Label
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-6 gap-1 px-2 text-xs"
-              onClick={handleHistoryCopySha}
-            >
-              <CopyIcon className="size-3" />
-              SHA
-            </Button>
-            <div className="mx-0.5 h-4 w-px bg-border" />
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-6"
-              onClick={handleHistoryClose}
-            >
-              <XIcon className="size-3.5" />
-            </Button>
-          </div>
-        </div>
-      )}
-      {/* Main content area */}
+    <div className="flex h-full min-w-0 bg-background">
       <div
-        ref={isPdf || isImage ? undefined : parentRef}
-        className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
+        className="relative flex h-full min-w-0 flex-1 flex-col"
+        aria-busy={isProjectMutating}
+        data-tour="tour-latex"
       >
-        {/* PDF content */}
-        {isPdf && activeFile && (
-          <InlinePdfContent
-            file={activeFile}
-            imageScale={imageScale}
-            onImageScaleChange={setImageScale}
+        {/* Toolbar — adapts to file type */}
+        <EditorToolbar
+          editorView={viewRef}
+          fileType={isPdf || isImage ? "image" : undefined}
+          imageScale={isPdf || isImage ? imageScale : undefined}
+          onImageScaleChange={isPdf || isImage ? setImageScale : undefined}
+          cropMode={isImage ? cropMode : undefined}
+          onCropToggle={isImage ? () => setCropMode((v) => !v) : undefined}
+        />
+        {isProjectMutating && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/65 text-muted-foreground text-sm backdrop-blur-[1px]">
+            Updating project…
+          </div>
+        )}
+        {/* Text-editor-only panels */}
+        {!isPdf && !isImage && !isLargeFileNotLoaded && isSearchOpen && (
+          <SearchPanel
+            searchQuery={searchQuery}
+            onSearchQueryChange={setSearchQuery}
+            onClose={() => {
+              setIsSearchOpen(false);
+              setSearchQuery("");
+              viewRef.current?.focus();
+            }}
+            onFindNext={handleFindNext}
+            onFindPrevious={handleFindPrevious}
+            matchCount={matchCount}
+            currentMatch={currentMatch}
           />
         )}
-        {/* Image content */}
-        {isImage && activeFile && (
-          <ImagePreview
-            file={activeFile}
-            scale={imageScale}
-            onScaleChange={setImageScale}
-            cropMode={cropMode}
-            onCropModeChange={setCropMode}
-          />
-        )}
-        {/* Large file warning */}
-        {isLargeFileNotLoaded && activeFile && (
-          <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
-            <div className="max-w-md rounded-lg border border-border bg-card/50 p-6 shadow-sm">
-              <p className="mb-1 font-medium text-foreground text-sm">
-                {activeFile.name}
-              </p>
-              <p className="mb-4 text-muted-foreground text-xs">
-                This file is large (
-                {activeFile.fileSize != null
-                  ? `${(activeFile.fileSize / (1024 * 1024)).toFixed(1)} MB`
-                  : "unknown size"}
-                ). Opening it may slow down the editor.
-              </p>
+        {!isPdf && !isImage && !isLargeFileNotLoaded && reviewingSnapshot && (
+          <div className="flex h-9 shrink-0 items-center justify-between border-border border-b bg-amber-500/10 px-3">
+            <div className="flex items-center gap-2 text-xs">
+              <RotateCcwIcon className="size-3.5 text-amber-600 dark:text-amber-400" />
+              <span className="font-medium text-amber-700 dark:text-amber-300">
+                Reviewing history
+              </span>
+              <span className="text-muted-foreground">
+                {reviewingSnapshot.message.replace(/^\[.*?\]\s*/, "")} &middot;{" "}
+                {reviewingSnapshot.id.slice(0, 7)}
+              </span>
+            </div>
+            <div className="flex items-center gap-1">
               <Button
-                variant="outline"
+                variant="ghost"
                 size="sm"
-                onClick={() => loadFileContent(activeFile.id)}
+                className="h-6 gap-1 px-2 text-xs"
+                onClick={handleHistoryRestore}
               >
-                Open Anyway
+                <RotateCcwIcon className="size-3" />
+                Restore
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 gap-1 px-2 text-xs"
+                onClick={() => {
+                  setHistoryLabelDialogOpen(true);
+                  setHistoryLabelValue("");
+                }}
+              >
+                <TagIcon className="size-3" />
+                Label
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 gap-1 px-2 text-xs"
+                onClick={handleHistoryCopySha}
+              >
+                <CopyIcon className="size-3" />
+                SHA
+              </Button>
+              <div className="mx-0.5 h-4 w-px bg-border" />
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-6"
+                onClick={handleHistoryClose}
+              >
+                <XIcon className="size-3.5" />
               </Button>
             </div>
           </div>
         )}
-        {/* Text editor content */}
-        {!isPdf && !isImage && !isLargeFileNotLoaded && (
-          <>
-            <div
-              ref={containerRef}
-              className={reviewingSnapshot ? "hidden" : "absolute inset-0"}
+        {activeFile?.type === "tex" &&
+          !isLargeFileNotLoaded &&
+          !reviewingSnapshot && (
+            <TeachEmptyEntry content={activeFileContent ?? ""} />
+          )}
+        {/* Main content area */}
+        <div
+          ref={isPdf || isImage ? undefined : parentRef}
+          className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
+        >
+          {/* PDF content */}
+          {isPdf && activeFile && (
+            <InlinePdfContent
+              file={activeFile}
+              imageScale={imageScale}
+              onImageScaleChange={setImageScale}
             />
-            {reviewingSnapshot && historyDiffResult && (
-              <HistoryDiffView diffs={historyDiffResult} />
-            )}
-            {toolbarPosition &&
-              selectionLabel &&
-              !isMergeActiveRef.current &&
-              !isSearchOpen && (
-                <SelectionToolbar
-                  position={toolbarPosition}
-                  contextLabel={selectionLabel}
-                  actions={editorToolbarActions}
-                  onSendPrompt={handleToolbarSendPrompt}
-                  onAction={handleToolbarAction}
-                  onDismiss={handleToolbarDismiss}
-                />
-              )}
-            {activeFileChange && mergeChunkInfo.total > 0 && (
-              <div className="absolute top-3 right-3 z-20 flex items-center gap-1 rounded-lg border border-border bg-background/95 px-2 py-1 shadow-lg backdrop-blur-sm">
-                <span className="px-1 font-mono text-muted-foreground text-xs">
-                  ±&nbsp;{mergeChunkInfo.current}/{mergeChunkInfo.total}
-                </span>
-                <div className="mx-0.5 h-4 w-px bg-border" />
-                <button
-                  onClick={() =>
-                    goToChunk(
-                      mergeChunkInfo.current <= 1
-                        ? mergeChunkInfo.total - 1
-                        : mergeChunkInfo.current - 2,
-                    )
-                  }
-                  className="rounded p-0.5 text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
-                  title="Previous change"
-                  aria-label="Previous change"
+          )}
+          {/* Image content */}
+          {isImage && activeFile && (
+            <ImagePreview
+              file={activeFile}
+              scale={imageScale}
+              onScaleChange={setImageScale}
+              cropMode={cropMode}
+              onCropModeChange={setCropMode}
+            />
+          )}
+          {/* Large file warning */}
+          {isLargeFileNotLoaded && activeFile && (
+            <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
+              <div className="max-w-md rounded-lg border border-border bg-card/50 p-6 shadow-sm">
+                <p className="mb-1 font-medium text-foreground text-sm">
+                  {activeFile.name}
+                </p>
+                <p className="mb-4 text-muted-foreground text-xs">
+                  This file is large (
+                  {activeFile.fileSize != null
+                    ? `${(activeFile.fileSize / (1024 * 1024)).toFixed(1)} MB`
+                    : "unknown size"}
+                  ). Opening it may slow down the editor.
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => loadFileContent(activeFile.id)}
                 >
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <polyline points="18 15 12 9 6 15" />
-                  </svg>
-                </button>
-                <button
-                  onClick={() =>
-                    goToChunk(
-                      mergeChunkInfo.current >= mergeChunkInfo.total
-                        ? 0
-                        : mergeChunkInfo.current,
-                    )
-                  }
-                  className="rounded p-0.5 text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
-                  title="Next change"
-                  aria-label="Next change"
-                >
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <polyline points="6 9 12 15 18 9" />
-                  </svg>
-                </button>
-                <div className="mx-0.5 h-4 w-px bg-border" />
-                <button
-                  onClick={acceptCurrentChunk}
-                  className="rounded p-0.5 text-green-400 transition-colors hover:bg-green-600/20"
-                  title="Accept this change"
-                  aria-label="Accept this change"
-                >
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <polyline points="20 6 9 17 4 12" />
-                  </svg>
-                </button>
-                <button
-                  onClick={rejectCurrentChunk}
-                  className="rounded p-0.5 text-red-400 transition-colors hover:bg-red-600/20"
-                  title="Reject this change"
-                  aria-label="Reject this change"
-                >
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <line x1="18" y1="6" x2="6" y2="18" />
-                    <line x1="6" y1="6" x2="18" y2="18" />
-                  </svg>
-                </button>
+                  Open Anyway
+                </Button>
               </div>
+            </div>
+          )}
+          {/* Text editor content */}
+          {!isPdf && !isImage && !isLargeFileNotLoaded && (
+            <>
+              <div
+                ref={containerRef}
+                className={reviewingSnapshot ? "hidden" : "absolute inset-0"}
+              />
+              {reviewingSnapshot && historyDiffResult && (
+                <HistoryDiffView diffs={historyDiffResult} />
+              )}
+              {toolbarPosition &&
+                selectionLabel &&
+                !isMergeActiveRef.current &&
+                !isSearchOpen && (
+                  <SelectionToolbar
+                    position={toolbarPosition}
+                    contextLabel={selectionLabel}
+                    actions={editorToolbarActions}
+                    onSendPrompt={handleToolbarSendPrompt}
+                    onAction={handleToolbarAction}
+                    onDismiss={handleToolbarDismiss}
+                  />
+                )}
+              {activeFileChange && mergeChunkInfo.total > 0 && (
+                <div className="absolute top-3 right-3 z-20 flex items-center gap-1 rounded-lg border border-border bg-background/95 px-2 py-1 shadow-lg backdrop-blur-sm">
+                  <span className="px-1 font-mono text-muted-foreground text-xs">
+                    ±&nbsp;{mergeChunkInfo.current}/{mergeChunkInfo.total}
+                  </span>
+                  <div className="mx-0.5 h-4 w-px bg-border" />
+                  <button
+                    onClick={() =>
+                      goToChunk(
+                        mergeChunkInfo.current <= 1
+                          ? mergeChunkInfo.total - 1
+                          : mergeChunkInfo.current - 2,
+                      )
+                    }
+                    className="rounded p-0.5 text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
+                    title="Previous change"
+                    aria-label="Previous change"
+                  >
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <polyline points="18 15 12 9 6 15" />
+                    </svg>
+                  </button>
+                  <button
+                    onClick={() =>
+                      goToChunk(
+                        mergeChunkInfo.current >= mergeChunkInfo.total
+                          ? 0
+                          : mergeChunkInfo.current,
+                      )
+                    }
+                    className="rounded p-0.5 text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
+                    title="Next change"
+                    aria-label="Next change"
+                  >
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
+                  </button>
+                  <div className="mx-0.5 h-4 w-px bg-border" />
+                  <button
+                    onClick={acceptCurrentChunk}
+                    className="rounded p-0.5 text-green-400 transition-colors hover:bg-green-600/20"
+                    title="Accept this change"
+                    aria-label="Accept this change"
+                  >
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  </button>
+                  <button
+                    onClick={rejectCurrentChunk}
+                    className="rounded p-0.5 text-red-400 transition-colors hover:bg-red-600/20"
+                    title="Reject this change"
+                    aria-label="Reject this change"
+                  >
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <line x1="18" y1="6" x2="6" y2="18" />
+                      <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+        {/* Text-editor-only bottom panels */}
+        {!isPdf &&
+          !isImage &&
+          !isLargeFileNotLoaded &&
+          diagnostics.length > 0 && (
+            <ProblemsPanel
+              diagnostics={diagnostics}
+              fileName={activeFile?.relativePath ?? "main.tex"}
+              onNavigate={(from) => {
+                const view = viewRef.current;
+                if (!view) return;
+                view.dispatch({
+                  selection: { anchor: from },
+                  effects: EditorView.scrollIntoView(from, { y: "center" }),
+                });
+                view.focus();
+              }}
+              onFixWithChat={(message, line) => {
+                const fileName = activeFile?.relativePath ?? "main.tex";
+                const ctx = `[Lint error in ${fileName}:${line}]\n[Error: ${message}]`;
+                useClaudeChatStore
+                  .getState()
+                  .sendPrompt(`${ctx}\n\nFix this lint error.`);
+              }}
+              onFixAllWithChat={() => {
+                const fileName = activeFile?.relativePath ?? "main.tex";
+                const errorList = diagnostics
+                  .map((d) => `- ${fileName}:${d.line} — ${d.message}`)
+                  .join("\n");
+                useClaudeChatStore
+                  .getState()
+                  .sendPrompt(
+                    `[Lint errors in ${fileName}]\n${errorList}\n\nFix all these lint errors.`,
+                  );
+              }}
+            />
+          )}
+        {!isPdf && !isImage && !isLargeFileNotLoaded && activeFileChange && (
+          <ProposedChangesPanel
+            change={activeFileChange}
+            changeIndex={proposedChanges.findIndex(
+              (c) => c.filePath === activeFile?.relativePath,
             )}
-          </>
-        )}
-      </div>
-      {/* Text-editor-only bottom panels */}
-      {!isPdf &&
-        !isImage &&
-        !isLargeFileNotLoaded &&
-        diagnostics.length > 0 && (
-          <ProblemsPanel
-            diagnostics={diagnostics}
-            fileName={activeFile?.relativePath ?? "main.tex"}
-            onNavigate={(from) => {
-              const view = viewRef.current;
-              if (!view) return;
-              view.dispatch({
-                selection: { anchor: from },
-                effects: EditorView.scrollIntoView(from, { y: "center" }),
-              });
-              view.focus();
-            }}
-            onFixWithChat={(message, line) => {
-              const fileName = activeFile?.relativePath ?? "main.tex";
-              const ctx = `[Lint error in ${fileName}:${line}]\n[Error: ${message}]`;
-              useClaudeChatStore
-                .getState()
-                .sendPrompt(`${ctx}\n\nFix this lint error.`);
-            }}
-            onFixAllWithChat={() => {
-              const fileName = activeFile?.relativePath ?? "main.tex";
-              const errorList = diagnostics
-                .map((d) => `- ${fileName}:${d.line} — ${d.message}`)
-                .join("\n");
-              useClaudeChatStore
-                .getState()
-                .sendPrompt(
-                  `[Lint errors in ${fileName}]\n${errorList}\n\nFix all these lint errors.`,
-                );
-            }}
+            totalChanges={proposedChanges.length}
+            onKeep={() => handleKeepAllRef.current()}
+            onUndo={() => handleUndoAllRef.current()}
           />
         )}
-      {!isPdf && !isImage && !isLargeFileNotLoaded && activeFileChange && (
-        <ProposedChangesPanel
-          change={activeFileChange}
-          changeIndex={proposedChanges.findIndex(
-            (c) => c.filePath === activeFile?.relativePath,
-          )}
-          totalChanges={proposedChanges.length}
-          onKeep={() => handleKeepAllRef.current()}
-          onUndo={() => handleUndoAllRef.current()}
-        />
-      )}
-      {/* History label dialog */}
-      <Dialog
-        open={historyLabelDialogOpen}
-        onOpenChange={setHistoryLabelDialogOpen}
-      >
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Add Label</DialogTitle>
-          </DialogHeader>
-          <div className="py-4">
-            <Input
-              placeholder="e.g. Draft v1"
-              value={historyLabelValue}
-              onChange={(e) => setHistoryLabelValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleHistoryAddLabel();
-              }}
-              autoFocus
-            />
-          </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setHistoryLabelDialogOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              onClick={handleHistoryAddLabel}
-              disabled={!historyLabelValue.trim()}
-            >
-              Add
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        {/* History label dialog */}
+        <Dialog
+          open={historyLabelDialogOpen}
+          onOpenChange={setHistoryLabelDialogOpen}
+        >
+          <DialogContent className="sm:max-w-sm">
+            <DialogHeader>
+              <DialogTitle>Add Label</DialogTitle>
+            </DialogHeader>
+            <div className="py-4">
+              <Input
+                placeholder="e.g. Draft v1"
+                value={historyLabelValue}
+                onChange={(e) => setHistoryLabelValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleHistoryAddLabel();
+                }}
+                autoFocus
+              />
+            </div>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setHistoryLabelDialogOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleHistoryAddLabel}
+                disabled={!historyLabelValue.trim()}
+              >
+                Add
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      </div>
+      <TeachPanel onInsert={insertTeachSnippet} />
     </div>
   );
 }
