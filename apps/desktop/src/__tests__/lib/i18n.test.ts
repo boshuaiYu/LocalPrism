@@ -38,6 +38,8 @@ describe("translate", () => {
     expect(translate("en", "editor.choose")).toBe("Choose editor");
     expect(translate("zh", "editor.choose")).toBe("选择编辑器");
     expect(translate("zh", "env.pythonEnvironment")).toBe("Python 环境 (uv)");
+    expect(translate("en", "agents.default")).toBe("Default");
+    expect(translate("zh", "agents.default")).toBe("默认智能体");
   });
 
   it("translates the skills and agents tour in English and Chinese", () => {

@@ -23,6 +23,13 @@ pub fn agents_root(scope: SkillScope, project_path: Option<&Path>) -> Result<Pat
     }
 }
 
+fn yaml_unknown_string(value: &Value) -> Option<String> {
+    match value {
+        Value::Bool(flag) => Some(if *flag { "true" } else { "false" }.to_string()),
+        _ => yaml_string(value),
+    }
+}
+
 fn yaml_string(value: &Value) -> Option<String> {
     value
         .as_str()
@@ -143,7 +150,7 @@ pub fn parse_claude_agent(path: &Path, scope: SkillScope) -> Result<AgentProfile
         source_path: path.to_string_lossy().to_string(),
         unknown_fields: unknown
             .into_iter()
-            .filter_map(|(key, value)| yaml_string(&value).map(|text| (key, text)))
+            .filter_map(|(key, value)| yaml_unknown_string(&value).map(|text| (key, text)))
             .collect(),
     })
 }
@@ -294,5 +301,21 @@ mod tests {
             validate_agent_slug("reviewer").expect("slug should validate"),
             "reviewer"
         );
+    }
+
+    #[test]
+    fn claude_agent_keeps_a_boolean_default_flag() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("default-agent.md");
+        fs::write(
+            &path,
+            "---\nname: 默认智能体\ndefault: true\n---\nBe the default.\n",
+        )
+        .unwrap();
+
+        let profile = parse_claude_agent(&path, SkillScope::User).unwrap();
+        assert_eq!(profile.id, "default-agent");
+        assert_eq!(profile.name, "默认智能体");
+        assert_eq!(profile.unknown_fields.get("default"), Some(&"true".into()));
     }
 }

@@ -1051,7 +1051,7 @@ const zh: Record<MessageKey, string> = {
   "skills.selectedShown": "已选 {{selected}} · 显示 {{shown}}",
 
   "agents.one": "智能体",
-  "agents.default": "默认",
+  "agents.default": "默认智能体",
   "agents.select": "选择自定义智能体",
   "agents.selectNamed": "选择自定义智能体 {{name}}",
   "agents.description": "说明",
