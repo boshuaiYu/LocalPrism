@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -55,14 +56,22 @@ const RECENCY_LABELS: Record<RecencyGroup, string> = {
 const HISTORY_PANEL_MARGIN = 8;
 const HISTORY_PANEL_WIDTH = 384;
 
+const HISTORY_MENU_ITEM_CLASS =
+  "cursor-default rounded-sm text-left outline-hidden hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground";
+
 /**
  * Overlay below the history button, using the viewport rather than the
  * header's clipping box. The tab bar is only one row tall; sizing the list
  * to that box piles sessions into the title bar and paints a scrollbar there.
+ *
+ * `maxHeight` is the room left for the scrolling list after `reservedHeight`
+ * (search row and panel border). It is not floored, so a short window cannot
+ * push the overlay past the viewport.
  */
 export function sessionHistoryPanelStyle(
   rect: { bottom: number; left: number; right: number },
   viewport: { width: number; height: number },
+  reservedHeight = 0,
 ): CSSProperties {
   const top = rect.bottom + 4;
   const width = Math.min(
@@ -76,8 +85,18 @@ export function sessionHistoryPanelStyle(
       viewport.width - HISTORY_PANEL_MARGIN - width,
     ),
   );
-  const maxHeight = Math.max(160, viewport.height - top - HISTORY_PANEL_MARGIN);
+  const maxHeight = Math.max(
+    0,
+    viewport.height - top - HISTORY_PANEL_MARGIN - reservedHeight,
+  );
   return { top, left, width, maxHeight };
+}
+
+function activateMenuButton(event: ReactKeyboardEvent<HTMLButtonElement>) {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  if (event.repeat) return;
+  event.currentTarget.click();
 }
 
 function startOfLocalDay(ms: number): number {
@@ -272,9 +291,12 @@ export function SessionSelector() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [panelStyle, setPanelStyle] = useState<CSSProperties>({});
   const searchRef = useRef<HTMLInputElement>(null);
+  const searchChromeRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const menuOpenRef = useRef(false);
+  const deleteDialogOpenRef = useRef(false);
+  deleteDialogOpenRef.current = deleteTarget != null;
 
   const needsLiveTabs = menuOpen || deleteTarget != null;
   const projectPath = useClaudeChatStore(
@@ -409,11 +431,19 @@ export function SessionSelector() {
     const place = () => {
       const rect = triggerRef.current?.getBoundingClientRect();
       if (!rect) return;
+      const panel = panelRef.current;
+      const reservedHeight =
+        (searchChromeRef.current?.offsetHeight ?? 0) +
+        (panel ? panel.offsetHeight - panel.clientHeight : 0);
       setPanelStyle(
-        sessionHistoryPanelStyle(rect, {
-          width: window.innerWidth,
-          height: window.innerHeight,
-        }),
+        sessionHistoryPanelStyle(
+          rect,
+          {
+            width: window.innerWidth,
+            height: window.innerHeight,
+          },
+          reservedHeight,
+        ),
       );
     };
     place();
@@ -427,20 +457,32 @@ export function SessionSelector() {
       searchRef.current?.focus();
     });
     const onPointerDown = (event: PointerEvent) => {
+      if (deleteDialogOpenRef.current) return;
       const target = event.target;
       if (!(target instanceof Node)) return;
       if (triggerRef.current?.contains(target)) return;
       if (panelRef.current?.contains(target)) return;
       if (
         target instanceof Element &&
-        target.closest("[role='dialog'], [data-slot='dialog-content']")
+        target.closest(
+          "[role='dialog'], [data-slot='dialog-content'], [data-slot='dialog-overlay']",
+        )
       ) {
         return;
       }
       setHistoryOpen(false);
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setHistoryOpen(false);
+      if (event.key !== "Escape" || deleteDialogOpenRef.current) return;
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement &&
+        target === searchRef.current &&
+        target.value.trim()
+      ) {
+        return;
+      }
+      setHistoryOpen(false);
     };
     document.addEventListener("pointerdown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);
@@ -599,35 +641,38 @@ export function SessionSelector() {
     const action = isCodex ? "Archive" : "Delete";
     const actionLower = action.toLowerCase();
     return (
-      <div
-        key={key}
-        role="menuitem"
-        tabIndex={isDeleting ? -1 : 0}
-        aria-disabled={isDeleting ? "true" : "false"}
-        onClick={() => {
-          if (isDeleting) return;
-          handleSelectConversation(conversation);
-          setHistoryOpen(false);
-        }}
-        className="group flex min-h-12 cursor-default items-start gap-2 rounded-sm px-2.5 py-2.5 outline-hidden hover:bg-accent hover:text-accent-foreground"
-      >
-        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="truncate text-sm leading-snug">{title}</span>
-          {isCodex ? (
+      <div key={key} className="group flex min-h-12 items-start">
+        <button
+          type="button"
+          role="menuitem"
+          tabIndex={isDeleting ? -1 : 0}
+          aria-disabled={isDeleting ? "true" : "false"}
+          onKeyDown={activateMenuButton}
+          onClick={() => {
+            if (isDeleting) return;
+            handleSelectConversation(conversation);
+            setHistoryOpen(false);
+          }}
+          className={`flex min-w-0 flex-1 items-start gap-2 px-2.5 py-2.5 ${HISTORY_MENU_ITEM_CLASS}`}
+        >
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="truncate text-sm leading-snug">{title}</span>
+            {isCodex ? (
+              <span className="text-muted-foreground text-xs">
+                {t("chat.readOnly")}
+              </span>
+            ) : null}
             <span className="text-muted-foreground text-xs">
-              {t("chat.readOnly")}
+              {formatRelativeTime(conversation.updatedAt)}
             </span>
-          ) : null}
-          <span className="text-muted-foreground text-xs">
-            {formatRelativeTime(conversation.updatedAt)}
-          </span>
-        </div>
-        <div className="flex shrink-0 items-center gap-1">
+          </div>
           {isBusy ? (
-            <Loader2Icon className="size-4 animate-spin text-primary" />
+            <Loader2Icon className="size-4 shrink-0 animate-spin text-primary" />
           ) : (
-            isCurrent && <CheckIcon className="size-4 text-primary" />
+            isCurrent && <CheckIcon className="size-4 shrink-0 text-primary" />
           )}
+        </button>
+        <div className="flex shrink-0 items-center py-2.5 pr-1.5">
           <button
             type="button"
             className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40"
@@ -705,9 +750,16 @@ export function SessionSelector() {
             role="menu"
             aria-label={t("chat.sessionHistory")}
             className="fixed z-50 flex flex-col overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md"
-            style={panelStyle}
+            style={{
+              top: panelStyle.top,
+              left: panelStyle.left,
+              width: panelStyle.width,
+            }}
           >
-            <div className="shrink-0 border-border/70 border-b p-2">
+            <div
+              ref={searchChromeRef}
+              className="shrink-0 border-border/70 border-b p-2"
+            >
               <div className="relative">
                 <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
                 <input
@@ -719,6 +771,17 @@ export function SessionSelector() {
                   onChange={(event) => setSearchQuery(event.target.value)}
                   onPointerDown={(event) => event.stopPropagation()}
                   onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      if (deleteDialogOpenRef.current) return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      if (event.currentTarget.value.trim()) {
+                        setSearchQuery("");
+                        return;
+                      }
+                      setHistoryOpen(false);
+                      return;
+                    }
                     event.stopPropagation();
                     if (event.key !== "ArrowDown") return;
                     event.preventDefault();
@@ -737,12 +800,18 @@ export function SessionSelector() {
 
             <div
               data-testid="session-history-list"
-              className="min-h-0 flex-1 overflow-y-auto p-1"
+              className="overflow-y-auto p-1"
+              style={
+                panelStyle.maxHeight == null
+                  ? undefined
+                  : { maxHeight: panelStyle.maxHeight }
+              }
             >
-              <div
+              <button
+                type="button"
                 role="menuitem"
-                tabIndex={0}
-                className="flex min-h-10 cursor-default items-center gap-2 rounded-sm px-2.5 outline-hidden hover:bg-accent hover:text-accent-foreground"
+                onKeyDown={activateMenuButton}
+                className={`flex min-h-10 w-full items-center gap-2 px-2.5 ${HISTORY_MENU_ITEM_CLASS}`}
                 onClick={() => {
                   newSession();
                   setHistoryOpen(false);
@@ -750,7 +819,7 @@ export function SessionSelector() {
               >
                 <PlusIcon className="size-4" />
                 <span>{t("chat.newChat")}</span>
-              </div>
+              </button>
               <div role="separator" className="-mx-1 my-1 h-px bg-border" />
 
               {isLoading ? (
