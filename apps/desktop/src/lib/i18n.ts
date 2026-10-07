@@ -536,6 +536,8 @@ const en = {
   "agents.project": "Project",
   "agents.effort": "Effort",
   "agents.approvals": "Approvals",
+  "agents.approvalsHint":
+    "Chat turns use the composer approval pill. A value saved here is only used when a turn does not send one.",
   "agents.instructions": "Instructions",
   "agents.workspaceDefault": "Workspace default",
   "agents.useWorkspaceDefault": "Use workspace default",
@@ -1060,6 +1062,8 @@ const zh: Record<MessageKey, string> = {
   "agents.project": "项目",
   "agents.effort": "推理强度",
   "agents.approvals": "审批",
+  "agents.approvalsHint":
+    "对话轮次使用输入框上的审批选项。这里保存的值只在某一轮没有发送审批模式时才会用到。",
   "agents.instructions": "指令",
   "agents.workspaceDefault": "工作区默认",
   "agents.useWorkspaceDefault": "使用工作区默认",

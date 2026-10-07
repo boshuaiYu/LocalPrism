@@ -268,6 +268,9 @@ export function AgentEditor({
             </option>
           ))}
         </select>
+        <p className="text-muted-foreground text-xs">
+          {t("agents.approvalsHint")}
+        </p>
         {selectedApproval && (
           <p className="text-muted-foreground text-xs">
             {selectedApproval.description}

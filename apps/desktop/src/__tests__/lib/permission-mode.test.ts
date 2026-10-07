@@ -5,6 +5,7 @@ import {
   isScopedShellRuleContent,
   isShellToolName,
   normalizePermissionMode,
+  permissionModeAfterPlanDecision,
   PERMISSION_MODE_OPTIONS,
   PERMISSION_MODES,
   toolNameFromApprovalTitle,
@@ -48,6 +49,27 @@ describe("PERMISSION_MODE_OPTIONS", () => {
     );
     expect(option?.description.toLowerCase()).toMatch(/ask you|approval/);
     expect(option?.description.toLowerCase()).not.toMatch(/cannot show/);
+  });
+});
+
+describe("permissionModeAfterPlanDecision", () => {
+  it("leaves plan mode when the plan is approved", () => {
+    expect(permissionModeAfterPlanDecision("plan", "approve")).toBe(
+      "acceptEdits",
+    );
+  });
+
+  it("keeps plan mode when the plan is revised", () => {
+    expect(permissionModeAfterPlanDecision("plan", "revise")).toBe("plan");
+  });
+
+  it("does not downgrade full access or allow-edits", () => {
+    expect(
+      permissionModeAfterPlanDecision("bypassPermissions", "approve"),
+    ).toBe("bypassPermissions");
+    expect(permissionModeAfterPlanDecision("acceptEdits", "approve")).toBe(
+      "acceptEdits",
+    );
   });
 });
 
