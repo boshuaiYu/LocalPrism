@@ -39,14 +39,26 @@ function stableRelease(version: string) {
   };
 }
 
+let githubReleases: unknown[] | "error" = [];
+
 function stubReleases(releases: unknown[]) {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async () => ({
-      ok: true,
-      json: async () => releases,
-    })),
-  );
+  githubReleases = releases;
+}
+
+function stubReleaseListFailure() {
+  githubReleases = "error";
+}
+
+async function invokeUpdateCommand(command: string): Promise<unknown> {
+  if (command === "fetch_github_releases") {
+    if (githubReleases === "error") throw new Error("github unavailable");
+    return githubReleases;
+  }
+  if (command === "update_install_channel") return "native";
+  if (command === "verify_bound_updater_manifest") return "1.0.8";
+  if (command === "clear_prepared_update") return undefined;
+  if (command === "js_log") return undefined;
+  return undefined;
 }
 
 describe("update store check", () => {
@@ -57,14 +69,10 @@ describe("update store check", () => {
     vi.mocked(getVersion).mockReset();
     vi.mocked(getVersion).mockResolvedValue("1.0.8-11");
     vi.mocked(check).mockRejectedValue(new Error("signature mismatch"));
-    vi.mocked(invoke).mockImplementation(async (command) => {
-      if (command === "update_install_channel") return "native";
-      if (command === "verify_bound_updater_manifest") return "1.0.8";
-      if (command === "clear_prepared_update") return undefined;
-      if (command === "js_log") return undefined;
-      return undefined;
-    });
-    stubReleases([]);
+    githubReleases = [];
+    vi.mocked(invoke).mockImplementation(async (command: string) =>
+      invokeUpdateCommand(command),
+    );
   });
 
   afterEach(() => {
@@ -80,6 +88,8 @@ describe("update store check", () => {
     await useUpdateStore.getState().checkForUpdate({ explicit: true });
 
     expect(useUpdateStore.getState().status).toEqual({ state: "up-to-date" });
+    expect(check).toHaveBeenCalledWith({ allowDowngrades: true });
+    expect(invoke).toHaveBeenCalledWith("fetch_github_releases");
     expect(invoke).not.toHaveBeenCalledWith(
       "verify_bound_updater_manifest",
       expect.anything(),
@@ -107,25 +117,50 @@ describe("update store check", () => {
       version: "1.0.8beta12",
       channel: "beta",
     });
+    expect(check).toHaveBeenCalledWith({ allowDowngrades: true });
   });
 
-  it("reports a check error when stable fails and no usable beta was loaded", async () => {
+  it("does not flash a check error when Beta is on, stable check throws, and the beta list is empty", async () => {
+    useSettingsStore.setState({ joinBetaChannel: true });
+    stubReleases([]);
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+
+    expect(useUpdateStore.getState().status).toEqual({ state: "idle" });
+    expect(check).toHaveBeenCalledWith({ allowDowngrades: true });
+    expect(invoke).toHaveBeenCalledWith("fetch_github_releases");
+  });
+
+  it("stays idle on an automatic check when Beta is on and the beta list failed", async () => {
+    useSettingsStore.setState({ joinBetaChannel: true });
+    stubReleaseListFailure();
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: false });
+
+    expect(useUpdateStore.getState().status).toEqual({ state: "idle" });
+  });
+
+  it("does not treat a draft-only beta list as a stable check failure", async () => {
     useSettingsStore.setState({ joinBetaChannel: true });
     stubReleases([betaRelease("v1.0.8beta12", true)]);
 
     await useUpdateStore.getState().checkForUpdate({ explicit: true });
 
+    expect(useUpdateStore.getState().status).toEqual({ state: "idle" });
+  });
+
+  it("still reports a missing-platform failure when Beta is on and the beta list is empty", async () => {
+    const message =
+      'None of the fallback platforms ["windows-x86_64-nsis", "windows-x86_64"] were found in the response platforms object';
+    useSettingsStore.setState({ joinBetaChannel: true });
+    vi.mocked(check).mockRejectedValue(new Error(message));
+    stubReleases([]);
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+
     expect(useUpdateStore.getState().status).toEqual({
       state: "error",
-      message: "signature mismatch",
-      explicit: true,
-    });
-
-    stubReleases([]);
-    await useUpdateStore.getState().checkForUpdate({ explicit: true });
-    expect(useUpdateStore.getState().status).toMatchObject({
-      state: "error",
-      message: "signature mismatch",
+      message,
       explicit: true,
     });
   });
@@ -138,21 +173,31 @@ describe("update store check", () => {
       message: "signature mismatch",
       explicit: true,
     });
-    expect(fetch).not.toHaveBeenCalled();
+    expect(check).toHaveBeenCalledWith({ allowDowngrades: true });
+    expect(invoke).not.toHaveBeenCalledWith("fetch_github_releases");
+  });
+
+  it("passes allowDowngrades whether or not Beta is on", async () => {
+    useSettingsStore.setState({ joinBetaChannel: true });
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+    useSettingsStore.setState({ joinBetaChannel: false });
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+
+    expect(vi.mocked(check).mock.calls.length).toBe(2);
+    for (const call of vi.mocked(check).mock.calls) {
+      expect(call[0]).toEqual({ allowDowngrades: true });
+    }
   });
 
   it("offers a newer beta when stable manifest verification fails", async () => {
     const stable = stableRelease("1.0.8");
     useSettingsStore.setState({ joinBetaChannel: true });
     vi.mocked(check).mockResolvedValue(stable as never);
-    vi.mocked(invoke).mockImplementation(async (command) => {
-      if (command === "update_install_channel") return "native";
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === "verify_bound_updater_manifest") {
         throw new Error("manifest bind failed");
       }
-      if (command === "clear_prepared_update") return undefined;
-      if (command === "js_log") return undefined;
-      return undefined;
+      return invokeUpdateCommand(command);
     });
     stubReleases([betaRelease("v1.0.8beta12")]);
 
@@ -175,12 +220,11 @@ describe("update store check", () => {
     const stable = stableRelease("1.0.9");
     useSettingsStore.setState({ joinBetaChannel: true });
     vi.mocked(check).mockResolvedValue(stable as never);
-    vi.mocked(invoke).mockImplementation(async (command) => {
-      if (command === "update_install_channel") return "native";
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === "verify_bound_updater_manifest") {
         throw new Error("manifest bind failed");
       }
-      return undefined;
+      return invokeUpdateCommand(command);
     });
     stubReleases([betaRelease("v1.0.8beta12")]);
 
@@ -198,12 +242,11 @@ describe("update store check", () => {
     const stable = stableRelease("1.0.9");
     vi.mocked(getVersion).mockResolvedValue("1.0.8");
     vi.mocked(check).mockResolvedValue(stable as never);
-    vi.mocked(invoke).mockImplementation(async (command) => {
-      if (command === "update_install_channel") return "native";
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === "verify_bound_updater_manifest") {
         throw new Error("manifest bind failed");
       }
-      return undefined;
+      return invokeUpdateCommand(command);
     });
 
     await useUpdateStore.getState().checkForUpdate({ explicit: true });
@@ -221,12 +264,11 @@ describe("update store check", () => {
     const stable = stableRelease("1.0.8");
     vi.mocked(getVersion).mockResolvedValue("1.0.8-12");
     vi.mocked(check).mockResolvedValue(stable as never);
-    vi.mocked(invoke).mockImplementation(async (command) => {
-      if (command === "update_install_channel") return "native";
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === "verify_bound_updater_manifest") {
         throw new Error("manifest bind failed");
       }
-      return undefined;
+      return invokeUpdateCommand(command);
     });
 
     await useUpdateStore.getState().checkForUpdate({ explicit: true });

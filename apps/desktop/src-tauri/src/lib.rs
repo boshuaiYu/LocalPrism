@@ -480,6 +480,12 @@ fn update_install_channel() -> String {
 const STABLE_UPDATER_ENDPOINT: &str =
     "https://github.com/boshuaiYu/LocalPrism/releases/latest/download/latest.json";
 
+/// Same list `update-policy.ts` documents as `GITHUB_RELEASES_API`.
+/// Beta discovery uses this from the shell so a webview `fetch` cannot
+/// fail closed and hide a prerelease.
+const GITHUB_RELEASES_API: &str =
+    "https://api.github.com/repos/boshuaiYu/LocalPrism/releases?per_page=30";
+
 fn updater_pubkey() -> Result<String, String> {
     let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
         .map_err(|err| format!("Could not read the updater public key: {err}"))?;
@@ -626,12 +632,16 @@ struct GatedBetaManifest {
     _server: Option<beta_manifest::LocalManifest>,
 }
 
-async fn fetch_updater_manifest_body(endpoint: &str) -> Result<String, String> {
-    let client = reqwest::Client::builder()
+fn updater_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
         .user_agent("LocalPrism")
         .timeout(Duration::from_secs(20))
         .build()
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| err.to_string())
+}
+
+async fn fetch_updater_manifest_body(endpoint: &str) -> Result<String, String> {
+    let client = updater_http_client()?;
     let response = client
         .get(endpoint)
         .send()
@@ -644,6 +654,38 @@ async fn fetch_updater_manifest_body(endpoint: &str) -> Result<String, String> {
         ));
     }
     response.text().await.map_err(|err| err.to_string())
+}
+
+/// A GitHub releases body is usable only when it is a JSON array.
+/// Error documents and non-JSON text are failures, not an empty beta list.
+fn parse_github_releases_body(body: &str) -> Result<serde_json::Value, String> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|err| format!("GitHub releases response was not JSON: {err}"))?;
+    if !value.is_array() {
+        return Err("GitHub releases response was not a list.".to_string());
+    }
+    Ok(value)
+}
+
+async fn fetch_github_releases_list() -> Result<serde_json::Value, String> {
+    let client = updater_http_client()?;
+    let response = client
+        .get(GITHUB_RELEASES_API)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("GitHub releases request failed ({status})."));
+    }
+    let body = response.text().await.map_err(|err| err.to_string())?;
+    parse_github_releases_body(&body)
+}
+
+#[tauri::command]
+async fn fetch_github_releases() -> Result<serde_json::Value, String> {
+    fetch_github_releases_list().await
 }
 
 /// Bind version/tag/URL before the updater runs. Compact tags still get a
@@ -975,6 +1017,7 @@ pub fn run() {
             clear_prepared_update,
             download_manifest_update,
             verify_bound_updater_manifest,
+            fetch_github_releases,
             install_prepared_update,
             open_debug_window,
         ])
@@ -1168,6 +1211,32 @@ mod update_channel_tests {
             "https://github.com/boshuaiYu/LocalPrism/releases/download/latest/latest.json"
         )
         .is_err());
+    }
+
+    #[test]
+    fn github_releases_api_is_the_beta_discovery_list() {
+        assert_eq!(
+            super::GITHUB_RELEASES_API,
+            "https://api.github.com/repos/boshuaiYu/LocalPrism/releases?per_page=30"
+        );
+    }
+
+    #[test]
+    fn github_releases_body_must_be_a_json_list() {
+        let empty = super::parse_github_releases_body("[]").expect("empty list");
+        assert_eq!(empty.as_array().map(Vec::len), Some(0));
+        let list = super::parse_github_releases_body(
+            r#"[{"tag_name":"v1.0.9beta1","prerelease":true}]"#,
+        )
+        .expect("release list");
+        assert_eq!(
+            list.get(0)
+                .and_then(|item| item.get("tag_name"))
+                .and_then(|tag| tag.as_str()),
+            Some("v1.0.9beta1")
+        );
+        assert!(super::parse_github_releases_body(r#"{"message":"nope"}"#).is_err());
+        assert!(super::parse_github_releases_body("not-json").is_err());
     }
 
     #[test]

@@ -9,6 +9,12 @@ export const RELEASES_URL =
 export const STABLE_UPDATER_ENDPOINT =
   "https://github.com/boshuaiYu/LocalPrism/releases/latest/download/latest.json";
 
+/**
+ * GitHub releases list used to discover beta manifests.
+ * The desktop shell fetches this with reqwest (`fetch_github_releases`).
+ * The webview must not call it: an empty or failed response does not
+ * prove that no newer beta exists.
+ */
 export const GITHUB_RELEASES_API =
   "https://api.github.com/repos/boshuaiYu/LocalPrism/releases?per_page=30";
 
@@ -464,4 +470,39 @@ export function installCoversLoadedBetas(
     if (compareSemver(parsed, current) > 0) return false;
   }
   return comparable > 0;
+}
+
+export type StableCheckFailureAction = "surface-error" | "up-to-date" | "idle";
+
+/**
+ * What to show when `chooseUpdateOffer` found nothing and the stable
+ * updater `check()` threw.
+ *
+ * Beta off still surfaces that error. A missing-platform failure still
+ * surfaces so the existing classifier can explain it. A loaded beta list
+ * that already covers this install is current: explicit checks say up to
+ * date, automatic checks stay idle. Beta on with a failed, empty, or
+ * otherwise unusable list does not rethrow the stable error and does not
+ * claim a newer beta was ruled out.
+ */
+export function stableCheckFailureAction(input: {
+  allowPrerelease: boolean;
+  explicit: boolean;
+  errorMessage: string;
+  /** False when the GitHub releases request itself failed. */
+  betaFeedLoaded: boolean;
+  currentVersion: string;
+  betas: readonly ReleaseCandidate[];
+}): StableCheckFailureAction {
+  if (!input.allowPrerelease) return "surface-error";
+  if (classifyUpdateError(input.errorMessage) === "missing-platform") {
+    return "surface-error";
+  }
+  if (
+    input.betaFeedLoaded &&
+    installCoversLoadedBetas(input.currentVersion, input.betas)
+  ) {
+    return input.explicit ? "up-to-date" : "idle";
+  }
+  return "idle";
 }
