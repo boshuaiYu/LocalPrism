@@ -36,6 +36,8 @@ function updateFixture(overrides?: { failInstall?: boolean }) {
   };
 }
 
+let githubReleases: unknown = [];
+
 describe("AppStatusBar updates", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -47,11 +49,14 @@ describe("AppStatusBar updates", () => {
     vi.mocked(relaunch).mockReset();
     vi.mocked(open).mockReset();
     vi.mocked(getVersion).mockResolvedValue("1.0.0");
+    githubReleases = [];
     vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "fetch_github_releases") return githubReleases;
       if (command === "update_install_channel") return "native";
       if (command === "download_manifest_update") return "1.0.8beta3";
       if (command === "verify_bound_updater_manifest") return "9.9.9";
       if (command === "clear_prepared_update") return undefined;
+      if (command === "js_log") return undefined;
       return undefined;
     });
     vi.stubGlobal(
@@ -201,7 +206,10 @@ describe("AppStatusBar updates", () => {
     });
 
     expect(useSettingsStore.getState().joinBetaChannel).toBe(false);
-    expect(check).toHaveBeenLastCalledWith({ allowDowngrades: true });
+    expect(vi.mocked(check).mock.calls.length).toBeGreaterThan(0);
+    for (const call of vi.mocked(check).mock.calls) {
+      expect(call[0]).toEqual({ allowDowngrades: true });
+    }
     expect(update.download).not.toHaveBeenCalled();
     expect(update.close).toHaveBeenCalled();
     const flash = container.querySelector("[data-testid='update-flash']");
@@ -216,34 +224,29 @@ describe("AppStatusBar updates", () => {
     useSettingsStore.setState({ joinBetaChannel: true });
     vi.mocked(check).mockResolvedValue(null);
     vi.mocked(getVersion).mockResolvedValue("1.0.8");
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => ({
-        ok: true,
-        json: async () => [
+    githubReleases = [
+      {
+        tag_name: "v1.0.8beta3",
+        prerelease: true,
+        draft: false,
+        body: "preview",
+        assets: [
           {
-            tag_name: "v1.0.8beta3",
-            prerelease: true,
-            draft: false,
-            body: "preview",
-            assets: [
-              {
-                name: "latest.json",
-                browser_download_url:
-                  "https://github.com/boshuaiYu/LocalPrism/releases/latest/download/latest.json",
-              },
-            ],
+            name: "latest.json",
+            browser_download_url:
+              "https://github.com/boshuaiYu/LocalPrism/releases/latest/download/latest.json",
           },
         ],
-      })),
-    );
+      },
+    ];
 
     await renderBar();
     await act(async () => {
       await Promise.resolve();
     });
 
-    expect(fetch).toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledWith("fetch_github_releases");
+    expect(fetch).not.toHaveBeenCalled();
     const flash = container.querySelector("[data-testid='update-flash']");
     expect(flash?.textContent).toContain("1.0.8beta3");
     expect(flash?.className).toMatch(/lp-update-flash/);
@@ -272,18 +275,8 @@ describe("AppStatusBar updates", () => {
     vi.mocked(check).mockResolvedValue(null);
     vi.mocked(getVersion).mockResolvedValue("1.0.8");
     vi.mocked(invoke).mockImplementation(async (command) => {
-      if (command === "update_install_channel") return "appimage";
-      if (command === "download_manifest_update") return "1.0.8beta9";
-      if (command === "install_prepared_update") throw installError;
-      if (command === "js_log") return undefined;
-      if (command === "clear_prepared_update") return undefined;
-      return undefined;
-    });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => ({
-        ok: true,
-        json: async () => [
+      if (command === "fetch_github_releases") {
+        return [
           {
             tag_name: "v1.0.8beta9",
             prerelease: true,
@@ -291,9 +284,15 @@ describe("AppStatusBar updates", () => {
             body: "preview",
             assets: [{ name: "latest.json" }],
           },
-        ],
-      })),
-    );
+        ];
+      }
+      if (command === "update_install_channel") return "appimage";
+      if (command === "download_manifest_update") return "1.0.8beta9";
+      if (command === "install_prepared_update") throw installError;
+      if (command === "js_log") return undefined;
+      if (command === "clear_prepared_update") return undefined;
+      return undefined;
+    });
 
     await renderBar();
     await act(async () => {
@@ -345,6 +344,36 @@ describe("AppStatusBar updates", () => {
     const flash = container.querySelector("[data-testid='update-flash']");
     expect(flash?.textContent).toBe(translate("en", "updates.flashError"));
     expect(flash?.getAttribute("title")).toContain("signature mismatch");
+  });
+
+  it("does not show a failed update check when Beta is turned on and the release list is empty", async () => {
+    vi.mocked(check).mockRejectedValue(new Error("signature mismatch"));
+
+    await renderBar();
+    const toggle = container.querySelector(
+      "[data-testid='beta-channel-toggle']",
+    );
+    await act(async () => {
+      if (toggle instanceof HTMLButtonElement) toggle.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    expect(useSettingsStore.getState().joinBetaChannel).toBe(true);
+    expect(invoke).toHaveBeenCalledWith("fetch_github_releases");
+    expect(fetch).not.toHaveBeenCalled();
+    for (const call of vi.mocked(check).mock.calls) {
+      expect(call[0]).toEqual({ allowDowngrades: true });
+    }
+    const flash = container.querySelector("[data-testid='update-flash']");
+    expect(flash?.textContent ?? "").not.toBe(
+      translate("en", "updates.flashError"),
+    );
+    expect(container.textContent).not.toContain(
+      translate("en", "updates.flashError"),
+    );
+    expect(container.textContent).not.toContain(
+      translate("en", "updates.flashCurrent"),
+    );
   });
 
   it("persists Join prerelease / Beta locally and defaults off", () => {

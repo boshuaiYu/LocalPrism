@@ -12,10 +12,9 @@ import { create } from "zustand";
 import {
   betaCandidatesFromGithub,
   chooseUpdateOffer,
-  GITHUB_RELEASES_API,
-  installCoversLoadedBetas,
   releasePageUrl,
   STABLE_UPDATER_ENDPOINT,
+  stableCheckFailureAction,
   updateApplyMode,
   type ReleaseCandidate,
   type UpdateApplyMode,
@@ -158,23 +157,24 @@ async function currentAppVersion(stable: Update | null): Promise<string> {
   return stable?.currentVersion ?? "";
 }
 
-async function loadBetaCandidates(): Promise<ReleaseCandidate[]> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
+interface BetaFeedResult {
+  /** False when the shell could not load the GitHub releases list. */
+  loaded: boolean;
+  candidates: ReleaseCandidate[];
+}
+
+async function loadBetaCandidates(): Promise<BetaFeedResult> {
   try {
-    const response = await fetch(GITHUB_RELEASES_API, {
-      signal: controller.signal,
-      headers: {
-        Accept: "application/vnd.github+json",
-        "User-Agent": "LocalPrism",
-      },
+    const payload = await invoke<unknown>("fetch_github_releases");
+    return {
+      loaded: true,
+      candidates: betaCandidatesFromGithub(payload),
+    };
+  } catch (error) {
+    log.warn("Beta release list failed", {
+      message: formatUpdateError(error),
     });
-    if (!response.ok) return [];
-    return betaCandidatesFromGithub(await response.json());
-  } catch {
-    return [];
-  } finally {
-    clearTimeout(timer);
+    return { loaded: false, candidates: [] };
   }
 }
 
@@ -260,21 +260,28 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
           channel = "native";
         }
         const mode: UpdateApplyMode = updateApplyMode(channel);
-        const [stableResult, betas] = await Promise.all([
-          // Beta off still receives the stable manifest. A post-release
-          // build such as `1.0.8-6` compares newer than plain `1.0.8`, so
-          // allowDowngrades keeps that payload visible to the policy,
-          // which then declines the same-core stable.
-          check(allowPrerelease ? undefined : { allowDowngrades: true })
+        const [stableResult, betaFeed] = await Promise.all([
+          // A post-release build such as `1.0.8-6` compares newer than
+          // plain `1.0.8` in this policy. allowDowngrades keeps that
+          // stable payload visible on both channels so the policy can
+          // decline the same core instead of the updater hiding it.
+          check({ allowDowngrades: true })
             .then((value) => ({ ok: true as const, value }))
             .catch((error: unknown) => ({ ok: false as const, error })),
-          allowPrerelease ? loadBetaCandidates() : Promise.resolve([]),
+          allowPrerelease
+            ? loadBetaCandidates()
+            : Promise.resolve({
+                loaded: false,
+                candidates: [] as ReleaseCandidate[],
+              }),
         ]);
+        const betas = betaFeed.candidates;
 
         if (!stableResult.ok) {
           log.error("Stable update check failed", {
             message: formatUpdateError(stableResult.error),
             allowPrerelease,
+            betaFeedLoaded: betaFeed.loaded,
           });
         }
 
@@ -315,14 +322,25 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
 
         if (offer.action === "none") {
           if (stableUpdate) await stableUpdate.close().catch(() => undefined);
-          // Stable check() failed. That is a real error only when no beta
-          // list was available to judge. A loaded list with nothing newer
-          // means this install is already current.
-          if (
-            !stableResult.ok &&
-            !installCoversLoadedBetas(currentVersion, betas)
-          ) {
-            throw stableResult.error;
+          if (!stableResult.ok) {
+            // up-to-date only when a loaded beta list already covers this
+            // install. An empty or failed list stays idle: do not rethrow
+            // the stable error, and do not claim a newer beta was ruled out.
+            const action = stableCheckFailureAction({
+              allowPrerelease,
+              explicit,
+              errorMessage: formatUpdateError(stableResult.error),
+              betaFeedLoaded: betaFeed.loaded,
+              currentVersion,
+              betas,
+            });
+            if (action === "surface-error") throw stableResult.error;
+            set({
+              status: {
+                state: action === "up-to-date" ? "up-to-date" : "idle",
+              },
+            });
+            return;
           }
           // The stable payload was dropped after verify failed. Report that
           // only when policy would have installed it. Plain 1.0.8 over a

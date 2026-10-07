@@ -5,6 +5,7 @@ import {
   chooseUpdateOffer,
   classifyUpdateError,
   compareSemver,
+  GITHUB_RELEASES_API,
   installCoversLoadedBetas,
   isAllowedBetaManifestUrl,
   isBetaRelease,
@@ -12,6 +13,7 @@ import {
   isPrereleaseVersion,
   parseSemver,
   STABLE_UPDATER_ENDPOINT,
+  stableCheckFailureAction,
   updateApplyMode,
   updateBannerVisible,
 } from "@/lib/update-policy";
@@ -521,5 +523,120 @@ describe("installCoversLoadedBetas", () => {
         },
       ]),
     ).toBe(false);
+  });
+});
+
+describe("stableCheckFailureAction", () => {
+  it("still confirms v1.0.9beta1 when that release is in the loaded list", () => {
+    const betas = betaCandidatesFromGithub([
+      { tag_name: "v1.0.9beta1", prerelease: true, draft: false },
+    ]);
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.9",
+        stable: { version: "1.0.9" },
+        betas,
+        allowPrerelease: true,
+      }),
+    ).toMatchObject({
+      action: "confirm",
+      version: "1.0.9beta1",
+      manifestUrl:
+        "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.9beta1/latest.json",
+    });
+  });
+
+  const missingPlatform =
+    'None of the fallback platforms ["windows-x86_64-nsis", "windows-x86_64"] were found in the response platforms object';
+  const loadedCurrent = betaCandidatesFromGithub([
+    { tag_name: "v1.0.9beta1", prerelease: true, draft: false },
+  ]);
+
+  it("keeps the GitHub releases list on the native discovery endpoint", () => {
+    expect(GITHUB_RELEASES_API).toBe(
+      "https://api.github.com/repos/boshuaiYu/LocalPrism/releases?per_page=30",
+    );
+  });
+
+  it("does not surface a stable check failure when Beta is on and the list is empty or failed", () => {
+    expect(
+      stableCheckFailureAction({
+        allowPrerelease: true,
+        explicit: true,
+        errorMessage: "signature mismatch",
+        betaFeedLoaded: true,
+        currentVersion: "1.0.9",
+        betas: [],
+      }),
+    ).toBe("idle");
+    expect(
+      stableCheckFailureAction({
+        allowPrerelease: true,
+        explicit: true,
+        errorMessage: "signature mismatch",
+        betaFeedLoaded: false,
+        currentVersion: "1.0.9",
+        betas: loadedCurrent,
+      }),
+    ).toBe("idle");
+    expect(
+      stableCheckFailureAction({
+        allowPrerelease: true,
+        explicit: false,
+        errorMessage: "signature mismatch",
+        betaFeedLoaded: false,
+        currentVersion: "1.0.9",
+        betas: [],
+      }),
+    ).toBe("idle");
+  });
+
+  it("treats a loaded list that already covers the install as current", () => {
+    expect(
+      stableCheckFailureAction({
+        allowPrerelease: true,
+        explicit: true,
+        errorMessage: "signature mismatch",
+        betaFeedLoaded: true,
+        currentVersion: "1.0.9-1",
+        betas: loadedCurrent,
+      }),
+    ).toBe("up-to-date");
+    expect(
+      stableCheckFailureAction({
+        allowPrerelease: true,
+        explicit: false,
+        errorMessage: "signature mismatch",
+        betaFeedLoaded: true,
+        currentVersion: "1.0.9beta1",
+        betas: loadedCurrent,
+      }),
+    ).toBe("idle");
+  });
+
+  it("still surfaces the stable error when Beta is off", () => {
+    expect(
+      stableCheckFailureAction({
+        allowPrerelease: false,
+        explicit: true,
+        errorMessage: "signature mismatch",
+        betaFeedLoaded: false,
+        currentVersion: "1.0.9",
+        betas: [],
+      }),
+    ).toBe("surface-error");
+  });
+
+  it("still surfaces a missing-platform error when Beta is on", () => {
+    expect(
+      stableCheckFailureAction({
+        allowPrerelease: true,
+        explicit: true,
+        errorMessage: missingPlatform,
+        betaFeedLoaded: false,
+        currentVersion: "1.0.9",
+        betas: [],
+      }),
+    ).toBe("surface-error");
   });
 });
