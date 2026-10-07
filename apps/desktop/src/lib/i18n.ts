@@ -6,10 +6,12 @@ const en = {
   "language.en": "English",
 
   "settings.title": "Settings",
-  "settings.description": "Configure providers, skills, and custom agents.",
+  "settings.description":
+    "Configure providers, skills, custom agents, and preview features.",
   "settings.providers": "Providers",
   "settings.skills": "Skills",
   "settings.agents": "Agents",
+  "settings.preview": "Preview",
   "settings.updates": "Updates",
 
   "chrome.settings": "Settings",
@@ -554,13 +556,10 @@ const en = {
   "agents.overwrite": "Overwrite if an agent with the same name already exists",
   "agents.projectBadge": "(project)",
 
-  "teach.section": "Editor and teaching",
   "teach.enable": "Enable LaTeX teaching",
   "teach.previewBadge": "Preview",
   "teach.enableHelp":
-    "After you select a command or environment, choose Explain beside Proofread on the selection toolbar. Compile errors and an empty project still open a floating card near that spot. The card does not resize the editor, and AI chat stays independent.",
-  "teach.callout":
-    "Teaching is not only for errors. Select a construct, then choose Explain on the selection toolbar so it does not cover Proofread. An empty project can still show a short guide.",
+    "Select a command or environment, then choose Explain beside Proofread on the selection toolbar. Compile errors and a blank file still open a floating card. The card does not resize the editor.",
   "teach.panelTitle": "Learn while writing",
   "teach.drag": "Drag",
   "teach.close": "Close teaching panel",
@@ -574,6 +573,16 @@ const en = {
   "teach.kind.construct": "Selection",
   "teach.kind.error": "Error",
   "teach.kind.guide": "Guide",
+  "teach.ask": "Ask AI",
+  "teach.askConstruct":
+    "Explain this LaTeX construct.\n\nConstruct: {{tag}}\nTitle: {{title}}\nWhat it is: {{what}}",
+  "teach.askSelected": "Selected text:\n{{selected}}",
+  "teach.askError":
+    "Explain this LaTeX error and how to fix it.\n\nTag: {{tag}}\nTitle: {{title}}",
+  "teach.askErrorDetail": "Detail: {{detail}}",
+  "teach.askErrorMessage": "Message: {{message}}",
+  "teach.askGuide":
+    "Explain this LaTeX guide.\n\nTitle: {{title}}\nWhat it is: {{what}}",
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -584,10 +593,11 @@ const zh: Record<MessageKey, string> = {
   "language.en": "English",
 
   "settings.title": "设置",
-  "settings.description": "配置服务商、技能和自定义智能体。",
+  "settings.description": "配置服务商、技能、自定义智能体和预览功能。",
   "settings.providers": "服务商",
   "settings.skills": "技能",
   "settings.agents": "智能体",
+  "settings.preview": "预览功能",
   "settings.updates": "更新",
 
   "chrome.settings": "设置",
@@ -1101,13 +1111,10 @@ const zh: Record<MessageKey, string> = {
   "agents.overwrite": "若已有同名智能体则覆盖",
   "agents.projectBadge": "（项目）",
 
-  "teach.section": "编辑器与教学",
   "teach.enable": "启用 LaTeX 教学",
   "teach.previewBadge": "预览 · 超前功能",
   "teach.enableHelp":
-    "选中命令或环境后，在选区工具条的校对旁边点「讲解」。编译报错或空白项目仍会在锚点附近弹出讲解卡片。卡片不挤压编辑器，也不影响 AI 对话。",
-  "teach.callout":
-    "不报错也会讲。选中结构后，用工具条上的「讲解」打开，这样不会盖住校对。空项目时仍可出现引导讲解。",
+    "选中命令或环境后，在选区工具条的校对旁边点「讲解」。编译报错或空白文稿仍会弹出讲解卡片，且不会挤压编辑器。",
   "teach.panelTitle": "边写边学",
   "teach.drag": "拖动",
   "teach.close": "关闭讲解",
@@ -1121,6 +1128,16 @@ const zh: Record<MessageKey, string> = {
   "teach.kind.construct": "选中",
   "teach.kind.error": "报错",
   "teach.kind.guide": "入门",
+  "teach.ask": "问 AI",
+  "teach.askConstruct":
+    "请讲解这个 LaTeX 结构。\n\n结构：{{tag}}\n标题：{{title}}\n是什么：{{what}}",
+  "teach.askSelected": "选中文本：\n{{selected}}",
+  "teach.askError":
+    "请讲解这个 LaTeX 报错，并说明如何修改。\n\n标记：{{tag}}\n标题：{{title}}",
+  "teach.askErrorDetail": "细节：{{detail}}",
+  "teach.askErrorMessage": "报错信息：{{message}}",
+  "teach.askGuide":
+    "请讲解这份 LaTeX 入门引导。\n\n标题：{{title}}\n是什么：{{what}}",
 };
 
 function interpolate(

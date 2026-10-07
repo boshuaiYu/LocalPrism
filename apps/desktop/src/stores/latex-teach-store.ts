@@ -3,6 +3,11 @@ import { sameTeachLesson, type TeachLessonRef } from "@/lib/latex-teaching";
 import type { TeachAnchor } from "@/lib/teach-float";
 import { useSettingsStore } from "@/stores/settings-store";
 
+/** Selection captured when a construct lesson is opened, if one was known. */
+export interface TeachPresentContext {
+  selectedText?: string | null;
+}
+
 interface LatexTeachState {
   open: boolean;
   lesson: TeachLessonRef | null;
@@ -10,20 +15,26 @@ interface LatexTeachState {
   anchor: TeachAnchor | null;
   /** Bumps on every accepted lesson so the float can drop a drag offset. */
   placement: number;
+  /** Construct selection kept after Explain dismisses the selection toolbar. */
+  selectedText: string | null;
   insertReady: boolean;
+  askReady: boolean;
   present: (
     lesson: TeachLessonRef,
     sourceKey: string,
     anchor?: TeachAnchor | null,
+    context?: TeachPresentContext | null,
   ) => void;
   forcePresent: (
     lesson: TeachLessonRef,
     sourceKey: string,
     anchor?: TeachAnchor | null,
+    context?: TeachPresentContext | null,
   ) => void;
   dismiss: () => void;
   reset: () => void;
   setInsertReady: (ready: boolean) => void;
+  setAskReady: (ready: boolean) => void;
 }
 
 const closed = {
@@ -32,9 +43,11 @@ const closed = {
   sourceKey: null,
   anchor: null,
   placement: 0,
+  selectedText: null,
 } as const;
 
 let teachInserter: ((snippet: string) => void) | null = null;
+let teachAsker: ((prompt: string) => void) | null = null;
 
 export function registerTeachInsert(
   handler: ((snippet: string) => void) | null,
@@ -45,6 +58,18 @@ export function registerTeachInsert(
 
 export function insertRegisteredTeachSnippet(snippet: string): void {
   teachInserter?.(snippet);
+}
+
+/** Editor registers the same sender Proofread uses, including selection context. */
+export function registerTeachAsk(
+  handler: ((prompt: string) => void) | null,
+): void {
+  teachAsker = handler;
+  useLatexTeachStore.getState().setAskReady(handler != null);
+}
+
+export function askRegisteredTeach(prompt: string): void {
+  teachAsker?.(prompt);
 }
 
 interface TeachDocumentScope {
@@ -73,27 +98,32 @@ function showLesson(
   set: (
     partial: Pick<
       LatexTeachState,
-      "open" | "lesson" | "sourceKey" | "anchor" | "placement"
+      "open" | "lesson" | "sourceKey" | "anchor" | "placement" | "selectedText"
     >,
   ) => void,
   lesson: TeachLessonRef,
   sourceKey: string,
   anchor: TeachAnchor | null,
+  context?: TeachPresentContext | null,
 ) {
+  const selectedText = context?.selectedText?.trim() || null;
   set({
     open: true,
     lesson,
     sourceKey,
     anchor,
     placement: get().placement + 1,
+    selectedText,
   });
 }
 
 export const useLatexTeachStore = create<LatexTeachState>((set, get) => ({
   ...closed,
   insertReady: false,
+  askReady: false,
   setInsertReady: (ready) => set({ insertReady: ready }),
-  present: (lesson, sourceKey, anchor = null) => {
+  setAskReady: (ready) => set({ askReady: ready }),
+  present: (lesson, sourceKey, anchor = null, context = null) => {
     if (!teachingEnabled()) return;
     const current = get();
     const activePriority = current.sourceKey
@@ -110,11 +140,11 @@ export const useLatexTeachStore = create<LatexTeachState>((set, get) => ({
     ) {
       return;
     }
-    showLesson(get, set, lesson, sourceKey, anchor);
+    showLesson(get, set, lesson, sourceKey, anchor, context);
   },
-  forcePresent: (lesson, sourceKey, anchor = null) => {
+  forcePresent: (lesson, sourceKey, anchor = null, context = null) => {
     if (!teachingEnabled()) return;
-    showLesson(get, set, lesson, sourceKey, anchor);
+    showLesson(get, set, lesson, sourceKey, anchor, context);
   },
   dismiss: () => {
     set({ open: false });

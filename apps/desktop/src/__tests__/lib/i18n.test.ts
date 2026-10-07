@@ -8,6 +8,10 @@ describe("translate", () => {
     expect(translate("en", "settings.title")).toBe("Settings");
     expect(translate("zh", "settings.title")).toBe("设置");
     expect(translate("zh", "settings.providers")).toBe("服务商");
+    expect(translate("en", "settings.preview")).toBe("Preview");
+    expect(translate("zh", "settings.preview")).toBe("预览功能");
+    expect(translate("en", "teach.ask")).toBe("Ask AI");
+    expect(translate("zh", "teach.ask")).toBe("问 AI");
     expect(translate("zh", "chat.compress")).toBe("压缩更早的消息");
     expect(translate("en", "chat.scrollToBottom")).toBe("Scroll to latest");
     expect(translate("zh", "chat.scrollToBottom")).toBe("跳到最新");

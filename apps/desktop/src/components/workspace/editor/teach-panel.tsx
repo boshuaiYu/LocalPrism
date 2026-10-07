@@ -11,6 +11,10 @@ import { BookOpenIcon, XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { MessageKey } from "@/lib/i18n";
 import {
+  buildTeachAskPrompt,
+  diagnosticMessageFromTeachSource,
+} from "@/lib/latex-teach-ask";
+import {
   EMPTY_PROJECT_LESSON,
   resolveLesson,
   shouldOfferEmptyGuide,
@@ -29,6 +33,7 @@ import {
 import { useI18n } from "@/lib/use-i18n";
 import { cn } from "@/lib/utils";
 import {
+  askRegisteredTeach,
   insertRegisteredTeachSnippet,
   useLatexTeachStore,
 } from "@/stores/latex-teach-store";
@@ -59,8 +64,10 @@ function viewportSize(): { width: number; height: number } {
 
 export function TeachPanel({
   onInsert,
+  onAskAi,
 }: {
   onInsert?: (snippet: string) => void;
+  onAskAi?: (prompt: string) => void;
 }) {
   const enabled = useSettingsStore((state) => state.latexTeaching);
   const language = useSettingsStore((state) => state.uiLanguage);
@@ -69,6 +76,7 @@ export function TeachPanel({
   const anchor = useLatexTeachStore((state) => state.anchor);
   const placement = useLatexTeachStore((state) => state.placement);
   const insertReady = useLatexTeachStore((state) => state.insertReady);
+  const askReady = useLatexTeachStore((state) => state.askReady);
   const dismiss = useLatexTeachStore((state) => state.dismiss);
   const { t } = useI18n();
   const cardRef = useRef<HTMLDivElement>(null);
@@ -116,6 +124,24 @@ export function TeachPanel({
   const snippet = lesson.snippet;
   const insert =
     onInsert ?? (insertReady ? insertRegisteredTeachSnippet : undefined);
+  const ask = onAskAi ?? (askReady ? askRegisteredTeach : undefined);
+  const canInsert = Boolean(lesson.insertable && snippet && insert);
+  const askAboutLesson = () => {
+    if (!ask) return;
+    const state = useLatexTeachStore.getState();
+    ask(
+      buildTeachAskPrompt({
+        lesson,
+        language,
+        detail: lessonRef.kind === "error" ? lessonRef.detail : "",
+        diagnosticMessage: diagnosticMessageFromTeachSource(
+          state.sourceKey,
+          lessonRef.kind,
+        ),
+        selectedText: state.selectedText,
+      }),
+    );
+  };
   const errorTone = lesson.tone === "error";
   const bannerClass = errorTone
     ? "border-destructive/30 bg-destructive/10 text-destructive"
@@ -272,17 +298,37 @@ export function TeachPanel({
             {lesson.source}
           </p>
         )}
-        {lesson.insertable && snippet && insert && (
-          <Button
-            className="mt-3 w-full"
-            onClick={() => insert(snippet)}
-            size="sm"
-            type="button"
-          >
-            {t("teach.insert")}
-          </Button>
-        )}
       </div>
+      {(canInsert || ask) && (
+        <footer
+          className="flex shrink-0 gap-2 border-border border-t px-3 py-2"
+          data-testid="latex-teach-footer"
+        >
+          {canInsert && snippet && insert && (
+            <Button
+              className="min-w-0 flex-1"
+              data-testid="latex-teach-insert"
+              onClick={() => insert(snippet)}
+              size="sm"
+              type="button"
+            >
+              {t("teach.insert")}
+            </Button>
+          )}
+          {ask && (
+            <Button
+              className="min-w-0 flex-1"
+              data-testid="latex-teach-ask"
+              onClick={askAboutLesson}
+              size="sm"
+              type="button"
+              variant={canInsert ? "secondary" : "default"}
+            >
+              {t("teach.ask")}
+            </Button>
+          )}
+        </footer>
+      )}
     </div>,
     document.body,
   );

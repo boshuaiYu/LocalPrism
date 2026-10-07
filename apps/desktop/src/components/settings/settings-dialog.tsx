@@ -7,7 +7,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { EditorSettings } from "@/components/settings/editor-settings";
+import { PreviewSettings } from "@/components/settings/preview-settings";
 import { RuntimeSettings } from "@/components/runtime/runtime-settings";
 import { SkillLibrary } from "@/components/skills/skill-library";
 import { AgentLibrary } from "@/components/agents/agent-library";
@@ -15,10 +15,12 @@ import { useProductTourDialogGuard } from "@/components/product-tour";
 import { useDocumentStore } from "@/stores/document-store";
 import { useI18n } from "@/lib/use-i18n";
 
+export type SettingsTab = "runtimes" | "skills" | "agents" | "preview";
+
 export interface SettingsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  defaultTab?: "runtimes" | "skills" | "agents";
+  defaultTab?: SettingsTab;
 }
 
 export function SettingsDialog({
@@ -46,19 +48,18 @@ export function SettingsDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <EditorSettings />
-
         <Tabs
           key={defaultTab}
           defaultValue={defaultTab}
           className="flex min-h-0 flex-1 flex-col gap-3"
         >
-          <TabsList className="grid w-full grid-cols-3">
+          <TabsList className="grid w-full grid-cols-4">
             <TabsTrigger value="runtimes">
               {t("settings.providers")}
             </TabsTrigger>
             <TabsTrigger value="skills">{t("settings.skills")}</TabsTrigger>
             <TabsTrigger value="agents">{t("settings.agents")}</TabsTrigger>
+            <TabsTrigger value="preview">{t("settings.preview")}</TabsTrigger>
           </TabsList>
 
           <TabsContent
@@ -82,6 +83,13 @@ export function SettingsDialog({
             className="mt-0 min-h-0 flex-1 overflow-y-auto px-1"
           >
             <AgentLibrary projectPath={projectPath} />
+          </TabsContent>
+
+          <TabsContent
+            value="preview"
+            className="mt-0 min-h-0 flex-1 overflow-y-auto px-1"
+          >
+            <PreviewSettings />
           </TabsContent>
         </Tabs>
       </DialogContent>
