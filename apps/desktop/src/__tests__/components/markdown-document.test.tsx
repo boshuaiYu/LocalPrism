@@ -8,8 +8,10 @@ import type { ProjectFile } from "@/stores/document-store";
 
 const stores = vi.hoisted(() => {
   const loadFileContent = vi.fn(async () => undefined);
+  const requestJumpToPosition = vi.fn();
   return {
     loadFileContent,
+    requestJumpToPosition,
     files: [] as ProjectFile[],
   };
 });
@@ -19,11 +21,13 @@ vi.mock("@/stores/document-store", () => ({
     selector: (state: {
       files: ProjectFile[];
       loadFileContent: typeof stores.loadFileContent;
+      requestJumpToPosition: typeof stores.requestJumpToPosition;
     }) => unknown,
   ) =>
     selector({
       files: stores.files,
       loadFileContent: stores.loadFileContent,
+      requestJumpToPosition: stores.requestJumpToPosition,
     }),
 }));
 
@@ -100,10 +104,22 @@ describe("MarkdownDocument", () => {
     expect(container.querySelector("h1")?.textContent).toMatch(
       /Spectral Methods/,
     );
+    expect(
+      container.querySelector("h1")?.getAttribute("data-source-line"),
+    ).toBe("1");
+    expect(container.querySelector("p")?.getAttribute("data-source-line")).toBe(
+      "3",
+    );
     expect(container.querySelector("h2")?.textContent).toMatch(/Results/);
+    expect(
+      container.querySelector("h2")?.getAttribute("data-source-line"),
+    ).toBe("5");
     expect(container.querySelector("blockquote")?.textContent).toMatch(
       /academic aside/,
     );
+    expect(
+      container.querySelector("blockquote")?.getAttribute("data-source-line"),
+    ).toBe("13");
     expect(container.querySelector("table thead th")?.textContent).toMatch(
       /Method/,
     );
@@ -136,6 +152,7 @@ describe("MarkdownPreviewPane", () => {
   beforeEach(() => {
     stores.files = [];
     stores.loadFileContent.mockClear();
+    stores.requestJumpToPosition.mockClear();
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -195,5 +212,51 @@ describe("MarkdownPreviewPane", () => {
     ).toBeTruthy();
     expect(container.querySelector("h1")?.textContent).toBe("Title");
     expect(container.textContent).toMatch(/Body text/);
+  });
+
+  it("jumps to the matching source offset when a block is clicked", async () => {
+    const content = "# Title\n\nBody text.\n\n[Docs](https://example.com)\n";
+    const file: ProjectFile = {
+      id: "notes.md",
+      name: "notes.md",
+      relativePath: "notes.md",
+      absolutePath: "F:\\Projects\\paper\\notes.md",
+      type: "markdown",
+      content,
+      isDirty: false,
+    };
+    stores.files = [file];
+
+    await act(async () => {
+      root.render(<MarkdownPreviewPane file={file} />);
+    });
+
+    const heading = container.querySelector("h1");
+    expect(heading?.getAttribute("data-source-line")).toBe("1");
+    await act(async () => {
+      heading?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+    });
+    expect(stores.requestJumpToPosition).toHaveBeenCalledWith(0);
+
+    stores.requestJumpToPosition.mockClear();
+    const paragraph = container.querySelector("p");
+    expect(paragraph?.getAttribute("data-source-line")).toBe("3");
+    await act(async () => {
+      paragraph?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+    });
+    expect(stores.requestJumpToPosition).toHaveBeenCalledWith(9);
+
+    stores.requestJumpToPosition.mockClear();
+    const link = container.querySelector("a");
+    await act(async () => {
+      link?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+    });
+    expect(stores.requestJumpToPosition).not.toHaveBeenCalled();
   });
 });

@@ -1,4 +1,4 @@
-import { type FC, useMemo } from "react";
+import { type FC, type HTMLAttributes, type ReactNode, useMemo } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -6,6 +6,10 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 
 import { resolveMarkdownAssetUrl } from "@/lib/markdown-preview-assets";
+import {
+  markdownSourceDataAttributes,
+  rehypeMarkdownSourcePositions,
+} from "@/lib/markdown-source-position";
 import { cn } from "@/lib/utils";
 
 interface MarkdownDocumentProps {
@@ -14,13 +18,94 @@ interface MarkdownDocumentProps {
   className?: string;
 }
 
+type SourcedTag =
+  | "h1"
+  | "h2"
+  | "h3"
+  | "h4"
+  | "h5"
+  | "h6"
+  | "p"
+  | "ul"
+  | "ol"
+  | "li"
+  | "blockquote"
+  | "tr"
+  | "th"
+  | "td"
+  | "thead"
+  | "tbody"
+  | "section"
+  | "strong"
+  | "em"
+  | "del"
+  | "sup";
+
+function withSourcePosition(tag: SourcedTag) {
+  function SourcedMarkdownBlock({
+    node,
+    children,
+    ...props
+  }: HTMLAttributes<HTMLElement> & {
+    node?: unknown;
+    children?: ReactNode;
+  }) {
+    const Tag = tag;
+    return (
+      <Tag {...props} {...markdownSourceDataAttributes(node)}>
+        {children}
+      </Tag>
+    );
+  }
+  SourcedMarkdownBlock.displayName = `MarkdownSource(${tag})`;
+  return SourcedMarkdownBlock;
+}
+
+function SourcedHr({
+  node,
+  children: _children,
+  ...props
+}: HTMLAttributes<HTMLHRElement> & {
+  node?: unknown;
+  children?: ReactNode;
+}) {
+  return <hr {...props} {...markdownSourceDataAttributes(node)} />;
+}
+
+const sourcedBlocks = {
+  h1: withSourcePosition("h1"),
+  h2: withSourcePosition("h2"),
+  h3: withSourcePosition("h3"),
+  h4: withSourcePosition("h4"),
+  h5: withSourcePosition("h5"),
+  h6: withSourcePosition("h6"),
+  p: withSourcePosition("p"),
+  ul: withSourcePosition("ul"),
+  ol: withSourcePosition("ol"),
+  li: withSourcePosition("li"),
+  blockquote: withSourcePosition("blockquote"),
+  hr: SourcedHr,
+  tr: withSourcePosition("tr"),
+  th: withSourcePosition("th"),
+  td: withSourcePosition("td"),
+  thead: withSourcePosition("thead"),
+  tbody: withSourcePosition("tbody"),
+  section: withSourcePosition("section"),
+  strong: withSourcePosition("strong"),
+  em: withSourcePosition("em"),
+  del: withSourcePosition("del"),
+  sup: withSourcePosition("sup"),
+} satisfies Partial<Components>;
+
 function createDocumentComponents(filePath?: string): Components {
   return {
-    a({ href, children, node: _node, ...props }) {
+    ...sourcedBlocks,
+    a({ href, children, node, ...props }) {
       const isExternal = /^https?:/i.test(href ?? "");
       return (
         <a
           {...props}
+          {...markdownSourceDataAttributes(node)}
           href={href}
           {...(isExternal
             ? { target: "_blank", rel: "noreferrer noopener" }
@@ -30,10 +115,11 @@ function createDocumentComponents(filePath?: string): Components {
         </a>
       );
     },
-    img({ src, alt, node: _node, ...props }) {
+    img({ src, alt, node, ...props }) {
       return (
         <img
           {...props}
+          {...markdownSourceDataAttributes(node)}
           src={resolveMarkdownAssetUrl(src, filePath)}
           alt={alt ?? ""}
           loading="lazy"
@@ -65,17 +151,22 @@ function createDocumentComponents(filePath?: string): Components {
         Boolean(language) ||
         (node?.position != null &&
           node.position.start.line !== node.position.end.line);
+      const source = markdownSourceDataAttributes(node);
 
       if (!isBlock) {
         return (
-          <code className={className} {...props}>
+          <code className={className} {...props} {...source}>
             {children}
           </code>
         );
       }
 
       return (
-        <div className="md-document-code" data-language={language || undefined}>
+        <div
+          className="md-document-code"
+          data-language={language || undefined}
+          {...source}
+        >
           {language ? (
             <span className="md-document-code-lang">{language}</span>
           ) : null}
@@ -87,9 +178,12 @@ function createDocumentComponents(filePath?: string): Components {
         </div>
       );
     },
-    table({ children, node: _node, ...props }) {
+    table({ children, node, ...props }) {
       return (
-        <div className="md-document-table-wrap">
+        <div
+          className="md-document-table-wrap"
+          {...markdownSourceDataAttributes(node)}
+        >
           <table {...props}>{children}</table>
         </div>
       );
@@ -111,7 +205,7 @@ export const MarkdownDocument: FC<MarkdownDocumentProps> = ({
     <div className={cn("md-document", className)} data-testid="md-document">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeKatex]}
+        rehypePlugins={[rehypeKatex, rehypeMarkdownSourcePositions]}
         components={components}
       >
         {content}
