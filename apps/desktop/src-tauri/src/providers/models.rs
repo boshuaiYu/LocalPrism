@@ -422,7 +422,7 @@ fn load_cached_if_fresh(id: &str) -> Option<Vec<ProviderModel>> {
     if cached.models.is_empty() {
         return None;
     }
-    Some(cached.models)
+    Some(with_known_reasoning_efforts(id, cached.models))
 }
 
 fn load_cached(id: &str) -> Option<Vec<ProviderModel>> {
@@ -430,8 +430,22 @@ fn load_cached(id: &str) -> Option<Vec<ProviderModel>> {
     if models.is_empty() {
         None
     } else {
-        Some(models)
+        Some(with_known_reasoning_efforts(id, models))
     }
+}
+
+/// Live catalogs omit efforts, and those empty lists stay in the cache.
+/// The UI reads this cache before the next refresh, so fill known ladders
+/// on the way out. Advertised efforts are left as stored.
+fn with_known_reasoning_efforts(id: &str, mut models: Vec<ProviderModel>) -> Vec<ProviderModel> {
+    let Ok(index) = load_index() else {
+        return models;
+    };
+    let Some(provider) = index.third_party(id) else {
+        return models;
+    };
+    apply_known_reasoning_efforts(&provider.base_url, &mut models);
+    models
 }
 
 fn load_cache_file() -> CatalogCacheFile {
@@ -875,5 +889,102 @@ mod tests {
             candidate_model_urls("https://api.openai.com/v1/models"),
             vec!["https://api.openai.com/v1/models".to_string()]
         );
+    }
+
+    #[test]
+    fn cached_empty_efforts_are_backfilled_before_the_ui_reads_them() {
+        let (_dir, _guard) = isolate_provider_dirs();
+        let mut index = crate::providers::types::ProviderIndex::default();
+        index.active_id = Some("deepseek".into());
+        index.providers.push(saved_provider(
+            "deepseek",
+            "https://api.deepseek.com/anthropic",
+            "deepseek-v4-pro",
+        ));
+        index.providers.push(saved_provider(
+            "siliconflow",
+            "https://api.siliconflow.cn/v1",
+            "Qwen/Qwen3-32B",
+        ));
+        crate::providers::store::save_index(&index).expect("save providers");
+
+        save_cached_models(
+            "deepseek",
+            &[
+                catalog_model("deepseek-v4-pro", Vec::new(), true),
+                catalog_model("kept", vec!["low".into(), "high".into()], false),
+            ],
+        )
+        .expect("save deepseek cache");
+        save_cached_models(
+            "siliconflow",
+            &[
+                catalog_model("Qwen/Qwen3-32B", Vec::new(), true),
+                catalog_model("deepseek-ai/DeepSeek-V3", Vec::new(), false),
+                catalog_model("Qwen/Qwen30B", Vec::new(), false),
+            ],
+        )
+        .expect("save siliconflow cache");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let deepseek = runtime
+            .block_on(models_for_provider("deepseek", false))
+            .expect("cached deepseek models");
+        assert_eq!(deepseek[0].reasoning_efforts, vec!["low", "high", "max"]);
+        assert_eq!(deepseek[1].reasoning_efforts, vec!["low", "high"]);
+
+        let active = cached_models_for_active();
+        assert_eq!(active[0].id, "deepseek-v4-pro");
+        assert_eq!(active[0].reasoning_efforts, vec!["low", "high", "max"]);
+
+        let siliconflow = runtime
+            .block_on(models_for_provider("siliconflow", false))
+            .expect("cached siliconflow models");
+        assert_eq!(
+            siliconflow[0].reasoning_efforts,
+            vec!["low", "medium", "high", "max"]
+        );
+        assert!(siliconflow[1].reasoning_efforts.is_empty());
+        assert!(siliconflow[2].reasoning_efforts.is_empty());
+    }
+
+    fn isolate_provider_dirs() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
+        let guard = crate::providers::paths::lock_provider_env();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::env::set_var("LOCALPRISM_PROVIDERS_DIR", dir.path());
+        std::env::set_var(
+            "LOCALPRISM_LEGACY_ANTHROPIC_AUTH",
+            dir.path().join("missing-legacy.json"),
+        );
+        (dir, guard)
+    }
+
+    fn saved_provider(id: &str, base_url: &str, main: &str) -> SavedProvider {
+        SavedProvider {
+            id: id.into(),
+            name: id.into(),
+            api_key: "sk-test".into(),
+            base_url: base_url.into(),
+            api_format: ApiFormat::Anthropic,
+            models: crate::providers::types::ProviderModels {
+                main: main.into(),
+                haiku: None,
+                sonnet: None,
+                opus: None,
+            },
+        }
+    }
+
+    fn catalog_model(id: &str, efforts: Vec<String>, is_default: bool) -> ProviderModel {
+        ProviderModel {
+            id: id.into(),
+            display_name: id.into(),
+            reasoning_efforts: efforts,
+            is_default,
+            context_window: None,
+            metadata: None,
+        }
     }
 }

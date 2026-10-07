@@ -335,6 +335,13 @@ fn normalized_model_tail(model: &str) -> String {
     lower.rsplit('/').next().unwrap_or(lower).trim().to_string()
 }
 
+fn model_prefix(tail: &str, prefix: &str) -> bool {
+    let Some(rest) = tail.strip_prefix(prefix) else {
+        return false;
+    };
+    rest.is_empty() || !rest.starts_with(|ch: char| ch.is_ascii_alphanumeric())
+}
+
 fn siliconflow_effort_model(model: &str) -> bool {
     // https://docs.siliconflow.cn/docs/api/chat-completions-post
     // `Pro/` is a serving prefix; the model tail is what the field list names.
@@ -351,7 +358,7 @@ fn siliconflow_budget_model(model: &str) -> bool {
     let tail = normalized_model_tail(model);
     tail.contains("deepseek-r1")
         || tail.contains("reasoner")
-        || tail.contains("qwen3")
+        || model_prefix(&tail, "qwen3")
         || tail.starts_with("deepseek-v3.1")
         || tail.starts_with("deepseek-v3.2")
         || tail.contains("hunyuan-a13b")
@@ -544,6 +551,62 @@ mod tests {
         assert!(body.as_object().unwrap().is_empty());
         assert_eq!(
             known_reasoning_efforts("https://api.siliconflow.cn/v1", "deepseek-ai/DeepSeek-V3"),
+            None
+        );
+
+        let mut anthropic_body = anthropic("xhigh");
+        let before = anthropic_body.clone();
+        rewrite_anthropic_reasoning(
+            &mut anthropic_body,
+            "https://api.anthropic.com",
+            "claude-opus-4-6",
+        );
+        assert_eq!(anthropic_body, before);
+
+        let mut responses = json!({ "model": "gpt-5" });
+        apply_responses_reasoning(
+            &mut responses,
+            &anthropic("xhigh"),
+            "https://api.openai.com/v1",
+            "gpt-5",
+        );
+        assert!(responses.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn deepseek_responses_compose_maps_xhigh_to_max() {
+        let request = json!({
+            "max_tokens": 32,
+            "output_config": { "effort": "xhigh" },
+            "messages": [{ "role": "user", "content": "hi" }]
+        });
+        let mut body = crate::anthropic_proxy::responses::anthropic_to_provider_responses(
+            &request,
+            "deepseek-v4-pro",
+        )
+        .expect("convert");
+        assert!(body.get("reasoning").is_none());
+        apply_responses_reasoning(
+            &mut body,
+            &request,
+            "https://api.deepseek.com",
+            "deepseek-v4-pro",
+        );
+        assert_eq!(body["reasoning"]["effort"], "max");
+    }
+
+    #[test]
+    fn qwen3_match_requires_a_model_prefix_boundary() {
+        assert_eq!(
+            known_reasoning_efforts("https://api.siliconflow.cn/v1", "Qwen/Qwen3-32B"),
+            Some(&["low", "medium", "high", "max"][..])
+        );
+        assert_eq!(
+            known_reasoning_efforts("https://api.siliconflow.cn/v1", "Qwen/Qwen30B"),
+            None
+        );
+        assert_eq!(
+            known_reasoning_efforts("https://api.siliconflow.cn/v1", "org/my-qwen3-8b"),
             None
         );
     }
