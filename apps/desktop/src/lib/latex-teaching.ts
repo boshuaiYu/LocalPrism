@@ -1,6 +1,7 @@
 /**
  * Curated explanations for common LaTeX constructs and compiler messages.
- * The floating teach card reads this catalog locally. It does not call a model or chat.
+ * The floating teach card reads this catalog locally. Ask AI is a separate
+ * action and does not change these lessons.
  */
 import type { UiLanguage } from "@/lib/i18n";
 

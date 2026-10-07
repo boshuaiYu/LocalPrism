@@ -6,9 +6,15 @@ import {
   TeachEmptyEntry,
   TeachPanel,
 } from "@/components/workspace/editor/teach-panel";
-import { lessonRefForSelection } from "@/lib/latex-teaching";
+import {
+  lessonRefForDiagnostic,
+  lessonRefForSelection,
+} from "@/lib/latex-teaching";
 import { newProjectFileTemplate } from "@/lib/new-project-file";
-import { useLatexTeachStore } from "@/stores/latex-teach-store";
+import {
+  registerTeachAsk,
+  useLatexTeachStore,
+} from "@/stores/latex-teach-store";
 import { useSettingsStore } from "@/stores/settings-store";
 
 const figure = lessonRefForSelection({
@@ -38,6 +44,7 @@ describe("LaTeX teach panel", () => {
     container.remove();
     useSettingsStore.setState({ latexTeaching: false, uiLanguage: "en" });
     useLatexTeachStore.getState().reset();
+    registerTeachAsk(null);
   });
 
   it("shows a Chinese lesson and does not render while teaching is off", async () => {
@@ -59,6 +66,9 @@ describe("LaTeX teach panel", () => {
     expect(panel?.textContent).toContain("拖动");
     expect(panel?.textContent).toContain("浮动图片环境");
     expect(panel?.textContent).toContain("插入示例到光标处");
+    expect(
+      document.body.querySelector('[data-testid="latex-teach-ask"]'),
+    ).toBeNull();
     const insert = [...document.body.querySelectorAll("button")].find(
       (button) => button.textContent?.includes("插入示例"),
     );
@@ -271,5 +281,97 @@ Hello
     );
     expect(panel?.textContent).toContain("找不到文件");
     expect(panel?.textContent).not.toContain("浮动图片环境");
+  });
+
+  it("asks AI beside insert and keeps the local lesson open", async () => {
+    useSettingsStore.setState({ latexTeaching: true, uiLanguage: "zh" });
+    useLatexTeachStore.getState().forcePresent(figure, "sel:0:20", null, {
+      selectedText: String.raw`\begin{figure}[htbp]`,
+    });
+    const onAskAi = vi.fn();
+    const onInsert = vi.fn();
+
+    await act(async () => {
+      root.render(<TeachPanel onAskAi={onAskAi} onInsert={onInsert} />);
+    });
+
+    const insert = document.body.querySelector(
+      '[data-testid="latex-teach-insert"]',
+    );
+    const ask = document.body.querySelector('[data-testid="latex-teach-ask"]');
+    expect(insert?.textContent).toContain("插入示例到光标处");
+    expect(ask?.textContent).toContain("问 AI");
+    expect(ask?.getAttribute("data-variant")).toBe("secondary");
+    expect(insert?.nextElementSibling).toBe(ask);
+
+    await act(async () => {
+      if (ask instanceof HTMLButtonElement) ask.click();
+    });
+
+    expect(onAskAi).toHaveBeenCalledTimes(1);
+    const prompt = String(onAskAi.mock.calls[0]?.[0]);
+    expect(prompt).toContain("浮动图片环境");
+    expect(prompt).toContain(String.raw`\begin{figure}`);
+    expect(prompt).toContain("选中文本");
+    expect(onInsert).not.toHaveBeenCalled();
+    expect(useLatexTeachStore.getState().open).toBe(true);
+    expect(
+      document.body.querySelector('[data-testid="latex-teach-panel"]'),
+    ).not.toBeNull();
+  });
+
+  it("asks about an error without an insert action", async () => {
+    useSettingsStore.setState({ latexTeaching: true, uiLanguage: "en" });
+    const message = "File `miss.png' not found";
+    const ref = lessonRefForDiagnostic(message);
+    useLatexTeachStore
+      .getState()
+      .forcePresent(ref, `diag:${ref.id}:${message}`);
+    const onAskAi = vi.fn();
+
+    await act(async () => {
+      root.render(<TeachPanel onAskAi={onAskAi} />);
+    });
+
+    expect(
+      document.body.querySelector('[data-testid="latex-teach-insert"]'),
+    ).toBeNull();
+    const ask = document.body.querySelector('[data-testid="latex-teach-ask"]');
+    expect(ask?.textContent).toContain("Ask AI");
+    expect(ask?.getAttribute("data-variant")).toBe("default");
+
+    await act(async () => {
+      if (ask instanceof HTMLButtonElement) ask.click();
+    });
+
+    const prompt = String(onAskAi.mock.calls[0]?.[0]);
+    expect(prompt).toContain("Missing file");
+    expect(prompt).toContain("miss.png");
+    expect(prompt).toContain(message);
+    expect(useLatexTeachStore.getState().open).toBe(true);
+  });
+
+  it("sends a guide prompt through the editor ask callback", async () => {
+    useSettingsStore.setState({ latexTeaching: true, uiLanguage: "zh" });
+    useLatexTeachStore
+      .getState()
+      .forcePresent({ kind: "guide", id: "empty-project" }, "guide:empty");
+    const handler = vi.fn();
+    registerTeachAsk(handler);
+
+    await act(async () => {
+      root.render(<TeachPanel />);
+    });
+
+    const ask = document.body.querySelector('[data-testid="latex-teach-ask"]');
+    await act(async () => {
+      if (ask instanceof HTMLButtonElement) ask.click();
+    });
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    const prompt = String(handler.mock.calls[0]?.[0]);
+    expect(prompt).toContain("一份最小的文稿");
+    expect(prompt).not.toContain("选中文本");
+    expect(useLatexTeachStore.getState().open).toBe(true);
   });
 });

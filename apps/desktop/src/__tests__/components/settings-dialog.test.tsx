@@ -28,6 +28,26 @@ function activePanel(): HTMLElement {
   return panel;
 }
 
+function tabLabels(): string[] {
+  return [...document.body.querySelectorAll('[role="tab"]')].map(
+    (tab) => tab.textContent?.trim() ?? "",
+  );
+}
+
+async function activateTab(label: string) {
+  const tab = [...document.body.querySelectorAll('[role="tab"]')].find(
+    (node) => node.textContent?.trim() === label,
+  );
+  if (!(tab instanceof HTMLElement)) {
+    throw new Error(`Missing tab ${label}`);
+  }
+  await act(async () => {
+    tab.dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true, button: 0 }),
+    );
+  });
+}
+
 describe("SettingsDialog", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -91,17 +111,49 @@ describe("SettingsDialog", () => {
     expect(providers.textContent).not.toContain("Debian");
     expect(providers.textContent).not.toContain("Check for updates");
     expect(providers.textContent).not.toContain("Agents body");
+    expect(tabLabels()).toEqual(["Providers", "Skills", "Agents", "Preview"]);
+    expect(
+      document.body.querySelector('[data-testid="latex-teaching-settings"]'),
+    ).toBeNull();
+    expect(agents.textContent).not.toContain("Enable LaTeX teaching");
   });
 
-  it("persists the LaTeX teaching toggle from the settings dialog", async () => {
+  it("keeps LaTeX teaching on the Preview tab and persists the toggle", async () => {
     useSettingsStore.setState({ latexTeaching: false, uiLanguage: "zh" });
     await act(async () => {
       root.render(<SettingsDialog open onOpenChange={vi.fn()} />);
     });
 
-    expect(document.body.textContent).toContain("启用 LaTeX 教学");
-    expect(document.body.textContent).toContain("预览 · 超前功能");
-    const toggle = document.body.querySelector(
+    expect(tabLabels()).toEqual(["服务商", "技能", "智能体", "预览功能"]);
+    expect(tabLabels()).not.toContain("编辑器");
+    expect(
+      document.body.querySelector('[data-testid="latex-teaching-settings"]'),
+    ).toBeNull();
+    expect(document.body.textContent).not.toContain("启用 LaTeX 教学");
+
+    await activateTab("预览功能");
+
+    const preview = activePanel();
+    const teaching = preview.querySelector(
+      '[data-testid="latex-teaching-settings"]',
+    );
+    const tablist = document.body.querySelector('[role="tablist"]');
+    expect(teaching).toBeInstanceOf(HTMLElement);
+    expect(
+      tablist &&
+        teaching &&
+        tablist.compareDocumentPosition(teaching) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(preview.textContent).toContain("启用 LaTeX 教学");
+    expect(preview.textContent).toContain("预览 · 超前功能");
+    expect(preview.textContent).toContain("校对");
+    expect(preview.textContent).toContain("讲解");
+    expect(preview.textContent).not.toContain("不报错也会讲");
+    expect(preview.querySelector(".border-amber-500\\/35")).toBeNull();
+    expect(activePanel().textContent).not.toContain("Providers body");
+
+    const toggle = preview.querySelector(
       '[data-testid="latex-teaching-toggle"]',
     );
     expect(toggle?.getAttribute("aria-checked")).toBe("false");
@@ -116,5 +168,28 @@ describe("SettingsDialog", () => {
       if (toggle instanceof HTMLButtonElement) toggle.click();
     });
     expect(useSettingsStore.getState().latexTeaching).toBe(false);
+
+    await activateTab("服务商");
+    expect(
+      document.body.querySelector('[data-testid="latex-teaching-settings"]'),
+    ).toBeNull();
+    expect(activePanel().textContent).toContain("Providers body");
+  });
+
+  it("opens Preview directly when that tab is requested", async () => {
+    useSettingsStore.setState({ latexTeaching: false, uiLanguage: "en" });
+    await act(async () => {
+      root.render(
+        <SettingsDialog open onOpenChange={vi.fn()} defaultTab="preview" />,
+      );
+    });
+
+    const preview = activePanel();
+    expect(preview.textContent).toContain("Enable LaTeX teaching");
+    expect(preview.textContent).toContain("Explain beside Proofread");
+    expect(
+      preview.querySelector('[data-testid="latex-teaching-toggle"]'),
+    ).not.toBeNull();
+    expect(preview.textContent).not.toContain("Editor and teaching");
   });
 });

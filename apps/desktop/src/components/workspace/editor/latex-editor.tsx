@@ -94,6 +94,7 @@ import type { TeachAnchor } from "@/lib/teach-float";
 import { useI18n } from "@/lib/use-i18n";
 import {
   bindTeachDocumentScope,
+  registerTeachAsk,
   registerTeachInsert,
   useLatexTeachStore,
 } from "@/stores/latex-teach-store";
@@ -1220,6 +1221,7 @@ export function LatexEditor() {
           action.lesson,
           action.sourceKey,
           teachAnchorForRange(view, snapshot.from, snapshot.to),
+          { selectedText: snapshot.selected },
         );
       toolbarStickyRef.current = false;
       setSelectionCoords(null);
@@ -1287,6 +1289,11 @@ export function LatexEditor() {
     registerTeachInsert(insertTeachSnippet);
     return () => registerTeachInsert(null);
   }, [insertTeachSnippet]);
+
+  useEffect(() => {
+    registerTeachAsk(sendToolbarPromptWithSelectionContext);
+    return () => registerTeachAsk(null);
+  }, [sendToolbarPromptWithSelectionContext]);
 
   const isPdf = activeFile?.type === "pdf";
   const isImage = !isTextFile && !isPdf && !!activeFile;
