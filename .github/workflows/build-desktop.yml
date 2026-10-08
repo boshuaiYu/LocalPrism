@@ -548,10 +548,19 @@ jobs:
             echo "tag=${{ inputs.release_tag }}" >> $GITHUB_OUTPUT
           fi
 
+      - name: Collect release notes for latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          UPDATER_RELEASE_NOTES_FILE: updater-release-notes.md
+        run: bash scripts/ci-updater-release-notes.sh
+
       - name: Sign updater artifacts
         env:
           TAG: ${{ steps.tag.outputs.tag }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          UPDATER_RELEASE_NOTES_FILE: updater-release-notes.md
         run: bash scripts/ci-sign-updater-artifacts.sh
 
       - name: Upload signed release files

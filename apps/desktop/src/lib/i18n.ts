@@ -66,6 +66,7 @@ const en = {
   "updates.availableLine":
     "LocalPrism {{version}} is available — you have {{current}}.",
   "updates.notesEmpty": "This release has no notes.",
+  "updates.notesSeeDownloadPage": "See the download page for release notes.",
   "updates.openDownloadPage": "Open download page",
   "updates.downloadAndInstall": "Download and install",
   "updates.dialogDownloading": "Downloading…",
@@ -664,6 +665,7 @@ const zh: Record<MessageKey, string> = {
   "updates.availableLine":
     "LocalPrism {{version}} 已发布，当前版本为 {{current}}。",
   "updates.notesEmpty": "这个版本没有发布说明。",
+  "updates.notesSeeDownloadPage": "更新说明请见下载页。",
   "updates.openDownloadPage": "打开下载页",
   "updates.downloadAndInstall": "下载并安装",
   "updates.dialogDownloading": "正在下载…",

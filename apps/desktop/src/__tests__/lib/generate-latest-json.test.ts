@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -11,7 +12,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { planUpdaterRelease } from "@/lib/updater-manifest";
-import { writeSignedLatestManifest } from "../../../scripts/generate-latest-json.ts";
+import {
+  readUpdaterReleaseNotes,
+  writeSignedLatestManifest,
+} from "../../../scripts/generate-latest-json.ts";
 
 const script = resolve(__dirname, "../../../scripts/generate-latest-json.ts");
 
@@ -32,6 +36,11 @@ function writeLinuxArtifacts(root: string): {
   );
   return { artifacts, upload };
 }
+
+const notesScript = resolve(
+  __dirname,
+  "../../../../../scripts/ci-updater-release-notes.sh",
+);
 
 describe("generate-latest-json", () => {
   it("does not write latest.json when the sign command fails", () => {
@@ -114,6 +123,83 @@ describe("generate-latest-json", () => {
         }),
       ).toThrow(/tauri signer sign failed/);
       expect(existsSync(join(upload, "latest.json"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reads changelog notes from the release-notes file", () => {
+    const root = mkdtempSync(join(tmpdir(), "localprism-notes-"));
+    try {
+      const notesFile = join(root, "updater-release-notes.md");
+      const changelog = "## What's Changed\n\n- real fix";
+      writeFileSync(notesFile, `${changelog}\n`);
+      expect(
+        readUpdaterReleaseNotes({
+          UPDATER_RELEASE_NOTES_FILE: notesFile,
+        }),
+      ).toBe(`${changelog}\n`);
+      expect(
+        readUpdaterReleaseNotes({
+          UPDATER_RELEASE_NOTES_FILE: join(root, "missing.md"),
+          UPDATER_RELEASE_NOTES: changelog,
+        }),
+      ).toBeUndefined();
+      expect(
+        readUpdaterReleaseNotes({ UPDATER_RELEASE_NOTES: changelog }),
+      ).toBe(changelog);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("writes an empty notes file when GitHub credentials are missing", () => {
+    const root = mkdtempSync(join(tmpdir(), "localprism-notes-script-"));
+    try {
+      const notesFile = join(root, "updater-release-notes.md");
+      const result = spawnSync("bash", [notesScript], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GH_TOKEN: "",
+          GITHUB_TOKEN: "",
+          TAG: "v1.0.9",
+          GITHUB_REPOSITORY: "boshuaiYu/LocalPrism",
+          UPDATER_RELEASE_NOTES_FILE: notesFile,
+        },
+      });
+      expect(result.status, result.stderr || result.stdout).toBe(0);
+      expect(readFileSync(notesFile, "utf8")).toBe("");
+      expect(result.stderr).toMatch(/release title/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not call gh when the release tag is not a version tag", () => {
+    const root = mkdtempSync(join(tmpdir(), "localprism-notes-tag-"));
+    try {
+      const notesFile = join(root, "updater-release-notes.md");
+      const bin = join(root, "bin");
+      mkdirSync(bin, { recursive: true });
+      const gh = join(bin, "gh");
+      writeFileSync(gh, "#!/bin/sh\necho called-gh >&2\nexit 99\n");
+      chmodSync(gh, 0o755);
+      const result = spawnSync("bash", [notesScript], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH ?? ""}`,
+          GH_TOKEN: "token",
+          TAG: "v1.0.9;touch-pwned",
+          GITHUB_REPOSITORY: "boshuaiYu/LocalPrism",
+          UPDATER_RELEASE_NOTES_FILE: notesFile,
+        },
+      });
+      expect(result.status, result.stderr || result.stdout).toBe(0);
+      expect(readFileSync(notesFile, "utf8")).toBe("");
+      expect(result.stderr).not.toMatch(/called-gh/);
+      expect(result.stderr).toMatch(/not valid/);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

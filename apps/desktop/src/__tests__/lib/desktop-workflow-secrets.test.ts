@@ -24,6 +24,26 @@ describe("desktop release workflow secrets", () => {
     expect(beforeSign).not.toContain("secrets.TAURI_SIGNING_PRIVATE_KEY");
   });
 
+  it("puts the GitHub changelog into latest.json before signing", () => {
+    const signJob =
+      workflow.split("sign-updater:")[1]?.split("\n  publish:")[0] ?? "";
+    const notesScript = readFileSync(
+      resolve(__dirname, "../../../../../scripts/ci-updater-release-notes.sh"),
+      "utf8",
+    );
+    expect(signJob).toContain("ci-updater-release-notes.sh");
+    expect(signJob).toContain("UPDATER_RELEASE_NOTES_FILE");
+    expect(signJob.indexOf("ci-updater-release-notes.sh")).toBeLessThan(
+      signJob.indexOf("ci-sign-updater-artifacts.sh"),
+    );
+    expect(notesScript).toContain("releases/generate-notes");
+    expect(notesScript).toContain("gh release view");
+    expect(notesScript).toContain(
+      'gh release view --json body --jq .body -- "$TAG"',
+    );
+    expect(notesScript).toContain("^v[A-Za-z0-9._+-]+$");
+  });
+
   it("still publishes from the signed latest.json after the split", () => {
     const publish = workflow.split("publish:")[1] ?? "";
     expect(workflow).toContain("needs: [sign-updater]");
