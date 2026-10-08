@@ -10,6 +10,7 @@ vi.mock("@/components/claude-chat/workspace-account-button", () => ({
   WorkspaceAccountButton: () => <div data-testid="workspace-account-button" />,
 }));
 
+import { LATEX_LEARN_PURPOSE } from "@/lib/latex-learn-tab";
 import {
   accountHeaderChrome,
   ChatTabBar,
@@ -461,6 +462,41 @@ describe("ChatTabBar runtime badges", () => {
       ).toContain("min-w-0");
     } finally {
       restore();
+    }
+  });
+
+  it("labels the learning session in the active UI language", async () => {
+    useSettingsStore.setState({ uiLanguage: "zh" });
+    try {
+      await renderTabs([
+        {
+          ...makeTab("tab-learn", "请讲解这个结构", "claude"),
+          purpose: LATEX_LEARN_PURPOSE,
+          resumeRequestId: "resume-1",
+          messages: [userText("请讲解这个结构")],
+        },
+      ]);
+      expect(
+        tabButton(container, "tab-learn").querySelector(
+          "[data-testid='chat-tab-title']",
+        )?.textContent,
+      ).toBe("边写边学");
+      expect(
+        tabButton(container, "tab-learn").querySelector(
+          "[data-testid='tab-history-indicator']",
+        ),
+      ).not.toBeNull();
+
+      await act(async () => {
+        useSettingsStore.setState({ uiLanguage: "en" });
+      });
+      expect(
+        tabButton(container, "tab-learn").querySelector(
+          "[data-testid='chat-tab-title']",
+        )?.textContent,
+      ).toBe("Learn LaTeX");
+    } finally {
+      useSettingsStore.setState({ uiLanguage: "en" });
     }
   });
 

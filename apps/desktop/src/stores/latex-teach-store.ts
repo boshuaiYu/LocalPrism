@@ -60,7 +60,7 @@ export function insertRegisteredTeachSnippet(snippet: string): void {
   teachInserter?.(snippet);
 }
 
-/** Editor registers the same sender Proofread uses, including selection context. */
+/** Editor registers Ask AI. The handler chooses the learning session. */
 export function registerTeachAsk(
   handler: ((prompt: string) => void) | null,
 ): void {

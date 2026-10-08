@@ -92,6 +92,7 @@ import {
 } from "@/lib/latex-selection-teach";
 import type { TeachAnchor } from "@/lib/teach-float";
 import { useI18n } from "@/lib/use-i18n";
+import { sendLatexTeachAsk } from "@/lib/latex-teach-session";
 import {
   bindTeachDocumentScope,
   registerTeachAsk,
@@ -1291,9 +1292,12 @@ export function LatexEditor() {
   }, [insertTeachSnippet]);
 
   useEffect(() => {
-    registerTeachAsk(sendToolbarPromptWithSelectionContext);
+    // Proofread still sends into the open chat. Ask AI uses the learning session.
+    registerTeachAsk((prompt) => {
+      void sendLatexTeachAsk(prompt);
+    });
     return () => registerTeachAsk(null);
-  }, [sendToolbarPromptWithSelectionContext]);
+  }, []);
 
   const isPdf = activeFile?.type === "pdf";
   const isImage = !isTextFile && !isPdf && !!activeFile;

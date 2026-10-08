@@ -421,6 +421,7 @@ describe("chat persistence I/O", () => {
         "providerKey",
         "reasoningEffort",
         "openedUnderAccountKey",
+        "purpose",
         "runtime",
         "runtimeModel",
         "sessionProviderKey",
@@ -444,6 +445,72 @@ describe("chat persistence I/O", () => {
     ]) {
       expect(json).not.toContain(forbidden);
     }
+  });
+
+  it("keeps a learning-session marker and drops unknown purposes", () => {
+    const kept = migratePersistedChat({
+      version: 2,
+      activeTabId: "tab-learn",
+      tabs: [
+        persistedTab({
+          id: "tab-learn",
+          purpose: "latex-learn",
+          title: "边写边学",
+        }),
+        persistedTab({ id: "tab-other", purpose: "scratch" }),
+      ],
+    });
+    expect(kept.tabs.map((tab) => tab.purpose)).toEqual(["latex-learn", null]);
+
+    const projected = projectPersistedChat({
+      activeTabId: "tab-learn",
+      tabs: kept.tabs,
+    });
+    expect(projected.tabs.map((tab) => tab.purpose)).toEqual([
+      "latex-learn",
+      null,
+    ]);
+    expect(migratePersistedChat(projected).tabs[0]?.purpose).toBe(
+      "latex-learn",
+    );
+  });
+
+  it("treats a missing purpose on old v1 and v2 documents as null", () => {
+    const v1 = migratePersistedChat({
+      version: 1,
+      activeTabId: "legacy-tab",
+      tabs: [
+        {
+          id: "legacy-tab",
+          title: "Legacy",
+          projectPath: "/legacy",
+          sessionId: "legacy-session",
+        },
+      ],
+    });
+    expect(v1.tabs[0]?.purpose).toBeNull();
+
+    const v2 = migratePersistedChat({
+      version: 2,
+      activeTabId: "tab-old",
+      tabs: [
+        {
+          id: "tab-old",
+          title: "Old",
+          projectPath: "/project-a",
+          runtime: "claude",
+        },
+      ],
+    });
+    expect(v2.tabs[0]?.purpose).toBeNull();
+  });
+
+  it("treats a purpose change as a different persistable tab", () => {
+    const plain = persistedTab({ purpose: null });
+    const learning = persistedTab({ purpose: "latex-learn" });
+    expect(samePersistableTab(plain, learning)).toBe(false);
+    expect(samePersistableTab(learning, { ...learning })).toBe(true);
+    expect(samePersistableTabs([plain], [learning])).toBe(false);
   });
 
   it("returns a safe default for malformed JSON and storage get failures", () => {

@@ -310,6 +310,77 @@ describe("useClaudeEvents cancellation isolation", () => {
     ]);
   });
 
+  it("forwards skipAmbientContext when queued guidance drains", async () => {
+    const original = useClaudeChatStore.getState().sendPrompt;
+    const sendPrompt = vi.fn(() => Promise.resolve());
+    const queued = {
+      id: "queued-learn",
+      prompt: "next lesson",
+      createdAt: 1,
+      skipAmbientContext: true as const,
+    };
+    const arm = async (patch: Partial<TabState>) => {
+      sendPrompt.mockClear();
+      await act(async () => {
+        useClaudeChatStore.setState((state) => ({
+          sendPrompt: sendPrompt as typeof original,
+          tabs: state.tabs.map((tab) =>
+            tab.id === "tab-a"
+              ? { ...makeTab(tab, "tab-a"), ...patch, queuedGuidance: [queued] }
+              : tab,
+          ),
+        }));
+      });
+    };
+    const expectSkip = async () => {
+      await vi.waitFor(() => expect(sendPrompt).toHaveBeenCalled());
+      expect(sendPrompt).toHaveBeenCalledWith(
+        "next lesson",
+        undefined,
+        expect.objectContaining({
+          tabId: "tab-a",
+          skipAmbientContext: true,
+        }),
+      );
+    };
+
+    useClaudeChatStore.setState({ sendPrompt: sendPrompt as typeof original });
+    try {
+      await arm({
+        forceQueuedGuidanceOnComplete: true,
+        forcedQueuedGuidanceId: "queued-learn",
+      });
+      await act(async () => {
+        callbacks.get("claude-complete")?.(completeEvent("tab-a", true));
+        await Promise.resolve();
+      });
+      await expectSkip();
+
+      await arm({});
+      await act(async () => {
+        callbacks.get("claude-complete")?.(completeEvent("tab-a", true));
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await expectSkip();
+
+      await arm({ runtime: "codex" });
+      await act(async () => {
+        callbacks.get("runtime-event")?.(
+          runtimeEvent("tab-a", "tab-a-attempt-1", {
+            type: "turnCompleted",
+            turnId: "turn-a",
+          }),
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await expectSkip();
+    } finally {
+      useClaudeChatStore.setState({ sendPrompt: original });
+    }
+  });
+
   it("does not refresh a reopened incarnation of the same project after Claude completion", async () => {
     const snapshot = deferred<void>();
     createSnapshot.mockReturnValueOnce(snapshot.promise);

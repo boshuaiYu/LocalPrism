@@ -66,6 +66,8 @@ export interface PersistedChatTab {
   agentId: string | null;
   /** Workspace account that opened the tab. Null until an account is observed. */
   openedUnderAccountKey: string | null;
+  /** `latex-learn` marks the one reusable teaching session for this project. */
+  purpose: "latex-learn" | null;
 }
 
 export interface PersistedChatDocument {
@@ -107,6 +109,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function nullableString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function persistedPurpose(value: unknown): "latex-learn" | null {
+  return value === "latex-learn" ? "latex-learn" : null;
 }
 
 function runtimeKind(value: unknown): RuntimeKind {
@@ -158,6 +164,7 @@ function defaultDocument(): HydratedChatDocument {
     reasoningEffort: null,
     agentId: null,
     openedUnderAccountKey: null,
+    purpose: null,
   });
   return { version: 2, activeTabId: tab.id, tabs: [tab] };
 }
@@ -222,6 +229,7 @@ function migrateV2Tab(
     reasoningEffort: nullableString(value.reasoningEffort),
     agentId: nullableString(value.agentId),
     openedUnderAccountKey: nullableString(value.openedUnderAccountKey),
+    purpose: persistedPurpose(value.purpose),
   });
 }
 
@@ -251,6 +259,7 @@ function migrateV1Tab(
       reasoningEffort: null,
       agentId: null,
       openedUnderAccountKey: null,
+      purpose: null,
     },
     sessionId,
   );
@@ -299,6 +308,7 @@ export interface PersistableTabLike {
   reasoningEffort?: string | null;
   agentId?: string | null;
   openedUnderAccountKey?: string | null;
+  purpose?: unknown;
 }
 
 function sameSessionRef(
@@ -338,6 +348,7 @@ export function samePersistableTab(
     nullableString(left.agentId) === nullableString(right.agentId) &&
     nullableString(left.openedUnderAccountKey) ===
       nullableString(right.openedUnderAccountKey) &&
+    persistedPurpose(left.purpose) === persistedPurpose(right.purpose) &&
     sameSessionRef(left.sessionRef, right.sessionRef)
   );
 }
@@ -376,6 +387,7 @@ export function projectPersistedChat(input: unknown): PersistedChatDocument {
       reasoningEffort: tab.reasoningEffort,
       agentId: tab.agentId,
       openedUnderAccountKey: tab.openedUnderAccountKey,
+      purpose: tab.purpose,
     })),
   };
 }

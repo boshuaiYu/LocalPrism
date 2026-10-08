@@ -773,6 +773,7 @@ export function useClaudeEvents() {
               tabId,
               preserveTabProvider: true,
               displayPrompt: queuedGuidance.displayPrompt,
+              skipAmbientContext: queuedGuidance.skipAmbientContext === true,
             });
           return;
         }
@@ -843,6 +844,7 @@ export function useClaudeEvents() {
             tabId,
             preserveTabProvider: true,
             displayPrompt: queuedGuidance.displayPrompt,
+            skipAmbientContext: queuedGuidance.skipAmbientContext === true,
           });
         return;
       }
@@ -1000,6 +1002,7 @@ export function useClaudeEvents() {
               tabId,
               preserveTabProvider: true,
               displayPrompt: queuedGuidance.displayPrompt,
+              skipAmbientContext: queuedGuidance.skipAmbientContext === true,
             });
           return;
         }

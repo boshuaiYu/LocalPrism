@@ -27,6 +27,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { meaningfulChatTitle } from "@/lib/chat-tab-title";
+import { LATEX_LEARN_PURPOSE } from "@/lib/latex-learn-tab";
 import { createLogger } from "@/lib/debug/logger";
 import {
   loadDismissedForeignSessionKeys,
@@ -185,12 +186,17 @@ export function displayConversationTitle(
   conversation: Pick<RuntimeConversation, "title" | "reference">,
   tabs: readonly TabState[],
   placeholder: string,
+  learnTitle?: string,
 ): string {
-  const sanitized = meaningfulChatTitle(conversation.title);
-  if (sanitized) return sanitized;
   const matchingTab = tabs.find((tab) =>
     sameConversation(tabConversationReference(tab), conversation.reference),
   );
+  const localizedLearnTitle = learnTitle?.trim();
+  if (matchingTab?.purpose === LATEX_LEARN_PURPOSE && localizedLearnTitle) {
+    return localizedLearnTitle;
+  }
+  const sanitized = meaningfulChatTitle(conversation.title);
+  if (sanitized) return sanitized;
   return (
     meaningfulChatTitle(firstUserLineFromMessages(matchingTab?.messages)) ??
     placeholder
@@ -497,7 +503,12 @@ export function SessionSelector() {
     const query = searchQuery.trim().toLowerCase();
     const decorated = conversations.map((conversation) => ({
       conversation,
-      title: displayConversationTitle(conversation, tabs, t("chat.newChat")),
+      title: displayConversationTitle(
+        conversation,
+        tabs,
+        t("chat.newChat"),
+        t("teach.sessionTitle"),
+      ),
     }));
     if (!query) return decorated;
     return decorated.filter(({ title }) => title.toLowerCase().includes(query));
@@ -625,7 +636,12 @@ export function SessionSelector() {
     ? conversationKey(deleteTarget.reference)
     : null;
   const deleteDisplayTitle = deleteTarget
-    ? displayConversationTitle(deleteTarget, tabs, t("chat.newChat"))
+    ? displayConversationTitle(
+        deleteTarget,
+        tabs,
+        t("chat.newChat"),
+        t("teach.sessionTitle"),
+      )
     : "this session";
 
   const renderConversation = (
