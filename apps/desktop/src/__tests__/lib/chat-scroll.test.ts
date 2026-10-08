@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  CHAT_SCROLL_JUMP_BUTTON_PX,
+  CHAT_SCROLL_JUMP_GUTTER_FLOOR_PX,
   CHAT_SCROLL_JUMP_INSET_PX,
+  chatScrollJumpContentInsetPx,
   chatScrollJumpRightPx,
   scrollbarGutterPx,
   transcriptHasContentBelow,
@@ -57,8 +60,28 @@ describe("chat scroll jump placement", () => {
     expect(scrollbarGutterPx(10, 30)).toBe(0);
     expect(scrollbarGutterPx(Number.NaN, 30)).toBe(0);
     expect(chatScrollJumpRightPx(17)).toBe(29);
-    expect(chatScrollJumpRightPx(0)).toBe(12);
-    expect(chatScrollJumpRightPx(-4)).toBe(12);
-    expect(chatScrollJumpRightPx(Number.NaN)).toBe(12);
+    expect(chatScrollJumpRightPx(0)).toBe(
+      CHAT_SCROLL_JUMP_GUTTER_FLOOR_PX + 12,
+    );
+    expect(chatScrollJumpRightPx(0)).toBe(24);
+    expect(chatScrollJumpRightPx(-4)).toBe(24);
+    expect(chatScrollJumpRightPx(Number.NaN)).toBe(24);
+  });
+
+  it("always reserves a text lane that clears the control, including a zero gutter", () => {
+    for (const gutter of [0, 8, 15, 17]) {
+      const right = chatScrollJumpRightPx(gutter);
+      const inset = chatScrollJumpContentInsetPx(gutter);
+      const measured = gutter > 0 ? gutter : 0;
+      const buttonLeftFromContentEdge =
+        right + CHAT_SCROLL_JUMP_BUTTON_PX - measured;
+      expect(inset, String(gutter)).toBeGreaterThanOrEqual(
+        buttonLeftFromContentEdge + CHAT_SCROLL_JUMP_INSET_PX,
+      );
+    }
+    expect(chatScrollJumpContentInsetPx(0)).toBe(72);
+    expect(chatScrollJumpContentInsetPx(17)).toBe(60);
+    expect(chatScrollJumpContentInsetPx(17, 48)).toBe(72);
+    expect(chatScrollJumpContentInsetPx(17, 20)).toBe(60);
   });
 });

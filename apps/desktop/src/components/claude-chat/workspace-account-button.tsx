@@ -12,7 +12,7 @@ import { getProviderIconSrc } from "@/lib/provider-icons";
 import { useProviderStore } from "@/stores/provider-store";
 import { useI18n } from "@/lib/use-i18n";
 
-/** Visible chip text. Long model ids stay in the string so CSS can ellipsize them. */
+/** Visible chip text: provider, account, or `provider · account`. Never sliced. */
 export function workspaceAccountChipText(
   providerName: string | null | undefined,
   accountLabel: string | null | undefined,

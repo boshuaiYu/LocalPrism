@@ -29,6 +29,11 @@ import { tabsForProject } from "@/stores/chat-persistence";
 import { tabOpenedUnderOtherAccount } from "@/lib/provider-account";
 import { useI18n } from "@/lib/use-i18n";
 import { useProviderStore } from "@/stores/provider-store";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { SessionSelector } from "./session-selector";
 import {
   WorkspaceAccountButton,
@@ -177,16 +182,33 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
           : next,
       );
     };
-    readBar();
-    readText();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => {
+    let cancelled = false;
+    const refresh = () => {
+      if (cancelled) return;
       readBar();
       readText();
-    });
+    };
+    refresh();
+    const fonts = document.fonts;
+    if (fonts?.ready) {
+      void fonts.ready.then(refresh);
+    }
+    const onFontsDone = () => refresh();
+    fonts?.addEventListener?.("loadingdone", onFontsDone);
+    if (typeof ResizeObserver === "undefined") {
+      return () => {
+        cancelled = true;
+        fonts?.removeEventListener?.("loadingdone", onFontsDone);
+      };
+    }
+    const observer = new ResizeObserver(refresh);
     observer.observe(node);
     if (measureRef.current) observer.observe(measureRef.current);
-    return () => observer.disconnect();
+    return () => {
+      cancelled = true;
+      fonts?.removeEventListener?.("loadingdone", onFontsDone);
+      observer.disconnect();
+    };
   }, [accountFull, accountProvider, learnLabel, leadingLabel]);
 
   // Scroll active tab into view when it changes
@@ -265,13 +287,26 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
         ref={measureRef}
         data-testid="chat-tab-measure"
         aria-hidden="true"
-        className="pointer-events-none absolute h-0 w-0 overflow-hidden whitespace-nowrap text-xs"
-        style={{ fontFamily: CHAT_STRIP_FONT_STACK }}
+        className="pointer-events-none absolute top-0 left-0 -z-10 whitespace-nowrap text-xs"
+        style={{
+          fontFamily: CHAT_STRIP_FONT_STACK,
+          visibility: "hidden",
+          width: "max-content",
+          height: "auto",
+        }}
       >
-        <span data-strip-measure="learn">{learnLabel}</span>
-        <span data-strip-measure="leading">{leadingLabel}</span>
-        <span data-strip-measure="accountFull">{accountFull}</span>
-        <span data-strip-measure="accountProvider">{accountProvider}</span>
+        <span className="inline-block" data-strip-measure="learn">
+          {learnLabel}
+        </span>
+        <span className="inline-block" data-strip-measure="leading">
+          {leadingLabel}
+        </span>
+        <span className="inline-block" data-strip-measure="accountFull">
+          {accountFull}
+        </span>
+        <span className="inline-block" data-strip-measure="accountProvider">
+          {accountProvider}
+        </span>
       </div>
       {/* Caption buttons occupy this band. The row below spans the panel. */}
       <div
@@ -287,7 +322,10 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
       >
         <div
           data-leading-label={strip.hideLeadingLabel ? "hidden" : "visible"}
-          className="shrink-0"
+          className={cn(
+            "shrink-0",
+            strip.hideLeadingLabel && "[&_span]:hidden",
+          )}
         >
           {leading}
         </div>
@@ -399,79 +437,86 @@ function TabButton({
 }) {
   const { t } = useI18n();
   return (
-    <button
-      type="button"
-      data-tab-id={tabId}
-      data-learn-tab={learn ? "true" : undefined}
-      title={title}
-      aria-label={
-        hasPendingApproval ? t("chat.needsApproval", { title }) : title
-      }
-      aria-busy={isLoadingHistory || undefined}
-      onClick={onClick}
-      style={{
-        ...(minWidth > 0 ? { minWidth } : {}),
-        ...(maxWidth ? { maxWidth } : {}),
-      }}
-      className={cn(
-        "group relative flex h-full shrink-0 items-center gap-1.5 overflow-hidden border-b-2 px-3.5 text-xs transition-colors",
-        learn ? "whitespace-nowrap" : "w-max max-w-full",
-        isActive
-          ? "border-primary/80 bg-muted/40 text-foreground"
-          : "border-transparent text-muted-foreground hover:bg-muted/25 hover:text-foreground",
-      )}
-    >
-      {learn ? (
-        <BookOpenIcon
-          data-testid="chat-tab-learn-icon"
-          className="size-3.5 shrink-0 text-muted-foreground"
-        />
-      ) : null}
-      {(isStreaming || hasPendingApproval || isLoadingHistory) && (
-        <span
-          className="relative flex size-2 shrink-0"
-          data-testid={
-            hasPendingApproval
-              ? "tab-approval-indicator"
-              : isStreaming
-                ? "tab-streaming-indicator"
-                : "tab-history-indicator"
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          data-tab-id={tabId}
+          data-learn-tab={learn ? "true" : undefined}
+          data-full-title={title}
+          aria-label={
+            hasPendingApproval ? t("chat.needsApproval", { title }) : title
           }
+          aria-busy={isLoadingHistory || undefined}
+          onClick={onClick}
+          style={{
+            ...(minWidth > 0 ? { minWidth } : {}),
+            ...(maxWidth ? { maxWidth } : {}),
+          }}
+          className={cn(
+            "group relative flex h-full shrink-0 items-center gap-1.5 overflow-hidden border-b-2 px-3.5 text-xs transition-colors",
+            learn ? "whitespace-nowrap" : "w-max max-w-full",
+            isActive
+              ? "border-primary/80 bg-muted/40 text-foreground"
+              : "border-transparent text-muted-foreground hover:bg-muted/25 hover:text-foreground",
+          )}
         >
+          {learn ? (
+            <BookOpenIcon
+              data-testid="chat-tab-learn-icon"
+              className="size-3.5 shrink-0 text-muted-foreground"
+            />
+          ) : null}
+          {(isStreaming || hasPendingApproval || isLoadingHistory) && (
+            <span
+              className="relative flex size-2 shrink-0"
+              data-testid={
+                hasPendingApproval
+                  ? "tab-approval-indicator"
+                  : isStreaming
+                    ? "tab-streaming-indicator"
+                    : "tab-history-indicator"
+              }
+            >
+              <span
+                className={cn(
+                  "absolute inline-flex size-full animate-ping rounded-full",
+                  hasPendingApproval ? "bg-amber-500/70" : "bg-primary/60",
+                )}
+              />
+              <span
+                className={cn(
+                  "relative inline-flex size-2 rounded-full",
+                  hasPendingApproval ? "bg-amber-500" : "bg-primary",
+                )}
+              />
+            </span>
+          )}
           <span
-            className={cn(
-              "absolute inline-flex size-full animate-ping rounded-full",
-              hasPendingApproval ? "bg-amber-500/70" : "bg-primary/60",
-            )}
-          />
-          <span
-            className={cn(
-              "relative inline-flex size-2 rounded-full",
-              hasPendingApproval ? "bg-amber-500" : "bg-primary",
-            )}
-          />
-        </span>
-      )}
-      <span
-        data-testid="chat-tab-title"
-        className={learn ? "shrink-0" : "min-w-0 truncate"}
-      >
-        {title}
-      </span>
-      {/* Close stays available for a session opened under another account.
+            data-testid="chat-tab-title"
+            className={learn ? "shrink-0" : "min-w-0 truncate"}
+          >
+            {title}
+          </span>
+          {/* Close stays available for a session opened under another account.
           It overlays the label so a short title is not ellipsized to make
           room for a control that is hidden until hover. */}
-      {(closableWhileBusy || (!isStreaming && !isStopping)) && (
-        <span
-          role="button"
-          tabIndex={-1}
-          aria-label={t("chat.closeTab")}
-          onClick={onClose}
-          className="absolute top-1/2 right-1 shrink-0 -translate-y-1/2 rounded-sm bg-background/80 p-0.5 opacity-0 transition-opacity hover:bg-muted-foreground/20 group-hover:opacity-100"
-        >
-          <XIcon className="size-3" />
-        </span>
-      )}
-    </button>
+          {(closableWhileBusy || (!isStreaming && !isStopping)) && (
+            <span
+              role="button"
+              tabIndex={-1}
+              aria-label={t("chat.closeTab")}
+              onClick={onClose}
+              className="absolute top-1/2 right-1 shrink-0 -translate-y-1/2 rounded-sm bg-background/80 p-0.5 opacity-0 transition-opacity hover:bg-muted-foreground/20 group-hover:opacity-100"
+            >
+              <XIcon className="size-3" />
+            </span>
+          )}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom" data-testid="chat-tab-tooltip">
+        {title}
+      </TooltipContent>
+    </Tooltip>
   );
 }

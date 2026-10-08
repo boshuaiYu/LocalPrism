@@ -42,7 +42,9 @@ import {
 } from "@/lib/chat-turn-settlement";
 import { canOfferCompression } from "@/lib/chat-compression";
 import {
+  CHAT_SCROLL_JUMP_BUTTON_PX,
   CHAT_SCROLL_JUMP_INSET_PX,
+  chatScrollJumpContentInsetPx,
   chatScrollJumpRightPx,
   scrollbarGutterPx,
   transcriptHasContentBelow,
@@ -243,6 +245,8 @@ export const ChatMessages: FC = () => {
   const appliedFollowEpochRef = useRef(0);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [scrollbarGutter, setScrollbarGutter] = useState(0);
+  const [jumpButtonPx, setJumpButtonPx] = useState(CHAT_SCROLL_JUMP_BUTTON_PX);
+  const jumpButtonRef = useRef<HTMLButtonElement>(null);
 
   // Build a map of tool_use_id → tool_result for inline display
   const toolResultMap = useMemo(() => {
@@ -338,6 +342,14 @@ export const ChatMessages: FC = () => {
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
+
+  useLayoutEffect(() => {
+    const button = jumpButtonRef.current;
+    if (!button) return;
+    const next = Math.ceil(button.getBoundingClientRect().width);
+    if (!Number.isFinite(next) || next <= jumpButtonPx) return;
+    setJumpButtonPx(next);
+  }, [showScrollToBottom, jumpButtonPx]);
 
   const contentBelow = (el: HTMLElement) =>
     transcriptHasContentBelow({
@@ -512,6 +524,12 @@ export const ChatMessages: FC = () => {
           onScroll={handleScroll}
           data-testid="chat-transcript"
           className="absolute inset-0 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden scroll-smooth px-5 pt-5 pb-2 [scrollbar-gutter:stable]"
+          style={{
+            paddingRight: chatScrollJumpContentInsetPx(
+              scrollbarGutter,
+              jumpButtonPx,
+            ),
+          }}
         >
           {settledMessages.length === 0 &&
             pendingGuidance.length === 0 &&
@@ -571,6 +589,7 @@ export const ChatMessages: FC = () => {
             variant="outline"
             size="icon"
             type="button"
+            ref={jumpButtonRef}
             data-testid="scroll-to-bottom"
             data-placement="bottom-end"
             className="absolute z-10 size-9 rounded-full border border-border/70 bg-background shadow-md"

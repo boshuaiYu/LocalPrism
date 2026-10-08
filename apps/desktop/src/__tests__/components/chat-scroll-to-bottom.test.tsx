@@ -3,6 +3,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatMessages } from "@/components/claude-chat/chat-messages";
 import {
+  chatScrollJumpContentInsetPx,
+  chatScrollJumpRightPx,
+} from "@/lib/chat-scroll";
+import {
   useClaudeChatStore,
   type ClaudeStreamMessage,
 } from "@/stores/claude-chat-store";
@@ -146,8 +150,12 @@ describe("chat scroll to bottom", () => {
     expect(button?.className).toContain("bg-background");
     expect(button?.className).toContain("shadow-md");
     expect(button?.className.split(/\s+/)).toContain("z-10");
-    expect(button?.style.right).toBe("12px");
+    expect(button?.style.right).toBe(`${chatScrollJumpRightPx(0)}px`);
+    expect(button?.style.right).toBe("24px");
     expect(button?.style.bottom).toBe("12px");
+    expect(transcript.style.paddingRight).toBe(
+      `${chatScrollJumpContentInsetPx(0)}px`,
+    );
     expect(button?.parentElement).toBe(frame);
     expect(transcript.contains(button!)).toBe(false);
     expect(transcript.className).toContain("[scrollbar-gutter:stable]");
@@ -163,6 +171,9 @@ describe("chat scroll to bottom", () => {
     expect(
       container.querySelector('[data-testid="scroll-to-bottom"]'),
     ).toBeNull();
+    expect(transcript.style.paddingRight).toBe(
+      `${chatScrollJumpContentInsetPx(0)}px`,
+    );
   });
 
   it("keeps the jump control inset from a classic scrollbar gutter", async () => {
@@ -200,6 +211,7 @@ describe("chat scroll to bottom", () => {
       );
       expect(button?.style.right).toBe("29px");
       expect(button?.style.bottom).toBe("12px");
+      expect(transcript.style.paddingRight).toBe("60px");
       expect(button?.parentElement).toBe(frame);
       expect(transcript.contains(button!)).toBe(false);
     } finally {

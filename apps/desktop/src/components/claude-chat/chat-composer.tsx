@@ -50,7 +50,18 @@ import {
   finishTemporaryChatAttachment,
   ownsChatAttachmentState,
 } from "@/lib/chat-attachment-commit";
-import { getProviderDisplayName } from "@/lib/provider-icons";
+import {
+  getProviderDisplayName,
+  getProviderIconSrc,
+} from "@/lib/provider-icons";
+import {
+  CHAT_STRIP_FONT_STACK,
+  measureChatStripCanvasPx,
+} from "@/lib/chat-tab-strip";
+import {
+  composerModelChipFullLabel,
+  composerModelChipPlan,
+} from "@/lib/composer-model-chip";
 import { getModelCapabilities } from "@/lib/model-capabilities";
 import {
   getSelectedCodexModel,
@@ -221,7 +232,7 @@ function ComposerModelChip({
   buttonRef,
   label,
   effortLabel,
-  modelId,
+  providerId,
   providerName,
   disabled,
   onClick,
@@ -229,35 +240,145 @@ function ComposerModelChip({
   buttonRef: RefObject<HTMLButtonElement | null>;
   label: string;
   effortLabel: string | null;
-  modelId: string;
+  providerId: string | null;
   providerName: string;
   disabled: boolean;
   onClick: () => void;
 }) {
-  return (
-    <button
-      ref={buttonRef}
-      type="button"
-      data-testid="composer-model-trigger"
-      onClick={onClick}
-      title={modelId}
-      aria-label={
-        effortLabel
-          ? `Switch model ${modelId}, ${effortLabel}`
-          : `Switch model ${modelId}`
+  const measureRef = useRef<HTMLDivElement>(null);
+  const [slotPx, setSlotPx] = useState(0);
+  const [textPx, setTextPx] = useState<{ model?: number; effort?: number }>({});
+  const fullLabel = composerModelChipFullLabel(label, effortLabel);
+  const iconSrc = getProviderIconSrc({
+    id: providerId,
+    label: providerName,
+  });
+  const form = composerModelChipPlan({
+    slotPx,
+    modelLabel: label,
+    effortLabel,
+    hasIcon: Boolean(iconSrc),
+    textPx,
+  });
+
+  useLayoutEffect(() => {
+    const slot = buttonRef.current?.parentElement;
+    if (!slot) return;
+    let cancelled = false;
+    const readSlot = () => {
+      const next = Math.round(
+        slot.clientWidth || slot.getBoundingClientRect().width || 0,
+      );
+      setSlotPx((prev) => (prev === next ? prev : next));
+    };
+    const readText = () => {
+      const root = measureRef.current;
+      const next: { model?: number; effort?: number } = {};
+      const assign = (
+        key: "model" | "effort",
+        value: string,
+        rendered?: number,
+      ) => {
+        const width = Math.max(rendered ?? 0, measureChatStripCanvasPx(value));
+        if (width > 0) next[key] = width;
+      };
+      if (root) {
+        for (const el of root.querySelectorAll<HTMLElement>(
+          "[data-model-measure]",
+        )) {
+          const key = el.dataset.modelMeasure;
+          if (key === "model" || key === "effort") {
+            assign(key, el.textContent ?? "", el.scrollWidth);
+          }
+        }
       }
-      disabled={disabled}
-      className="flex h-8 w-fit min-w-0 max-w-full shrink items-center gap-1.5 self-start overflow-hidden rounded-full border border-border/80 bg-background/70 px-2.5 text-foreground text-xs transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
-    >
-      <span className="min-w-0 truncate text-left">{label}</span>
-      {effortLabel ? (
-        <span className="shrink-0 text-muted-foreground/60">
-          · {effortLabel}
+      setTextPx((prev) =>
+        prev.model === next.model && prev.effort === next.effort ? prev : next,
+      );
+    };
+    const refresh = () => {
+      if (cancelled) return;
+      readSlot();
+      readText();
+    };
+    refresh();
+    const fonts = document.fonts;
+    if (fonts?.ready) void fonts.ready.then(refresh);
+    const onFontsDone = () => refresh();
+    fonts?.addEventListener?.("loadingdone", onFontsDone);
+    if (typeof ResizeObserver === "undefined") {
+      return () => {
+        cancelled = true;
+        fonts?.removeEventListener?.("loadingdone", onFontsDone);
+      };
+    }
+    const observer = new ResizeObserver(refresh);
+    observer.observe(slot);
+    if (measureRef.current) observer.observe(measureRef.current);
+    return () => {
+      cancelled = true;
+      fonts?.removeEventListener?.("loadingdone", onFontsDone);
+      observer.disconnect();
+    };
+  }, [buttonRef, label, effortLabel]);
+
+  return (
+    <>
+      <div
+        ref={measureRef}
+        aria-hidden="true"
+        className="pointer-events-none absolute top-0 left-0 -z-10 whitespace-nowrap text-xs"
+        style={{
+          fontFamily: CHAT_STRIP_FONT_STACK,
+          visibility: "hidden",
+          width: "max-content",
+          height: "auto",
+        }}
+      >
+        <span className="inline-block" data-model-measure="model">
+          {label}
         </span>
-      ) : null}
-      <span className="sr-only">{providerName}</span>
-      <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
-    </button>
+        {effortLabel ? (
+          <span className="inline-block" data-model-measure="effort">
+            {effortLabel}
+          </span>
+        ) : null}
+      </div>
+      <button
+        ref={buttonRef}
+        type="button"
+        data-testid="composer-model-trigger"
+        data-model-form={form}
+        onClick={onClick}
+        title={fullLabel}
+        aria-label={fullLabel ? `Switch model ${fullLabel}` : "Switch model"}
+        disabled={disabled}
+        className="flex h-8 w-fit shrink-0 items-center gap-1.5 self-start whitespace-nowrap rounded-full border border-border/80 bg-background/70 px-2.5 text-foreground text-xs transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+        style={{ fontFamily: CHAT_STRIP_FONT_STACK }}
+      >
+        {form === "icon" && iconSrc ? (
+          <img src={iconSrc} alt="" className="size-3.5 shrink-0" />
+        ) : null}
+        {form === "full" ? (
+          <span
+            data-testid="composer-model-name"
+            className="whitespace-nowrap text-left"
+          >
+            {label}
+          </span>
+        ) : null}
+        {effortLabel ? (
+          <span
+            data-testid="composer-model-effort"
+            className="shrink-0 whitespace-nowrap text-muted-foreground/60"
+          >
+            {form === "full" ? ` · ${effortLabel}` : effortLabel}
+          </span>
+        ) : null}
+        <span className="sr-only">{providerName}</span>
+        <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
+      </button>
+    </>
   );
 }
 
@@ -373,10 +494,10 @@ export const ChatComposer: FC<{
   const providerReady = useProviderStore((state) => state.ready);
   const engineInstalling = useClaudeSetupStore((state) => state.isInstalling);
   const providerModels = useProviderStore((state) => state.models);
-  const activeProviderName =
-    useProviderStore(
-      (state) => state.cards.find((card) => card.isActive)?.name,
-    ) ?? "Provider";
+  const activeProvider = useProviderStore((state) =>
+    state.cards.find((card) => card.isActive),
+  );
+  const activeProviderName = activeProvider?.name ?? "Provider";
   const claudeAvailable =
     claudeAccount.installed && claudeAccount.authenticated;
   // API peer needs Claude CLI installed (wire runtime) plus a credential;
@@ -1630,13 +1751,13 @@ export const ChatComposer: FC<{
               />
               <div
                 data-testid="composer-controls-model"
-                className="flex min-w-0 max-w-full flex-1 basis-0 overflow-hidden"
+                className="relative flex min-w-0 max-w-full flex-1 basis-0 overflow-hidden"
               >
                 <ComposerModelChip
                   buttonRef={modelButtonRef}
                   label={composerModelLabel}
                   effortLabel={composerEffortLabel}
-                  modelId={composerModelId}
+                  providerId={activeProvider?.id ?? null}
                   providerName={activeProviderName}
                   disabled={runtimeBusy}
                   onClick={() => setModelPickerOpen((open) => !open)}

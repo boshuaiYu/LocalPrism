@@ -34,6 +34,12 @@ import {
 } from "@/stores/provider-store";
 import { useSettingsStore } from "@/stores/settings-store";
 
+if (typeof globalThis.PointerEvent === "undefined") {
+  class PointerEventPolyfill extends MouseEvent {}
+  globalThis.PointerEvent =
+    PointerEventPolyfill as unknown as typeof PointerEvent;
+}
+
 function makeTab(
   id: string,
   title: string,
@@ -133,7 +139,10 @@ describe("ChatTabBar runtime badges", () => {
       totalInputTokens: activeTab.totalInputTokens,
       totalOutputTokens: activeTab.totalOutputTokens,
     });
-    await act(async () => root.render(<ChatTabBar leading={leading} />));
+    await act(async () => {
+      root.render(<ChatTabBar leading={leading} />);
+      await document.fonts?.ready;
+    });
   }
 
   it("clears caption buttons above the row instead of beside the label", async () => {
@@ -300,23 +309,24 @@ describe("ChatTabBar runtime badges", () => {
       makeTab("tab-old", "你好", "claude", true),
       makeTab("tab-new", "New Chat", "claude"),
     ]);
-    useApprovalStore.getState().enqueue({
-      requestId: "req-old",
-      method: "claude/can_use_tool",
-      runtime: "claude",
-      threadId: "thread-old",
-      turnId: "turn-old",
-      tabId: "tab-old",
-      agentRunId: null,
-      title: "PowerShell",
-      command: "Get-Location",
-      cwd: null,
-      diff: null,
-      permissions: null,
-      questions: [],
-      details: null,
+    await act(async () => {
+      useApprovalStore.getState().enqueue({
+        requestId: "req-old",
+        method: "claude/can_use_tool",
+        runtime: "claude",
+        threadId: "thread-old",
+        turnId: "turn-old",
+        tabId: "tab-old",
+        agentRunId: null,
+        title: "PowerShell",
+        command: "Get-Location",
+        cwd: null,
+        diff: null,
+        permissions: null,
+        questions: [],
+        details: null,
+      });
     });
-    await act(async () => root.render(<ChatTabBar />));
 
     const oldTab = tabButton(container, "tab-old");
     const newTab = tabButton(container, "tab-new");
@@ -335,18 +345,14 @@ describe("ChatTabBar runtime badges", () => {
     expect(accountHeaderChrome(0).utilities).toBe(true);
     expect(accountHeaderChrome(420).utilities).toBe(true);
     expect(accountHeaderChrome(419).utilities).toBe(false);
-    expect(accountHeaderChrome(234)).toMatchObject({
+    expect(accountHeaderChrome(234)).toEqual({
       utilities: false,
-      density: "full",
-      accountMin: "min-w-[10rem]",
+      hideLabel: false,
     });
-    expect(accountHeaderChrome(94)).toMatchObject({
+    expect(accountHeaderChrome(94)).toEqual({
       utilities: false,
       hideLabel: true,
-      density: "provider",
-      accountMin: "min-w-0",
     });
-    expect(accountHeaderChrome(234).accountMin).not.toContain("46%");
   });
 
   it("fills a blank or punctuation title from the first user message", async () => {
@@ -590,7 +596,7 @@ describe("ChatTabBar runtime badges", () => {
       expect(
         learn.querySelector("[data-testid='chat-tab-learn-icon']"),
       ).not.toBeNull();
-      expect(learn.getAttribute("title")).toBe("Learn LaTeX");
+      expect(learn.getAttribute("data-full-title")).toBe("Learn LaTeX");
       expect(
         learn.querySelector("[data-testid='chat-tab-title']")?.textContent,
       ).toBe("Learn LaTeX");
@@ -599,7 +605,28 @@ describe("ChatTabBar runtime badges", () => {
       ).not.toContain("truncate");
       expect(learn.className).toContain("whitespace-nowrap");
       expect(learn.className).not.toContain("max-w-[11rem]");
-      expect(writing.getAttribute("title")).toBe(writingTitle);
+      expect(writing.getAttribute("data-full-title")).toBe(writingTitle);
+      expect(writing.getAttribute("title")).toBeNull();
+      await act(async () => {
+        writing.dispatchEvent(
+          new PointerEvent("pointermove", {
+            bubbles: true,
+            pointerType: "mouse",
+          }),
+        );
+        await new Promise((resolve) => {
+          setTimeout(resolve, 0);
+        });
+      });
+      const tip = document.querySelector("[data-testid='chat-tab-tooltip']");
+      // Radix repeats the label in a visually hidden accessible tooltip.
+      expect(tip?.textContent).toContain(writingTitle);
+      expect(tip?.textContent).not.toContain("…");
+      expect(
+        container
+          .querySelector("[data-testid='chat-tab-scroller']")
+          ?.contains(tip),
+      ).toBe(false);
       expect(
         writing.querySelector("[data-testid='chat-tab-title']")?.textContent,
       ).toBe(writingTitle);
@@ -625,6 +652,23 @@ describe("ChatTabBar runtime badges", () => {
       expect(
         toolbar?.firstElementChild?.getAttribute("data-leading-label"),
       ).toBe("hidden");
+      expect(toolbar?.firstElementChild?.className).toContain(
+        "[&_span]:hidden",
+      );
+      const measure = container.querySelector(
+        "[data-testid='chat-tab-measure']",
+      );
+      expect(measure?.className).not.toContain("h-0");
+      expect(measure?.className).not.toContain("w-0");
+      expect(
+        measure instanceof HTMLElement ? measure.style.visibility : "",
+      ).toBe("hidden");
+      expect(measure instanceof HTMLElement ? measure.style.width : "").toBe(
+        "max-content",
+      );
+      expect(measure instanceof HTMLElement ? measure.style.height : "").toBe(
+        "auto",
+      );
       expect(toolbar?.querySelector("button")?.getAttribute("aria-label")).toBe(
         "Hide chat",
       );
@@ -663,9 +707,9 @@ describe("ChatTabBar runtime badges", () => {
           accountProvider: "DeepSeek",
         },
       });
-      expect(tabButton(container, "tab-learn").getAttribute("title")).toBe(
-        "边写边学",
-      );
+      expect(
+        tabButton(container, "tab-learn").getAttribute("data-full-title"),
+      ).toBe("边写边学");
       expect(
         tabButton(container, "tab-learn").querySelector(
           "[data-testid='chat-tab-title']",
