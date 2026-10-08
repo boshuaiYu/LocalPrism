@@ -545,7 +545,7 @@ describe("ChatTabBar runtime badges", () => {
         writing.querySelector("[data-testid='chat-tab-title']")?.textContent,
       ).toBe(writingTitle);
       expect(learn.style.minWidth).toBe("134px");
-      expect(writing.style.minWidth).toBe("92px");
+      expect(writing.style.minWidth).toBe("93px");
       expect(
         container.querySelector("[data-testid='chat-account-cluster']"),
       ).toHaveProperty("style.minWidth", "40px");
