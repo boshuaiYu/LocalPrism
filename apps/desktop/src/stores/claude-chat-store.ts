@@ -1234,6 +1234,13 @@ interface ClaudeChatState {
   tabs: TabState[];
   activeTabId: string;
   activeProjectPath: string | null;
+  /**
+   * User sends (composer, Ask AI, and queued continuations) bump this so the
+   * transcript follows that tab even if the reader had scrolled up, or the
+   * send landed in the same turn as a tab switch. Streaming tokens do not.
+   */
+  transcriptFollowTabId: string | null;
+  transcriptFollowNonce: number;
   /** Signed-in workspace account. Null when logged out. */
   activeAccountKey: string | null;
   /** True after the first authenticated account has been observed. */
@@ -1397,6 +1404,8 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
   tabs: [makeDefaultTab(DEFAULT_TAB_ID)],
   activeTabId: DEFAULT_TAB_ID,
   activeProjectPath: null,
+  transcriptFollowTabId: null,
+  transcriptFollowNonce: 0,
   activeAccountKey: null,
   accountObserved: false,
   noteActiveAccount: (accountKey) => {
@@ -1829,6 +1838,8 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       return {
         ...applyTabUpdate(s, activeTabId, tabUpdates),
         activeProjectPath: projectPath,
+        transcriptFollowTabId: activeTabId,
+        transcriptFollowNonce: s.transcriptFollowNonce + 1,
       };
     });
 
@@ -2060,7 +2071,11 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
             : {}),
         },
       ];
-      return applyTabUpdate(state, tabId, { queuedGuidance });
+      return {
+        ...applyTabUpdate(state, tabId, { queuedGuidance }),
+        transcriptFollowTabId: tabId,
+        transcriptFollowNonce: state.transcriptFollowNonce + 1,
+      };
     });
     if (!accepted) cleanupDiscardedTemporaryFiles(temporaryFilePaths);
   },
@@ -2108,12 +2123,24 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       const targetId = guidanceId ?? queue[0]?.id;
       if (!tab || !targetId || queue.length === 0) return {};
       displayedId = targetId;
-      return applyTabUpdate(state, tabId, {
-        queuedGuidance: queue.map((guidance) => ({
-          ...guidance,
-          displayedInChat: guidance.displayedInChat || guidance.id === targetId,
-        })),
-      });
+      const newlyShown = queue.some(
+        (guidance) => guidance.id === targetId && !guidance.displayedInChat,
+      );
+      return {
+        ...applyTabUpdate(state, tabId, {
+          queuedGuidance: queue.map((guidance) => ({
+            ...guidance,
+            displayedInChat:
+              guidance.displayedInChat || guidance.id === targetId,
+          })),
+        }),
+        ...(newlyShown
+          ? {
+              transcriptFollowTabId: tabId,
+              transcriptFollowNonce: state.transcriptFollowNonce + 1,
+            }
+          : {}),
+      };
     });
     return displayedId;
   },

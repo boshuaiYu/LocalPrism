@@ -500,6 +500,84 @@ describe("ChatTabBar runtime badges", () => {
     }
   });
 
+  it("keeps the writing chat beside the pinned learning tab", async () => {
+    const restore = installWidthObserver(307);
+    const previous = useSettingsStore.getState().uiLanguage;
+    useSettingsStore.setState({ uiLanguage: "en" });
+    try {
+      const writingTitle =
+        "Explain anything about this very long writing chat title";
+      await renderTabs([
+        makeTab("tab-write", writingTitle, "claude"),
+        {
+          ...makeTab("tab-learn", "请讲解这个结构", "claude"),
+          purpose: LATEX_LEARN_PURPOSE,
+          messages: [userText("请讲解这个结构")],
+        },
+      ]);
+
+      const scroller = container.querySelector(
+        "[data-testid='chat-tab-scroller']",
+      );
+      const learnSlot = container.querySelector(
+        "[data-testid='chat-tab-learn-slot']",
+      );
+      const writing = tabButton(container, "tab-write");
+      const learn = tabButton(container, "tab-learn");
+      const toolbar = container.querySelector(
+        "[data-testid='chat-tab-toolbar']",
+      );
+
+      expect(container.querySelectorAll("[data-tab-id]")).toHaveLength(2);
+      expect(scroller?.contains(writing)).toBe(true);
+      expect(scroller?.contains(learn)).toBe(false);
+      expect(learnSlot?.contains(learn)).toBe(true);
+      expect(
+        learn.querySelector("[data-testid='chat-tab-learn-icon']"),
+      ).not.toBeNull();
+      expect(learn.getAttribute("title")).toBe("Learn LaTeX");
+      expect(
+        learn.querySelector("[data-testid='chat-tab-title']")?.textContent,
+      ).toBe("Learn LaTeX");
+      expect(learn.className).not.toContain("max-w-[11rem]");
+      expect(writing.getAttribute("title")).toBe(writingTitle);
+      expect(
+        writing.querySelector("[data-testid='chat-tab-title']")?.textContent,
+      ).toBe(writingTitle);
+      expect(learn.style.minWidth).toBe("128px");
+      expect(writing.style.minWidth).toBe("92px");
+      expect(
+        container.querySelector("[data-testid='chat-account-cluster']"),
+      ).toHaveProperty("style.minWidth", "40px");
+      expect(toolbar?.firstElementChild?.className).toContain("sr-only");
+
+      await act(async () => learn.click());
+      expect(useClaudeChatStore.getState().activeTabId).toBe("tab-learn");
+      expect(tabButton(container, "tab-write").isConnected).toBe(true);
+      expect(tabButton(container, "tab-learn").isConnected).toBe(true);
+
+      await act(async () => tabButton(container, "tab-write").click());
+      expect(useClaudeChatStore.getState().activeTabId).toBe("tab-write");
+      expect(tabButton(container, "tab-learn").isConnected).toBe(true);
+      expect(container.querySelectorAll("[data-tab-id]")).toHaveLength(2);
+
+      await act(async () => {
+        useSettingsStore.setState({ uiLanguage: "zh" });
+      });
+      expect(tabButton(container, "tab-learn").getAttribute("title")).toBe(
+        "边写边学",
+      );
+      expect(
+        tabButton(container, "tab-learn").querySelector(
+          "[data-testid='chat-tab-title']",
+        )?.textContent,
+      ).toBe("边写边学");
+    } finally {
+      useSettingsStore.setState({ uiLanguage: previous });
+      restore();
+    }
+  });
+
   it("shows a close control on the last idle tab", async () => {
     await renderTabs([makeTab("tab-only", "Literature review", "claude")]);
 

@@ -29,6 +29,29 @@ export function releaseSelectionLessonForToolbar(state: {
   }
 }
 
+/**
+ * A selection echo after Explain must not close the card that click just
+ * opened. Focusing the toolbar used to make CodeMirror report the same
+ * range again, and that report dismissed the new lesson before paint.
+ * A different range still releases so Proofread can use the selection.
+ */
+export function shouldReleaseSelectionLesson(input: {
+  open: boolean;
+  sourceKey: string | null;
+  heldSelectionKey: string | null;
+  selectionKey: string;
+}): boolean {
+  if (!input.open || !isSelectionTeachSource(input.sourceKey)) return false;
+  if (
+    input.heldSelectionKey &&
+    input.heldSelectionKey === input.sourceKey &&
+    input.heldSelectionKey === input.selectionKey
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export function selectionExplainAction(input: {
   teachingEnabled: boolean;
   isTex: boolean;

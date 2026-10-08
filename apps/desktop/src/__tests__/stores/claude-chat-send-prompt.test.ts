@@ -1011,3 +1011,58 @@ describe("useClaudeChatStore.resumeSession", () => {
     expect(tab?.usageFromPreviousTurn).toBe(false);
   });
 });
+
+describe("transcript follow on user sends", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetClaudeChatStore();
+    setMockDocumentState();
+  });
+
+  it("bumps follow for a send and a queued continuation, not for streamed tokens", async () => {
+    useClaudeChatStore.setState({
+      transcriptFollowNonce: 0,
+      transcriptFollowTabId: null,
+    });
+    await useClaudeChatStore
+      .getState()
+      .sendPrompt("Explain the section", undefined, {
+        tabId: "tab-default",
+        skipAmbientContext: true,
+      });
+    expect(useClaudeChatStore.getState().transcriptFollowTabId).toBe(
+      "tab-default",
+    );
+    expect(useClaudeChatStore.getState().transcriptFollowNonce).toBe(1);
+
+    useClaudeChatStore.getState()._appendMessage("tab-default", {
+      type: "assistant",
+      message: { content: [{ type: "text", text: "still streaming" }] },
+    });
+    expect(useClaudeChatStore.getState().transcriptFollowNonce).toBe(1);
+
+    useClaudeChatStore
+      .getState()
+      .queueGuidance(
+        "tab-default",
+        "Explain the next construct",
+        undefined,
+        undefined,
+        {
+          skipAmbientContext: true,
+        },
+      );
+    expect(useClaudeChatStore.getState().transcriptFollowNonce).toBe(2);
+
+    const queuedId =
+      useClaudeChatStore.getState().tabs[0]?.queuedGuidance?.[0]?.id;
+    useClaudeChatStore
+      .getState()
+      .displayQueuedGuidanceInChat("tab-default", queuedId);
+    expect(useClaudeChatStore.getState().transcriptFollowNonce).toBe(3);
+    useClaudeChatStore
+      .getState()
+      .displayQueuedGuidanceInChat("tab-default", queuedId);
+    expect(useClaudeChatStore.getState().transcriptFollowNonce).toBe(3);
+  });
+});
