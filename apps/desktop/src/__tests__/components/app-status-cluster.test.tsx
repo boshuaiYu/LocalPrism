@@ -81,8 +81,12 @@ describe("AppStatusBar tour anchor", () => {
     expect(row?.className).toContain("overflow-x-hidden");
     expect(row?.className).not.toMatch(/(^|\s)flex-col(\s|$)/);
     expect(row?.className).toContain("@max-[13.75rem]/status:flex-col");
-    expect(version?.className).toContain("truncate");
-    expect(version?.className).not.toContain("shrink-0");
+    const cluster = container.querySelector(
+      '[data-testid="app-status-version"]',
+    );
+    expect(cluster?.getAttribute("data-layout")).toBe("inline");
+    expect(version?.className).not.toContain("truncate");
+    expect(version?.className).toContain("whitespace-nowrap");
     expect(version?.getAttribute("title")).toContain("LocalPrism");
     expect(actions?.className).toContain("ml-auto");
     expect(actions?.className).toContain("shrink-0");

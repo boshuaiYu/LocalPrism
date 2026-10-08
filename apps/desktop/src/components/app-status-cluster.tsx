@@ -1,9 +1,20 @@
-import { useEffect, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { RefreshCwIcon } from "lucide-react";
 import { LanguageSwitch } from "@/components/language-switch";
 import { Button } from "@/components/ui/button";
 import { classifyUpdateError } from "@/lib/update-policy";
+import {
+  STATUS_NOTICE_BUTTON_PAD_PX,
+  planStatusVersionNotice,
+  statusLabelMeasurementPx,
+} from "@/lib/status-bar-layout";
 import { UpdateAvailableDialog } from "@/components/update-available-dialog";
 import { useI18n } from "@/lib/use-i18n";
 import { cn } from "@/lib/utils";
@@ -127,6 +138,70 @@ export function AppStatusBar({
       classifyUpdateError(status.message) === "missing-platform");
 
   const versionLabel = `LocalPrism${version ? ` v${version}` : ""}`;
+  const noticeLabel = notice?.label ?? "";
+  const noticeChromePx = noticeInteractive ? STATUS_NOTICE_BUTTON_PAD_PX : 0;
+  const clusterRef = useRef<HTMLDivElement>(null);
+  const measureRef = useRef<HTMLDivElement>(null);
+  const [clusterPx, setClusterPx] = useState(0);
+  const [measuredVersionPx, setMeasuredVersionPx] = useState<
+    number | undefined
+  >();
+  const [measuredNoticePx, setMeasuredNoticePx] = useState<
+    number | undefined
+  >();
+
+  useLayoutEffect(() => {
+    const cluster = clusterRef.current;
+    let cancelled = false;
+    const read = () => {
+      if (cancelled) return;
+      const nextWidth = elementContentWidth(cluster);
+      setClusterPx((prev) => (prev === nextWidth ? prev : nextWidth));
+      const root = measureRef.current;
+      const versionNode = root?.querySelector<HTMLElement>(
+        '[data-status-measure="version"]',
+      );
+      const noticeNode = root?.querySelector<HTMLElement>(
+        '[data-status-measure="notice"]',
+      );
+      const nextVersion = statusLabelMeasurementPx(
+        versionLabel,
+        renderedLabelPx(versionNode),
+      );
+      const nextNotice = noticeLabel
+        ? statusLabelMeasurementPx(noticeLabel, renderedLabelPx(noticeNode))
+        : undefined;
+      setMeasuredVersionPx((prev) =>
+        prev === nextVersion ? prev : nextVersion,
+      );
+      setMeasuredNoticePx((prev) => (prev === nextNotice ? prev : nextNotice));
+    };
+    read();
+    const fonts = document.fonts;
+    const onFonts = () => read();
+    if (fonts?.ready) void fonts.ready.then(onFonts);
+    fonts?.addEventListener?.("loadingdone", onFonts);
+    let observer: ResizeObserver | null = null;
+    if (cluster && typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(read);
+      observer.observe(cluster);
+    }
+    return () => {
+      cancelled = true;
+      fonts?.removeEventListener?.("loadingdone", onFonts);
+      observer?.disconnect();
+    };
+  }, [noticeLabel, versionLabel]);
+
+  const versionPlan = planStatusVersionNotice({
+    availablePx: clusterPx,
+    versionLabel,
+    noticeLabel,
+    noticeChromePx,
+    measuredVersionPx,
+    measuredNoticePx,
+  });
+  const stacked = versionPlan.layout === "stacked";
 
   return (
     <div
@@ -137,25 +212,53 @@ export function AppStatusBar({
         className,
       )}
     >
-      {/* One row until the pane is narrower than the fixed controls
-          (language, Beta, refresh, trailing chrome ≈ 13.75rem). Version
-          text truncates. Stacking only below that keeps those controls
-          from being clipped on a narrow sidebar. */}
+      {/* Controls stay on one row until the pane is narrower than the
+          fixed actions (language, Beta, refresh, trailing chrome ≈
+          13.75rem). The version and the update hint share the text row
+          only when both strings fit; otherwise the hint takes the next
+          line. Neither label is ellipsized. */}
       <div
         data-testid="app-status-bar-row"
         className={cn(
-          "flex min-h-9 w-full min-w-0 items-center gap-1.5 overflow-x-hidden px-2 py-1",
+          "relative flex min-h-9 w-full min-w-0 items-center gap-1.5 overflow-x-hidden px-2 py-1",
           "@max-[13.75rem]/status:flex-col @max-[13.75rem]/status:items-stretch @max-[13.75rem]/status:gap-1 @max-[13.75rem]/status:px-1.5",
         )}
       >
         <div
+          ref={measureRef}
+          data-testid="app-status-measure"
+          aria-hidden="true"
+          className="pointer-events-none absolute top-0 left-0 -z-10 h-0 overflow-hidden whitespace-nowrap"
+        >
+          <span
+            className="inline-block"
+            data-status-measure="version"
+            style={{ width: "max-content" }}
+          >
+            {versionLabel}
+          </span>
+          {noticeLabel ? (
+            <span
+              className="inline-block"
+              data-status-measure="notice"
+              style={{ width: "max-content" }}
+            >
+              {noticeLabel}
+            </span>
+          ) : null}
+        </div>
+        <div
+          ref={clusterRef}
+          data-testid="app-status-version"
+          data-layout={versionPlan.layout}
           className={cn(
-            "flex min-w-0 flex-1 items-center gap-1.5",
+            "flex min-w-0 flex-1",
+            stacked ? "flex-col items-stretch gap-0.5" : "items-center gap-1.5",
             "@max-[13.75rem]/status:w-full @max-[13.75rem]/status:flex-none",
           )}
         >
           <span
-            className="min-w-0 truncate"
+            className={footerLabelClass(versionPlan.versionFits, stacked)}
             data-testid="app-version"
             title={versionLabel}
           >
@@ -167,7 +270,8 @@ export function AppStatusBar({
                 type="button"
                 data-testid="update-flash"
                 className={cn(
-                  "min-w-0 truncate rounded px-1 text-left text-foreground hover:bg-muted/70",
+                  footerLabelClass(versionPlan.noticeFits, stacked),
+                  "rounded px-1 text-left text-foreground hover:bg-muted/70",
                   blink && "lp-update-flash",
                 )}
                 title={notice.title}
@@ -179,7 +283,8 @@ export function AppStatusBar({
               <span
                 data-testid="update-flash"
                 className={cn(
-                  "min-w-0 truncate text-foreground",
+                  footerLabelClass(versionPlan.noticeFits, stacked),
+                  "text-foreground",
                   blink && "lp-update-flash",
                 )}
                 title={notice.title}
@@ -240,6 +345,30 @@ export function AppStatusBar({
       <UpdateAvailableDialog />
     </div>
   );
+}
+
+function elementContentWidth(node: HTMLElement | null): number {
+  if (!node) return 0;
+  const width = node.clientWidth || node.getBoundingClientRect().width || 0;
+  if (!Number.isFinite(width) || width <= 0) return 0;
+  return Math.round(width);
+}
+
+function renderedLabelPx(
+  node: HTMLElement | null | undefined,
+): number | undefined {
+  if (!node) return undefined;
+  const width = Math.max(node.scrollWidth, node.getBoundingClientRect().width);
+  if (!Number.isFinite(width) || width <= 0) return undefined;
+  return width;
+}
+
+/** One line when the string fits the cluster. Otherwise wrap the whole label. */
+function footerLabelClass(fitsLine: boolean, stacked: boolean): string {
+  if (!fitsLine) return "min-w-0 max-w-full break-words";
+  return stacked
+    ? "shrink-0 self-start whitespace-nowrap"
+    : "shrink-0 whitespace-nowrap";
 }
 
 function flashCopy(
