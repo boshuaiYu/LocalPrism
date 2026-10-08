@@ -1,7 +1,14 @@
-import { act, type ComponentType, type ReactNode } from "react";
+import {
+  act,
+  type ComponentType,
+  type ReactNode,
+  useEffect,
+  useState,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApprovalDialog } from "@/components/approvals/approval-dialog";
 import { ChatComposer } from "@/components/claude-chat/chat-composer";
 import * as runtimeSelectorModule from "@/components/runtime/runtime-selector";
 import {
@@ -13,7 +20,9 @@ import {
   matchesConversationReference,
   normalizeReasoningEffort,
 } from "@/components/runtime/runtime-selector";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { SearchPanel } from "@/components/workspace/editor/search-panel";
 import {
   composerModelChipChevronPx,
   composerModelChipPlan,
@@ -26,7 +35,9 @@ import type {
   RuntimeKind,
   RuntimeConversation,
   RuntimeModel,
+  RuntimeRequest,
 } from "@/runtime/types";
+import { useApprovalStore } from "@/stores/approval-store";
 import {
   CLAUDE_CODE_PROVIDER_ID,
   useClaudeChatStore,
@@ -452,6 +463,51 @@ async function mountSelector(
       resetProviderStoreForTests();
     },
   };
+}
+
+function escapeKey(): KeyboardEvent {
+  return new KeyboardEvent("keydown", {
+    key: "Escape",
+    bubbles: true,
+    cancelable: true,
+  });
+}
+
+function ComposerWithSearch() {
+  const [open, setOpen] = useState(true);
+  return (
+    <>
+      <ChatComposer />
+      {open ? (
+        <SearchPanel
+          searchQuery=""
+          onSearchQueryChange={() => {}}
+          onClose={() => setOpen(false)}
+          onFindNext={() => {}}
+          onFindPrevious={() => {}}
+          matchCount={0}
+          currentMatch={0}
+        />
+      ) : null}
+    </>
+  );
+}
+
+function ComposerWithDialog({ revealDialog }: { revealDialog: boolean }) {
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (revealDialog) setOpen(true);
+  }, [revealDialog]);
+  return (
+    <>
+      <ChatComposer />
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent aria-describedby={undefined}>
+          <DialogTitle>Update available</DialogTitle>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
 }
 
 function buttonByLabel(
@@ -981,33 +1037,37 @@ describe("ChatComposer provider wiring", () => {
       if (!(field instanceof HTMLTextAreaElement)) {
         throw new Error("Composer field not found");
       }
+      expect(trigger.getAttribute("aria-haspopup")).toBe("dialog");
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
       const before = selection();
 
       await act(async () => trigger.click());
       expect(
         document.querySelector('[aria-label="Runtime controls"]'),
       ).toBeTruthy();
+      expect(trigger.getAttribute("aria-expanded")).toBe("true");
+      const fromChip = escapeKey();
       await act(async () => {
-        trigger.dispatchEvent(
-          new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
-        );
+        trigger.dispatchEvent(fromChip);
       });
+      expect(fromChip.defaultPrevented).toBe(true);
       expect(
         document.querySelector('[aria-label="Runtime controls"]'),
       ).toBeNull();
       expect(selection()).toEqual(before);
       expect(document.activeElement).toBe(trigger);
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
 
       await act(async () => trigger.click());
       expect(
         document.querySelector('[aria-label="Runtime controls"]'),
       ).toBeTruthy();
+      const fromField = escapeKey();
       await act(async () => {
         field.focus();
-        field.dispatchEvent(
-          new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
-        );
+        field.dispatchEvent(fromField);
       });
+      expect(fromField.defaultPrevented).toBe(true);
       expect(
         document.querySelector('[aria-label="Runtime controls"]'),
       ).toBeNull();
@@ -1022,6 +1082,409 @@ describe("ChatComposer provider wiring", () => {
       useClaudeSetupStore.setState(setupSnapshot, true);
       useDocumentStore.setState(documentSnapshot, true);
       useRuntimeStore.setState(runtimeSnapshot, true);
+    }
+  });
+
+  function mountLayeredComposer(tabId: string, isStreaming = false) {
+    const chatSnapshot = useClaudeChatStore.getState();
+    const setupSnapshot = useClaudeSetupStore.getState();
+    const documentSnapshot = useDocumentStore.getState();
+    const runtimeSnapshot = useRuntimeStore.getState();
+    const baseTab = chatSnapshot.tabs[0];
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const OriginalResizeObserver = globalThis.ResizeObserver;
+    class NoopResizeObserver {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    globalThis.ResizeObserver =
+      NoopResizeObserver as unknown as typeof ResizeObserver;
+    vi.mocked(invoke).mockResolvedValue([] as never);
+    seedClaudeProvider();
+    useDocumentStore.setState({ projectRoot: "C:/project" });
+    useClaudeSetupStore.setState({
+      status: "ready",
+      providerKind: "claude-code",
+      claudeProviderConfigured: true,
+      openAiCredentials: [],
+      activeOpenAiCredentialId: null,
+    });
+    useRuntimeStore.setState({
+      accounts: {
+        claude: runtimeAccount("claude", true),
+        codex: runtimeAccount("codex", true),
+      },
+      models: { claude: [], codex: [] },
+      loading: {},
+      login: {},
+    });
+    useClaudeChatStore.setState({
+      tabs: [
+        {
+          ...baseTab,
+          id: tabId,
+          projectPath: "C:/project",
+          runtime: "claude",
+          chatPeer: "claude",
+          runtimeModel: "opus",
+          reasoningEffort: "high",
+          providerKey: null,
+        },
+      ],
+      activeTabId: tabId,
+      activeProjectPath: "C:/project",
+      selectedModel: "opus",
+      effortLevel: "high",
+      selectedProviderCredentialId: CLAUDE_CODE_PROVIDER_ID,
+      selectedProviderModels: {},
+      messages: [],
+      sessionId: null,
+      isStreaming,
+    });
+    (
+      globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+
+    const selection = () => {
+      const state = useClaudeChatStore.getState();
+      const tab = state.tabs.find((item) => item.id === tabId);
+      return {
+        runtimeModel: tab?.runtimeModel,
+        reasoningEffort: tab?.reasoningEffort,
+        selectedModel: state.selectedModel,
+        effortLevel: state.effortLevel,
+      };
+    };
+
+    return {
+      container,
+      selection,
+      async paint(node: ReactNode) {
+        await act(async () => {
+          root.render(<TooltipProvider>{node}</TooltipProvider>);
+          await Promise.resolve();
+        });
+      },
+      async cleanup() {
+        globalThis.ResizeObserver = OriginalResizeObserver;
+        await act(async () => root.unmount());
+        container.remove();
+        resetProviderStoreForTests();
+        useClaudeChatStore.setState(chatSnapshot, true);
+        useClaudeSetupStore.setState(setupSnapshot, true);
+        useDocumentStore.setState(documentSnapshot, true);
+        useRuntimeStore.setState(runtimeSnapshot, true);
+      },
+    };
+  }
+
+  it("lets the slash picker consume Escape while the model menu stays open", async () => {
+    const view = mountLayeredComposer("tab-slash");
+    try {
+      await view.paint(<ChatComposer />);
+      const trigger = view.container.querySelector(
+        '[data-testid="composer-model-trigger"]',
+      );
+      const field = view.container.querySelector("textarea");
+      if (!(trigger instanceof HTMLButtonElement)) {
+        throw new Error("Composer model trigger not found");
+      }
+      if (!(field instanceof HTMLTextAreaElement)) {
+        throw new Error("Composer field not found");
+      }
+      const before = view.selection();
+      await act(async () => trigger.click());
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeTruthy();
+      const setValue = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        "value",
+      )?.set;
+      setValue?.call(field, "/");
+      await act(async () => {
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+        await Promise.resolve();
+      });
+      expect(
+        document.querySelector('[aria-label="Close command picker"]'),
+      ).toBeTruthy();
+      await act(async () => {
+        field.focus();
+        field.dispatchEvent(escapeKey());
+      });
+      expect(
+        document.querySelector('[aria-label="Close command picker"]'),
+      ).toBeNull();
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeTruthy();
+      expect(view.selection()).toEqual(before);
+      expect(document.activeElement).toBe(field);
+      expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("lets editor search consume Escape without closing the model menu", async () => {
+    const view = mountLayeredComposer("tab-search");
+    try {
+      await view.paint(<ComposerWithSearch />);
+      const trigger = view.container.querySelector(
+        '[data-testid="composer-model-trigger"]',
+      );
+      const search = view.container.querySelector(
+        'input[placeholder="Search..."]',
+      );
+      if (!(trigger instanceof HTMLButtonElement)) {
+        throw new Error("Composer model trigger not found");
+      }
+      if (!(search instanceof HTMLInputElement)) {
+        throw new Error("Editor search input not found");
+      }
+      const before = view.selection();
+      await act(async () => trigger.click());
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeTruthy();
+      await act(async () => {
+        search.focus();
+        search.dispatchEvent(escapeKey());
+      });
+      expect(
+        view.container.querySelector('input[placeholder="Search..."]'),
+      ).toBeNull();
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeTruthy();
+      expect(view.selection()).toEqual(before);
+      expect(document.activeElement).not.toBe(trigger);
+      expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("lets an open dialog consume Escape without closing the model menu", async () => {
+    const view = mountLayeredComposer("tab-dialog");
+    let revealDialog = false;
+    try {
+      await view.paint(<ComposerWithDialog revealDialog={revealDialog} />);
+      const trigger = view.container.querySelector(
+        '[data-testid="composer-model-trigger"]',
+      );
+      if (!(trigger instanceof HTMLButtonElement)) {
+        throw new Error("Composer model trigger not found");
+      }
+      const before = view.selection();
+      await act(async () => trigger.click());
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeTruthy();
+      revealDialog = true;
+      await view.paint(<ComposerWithDialog revealDialog={revealDialog} />);
+      const dialog = document.querySelector('[data-slot="dialog-content"]');
+      if (!(dialog instanceof HTMLElement)) {
+        throw new Error("Dialog content not found");
+      }
+      expect(dialog.getAttribute("data-state")).toBe("open");
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeTruthy();
+      dialog.focus();
+      await act(async () => {
+        dialog.dispatchEvent(escapeKey());
+      });
+      expect(
+        document.querySelector(
+          '[data-slot="dialog-content"][data-state="open"]',
+        ),
+      ).toBeNull();
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeTruthy();
+      expect(view.selection()).toEqual(before);
+      expect(document.activeElement).not.toBe(trigger);
+      expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("closes the model menu on Escape while a pending approval stays open", async () => {
+    useApprovalStore.getState().reset();
+    const view = mountLayeredComposer("tab-approval");
+    const request: RuntimeRequest = {
+      requestId: "req-approval",
+      method: "claude/can_use_tool",
+      runtime: "claude",
+      threadId: "tab-approval-thread",
+      turnId: "tab-approval-turn",
+      tabId: "tab-approval",
+      agentRunId: null,
+      title: "Allow Bash?",
+      command: "pwd",
+      cwd: null,
+      diff: null,
+      permissions: null,
+      questions: [],
+      details: null,
+    };
+    useApprovalStore.getState().enqueue(request);
+    try {
+      await view.paint(
+        <>
+          <ChatComposer />
+          <ApprovalDialog />
+        </>,
+      );
+      const trigger = view.container.querySelector(
+        '[data-testid="composer-model-trigger"]',
+      );
+      const approval = view.container.querySelector(
+        '[data-testid="approval-dialog"]',
+      );
+      if (!(trigger instanceof HTMLButtonElement)) {
+        throw new Error("Composer model trigger not found");
+      }
+      if (!(approval instanceof HTMLElement)) {
+        throw new Error("Approval dialog not found");
+      }
+      expect(approval.getAttribute("aria-modal")).toBe("true");
+      const before = view.selection();
+      await act(async () => trigger.click());
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeTruthy();
+      await act(async () => {
+        trigger.focus();
+        trigger.dispatchEvent(escapeKey());
+      });
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeNull();
+      expect(
+        view.container.querySelector('[data-testid="approval-dialog"]'),
+      ).toBe(approval);
+      expect(useApprovalStore.getState().pending).toHaveProperty(
+        "s:req-approval",
+      );
+      expect(view.selection()).toEqual(before);
+      expect(document.activeElement).toBe(trigger);
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    } finally {
+      await view.cleanup();
+      useApprovalStore.getState().reset();
+    }
+  });
+
+  it("closes the model menu on Escape from the chip while a mention list stays open", async () => {
+    const view = mountLayeredComposer("tab-mention");
+    useDocumentStore.setState({
+      files: [
+        {
+          id: "notes.tex",
+          name: "notes.tex",
+          relativePath: "notes.tex",
+          absolutePath: "C:/project/notes.tex",
+          type: "tex",
+          content: "",
+          isDirty: false,
+        },
+      ],
+    });
+    try {
+      await view.paint(<ChatComposer />);
+      const trigger = view.container.querySelector(
+        '[data-testid="composer-model-trigger"]',
+      );
+      const field = view.container.querySelector("textarea");
+      if (!(trigger instanceof HTMLButtonElement)) {
+        throw new Error("Composer model trigger not found");
+      }
+      if (!(field instanceof HTMLTextAreaElement)) {
+        throw new Error("Composer field not found");
+      }
+      const setValue = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        "value",
+      )?.set;
+      setValue?.call(field, "@");
+      await act(async () => {
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+        await Promise.resolve();
+      });
+      const mention = () =>
+        Array.from(view.container.querySelectorAll("button")).find((button) =>
+          button.textContent?.includes("notes.tex"),
+        );
+      expect(mention()).toBeInstanceOf(HTMLButtonElement);
+      const before = view.selection();
+      await act(async () => trigger.click());
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeTruthy();
+      expect(mention()).toBeInstanceOf(HTMLButtonElement);
+      await act(async () => {
+        trigger.focus();
+        trigger.dispatchEvent(escapeKey());
+      });
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeNull();
+      expect(mention()).toBeInstanceOf(HTMLButtonElement);
+      expect(view.selection()).toEqual(before);
+      expect(document.activeElement).toBe(trigger);
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("shows the model tooltip while the chip is disabled", async () => {
+    const view = mountLayeredComposer("tab-streaming", true);
+    try {
+      await view.paint(<ChatComposer />);
+      const trigger = view.container.querySelector(
+        '[data-testid="composer-model-trigger"]',
+      );
+      const slot = view.container.querySelector(
+        "[data-testid='composer-controls-model']",
+      );
+      if (!(trigger instanceof HTMLButtonElement)) {
+        throw new Error("Composer model trigger not found");
+      }
+      expect(trigger.disabled).toBe(true);
+      expect(trigger.className).toContain("disabled:pointer-events-none");
+      expect(trigger.parentElement?.tagName).toBe("SPAN");
+      expect(trigger.getAttribute("aria-haspopup")).toBe("dialog");
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+      const wrapper = trigger.parentElement;
+      if (!(wrapper instanceof HTMLSpanElement)) {
+        throw new Error("Tooltip trigger span not found");
+      }
+      await act(async () => {
+        wrapper.dispatchEvent(
+          new PointerEvent("pointermove", {
+            bubbles: true,
+            pointerType: "mouse",
+          }),
+        );
+        await new Promise((resolve) => {
+          setTimeout(resolve, 0);
+        });
+      });
+      const tip = document.querySelector(
+        "[data-testid='composer-model-tooltip']",
+      );
+      expect(tip?.textContent).toContain("Opus · High");
+      expect(slot?.contains(tip)).toBe(false);
+    } finally {
+      await view.cleanup();
     }
   });
 

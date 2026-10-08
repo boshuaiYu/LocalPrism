@@ -241,6 +241,7 @@ function ComposerModelChip({
   providerId,
   providerName,
   disabled,
+  expanded,
   onClick,
 }: {
   buttonRef: RefObject<HTMLButtonElement | null>;
@@ -249,6 +250,7 @@ function ComposerModelChip({
   providerId: string | null;
   providerName: string;
   disabled: boolean;
+  expanded: boolean;
   onClick: () => void;
 }) {
   const measureRef = useRef<HTMLDivElement>(null);
@@ -268,7 +270,9 @@ function ComposerModelChip({
   });
 
   useLayoutEffect(() => {
-    const slot = buttonRef.current?.parentElement;
+    const slot = buttonRef.current?.closest(
+      "[data-testid='composer-controls-model']",
+    );
     if (!slot) return;
     let cancelled = false;
     const readSlot = () => {
@@ -352,44 +356,48 @@ function ComposerModelChip({
       </div>
       <Tooltip>
         <TooltipTrigger asChild>
-          <button
-            ref={buttonRef}
-            type="button"
-            data-testid="composer-model-trigger"
-            data-model-form={form}
-            onClick={onClick}
-            aria-label={
-              fullLabel ? `Switch model ${fullLabel}` : "Switch model"
-            }
-            disabled={disabled}
-            className="flex h-8 w-fit shrink-0 items-center gap-1.5 self-start whitespace-nowrap rounded-full border border-border/80 bg-background/70 px-2.5 text-foreground text-xs transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
-            style={{ fontFamily: CHAT_STRIP_FONT_STACK }}
-          >
-            {form === "icon" && iconSrc ? (
-              <img src={iconSrc} alt="" className="size-3.5 shrink-0" />
-            ) : null}
-            {form === "full" ? (
-              <span
-                data-testid="composer-model-name"
-                className="whitespace-nowrap text-left"
-              >
-                {label}
-              </span>
-            ) : null}
-            {effortLabel && form !== "chevron" ? (
-              <span
-                data-testid="composer-model-effort"
-                className="shrink-0 whitespace-nowrap text-muted-foreground/60"
-              >
-                {form === "full" ? ` · ${effortLabel}` : effortLabel}
-              </span>
-            ) : null}
-            <span className="sr-only">{providerName}</span>
-            <ChevronDownIcon
-              data-testid="composer-model-chevron"
-              className="size-3.5 shrink-0 text-muted-foreground"
-            />
-          </button>
+          <span className="inline-flex w-fit max-w-full shrink-0">
+            <button
+              ref={buttonRef}
+              type="button"
+              data-testid="composer-model-trigger"
+              data-model-form={form}
+              onClick={onClick}
+              aria-haspopup="dialog"
+              aria-expanded={expanded}
+              aria-label={
+                fullLabel ? `Switch model ${fullLabel}` : "Switch model"
+              }
+              disabled={disabled}
+              className="flex h-8 w-fit shrink-0 items-center gap-1.5 self-start whitespace-nowrap rounded-full border border-border/80 bg-background/70 px-2.5 text-foreground text-xs transition-colors hover:bg-muted disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50"
+              style={{ fontFamily: CHAT_STRIP_FONT_STACK }}
+            >
+              {form === "icon" && iconSrc ? (
+                <img src={iconSrc} alt="" className="size-3.5 shrink-0" />
+              ) : null}
+              {form === "full" ? (
+                <span
+                  data-testid="composer-model-name"
+                  className="whitespace-nowrap text-left"
+                >
+                  {label}
+                </span>
+              ) : null}
+              {effortLabel && form !== "chevron" ? (
+                <span
+                  data-testid="composer-model-effort"
+                  className="shrink-0 whitespace-nowrap text-muted-foreground/60"
+                >
+                  {form === "full" ? ` · ${effortLabel}` : effortLabel}
+                </span>
+              ) : null}
+              <span className="sr-only">{providerName}</span>
+              <ChevronDownIcon
+                data-testid="composer-model-chevron"
+                className="size-3.5 shrink-0 text-muted-foreground"
+              />
+            </button>
+          </span>
         </TooltipTrigger>
         <TooltipContent side="top" data-testid="composer-model-tooltip">
           {fullLabel}
@@ -1387,29 +1395,53 @@ export const ChatComposer: FC<{
     }
   }, [mentionIndex]);
 
-  // The menu is portaled and does not take focus, so a keydown listener on
-  // the menu never sees Escape. The composer field only consumes Escape for
-  // the slash and mention pickers. Listen on document, as the token meter
-  // and history menu do, and return focus to the chip without changing the
-  // selection. This close path predates the chip layout in #134.
+  // The menu is portaled and does not take focus, so Escape is handled here
+  // on the document bubble. Capture-phase Radix dialogs and the composer
+  // field's slash / mention handlers run first. A pending tool approval is
+  // only an overlay on the thread; it consumes Escape from its own keydown,
+  // which arrives here as defaultPrevented. One Escape closes only that top
+  // layer, and focus returns to the chip only when the key came from the
+  // chip, the menu, or the composer.
   useEffect(() => {
     if (!modelPickerOpen) return;
     const handleClickOutside = (e: MouseEvent) => {
       const target = e.target as Node;
+      const trigger =
+        modelButtonRef.current?.closest("[data-slot='tooltip-trigger']") ??
+        modelButtonRef.current;
       if (
         modelPickerRef.current &&
         !modelPickerRef.current.contains(target) &&
-        modelButtonRef.current &&
-        !modelButtonRef.current.contains(target)
+        trigger &&
+        !trigger.contains(target)
       ) {
         setModelPickerOpen(false);
       }
     };
     const handleEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      // The slash picker closes from a window listener. Mention only closes
+      // from the textarea, so an already-open list must not swallow Escape
+      // once focus has moved to the chip.
+      if (slashQuery !== null) return;
+      if (
+        document.querySelector(
+          '[data-slot="dialog-content"][data-state="open"]',
+        )
+      ) {
+        return;
+      }
       event.preventDefault();
       setModelPickerOpen(false);
-      modelButtonRef.current?.focus();
+      const target = event.target;
+      const restoreFocus =
+        target instanceof Node &&
+        Boolean(
+          modelButtonRef.current?.contains(target) ||
+            modelPickerRef.current?.contains(target) ||
+            composerRef.current?.contains(target),
+        );
+      if (restoreFocus) modelButtonRef.current?.focus();
     };
     document.addEventListener("mousedown", handleClickOutside);
     document.addEventListener("keydown", handleEscape);
@@ -1417,7 +1449,7 @@ export const ChatComposer: FC<{
       document.removeEventListener("mousedown", handleClickOutside);
       document.removeEventListener("keydown", handleEscape);
     };
-  }, [modelPickerOpen]);
+  }, [modelPickerOpen, slashQuery]);
 
   const composerCatalogModel =
     providerModels.find((model) => model.id === selectedRuntimeModelId) ??
@@ -1792,6 +1824,7 @@ export const ChatComposer: FC<{
                   providerId={activeProvider?.id ?? null}
                   providerName={activeProviderName}
                   disabled={runtimeBusy}
+                  expanded={modelPickerOpen}
                   onClick={() => setModelPickerOpen((open) => !open)}
                 />
               </div>
