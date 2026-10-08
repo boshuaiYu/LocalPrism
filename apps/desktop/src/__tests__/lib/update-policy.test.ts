@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   betaCandidatesFromGithub,
+  isPlaceholderReleaseNotes,
   betaManifestUrlForTag,
   chooseUpdateOffer,
   classifyUpdateError,
@@ -491,6 +492,22 @@ describe("beta update detection", () => {
   });
 });
 
+describe("isPlaceholderReleaseNotes", () => {
+  it("treats an empty body or the release title as not a changelog", () => {
+    expect(isPlaceholderReleaseNotes(undefined, "1.0.9")).toBe(true);
+    expect(isPlaceholderReleaseNotes("  ", "1.0.9")).toBe(true);
+    expect(isPlaceholderReleaseNotes("LocalPrism v1.0.9", "1.0.9")).toBe(true);
+    expect(isPlaceholderReleaseNotes("LocalPrism v1.0.9", "v1.0.9")).toBe(true);
+    expect(isPlaceholderReleaseNotes("localprism 1.0.9", "1.0.9")).toBe(true);
+    expect(isPlaceholderReleaseNotes("v1.0.9", "1.0.9")).toBe(true);
+    expect(isPlaceholderReleaseNotes("1.0.9", "1.0.9")).toBe(true);
+    expect(
+      isPlaceholderReleaseNotes("## What's Changed\n\n- fix", "1.0.9"),
+    ).toBe(false);
+    expect(isPlaceholderReleaseNotes("Stable notes", "1.0.9")).toBe(false);
+  });
+});
+
 describe("update channel offers", () => {
   const betas = betaCandidatesFromGithub([
     {
@@ -556,6 +573,29 @@ describe("update channel offers", () => {
       action: "download",
       version: "1.3.0",
       notes: "newer stable",
+    });
+  });
+
+  it("offers 1.0.9beta2 over stable 1.0.9 when that beta is in the list", () => {
+    const loaded = betaCandidatesFromGithub([
+      {
+        tag_name: "v1.0.9beta2",
+        prerelease: true,
+        draft: false,
+        body: "## What's Changed\n\n- beta fix",
+      },
+    ]);
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.8",
+        stable: { version: "1.0.9", notes: "LocalPrism v1.0.9" },
+        betas: loaded,
+        allowPrerelease: true,
+      }),
+    ).toMatchObject({
+      action: "confirm",
+      version: "1.0.9beta2",
+      notes: "## What's Changed\n\n- beta fix",
     });
   });
 });

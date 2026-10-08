@@ -61,9 +61,13 @@ export function AppStatusBar({
   const version = useAppVersion();
   const { t } = useI18n();
   const status = useUpdateStore((state) => state.status);
+  const dismissedOffer = useUpdateStore((state) => state.dismissedOffer);
   const checkForUpdate = useUpdateStore((state) => state.checkForUpdate);
   const applyUpdate = useUpdateStore((state) => state.applyUpdate);
   const openReleases = useUpdateStore((state) => state.openReleases);
+  const reopenDismissedOffer = useUpdateStore(
+    (state) => state.reopenDismissedOffer,
+  );
   const joinBeta = useSettingsStore((state) => state.joinBetaChannel);
   const setJoinBetaChannel = useSettingsStore(
     (state) => state.setJoinBetaChannel,
@@ -80,10 +84,29 @@ export function AppStatusBar({
     ensureUpdateCheck();
   }, []);
 
-  const mode = noticeMode(status);
-  const notice = mode === "hidden" ? null : flashCopy(status, t);
+  const dismissedHint = status.state === "idle" ? dismissedOffer : null;
+  const mode = dismissedHint ? "blink" : noticeMode(status);
+  const notice = dismissedHint
+    ? flashCopy(
+        {
+          state: dismissedHint.kind,
+          version: dismissedHint.version,
+          currentVersion: dismissedHint.currentVersion,
+          notes: dismissedHint.notes,
+          notesState: dismissedHint.notesState,
+          channel: dismissedHint.channel,
+        },
+        t,
+      )
+    : mode === "hidden"
+      ? null
+      : flashCopy(status, t);
   const blink = mode === "blink";
   const onNotice = () => {
+    if (dismissedHint) {
+      reopenDismissedOffer();
+      return;
+    }
     if (status.state === "ready") {
       void applyUpdate();
       return;
@@ -97,6 +120,7 @@ export function AppStatusBar({
     }
   };
   const noticeInteractive =
+    dismissedHint !== null ||
     status.state === "ready" ||
     status.state === "manual" ||
     (status.state === "error" &&
@@ -287,7 +311,10 @@ function flashCopy(
         title: t("updates.flashCurrent"),
       };
     case "error":
-      if (status.phase === "install" && status.message.trim()) {
+      if (
+        (status.phase === "install" || status.phase === "download") &&
+        status.message.trim()
+      ) {
         return { label: status.message, title: status.message };
       }
       return classifyUpdateError(status.message) === "missing-platform"

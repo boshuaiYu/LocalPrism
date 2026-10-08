@@ -2,6 +2,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { check } from "@tauri-apps/plugin-updater";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useLogStore } from "@/lib/debug/log-store";
 import { STABLE_UPDATER_ENDPOINT } from "@/lib/update-policy";
 import { useSettingsStore } from "@/stores/settings-store";
 import {
@@ -421,5 +422,166 @@ describe("update store check", () => {
 
     expect(stable.download).not.toHaveBeenCalled();
     expect(useUpdateStore.getState().status).toEqual({ state: "up-to-date" });
+  });
+
+  it("offers 1.0.9beta2 when Beta is on and the release list loads", async () => {
+    const stable = stableRelease("1.0.9");
+    useSettingsStore.setState({ joinBetaChannel: true });
+    vi.mocked(getVersion).mockResolvedValue("1.0.8");
+    vi.mocked(check).mockResolvedValue(stable as never);
+    stubReleases([betaRelease("v1.0.9beta2")]);
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+
+    expect(useUpdateStore.getState().status).toMatchObject({
+      state: "confirm",
+      version: "1.0.9beta2",
+      channel: "beta",
+    });
+    expect(stable.download).not.toHaveBeenCalled();
+  });
+
+  it("logs a stable fallback when the beta release list is rate limited", async () => {
+    const stable = stableRelease("1.0.9");
+    useSettingsStore.setState({ joinBetaChannel: true });
+    vi.mocked(getVersion).mockResolvedValue("1.0.8");
+    vi.mocked(check).mockResolvedValue(stable as never);
+    useLogStore.getState().clear();
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === "fetch_github_releases") {
+        throw new Error("GitHub releases request failed (403 Forbidden).");
+      }
+      return invokeUpdateCommand(command);
+    });
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+
+    expect(useUpdateStore.getState().status).toMatchObject({
+      state: "confirm",
+      version: "1.0.9",
+      channel: "stable",
+    });
+    expect(stable.download).not.toHaveBeenCalled();
+    const warning = useLogStore
+      .getState()
+      .getEntries()
+      .find(
+        (entry) =>
+          entry.level === "warn" &&
+          entry.message ===
+            "Beta release list hit the GitHub API rate limit; offering the stable update instead",
+      );
+    expect(warning?.data).toMatchObject({
+      rateLimited: true,
+      offeredStable: true,
+      offeredVersion: "1.0.9",
+    });
+  });
+
+  it("keeps a cancelled update in the footer without downloading", async () => {
+    const first = stableRelease("1.1.0");
+    const second = stableRelease("1.1.0");
+    vi.mocked(getVersion).mockResolvedValue("1.0.0");
+    vi.mocked(check)
+      .mockResolvedValueOnce(first as never)
+      .mockResolvedValueOnce(second as never);
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: false });
+    useUpdateStore.getState().dismissOfferDialog();
+
+    expect(useUpdateStore.getState().status).toEqual({ state: "idle" });
+    expect(useUpdateStore.getState().dismissedOffer).toMatchObject({
+      kind: "confirm",
+      version: "1.1.0",
+      channel: "stable",
+    });
+    expect(first.download).not.toHaveBeenCalled();
+    expect(first.close).not.toHaveBeenCalled();
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: false });
+    expect(useUpdateStore.getState().status).toEqual({ state: "idle" });
+    expect(useUpdateStore.getState().dismissedOffer).toMatchObject({
+      version: "1.1.0",
+    });
+    expect(second.close).toHaveBeenCalled();
+    expect(first.close).not.toHaveBeenCalled();
+    expect(first.download).not.toHaveBeenCalled();
+
+    useUpdateStore.getState().reopenDismissedOffer();
+    expect(useUpdateStore.getState().status).toMatchObject({
+      state: "confirm",
+      version: "1.1.0",
+    });
+    expect(first.download).not.toHaveBeenCalled();
+
+    await useUpdateStore.getState().confirmDownload();
+    expect(first.download).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a prepared update when an explicit check runs in the ready state", async () => {
+    const stable = stableRelease("1.1.0");
+    vi.mocked(getVersion).mockResolvedValue("1.0.0");
+    vi.mocked(check).mockResolvedValue(stable as never);
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+    await useUpdateStore.getState().confirmDownload();
+    expect(useUpdateStore.getState().status.state).toBe("ready");
+    useUpdateStore.getState().dismissOfferDialog();
+    expect(useUpdateStore.getState().offerDialogHidden).toBe(true);
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+
+    expect(vi.mocked(check).mock.calls).toHaveLength(1);
+    expect(stable.close).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalledWith("clear_prepared_update");
+    expect(useUpdateStore.getState().offerDialogHidden).toBe(false);
+    expect(useUpdateStore.getState().status).toMatchObject({
+      state: "ready",
+      version: "1.1.0",
+    });
+  });
+
+  it("keeps a prepared beta package when an explicit check runs again", async () => {
+    useSettingsStore.setState({ joinBetaChannel: true });
+    vi.mocked(getVersion).mockResolvedValue("1.0.8");
+    vi.mocked(check).mockResolvedValue(stableRelease("1.0.9") as never);
+    stubReleases([betaRelease("v1.0.9beta2")]);
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+    expect(useUpdateStore.getState().status).toMatchObject({
+      state: "confirm",
+      version: "1.0.9beta2",
+    });
+    await useUpdateStore.getState().confirmDownload();
+    expect(useUpdateStore.getState().status.state).toBe("ready");
+    useUpdateStore.getState().dismissOfferDialog();
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+
+    expect(invoke).not.toHaveBeenCalledWith("clear_prepared_update");
+    expect(useUpdateStore.getState().status).toMatchObject({
+      state: "ready",
+      version: "1.0.9beta2",
+    });
+    expect(useUpdateStore.getState().offerDialogHidden).toBe(false);
+  });
+
+  it("labels a download failure with the download phase", async () => {
+    const stable = stableRelease("1.1.0");
+    stable.download = vi.fn(async () => {
+      throw new Error("network dropped");
+    });
+    vi.mocked(getVersion).mockResolvedValue("1.0.0");
+    vi.mocked(check).mockResolvedValue(stable as never);
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+    await useUpdateStore.getState().confirmDownload();
+
+    expect(useUpdateStore.getState().status).toEqual({
+      state: "error",
+      message: "network dropped",
+      explicit: true,
+      phase: "download",
+    });
   });
 });

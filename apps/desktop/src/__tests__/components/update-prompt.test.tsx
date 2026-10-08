@@ -386,6 +386,27 @@ describe("AppStatusBar updates", () => {
     );
   });
 
+  it("shows a download failure instead of the check-failed label", async () => {
+    const update = updateFixture();
+    update.download = vi.fn(async () => {
+      throw new Error("network dropped");
+    });
+    vi.mocked(check).mockResolvedValue(update as never);
+
+    await renderBar();
+    const download = document.body.querySelector(
+      "[data-testid='update-dialog-download']",
+    );
+    await act(async () => {
+      if (download instanceof HTMLButtonElement) download.click();
+      await Promise.resolve();
+    });
+
+    const flash = container.querySelector("[data-testid='update-flash']");
+    expect(flash?.textContent).toBe("network dropped");
+    expect(flash?.textContent).not.toBe(translate("en", "updates.flashError"));
+  });
+
   it("keeps a failed update check on the check-failed label", async () => {
     vi.mocked(check).mockRejectedValue(new Error("signature mismatch"));
 

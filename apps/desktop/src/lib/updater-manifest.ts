@@ -141,6 +141,16 @@ function normalizeSignature(text: string | undefined): string {
   return (text ?? "").trim();
 }
 
+/** Changelog text for latest.json. Empty input keeps the historical title. */
+export function releaseNotesForUpdater(
+  notes: string | undefined,
+  tag: string,
+): string {
+  const text = (notes ?? "").replace(/\r\n/g, "\n").trim();
+  if (!text) return `LocalPrism ${tag}`;
+  return text;
+}
+
 export function updaterChannelForVersion(version: string): "stable" | "beta" {
   const trimmed = version.trim();
   if (/^v?\d+\.\d+\.\d+beta\d+$/i.test(trimmed) || trimmed.includes("-")) {
@@ -183,6 +193,8 @@ export function planUpdaterRelease(input: {
   tag: string;
   repository: string;
   pubDate: string;
+  /** GitHub release body or generated changelog. Omitted → release title. */
+  notes?: string;
 }): UpdaterReleaseResult {
   const tag = input.tag.trim();
   const repository = input.repository.trim();
@@ -286,7 +298,7 @@ export function planUpdaterRelease(input: {
     plan: {
       manifest: {
         version,
-        notes: `LocalPrism ${tag}`,
+        notes: releaseNotesForUpdater(input.notes, tag),
         pub_date: input.pubDate,
         channel,
         tag,

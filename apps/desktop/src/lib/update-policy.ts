@@ -228,6 +228,28 @@ export function releasePageUrl(version?: string): string {
   return `https://github.com/boshuaiYu/LocalPrism/releases/tag/v${trimmed}`;
 }
 
+/**
+ * True when updater notes are missing or only repeat the release title.
+ * Published latest.json used `LocalPrism v1.0.9`, which is not a changelog.
+ */
+export function isPlaceholderReleaseNotes(
+  notes: string | undefined,
+  version: string,
+): boolean {
+  const text = (notes ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return true;
+  const bare = version.trim().replace(/^v(?=\d)/i, "");
+  if (!bare) return false;
+  const folded = text.toLowerCase();
+  const titles = [
+    `localprism v${bare}`,
+    `localprism ${bare}`,
+    bare,
+    `v${bare}`,
+  ];
+  return titles.some((title) => title.toLowerCase() === folded);
+}
+
 export function betaManifestUrlForTag(tag: string): string | null {
   const trimmed = tag.trim();
   if (!SAFE_TAG_RE.test(trimmed) || trimmed === "latest") return null;

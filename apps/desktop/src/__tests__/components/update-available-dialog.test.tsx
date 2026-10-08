@@ -131,9 +131,20 @@ describe("UpdateAvailableDialog", () => {
     expect(update.download).not.toHaveBeenCalled();
   });
 
-  it("shows Chinese copy and a short fallback when notes are empty", async () => {
+  it("shows Chinese copy and a download-page line when notes cannot be loaded", async () => {
     useSettingsStore.setState({ uiLanguage: "zh" });
-    const update = updateFixture({ body: "   " });
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "fetch_github_release_body") {
+        throw new Error("GitHub release request failed (403 Forbidden).");
+      }
+      if (command === "fetch_github_releases") return githubReleases;
+      if (command === "update_install_channel") return "native";
+      if (command === "verify_bound_updater_manifest") return "1.2.0";
+      if (command === "clear_prepared_update") return undefined;
+      if (command === "js_log") return undefined;
+      return undefined;
+    });
+    const update = updateFixture({ body: "LocalPrism v1.2.0" });
     vi.mocked(check).mockResolvedValue(update as never);
 
     await renderBar();
@@ -152,8 +163,10 @@ describe("UpdateAvailableDialog", () => {
       offer?.querySelector("[data-testid='update-release-notes']"),
     ).toBeNull();
     expect(
-      offer?.querySelector("[data-testid='update-notes-empty']")?.textContent,
-    ).toBe(translate("zh", "updates.notesEmpty"));
+      offer?.querySelector("[data-testid='update-notes-unavailable']")
+        ?.textContent,
+    ).toBe(translate("zh", "updates.notesSeeDownloadPage"));
+    expect(offer?.textContent).not.toContain("LocalPrism v1.2.0");
     expect(
       offer?.querySelector("[data-testid='update-dialog-cancel']")?.textContent,
     ).toBe("取消");
@@ -398,5 +411,234 @@ describe("UpdateAvailableDialog", () => {
     expect(dialog()?.getAttribute("data-phase")).toBe("confirm");
     expect(dialog()?.textContent).toContain("1.2.0");
     expect(update.download).not.toHaveBeenCalled();
+  });
+
+  it("fills placeholder notes from the tagged GitHub release without blocking the dialog", async () => {
+    let resolveNotes: (body: string) => void = () => undefined;
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "fetch_github_release_body") {
+        return new Promise<string>((resolve) => {
+          resolveNotes = resolve;
+        });
+      }
+      if (command === "update_install_channel") return "native";
+      if (command === "verify_bound_updater_manifest") return "1.2.0";
+      if (command === "js_log") return undefined;
+      return undefined;
+    });
+    const update = updateFixture({ body: "LocalPrism v1.2.0" });
+    vi.mocked(check).mockResolvedValue(update as never);
+
+    await renderBar();
+
+    expect(dialog()?.getAttribute("data-phase")).toBe("confirm");
+    expect(
+      dialog()?.querySelector("[data-testid='update-notes-loading']"),
+    ).not.toBeNull();
+    expect(dialog()?.textContent).not.toContain("LocalPrism v1.2.0");
+    expect(
+      dialog()?.querySelector("[data-testid='update-release-notes']"),
+    ).toBeNull();
+
+    const callsBefore = vi
+      .mocked(invoke)
+      .mock.calls.filter(
+        ([command]) => command === "fetch_github_release_body",
+      ).length;
+    expect(callsBefore).toBe(1);
+
+    await act(async () => {
+      resolveNotes("## What's Changed\n\n- real changelog");
+      await Promise.resolve();
+    });
+
+    expect(
+      dialog()?.querySelector("[data-testid='update-release-notes'] li")
+        ?.textContent,
+    ).toContain("real changelog");
+
+    await act(async () => {
+      const cancel = dialog()?.querySelector(
+        "[data-testid='update-dialog-cancel']",
+      );
+      if (cancel instanceof HTMLButtonElement) cancel.click();
+    });
+    useUpdateStore.getState().reopenDismissedOffer();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      dialog()?.querySelector("[data-testid='update-release-notes']")
+        ?.textContent,
+    ).toContain("real changelog");
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.filter(
+          ([command]) => command === "fetch_github_release_body",
+        ),
+    ).toHaveLength(1);
+  });
+
+  it("shows the empty-notes line when the tagged release body is empty", async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "fetch_github_release_body") return "  ";
+      if (command === "update_install_channel") return "native";
+      if (command === "verify_bound_updater_manifest") return "1.2.0";
+      if (command === "js_log") return undefined;
+      return undefined;
+    });
+    vi.mocked(check).mockResolvedValue(updateFixture({ body: "" }) as never);
+
+    await renderBar();
+
+    expect(
+      dialog()?.querySelector("[data-testid='update-notes-empty']")
+        ?.textContent,
+    ).toBe(translate("en", "updates.notesEmpty"));
+  });
+
+  it("keeps http links, drops images, and wraps long notes", async () => {
+    const notes = [
+      "See [docs](https://example.com/a-very-long-release-note-url)",
+      "",
+      "[bad](javascript:alert(1))",
+      "",
+      "![hidden](https://example.com/secret.png)",
+      "",
+      "| Col | Value |",
+      "| --- | --- |",
+      "| one | wide-table-cell |",
+    ].join("\n");
+    vi.mocked(check).mockResolvedValue(updateFixture({ body: notes }) as never);
+
+    await renderBar();
+
+    const box = dialog()?.querySelector("[data-testid='update-release-notes']");
+    expect(box?.className).toMatch(/overflow-x-auto/);
+    expect(box?.className).toMatch(/break-words/);
+    expect(box?.querySelector("img")).toBeNull();
+    expect(box?.textContent).not.toContain("secret.png");
+    const table = box?.querySelector("[data-testid='update-notes-table']");
+    expect(table?.className).toMatch(/overflow-x-auto/);
+    expect(table?.querySelector("table")).not.toBeNull();
+
+    const links = [...(box?.querySelectorAll("a") ?? [])];
+    expect(
+      links.map((link) => link.getAttribute("href")).filter((href) => href),
+    ).toEqual(["https://example.com/a-very-long-release-note-url"]);
+    expect(box?.innerHTML ?? "").not.toMatch(/javascript:/i);
+    await act(async () => {
+      for (const link of links) {
+        if (link instanceof HTMLAnchorElement) link.click();
+      }
+      const bad = box?.querySelector("a[href^='javascript']");
+      if (bad instanceof HTMLAnchorElement) bad.click();
+    });
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(open).toHaveBeenCalledWith(
+      "https://example.com/a-very-long-release-note-url",
+    );
+    expect(open).not.toHaveBeenCalledWith(
+      expect.stringMatching(/^javascript:/i),
+    );
+  });
+
+  it("keeps a footer hint after Cancel and reopens the dialog from it", async () => {
+    const update = updateFixture();
+    vi.mocked(check).mockResolvedValue(update as never);
+    await renderBar();
+
+    await act(async () => {
+      const cancel = dialog()?.querySelector(
+        "[data-testid='update-dialog-cancel']",
+      );
+      if (cancel instanceof HTMLButtonElement) cancel.click();
+    });
+
+    const hint = container.querySelector("[data-testid='update-flash']");
+    expect(dialog()).toBeNull();
+    expect(hint).toBeInstanceOf(HTMLButtonElement);
+    expect(hint?.textContent).toBe(
+      translate("en", "updates.flashAvailable", { version: "1.2.0" }),
+    );
+    expect(update.download).not.toHaveBeenCalled();
+
+    useSettingsStore.setState({ uiLanguage: "zh" });
+    await act(async () => {
+      root.render(<AppStatusBar />);
+    });
+    const zhHint = container.querySelector("[data-testid='update-flash']");
+    expect(zhHint?.textContent).toBe(
+      translate("zh", "updates.flashAvailable", { version: "1.2.0" }),
+    );
+
+    const checks = vi.mocked(check).mock.calls.length;
+    await act(async () => {
+      if (zhHint instanceof HTMLButtonElement) zhHint.click();
+    });
+    expect(vi.mocked(check).mock.calls.length).toBe(checks);
+    expect(dialog()?.getAttribute("data-phase")).toBe("confirm");
+    expect(update.download).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await useUpdateStore.getState().checkForUpdate({ explicit: false });
+    });
+    expect(dialog()?.getAttribute("data-phase")).toBe("confirm");
+
+    await act(async () => {
+      const cancel = dialog()?.querySelector(
+        "[data-testid='update-dialog-cancel']",
+      );
+      if (cancel instanceof HTMLButtonElement) cancel.click();
+    });
+    await act(async () => {
+      await useUpdateStore.getState().checkForUpdate({ explicit: false });
+    });
+    expect(dialog()).toBeNull();
+    expect(
+      container.querySelector("[data-testid='update-flash']"),
+    ).toBeInstanceOf(HTMLButtonElement);
+    expect(update.download).not.toHaveBeenCalled();
+  });
+
+  it("reopens Restart for a prepared update instead of checking again", async () => {
+    const update = updateFixture();
+    vi.mocked(check).mockResolvedValue(update as never);
+    await renderBar();
+
+    await act(async () => {
+      const download = dialog()?.querySelector(
+        "[data-testid='update-dialog-download']",
+      );
+      if (download instanceof HTMLButtonElement) download.click();
+      await Promise.resolve();
+    });
+    expect(dialog()?.getAttribute("data-phase")).toBe("ready");
+
+    await act(async () => {
+      const close = dialog()?.querySelector(
+        "[data-testid='update-dialog-close']",
+      );
+      if (close instanceof HTMLButtonElement) close.click();
+    });
+    expect(dialog()).toBeNull();
+
+    const checks = vi.mocked(check).mock.calls.length;
+    const checkButton = container.querySelector(
+      "[data-testid='check-for-updates']",
+    );
+    await act(async () => {
+      if (checkButton instanceof HTMLButtonElement) checkButton.click();
+      await Promise.resolve();
+    });
+
+    expect(vi.mocked(check).mock.calls.length).toBe(checks);
+    expect(update.close).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalledWith("clear_prepared_update");
+    expect(dialog()?.getAttribute("data-phase")).toBe("ready");
+    expect(
+      dialog()?.querySelector("[data-testid='update-dialog-restart']"),
+    ).toBeInstanceOf(HTMLButtonElement);
   });
 });

@@ -13,21 +13,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { isOpenableChatHref, transformChatUrl } from "@/lib/chat-citations";
 import { isPrereleaseVersion } from "@/lib/update-policy";
 import { useI18n } from "@/lib/use-i18n";
 import { cn } from "@/lib/utils";
 import { useUpdateStore, type UpdateStatus } from "@/stores/update-store";
 
 const REMARK_PLUGINS = [remarkGfm];
-
-function isExternalHttpUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return url.protocol === "http:" || url.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
 
 /** Release-note links leave the webview and open in the system browser. */
 function ReleaseNoteLink({
@@ -37,8 +29,8 @@ function ReleaseNoteLink({
   href?: string;
   children?: ReactNode;
 }) {
-  const url = typeof href === "string" ? href.trim() : "";
-  const openable = isExternalHttpUrl(url);
+  const url = transformChatUrl(typeof href === "string" ? href : "");
+  const openable = isOpenableChatHref(url);
   const openLink = (event: { preventDefault: () => void }) => {
     event.preventDefault();
     if (!openable) return;
@@ -48,7 +40,7 @@ function ReleaseNoteLink({
     <a
       href={openable ? url : undefined}
       data-testid="update-release-link"
-      className="text-primary underline underline-offset-2"
+      className="break-all text-primary underline underline-offset-2"
       onClick={openLink}
       onAuxClick={openLink}
     >
@@ -88,6 +80,26 @@ const RELEASE_NOTE_COMPONENTS = {
       {children}
     </pre>
   ),
+  table: ({ children }: { children?: ReactNode }) => (
+    <div
+      data-testid="update-notes-table"
+      className="my-2 max-w-full overflow-x-auto"
+    >
+      <table className="w-max min-w-full border-collapse text-left">
+        {children}
+      </table>
+    </div>
+  ),
+  th: ({ children }: { children?: ReactNode }) => (
+    <th className="break-words border-border border-b px-2 py-1 font-medium">
+      {children}
+    </th>
+  ),
+  td: ({ children }: { children?: ReactNode }) => (
+    <td className="break-words border-border border-t px-2 py-1 align-top">
+      {children}
+    </td>
+  ),
 };
 
 function offerDialogOpen(status: UpdateStatus, hidden: boolean): boolean {
@@ -114,6 +126,7 @@ export function UpdateAvailableDialog() {
   const currentVersion =
     "currentVersion" in status ? status.currentVersion : "";
   const notes = "notes" in status ? status.notes?.trim() : "";
+  const notesState = "notesState" in status ? status.notesState : undefined;
   const channel = "channel" in status ? status.channel : "stable";
   const beta = channel === "beta" || isPrereleaseVersion(version);
   const percent = status.state === "downloading" ? status.percent : null;
@@ -208,13 +221,29 @@ export function UpdateAvailableDialog() {
             {t("updates.manual", { version })}
           </p>
         ) : null}
-        {notes ? (
+        {notesState === "loading" ? (
+          <div
+            data-testid="update-notes-loading"
+            aria-busy="true"
+            className="max-h-60 min-h-16 rounded-md border bg-muted/40"
+          />
+        ) : notesState === "unavailable" ? (
+          <p
+            data-testid="update-notes-unavailable"
+            className="text-muted-foreground text-sm"
+          >
+            {t("updates.notesSeeDownloadPage")}
+          </p>
+        ) : notes ? (
           <div
             data-testid="update-release-notes"
-            className="max-h-60 overflow-y-auto overscroll-contain rounded-md border bg-muted/40 px-3 py-2.5 text-sm"
+            className="max-h-60 overflow-x-auto overflow-y-auto overscroll-contain break-words rounded-md border bg-muted/40 px-3 py-2.5 text-sm [overflow-wrap:anywhere]"
           >
             <ReactMarkdown
               remarkPlugins={REMARK_PLUGINS}
+              urlTransform={transformChatUrl}
+              disallowedElements={["img"]}
+              unwrapDisallowed
               components={RELEASE_NOTE_COMPONENTS}
             >
               {notes}

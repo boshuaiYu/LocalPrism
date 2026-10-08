@@ -160,6 +160,50 @@ linux-x86_64 digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 `);
   });
 
+  it("puts the release changelog in notes without signing that text", () => {
+    const changelog = "## What's Changed\n\n- Show the real release notes";
+    const result = planUpdaterRelease({
+      files: signedTree(),
+      tag: "v1.0.9",
+      repository: "boshuaiYu/LocalPrism",
+      pubDate: "2026-10-08T00:00:00Z",
+      notes: changelog,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.manifest.notes).toBe(changelog);
+    expect(result.plan.manifest.channel).toBe("stable");
+    expect(result.plan.attestation).not.toContain("What's Changed");
+    expect(result.plan.attestation).toContain("version=1.0.9");
+
+    const beta = planUpdaterRelease({
+      files: signedTree(),
+      tag: "v1.0.9beta2",
+      repository: "boshuaiYu/LocalPrism",
+      pubDate: "2026-10-08T00:00:00Z",
+      notes: `  \n${changelog}\n`,
+    });
+    expect(beta.ok).toBe(true);
+    if (!beta.ok) return;
+    expect(beta.plan.manifest.notes).toBe(changelog);
+    expect(beta.plan.manifest.channel).toBe("beta");
+    expect(beta.plan.attestation).toContain("channel=beta");
+    expect(beta.plan.attestation).not.toContain("What's Changed");
+  });
+
+  it("keeps the release title when no changelog was collected", () => {
+    const result = planUpdaterRelease({
+      files: signedTree(),
+      tag: "v1.0.9",
+      repository: "boshuaiYu/LocalPrism",
+      pubDate: "2026-10-08T00:00:00Z",
+      notes: " \n ",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.manifest.notes).toBe("LocalPrism v1.0.9");
+  });
+
   it("marks compact and hyphenated versions as the beta channel", () => {
     const compact = planUpdaterRelease({
       files: signedTree(),

@@ -688,6 +688,76 @@ async fn fetch_github_releases() -> Result<serde_json::Value, String> {
     fetch_github_releases_list().await
 }
 
+fn github_release_tag(version: &str) -> Result<String, String> {
+    let trimmed = version.trim();
+    if trimmed.is_empty() {
+        return Err("Release tag is empty.".to_string());
+    }
+    let bare = trimmed
+        .strip_prefix('v')
+        .or_else(|| trimmed.strip_prefix('V'))
+        .unwrap_or(trimmed);
+    if bare.is_empty()
+        || !bare
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | '+'))
+    {
+        return Err("Release tag is not valid.".to_string());
+    }
+    Ok(format!("v{bare}"))
+}
+
+fn github_release_by_tag_url(version: &str) -> Result<String, String> {
+    let tag = github_release_tag(version)?;
+    Ok(format!(
+        "https://api.github.com/repos/boshuaiYu/LocalPrism/releases/tags/{tag}"
+    ))
+}
+
+/// Notes from one published tag. Error documents are not an empty changelog.
+fn parse_github_release_notes(body: &str) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|err| format!("GitHub release response was not JSON: {err}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "GitHub release response was not an object.".to_string())?;
+    if object.contains_key("message") && !object.contains_key("tag_name") {
+        let message = object
+            .get("message")
+            .and_then(|value| value.as_str())
+            .unwrap_or("GitHub release request failed.");
+        return Err(message.to_string());
+    }
+    match object.get("body") {
+        Some(serde_json::Value::String(text)) => Ok(text.clone()),
+        Some(serde_json::Value::Null) | None => Ok(String::new()),
+        Some(_) => Err("GitHub release body was not text.".to_string()),
+    }
+}
+
+async fn fetch_github_release_notes(tag: &str) -> Result<String, String> {
+    let url = github_release_by_tag_url(tag)?;
+    let client = updater_http_client()?;
+    let response = client
+        .get(url)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("GitHub release request failed ({status})."));
+    }
+    let body = response.text().await.map_err(|err| err.to_string())?;
+    parse_github_release_notes(&body)
+}
+
+/// One release body, fetched in the shell so the webview makes no GitHub call.
+#[tauri::command]
+async fn fetch_github_release_body(tag: String) -> Result<String, String> {
+    fetch_github_release_notes(&tag).await
+}
+
 /// Bind version/tag/URL before the updater runs. Compact tags still get a
 /// local semver gate. Other published manifests stay on their GitHub URL.
 async fn fetch_bound_manifest(
@@ -1018,6 +1088,7 @@ pub fn run() {
             download_manifest_update,
             verify_bound_updater_manifest,
             fetch_github_releases,
+            fetch_github_release_body,
             install_prepared_update,
             open_debug_window,
         ])
@@ -1219,6 +1290,40 @@ mod update_channel_tests {
             super::GITHUB_RELEASES_API,
             "https://api.github.com/repos/boshuaiYu/LocalPrism/releases?per_page=30"
         );
+    }
+
+    #[test]
+    fn github_release_notes_come_from_that_tag() {
+        assert_eq!(
+            super::github_release_by_tag_url("1.0.9").ok().as_deref(),
+            Some("https://api.github.com/repos/boshuaiYu/LocalPrism/releases/tags/v1.0.9")
+        );
+        assert_eq!(
+            super::github_release_by_tag_url("v1.0.9beta2")
+                .ok()
+                .as_deref(),
+            Some(
+                "https://api.github.com/repos/boshuaiYu/LocalPrism/releases/tags/v1.0.9beta2"
+            )
+        );
+        assert!(super::github_release_by_tag_url("v1.0.9/../evil").is_err());
+        assert!(super::github_release_by_tag_url("").is_err());
+        let notes = super::parse_github_release_notes(
+            r#"{"tag_name":"v1.0.9","body":"real changelog"}"#,
+        )
+        .expect("release notes");
+        assert_eq!(notes, "real changelog");
+        assert_eq!(
+            super::parse_github_release_notes(r#"{"tag_name":"v1.0.9","body":null}"#)
+                .ok()
+                .as_deref(),
+            Some("")
+        );
+        assert!(super::parse_github_release_notes(
+            r#"{"message":"API rate limit exceeded"}"#
+        )
+        .is_err());
+        assert!(super::parse_github_release_notes("[]").is_err());
     }
 
     #[test]

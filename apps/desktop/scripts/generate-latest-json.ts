@@ -110,6 +110,22 @@ export function writeSignedLatestManifest(input: {
   return manifest;
 }
 
+export function readUpdaterReleaseNotes(
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const file = env.UPDATER_RELEASE_NOTES_FILE?.trim();
+  if (file) {
+    try {
+      return readFileSync(file, "utf8");
+    } catch {
+      return undefined;
+    }
+  }
+  const inline = env.UPDATER_RELEASE_NOTES;
+  if (typeof inline !== "string") return undefined;
+  return inline.trim() ? inline : undefined;
+}
+
 export function generateLatestJson(
   argv: string[] = process.argv,
   env: NodeJS.ProcessEnv = process.env,
@@ -125,6 +141,7 @@ export function generateLatestJson(
     tag,
     repository,
     pubDate,
+    notes: readUpdaterReleaseNotes(env),
   });
 
   if (!result.ok) {
