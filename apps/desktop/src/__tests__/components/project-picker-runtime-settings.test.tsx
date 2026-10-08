@@ -212,6 +212,9 @@ describe("ProjectPicker runtime settings", () => {
     ).toBeNull();
     expect(header?.textContent).not.toContain("Settings");
     expect(container.querySelector("[data-testid='update-prompt']")).toBeNull();
+    expect(
+      document.body.querySelector("[data-testid='update-available-dialog']"),
+    ).toBeNull();
     expect(download).not.toHaveBeenCalled();
     expect(container.textContent).not.toContain("1.0.9-3");
 
@@ -236,7 +239,16 @@ describe("ProjectPicker runtime settings", () => {
     const flash = container.querySelector("[data-testid='update-flash']");
     expect(flash?.textContent).toContain("1.0.9-3");
     expect(flash?.className).toMatch(/lp-update-flash/);
-    expect(container.querySelector("[role='dialog']")).toBeNull();
+    const dialog = document.body.querySelector(
+      "[data-testid='update-available-dialog']",
+    );
+    expect(dialog?.getAttribute("data-channel")).toBe("beta");
+    expect(
+      dialog?.querySelector("[data-testid='update-beta-badge']"),
+    ).not.toBeNull();
+    expect(
+      dialog?.querySelector("[data-testid='update-dialog-download']"),
+    ).not.toBeNull();
   });
 
   it("opens Settings from the start page gear and from Ctrl+,", async () => {

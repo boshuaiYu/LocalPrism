@@ -25,25 +25,27 @@ import { useSettingsStore } from "@/stores/settings-store";
 
 const log = createLogger("updater");
 
+export type UpdateChannel = "stable" | "beta";
+
+interface UpdateOfferFields {
+  version: string;
+  currentVersion: string;
+  notes?: string;
+  channel: UpdateChannel;
+}
+
 export type UpdateStatus =
   | { state: "idle" }
   | { state: "checking"; explicit: boolean }
   | { state: "up-to-date" }
-  | {
-      state: "confirm";
-      version: string;
-      notes?: string;
-      channel: "beta";
-    }
-  | {
+  | ({ state: "confirm" } & UpdateOfferFields)
+  | ({
       state: "downloading";
-      version: string;
       percent: number | null;
-      notes?: string;
-    }
-  | { state: "ready"; version: string; notes?: string }
-  | { state: "manual"; version: string; notes?: string }
-  | { state: "installing"; version: string }
+    } & UpdateOfferFields)
+  | ({ state: "ready" } & UpdateOfferFields)
+  | ({ state: "manual" } & UpdateOfferFields)
+  | ({ state: "installing" } & UpdateOfferFields)
   | {
       state: "error";
       message: string;
@@ -55,10 +57,14 @@ export type UpdateStatus =
 interface UpdateStore {
   status: UpdateStatus;
   bannerDismissed: boolean;
+  /** Hides the offer dialog without discarding an in-progress download. */
+  offerDialogHidden: boolean;
   checkForUpdate: (options?: { explicit?: boolean }) => Promise<void>;
   confirmDownload: () => Promise<void>;
   applyUpdate: () => Promise<void>;
   dismissBanner: () => void;
+  /** Cancel, Esc, and the close button. Does not start a download. */
+  dismissOfferDialog: () => void;
   openReleases: () => Promise<void>;
 }
 
@@ -68,6 +74,8 @@ let preparedManifest = false;
 let autoCheckStarted = false;
 let checkLock: Promise<void> | null = null;
 let stopProgress: (() => void) | null = null;
+/** Versions the user cancelled. Automatic checks skip these until restart. */
+const sessionDismissedVersions = new Set<string>();
 
 function notesFrom(update: Update): string | undefined {
   const body = update.body?.trim();
@@ -100,20 +108,28 @@ function clearPreparedManifest() {
   void invoke("clear_prepared_update").catch(() => undefined);
 }
 
+type StoreSet = (
+  partial:
+    | Partial<UpdateStore>
+    | ((state: UpdateStore) => Partial<UpdateStore>),
+) => void;
+
+function downloadingStatus(
+  meta: UpdateOfferFields,
+  percent: number | null,
+): UpdateStatus {
+  return { state: "downloading", ...meta, percent };
+}
+
 async function downloadPending(
   update: Update,
-  set: (
-    partial:
-      | Partial<UpdateStore>
-      | ((state: UpdateStore) => Partial<UpdateStore>),
-  ) => void,
+  meta: UpdateOfferFields,
+  set: StoreSet,
 ) {
   let downloaded = 0;
   let contentLength = 0;
-  const notes = notesFrom(update);
-  const version = update.version;
   set({
-    status: { state: "downloading", version, percent: null, notes },
+    status: downloadingStatus(meta, null),
     bannerDismissed: false,
   });
 
@@ -121,12 +137,7 @@ async function downloadPending(
     if (event.event === "Started") {
       contentLength = event.data.contentLength ?? 0;
       set({
-        status: {
-          state: "downloading",
-          version,
-          percent: contentLength > 0 ? 0 : null,
-          notes,
-        },
+        status: downloadingStatus(meta, contentLength > 0 ? 0 : null),
       });
       return;
     }
@@ -137,12 +148,12 @@ async function downloadPending(
         ? Math.min(100, Math.round((downloaded / contentLength) * 100))
         : null;
     set({
-      status: { state: "downloading", version, percent, notes },
+      status: downloadingStatus(meta, percent),
     });
   });
 
   set({
-    status: { state: "ready", version, notes },
+    status: { state: "ready", ...meta },
     bannerDismissed: false,
   });
 }
@@ -178,15 +189,7 @@ async function loadBetaCandidates(): Promise<BetaFeedResult> {
   }
 }
 
-async function trackManifestProgress(
-  version: string,
-  notes: string | undefined,
-  set: (
-    partial:
-      | Partial<UpdateStore>
-      | ((state: UpdateStore) => Partial<UpdateStore>),
-  ) => void,
-) {
+async function trackManifestProgress(meta: UpdateOfferFields, set: StoreSet) {
   stopProgress?.();
   const unlisten = await listen<{
     downloaded: number;
@@ -198,7 +201,7 @@ async function trackManifestProgress(
         ? Math.min(100, Math.round((event.payload.downloaded / total) * 100))
         : null;
     set({
-      status: { state: "downloading", version, percent, notes },
+      status: downloadingStatus(meta, percent),
     });
   });
   stopProgress = () => {
@@ -209,7 +212,25 @@ async function trackManifestProgress(
 export const useUpdateStore = create<UpdateStore>((set, get) => ({
   status: { state: "idle" },
   bannerDismissed: false,
+  offerDialogHidden: false,
   dismissBanner: () => set({ bannerDismissed: true }),
+  dismissOfferDialog: () => {
+    const status = get().status;
+    if (status.state === "confirm" || status.state === "manual") {
+      sessionDismissedVersions.add(status.version);
+      set({ status: { state: "idle" }, offerDialogHidden: false });
+      void closePending();
+      clearPreparedManifest();
+      return;
+    }
+    if (
+      status.state === "downloading" ||
+      status.state === "ready" ||
+      status.state === "installing"
+    ) {
+      set({ offerDialogHidden: true });
+    }
+  },
   openReleases: async () => {
     const status = get().status;
     const version = "version" in status ? status.version : undefined;
@@ -364,11 +385,28 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
         }
 
         const notes = offer.notes;
+        const offerFields: UpdateOfferFields = {
+          version: offer.version,
+          currentVersion,
+          notes,
+          channel: offer.action === "confirm" ? "beta" : "stable",
+        };
+        // Cancel hides this exact version from later automatic checks.
+        // A manual check still shows the dialog.
+        if (!explicit && sessionDismissedVersions.has(offer.version)) {
+          if (stableUpdate) await stableUpdate.close().catch(() => undefined);
+          log.info("Skipped automatic update dialog", {
+            version: offer.version,
+          });
+          set({ status: { state: "idle" } });
+          return;
+        }
         if (mode === "manual-package") {
           if (stableUpdate) await stableUpdate.close().catch(() => undefined);
           set({
-            status: { state: "manual", version: offer.version, notes },
+            status: { state: "manual", ...offerFields },
             bannerDismissed: false,
+            offerDialogHidden: false,
           });
           return;
         }
@@ -381,13 +419,9 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
             pending = stableUpdate;
           }
           set({
-            status: {
-              state: "confirm",
-              version: offer.version,
-              notes,
-              channel: "beta",
-            },
+            status: { state: "confirm", ...offerFields, channel: "beta" },
             bannerDismissed: false,
+            offerDialogHidden: false,
           });
           return;
         }
@@ -398,8 +432,14 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
           });
           return;
         }
+        // Stable payloads used to download immediately. Both channels now
+        // wait for the dialog's Download and install action.
         pending = stableUpdate;
-        await downloadPending(stableUpdate, set);
+        set({
+          status: { state: "confirm", ...offerFields, channel: "stable" },
+          bannerDismissed: false,
+          offerDialogHidden: false,
+        });
       } catch (err) {
         const message = formatUpdateError(err);
         log.error("Update check failed", { message, explicit });
@@ -425,11 +465,15 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
     if (status.state !== "confirm") return;
     const update = pending;
     const manifestUrl = pendingManifest;
-    const notes = status.notes;
-    const version = status.version;
+    const meta: UpdateOfferFields = {
+      version: status.version,
+      currentVersion: status.currentVersion,
+      notes: status.notes,
+      channel: status.channel,
+    };
     if (update) {
       try {
-        await downloadPending(update, set);
+        await downloadPending(update, meta, set);
       } catch (err) {
         const message = formatUpdateError(err);
         log.error("Update download failed", { message });
@@ -450,11 +494,11 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
       return;
     }
     set({
-      status: { state: "downloading", version, percent: null, notes },
+      status: downloadingStatus(meta, null),
       bannerDismissed: false,
     });
     try {
-      await trackManifestProgress(version, notes, set);
+      await trackManifestProgress(meta, set);
       const installedVersion = await invoke<string>(
         "download_manifest_update",
         {
@@ -468,8 +512,8 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
       set({
         status: {
           state: "ready",
-          version: installedVersion || version,
-          notes,
+          ...meta,
+          version: installedVersion || meta.version,
         },
         bannerDismissed: false,
       });
@@ -488,7 +532,15 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
     const status = get().status;
     if (status.state !== "ready") return;
     if (!update && !preparedManifest) return;
-    set({ status: { state: "installing", version: status.version } });
+    set({
+      status: {
+        state: "installing",
+        version: status.version,
+        currentVersion: status.currentVersion,
+        notes: status.notes,
+        channel: status.channel,
+      },
+    });
     try {
       if (update) {
         await update.install();
@@ -524,9 +576,11 @@ export function resetUpdateStoreForTests() {
   preparedManifest = false;
   stopProgress = null;
   checkLock = null;
+  sessionDismissedVersions.clear();
   useSettingsStore.setState({ joinBetaChannel: false });
   useUpdateStore.setState({
     status: { state: "idle" },
     bannerDismissed: false,
+    offerDialogHidden: false,
   });
 }

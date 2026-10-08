@@ -260,6 +260,152 @@ describe("update store check", () => {
     });
   });
 
+  it("asks before downloading a newer stable release when Beta is off", async () => {
+    const stable = stableRelease("1.1.0");
+    vi.mocked(getVersion).mockResolvedValue("1.0.0");
+    vi.mocked(check).mockResolvedValue(stable as never);
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: false });
+
+    expect(stable.download).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalledWith("fetch_github_releases");
+    expect(useUpdateStore.getState().status).toMatchObject({
+      state: "confirm",
+      version: "1.1.0",
+      currentVersion: "1.0.0",
+      channel: "stable",
+      notes: "Stable notes",
+    });
+
+    await useUpdateStore.getState().confirmDownload();
+
+    expect(stable.download).toHaveBeenCalledOnce();
+    expect(useUpdateStore.getState().status).toMatchObject({
+      state: "ready",
+      version: "1.1.0",
+      channel: "stable",
+    });
+  });
+
+  it("does not offer a beta release when Beta is off", async () => {
+    const stable = stableRelease("1.2.0beta1");
+    vi.mocked(getVersion).mockResolvedValue("1.0.0");
+    vi.mocked(check).mockResolvedValue(stable as never);
+    stubReleases([betaRelease("v1.2.0beta2")]);
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+
+    expect(useUpdateStore.getState().status).toEqual({ state: "up-to-date" });
+    expect(stable.download).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalledWith("fetch_github_releases");
+  });
+
+  it("offers the newer stable release instead of an older beta when Beta is on", async () => {
+    const stable = stableRelease("1.3.0");
+    useSettingsStore.setState({ joinBetaChannel: true });
+    vi.mocked(getVersion).mockResolvedValue("1.0.0");
+    vi.mocked(check).mockResolvedValue(stable as never);
+    stubReleases([betaRelease("v1.2.0beta1")]);
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+
+    expect(stable.download).not.toHaveBeenCalled();
+    expect(useUpdateStore.getState().status).toMatchObject({
+      state: "confirm",
+      version: "1.3.0",
+      channel: "stable",
+    });
+  });
+
+  it("offers the newer beta instead of an older stable when Beta is on", async () => {
+    const stable = stableRelease("1.1.0");
+    useSettingsStore.setState({ joinBetaChannel: true });
+    vi.mocked(getVersion).mockResolvedValue("1.0.0");
+    vi.mocked(check).mockResolvedValue(stable as never);
+    stubReleases([betaRelease("v1.2.0beta1")]);
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: false });
+
+    expect(stable.download).not.toHaveBeenCalled();
+    expect(stable.close).toHaveBeenCalled();
+    expect(useUpdateStore.getState().status).toMatchObject({
+      state: "confirm",
+      version: "1.2.0beta1",
+      channel: "beta",
+      notes: "preview",
+    });
+  });
+
+  it("does not show a cancelled version again until a manual check", async () => {
+    const stable = stableRelease("1.1.0");
+    vi.mocked(getVersion).mockResolvedValue("1.0.0");
+    vi.mocked(check).mockResolvedValue(stable as never);
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: false });
+    expect(useUpdateStore.getState().status.state).toBe("confirm");
+    useUpdateStore.getState().dismissOfferDialog();
+
+    expect(useUpdateStore.getState().status).toEqual({ state: "idle" });
+    expect(stable.download).not.toHaveBeenCalled();
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: false });
+    expect(useUpdateStore.getState().status).toEqual({ state: "idle" });
+    expect(stable.download).not.toHaveBeenCalled();
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+    expect(useUpdateStore.getState().status).toMatchObject({
+      state: "confirm",
+      version: "1.1.0",
+      channel: "stable",
+    });
+  });
+
+  it("still shows an automatic dialog for a version the user has not cancelled", async () => {
+    vi.mocked(getVersion).mockResolvedValue("1.0.0");
+    vi.mocked(check).mockResolvedValue(stableRelease("1.1.0") as never);
+    await useUpdateStore.getState().checkForUpdate({ explicit: false });
+    useUpdateStore.getState().dismissOfferDialog();
+
+    vi.mocked(check).mockResolvedValue(stableRelease("1.2.0") as never);
+    await useUpdateStore.getState().checkForUpdate({ explicit: false });
+
+    expect(useUpdateStore.getState().status).toMatchObject({
+      state: "confirm",
+      version: "1.2.0",
+      channel: "stable",
+    });
+  });
+
+  it("keeps a download running when the dialog is closed after it starts", async () => {
+    let releaseDownload: () => void = () => undefined;
+    const stable = stableRelease("1.1.0");
+    stable.download = vi.fn(
+      () =>
+        new Promise<undefined>((resolve) => {
+          releaseDownload = () => resolve(undefined);
+        }),
+    );
+    vi.mocked(getVersion).mockResolvedValue("1.0.0");
+    vi.mocked(check).mockResolvedValue(stable as never);
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+    const downloading = useUpdateStore.getState().confirmDownload();
+    await Promise.resolve();
+    expect(useUpdateStore.getState().status.state).toBe("downloading");
+
+    useUpdateStore.getState().dismissOfferDialog();
+    expect(useUpdateStore.getState().offerDialogHidden).toBe(true);
+    expect(useUpdateStore.getState().status.state).toBe("downloading");
+
+    releaseDownload();
+    await downloading;
+    expect(useUpdateStore.getState().status).toMatchObject({
+      state: "ready",
+      version: "1.1.0",
+    });
+    expect(useUpdateStore.getState().offerDialogHidden).toBe(true);
+  });
+
   it("stays up to date when verification fails for a stable build the policy already declines", async () => {
     const stable = stableRelease("1.0.8");
     vi.mocked(getVersion).mockResolvedValue("1.0.8-12");

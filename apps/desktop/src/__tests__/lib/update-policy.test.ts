@@ -23,7 +23,7 @@ describe("update apply mode", () => {
     expect(updateApplyMode("linux-package")).toBe("manual-package");
   });
 
-  it("downloads the AppImage, macOS, and Windows builds in the background", () => {
+  it("restarts into the AppImage, macOS, and Windows builds", () => {
     expect(updateApplyMode("appimage")).toBe("background-restart");
     expect(updateApplyMode("native")).toBe("background-restart");
     expect(updateApplyMode(undefined)).toBe("background-restart");
@@ -488,6 +488,75 @@ describe("beta update detection", () => {
         allowPrerelease: false,
       }),
     ).toEqual({ action: "none" });
+  });
+});
+
+describe("update channel offers", () => {
+  const betas = betaCandidatesFromGithub([
+    {
+      tag_name: "v1.2.0beta1",
+      prerelease: true,
+      draft: false,
+      body: "beta notes",
+    },
+  ]);
+
+  it("offers only a newer stable release when Beta is off", () => {
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.0",
+        stable: { version: "1.1.0", notes: "stable notes" },
+        betas,
+        allowPrerelease: false,
+      }),
+    ).toEqual({
+      action: "download",
+      version: "1.1.0",
+      notes: "stable notes",
+    });
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.0",
+        stable: null,
+        betas,
+        allowPrerelease: false,
+      }),
+    ).toEqual({ action: "none" });
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.1.0",
+        stable: { version: "1.2.0beta1", notes: "hidden beta" },
+        betas,
+        allowPrerelease: false,
+      }),
+    ).toEqual({ action: "none" });
+  });
+
+  it("offers the newer of stable and beta when Beta is on", () => {
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.0",
+        stable: { version: "1.1.0", notes: "stable notes" },
+        betas,
+        allowPrerelease: true,
+      }),
+    ).toMatchObject({
+      action: "confirm",
+      version: "1.2.0beta1",
+      notes: "beta notes",
+    });
+    expect(
+      chooseUpdateOffer({
+        currentVersion: "1.0.0",
+        stable: { version: "1.3.0", notes: "newer stable" },
+        betas,
+        allowPrerelease: true,
+      }),
+    ).toEqual({
+      action: "download",
+      version: "1.3.0",
+      notes: "newer stable",
+    });
   });
 });
 
