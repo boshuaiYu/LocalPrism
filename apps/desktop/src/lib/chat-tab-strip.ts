@@ -25,9 +25,21 @@ export const CHAT_TAB_LEADING_ICON_PX = 40;
 export const CHAT_TAB_LEADING_LABEL_PX = 76;
 export const CHAT_TAB_LEARN_TEXT_PX = 72;
 export const CHAT_TAB_LEARN_CHROME_PX = 48;
+/** Streaming dot (8px) plus the tab's 6px gap. */
+export const CHAT_TAB_LEARN_STATUS_PX = 14;
 export const CHAT_TAB_LEARN_SLOT_PX =
+  CHAT_TAB_LEARN_CHROME_PX + CHAT_TAB_LEARN_STATUS_PX + CHAT_TAB_LEARN_TEXT_PX;
+/**
+ * Learn budget the account/label collapse still uses. Main reserved
+ * 48 + 72 + 8. The status dot replaced that slack and grew the real slot
+ * by 6px; those 6px come out of the writing tab, not the account chip.
+ */
+const CHAT_TAB_LEARN_COLLAPSE_PX =
   CHAT_TAB_LEARN_CHROME_PX + CHAT_TAB_LEARN_TEXT_PX + 8;
+/** Floor that still shows a short writing title at the 307px default column. */
 export const CHAT_TAB_WRITING_SLOT_PX = 92;
+/** Used when the bar has room after the learning tab, including its status dot. */
+export const CHAT_TAB_WRITING_PREFERRED_PX = 128;
 export const CHAT_TAB_WRITING_MANY_SLOT_PX = 72;
 export const CHAT_TAB_ACCOUNT_FULL_PX = 72;
 export const CHAT_TAB_ACCOUNT_COMFORT_PX = 160;
@@ -118,27 +130,27 @@ export function chatTabStripPlan(input: {
   let accountDensity: "full" | "provider" = roomy
     ? "full"
     : input.chrome.density;
-  let writingTabMinPx = many
+  const writingFloor = many
     ? CHAT_TAB_WRITING_MANY_SLOT_PX
     : input.writingTabCount > 0
       ? CHAT_TAB_WRITING_SLOT_PX
       : 0;
 
-  const reserved = () =>
-    chatTabStripReservedPx(
-      {
-        pinLearnTab: true,
-        hideLeadingLabel,
-        accountMinPx,
-        accountDensity,
-        writingScrollerMinPx: writingTabMinPx,
-        writingTabMinPx,
-        writingTabMaxPx,
-        learnSlotPx: CHAT_TAB_LEARN_SLOT_PX,
-      },
-      input.chrome.utilities,
+  const occupied = (writingPx: number, learnPx: number) => {
+    const leading = hideLeadingLabel
+      ? CHAT_TAB_LEADING_ICON_PX
+      : CHAT_TAB_LEADING_LABEL_PX;
+    return (
+      leading +
+      learnPx +
+      writingPx +
+      accountMinPx +
+      (input.chrome.utilities ? CHAT_TAB_UTILITIES_PX : 0)
     );
-  const cramped = () => !roomy && reserved() > input.barWidthPx;
+  };
+  const cramped = () =>
+    !roomy &&
+    occupied(writingFloor, CHAT_TAB_LEARN_COLLAPSE_PX) > input.barWidthPx;
 
   if (cramped() && accountMinPx > CHAT_TAB_ACCOUNT_FULL_PX) {
     accountMinPx = CHAT_TAB_ACCOUNT_FULL_PX;
@@ -149,10 +161,17 @@ export function chatTabStripPlan(input: {
     accountMinPx = CHAT_TAB_ACCOUNT_TIGHT_PX;
     accountDensity = "provider";
   }
-  if (cramped() && writingTabMinPx > CHAT_TAB_WRITING_MANY_SLOT_PX) {
-    writingTabMinPx = CHAT_TAB_WRITING_MANY_SLOT_PX;
+
+  let writingTabMinPx = writingFloor;
+  if (!roomy && writingFloor > 0) {
+    const room = input.barWidthPx - occupied(0, CHAT_TAB_LEARN_SLOT_PX);
+    const cap = many
+      ? CHAT_TAB_WRITING_MANY_SLOT_PX
+      : CHAT_TAB_WRITING_PREFERRED_PX;
+    if (room >= writingFloor) writingTabMinPx = Math.min(cap, room);
+    else if (room > 0) writingTabMinPx = room;
+    else writingTabMinPx = 0;
   }
-  if (cramped()) writingTabMinPx = 0;
 
   return {
     pinLearnTab: true,

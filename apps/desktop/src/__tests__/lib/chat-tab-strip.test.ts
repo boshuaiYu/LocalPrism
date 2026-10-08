@@ -3,9 +3,9 @@ import { accountHeaderChrome } from "@/components/claude-chat/chat-tab-bar";
 import {
   CHAT_TAB_LEARN_CHROME_PX,
   CHAT_TAB_LEARN_SLOT_PX,
+  CHAT_TAB_LEARN_STATUS_PX,
   CHAT_TAB_LEARN_TEXT_PX,
   CHAT_TAB_WRITING_MANY_MAX_PX,
-  CHAT_TAB_WRITING_SLOT_PX,
   chatTabStripPlan,
   chatTabStripReservedPx,
   defaultThreePaneChatBarPx,
@@ -15,8 +15,10 @@ describe("chat tab strip budget", () => {
   it("fits Learn LaTeX and a writing tab in the default 1280 three-pane chat column", () => {
     const barWidth = defaultThreePaneChatBarPx(1280);
     expect(barWidth).toBe(307);
-    expect(CHAT_TAB_LEARN_SLOT_PX).toBeGreaterThanOrEqual(
-      CHAT_TAB_LEARN_CHROME_PX + CHAT_TAB_LEARN_TEXT_PX,
+    expect(CHAT_TAB_LEARN_SLOT_PX).toBe(
+      CHAT_TAB_LEARN_CHROME_PX +
+        CHAT_TAB_LEARN_STATUS_PX +
+        CHAT_TAB_LEARN_TEXT_PX,
     );
     // 「边写边学」 is four 12px ems, shorter than the English label.
     expect(CHAT_TAB_LEARN_TEXT_PX).toBeGreaterThanOrEqual(48);
@@ -31,9 +33,9 @@ describe("chat tab strip budget", () => {
 
     expect(plan.pinLearnTab).toBe(true);
     expect(plan.learnSlotPx).toBe(CHAT_TAB_LEARN_SLOT_PX);
-    expect(plan.writingTabMinPx).toBeGreaterThanOrEqual(
-      CHAT_TAB_WRITING_SLOT_PX,
-    );
+    expect(plan.learnSlotPx).toBe(134);
+    // One spare pixel above the 92px floor stays on the writing tab.
+    expect(plan.writingTabMinPx).toBe(93);
     expect(plan.hideLeadingLabel).toBe(true);
     expect(chatTabStripReservedPx(plan, chrome.utilities)).toBeLessThanOrEqual(
       barWidth,
@@ -52,9 +54,10 @@ describe("chat tab strip budget", () => {
     });
     expect(plan.pinLearnTab).toBe(true);
     expect(plan.learnSlotPx).toBe(CHAT_TAB_LEARN_SLOT_PX);
-    expect(plan.writingTabMinPx).toBeGreaterThanOrEqual(
-      CHAT_TAB_WRITING_SLOT_PX,
-    );
+    expect(plan.accountMinPx).toBe(72);
+    expect(plan.accountDensity).toBe("full");
+    expect(plan.hideLeadingLabel).toBe(true);
+    expect(plan.writingTabMinPx).toBe(94);
     expect(chatTabStripReservedPx(plan, chrome.utilities)).toBeLessThanOrEqual(
       barWidth,
     );
@@ -81,6 +84,87 @@ describe("chat tab strip budget", () => {
     expect(chatTabStripReservedPx(many, chrome.utilities)).toBeLessThanOrEqual(
       307,
     );
+  });
+
+  it("collapses the account and leading label like main, then gives leftover width to the writing tab", () => {
+    const cases = [
+      {
+        bar: 280,
+        accountMinPx: 40,
+        accountDensity: "provider" as const,
+        hideLeadingLabel: true,
+        writingTabMinPx: 66,
+      },
+      {
+        bar: 300,
+        accountMinPx: 40,
+        accountDensity: "provider" as const,
+        hideLeadingLabel: true,
+        writingTabMinPx: 86,
+      },
+      {
+        bar: 360,
+        accountMinPx: 72,
+        accountDensity: "full" as const,
+        hideLeadingLabel: true,
+        writingTabMinPx: 114,
+      },
+      {
+        bar: 400,
+        accountMinPx: 72,
+        accountDensity: "full" as const,
+        hideLeadingLabel: false,
+        writingTabMinPx: 118,
+      },
+      {
+        bar: 450,
+        accountMinPx: 72,
+        accountDensity: "full" as const,
+        hideLeadingLabel: false,
+        writingTabMinPx: 88,
+      },
+      {
+        bar: 600,
+        accountMinPx: 72,
+        accountDensity: "full" as const,
+        hideLeadingLabel: false,
+        writingTabMinPx: 128,
+      },
+    ];
+
+    for (const expected of cases) {
+      const chrome = accountHeaderChrome(expected.bar);
+      const plan = chatTabStripPlan({
+        barWidthPx: expected.bar,
+        writingTabCount: 1,
+        hasLearnTab: true,
+        chrome,
+      });
+      expect(plan.accountMinPx, String(expected.bar)).toBe(
+        expected.accountMinPx,
+      );
+      expect(plan.accountDensity, String(expected.bar)).toBe(
+        expected.accountDensity,
+      );
+      expect(plan.hideLeadingLabel, String(expected.bar)).toBe(
+        expected.hideLeadingLabel,
+      );
+      expect(plan.writingTabMinPx, String(expected.bar)).toBe(
+        expected.writingTabMinPx,
+      );
+      expect(plan.writingScrollerMinPx, String(expected.bar)).toBe(
+        plan.writingTabMinPx,
+      );
+      expect(plan.writingTabMinPx, String(expected.bar)).toBeGreaterThan(0);
+      expect(plan.writingTabMinPx, String(expected.bar)).toBeLessThanOrEqual(
+        128,
+      );
+      expect(plan.learnSlotPx).toBe(134);
+      expect(
+        chatTabStripReservedPx(plan, chrome.utilities),
+        String(expected.bar),
+      ).toBeLessThanOrEqual(expected.bar);
+    }
   });
 
   it("leaves the single-tab account chrome alone", () => {
