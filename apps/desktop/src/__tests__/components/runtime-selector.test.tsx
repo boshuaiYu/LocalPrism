@@ -8,6 +8,7 @@ import {
 import { createRoot, type Root } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApprovalDialog } from "@/components/approvals/approval-dialog";
 import { ChatComposer } from "@/components/claude-chat/chat-composer";
 import * as runtimeSelectorModule from "@/components/runtime/runtime-selector";
 import {
@@ -34,7 +35,9 @@ import type {
   RuntimeKind,
   RuntimeConversation,
   RuntimeModel,
+  RuntimeRequest,
 } from "@/runtime/types";
+import { useApprovalStore } from "@/stores/approval-store";
 import {
   CLAUDE_CODE_PROVIDER_ID,
   useClaudeChatStore,
@@ -1307,6 +1310,136 @@ describe("ChatComposer provider wiring", () => {
       expect(view.selection()).toEqual(before);
       expect(document.activeElement).not.toBe(trigger);
       expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("closes the model menu on Escape while a pending approval stays open", async () => {
+    useApprovalStore.getState().reset();
+    const view = mountLayeredComposer("tab-approval");
+    const request: RuntimeRequest = {
+      requestId: "req-approval",
+      method: "claude/can_use_tool",
+      runtime: "claude",
+      threadId: "tab-approval-thread",
+      turnId: "tab-approval-turn",
+      tabId: "tab-approval",
+      agentRunId: null,
+      title: "Allow Bash?",
+      command: "pwd",
+      cwd: null,
+      diff: null,
+      permissions: null,
+      questions: [],
+      details: null,
+    };
+    useApprovalStore.getState().enqueue(request);
+    try {
+      await view.paint(
+        <>
+          <ChatComposer />
+          <ApprovalDialog />
+        </>,
+      );
+      const trigger = view.container.querySelector(
+        '[data-testid="composer-model-trigger"]',
+      );
+      const approval = view.container.querySelector(
+        '[data-testid="approval-dialog"]',
+      );
+      if (!(trigger instanceof HTMLButtonElement)) {
+        throw new Error("Composer model trigger not found");
+      }
+      if (!(approval instanceof HTMLElement)) {
+        throw new Error("Approval dialog not found");
+      }
+      expect(approval.getAttribute("aria-modal")).toBe("true");
+      const before = view.selection();
+      await act(async () => trigger.click());
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeTruthy();
+      await act(async () => {
+        trigger.focus();
+        trigger.dispatchEvent(escapeKey());
+      });
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeNull();
+      expect(
+        view.container.querySelector('[data-testid="approval-dialog"]'),
+      ).toBe(approval);
+      expect(useApprovalStore.getState().pending).toHaveProperty(
+        "s:req-approval",
+      );
+      expect(view.selection()).toEqual(before);
+      expect(document.activeElement).toBe(trigger);
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    } finally {
+      await view.cleanup();
+      useApprovalStore.getState().reset();
+    }
+  });
+
+  it("closes the model menu on Escape from the chip while a mention list stays open", async () => {
+    const view = mountLayeredComposer("tab-mention");
+    useDocumentStore.setState({
+      files: [
+        {
+          id: "notes.tex",
+          name: "notes.tex",
+          relativePath: "notes.tex",
+          absolutePath: "C:/project/notes.tex",
+          type: "tex",
+          content: "",
+          isDirty: false,
+        },
+      ],
+    });
+    try {
+      await view.paint(<ChatComposer />);
+      const trigger = view.container.querySelector(
+        '[data-testid="composer-model-trigger"]',
+      );
+      const field = view.container.querySelector("textarea");
+      if (!(trigger instanceof HTMLButtonElement)) {
+        throw new Error("Composer model trigger not found");
+      }
+      if (!(field instanceof HTMLTextAreaElement)) {
+        throw new Error("Composer field not found");
+      }
+      const setValue = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        "value",
+      )?.set;
+      setValue?.call(field, "@");
+      await act(async () => {
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+        await Promise.resolve();
+      });
+      const mention = () =>
+        Array.from(view.container.querySelectorAll("button")).find((button) =>
+          button.textContent?.includes("notes.tex"),
+        );
+      expect(mention()).toBeInstanceOf(HTMLButtonElement);
+      const before = view.selection();
+      await act(async () => trigger.click());
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeTruthy();
+      expect(mention()).toBeInstanceOf(HTMLButtonElement);
+      await act(async () => {
+        trigger.focus();
+        trigger.dispatchEvent(escapeKey());
+      });
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeNull();
+      expect(mention()).toBeInstanceOf(HTMLButtonElement);
+      expect(view.selection()).toEqual(before);
+      expect(document.activeElement).toBe(trigger);
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
     } finally {
       await view.cleanup();
     }

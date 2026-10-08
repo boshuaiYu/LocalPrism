@@ -1396,10 +1396,12 @@ export const ChatComposer: FC<{
   }, [mentionIndex]);
 
   // The menu is portaled and does not take focus, so Escape is handled here
-  // on the document bubble. Capture-phase dialogs (the update dialog) and the
-  // composer field's slash / mention handlers run first. One Escape closes
-  // only that top layer; this handler returns focus to the chip only when
-  // the key came from the chip, the menu, or the composer.
+  // on the document bubble. Capture-phase Radix dialogs and the composer
+  // field's slash / mention handlers run first. A pending tool approval is
+  // only an overlay on the thread; it consumes Escape from its own keydown,
+  // which arrives here as defaultPrevented. One Escape closes only that top
+  // layer, and focus returns to the chip only when the key came from the
+  // chip, the menu, or the composer.
   useEffect(() => {
     if (!modelPickerOpen) return;
     const handleClickOutside = (e: MouseEvent) => {
@@ -1418,15 +1420,13 @@ export const ChatComposer: FC<{
     };
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
-      if (
-        slashQuery !== null ||
-        (mentionQuery !== null && mentionFiles.length > 0)
-      ) {
-        return;
-      }
+      // The slash picker closes from a window listener. Mention only closes
+      // from the textarea, so an already-open list must not swallow Escape
+      // once focus has moved to the chip.
+      if (slashQuery !== null) return;
       if (
         document.querySelector(
-          '[data-slot="dialog-content"][data-state="open"], [role="dialog"][aria-modal="true"]',
+          '[data-slot="dialog-content"][data-state="open"]',
         )
       ) {
         return;
@@ -1449,7 +1449,7 @@ export const ChatComposer: FC<{
       document.removeEventListener("mousedown", handleClickOutside);
       document.removeEventListener("keydown", handleEscape);
     };
-  }, [mentionFiles, mentionQuery, modelPickerOpen, slashQuery]);
+  }, [modelPickerOpen, slashQuery]);
 
   const composerCatalogModel =
     providerModels.find((model) => model.id === selectedRuntimeModelId) ??
