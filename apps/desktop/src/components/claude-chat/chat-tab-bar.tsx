@@ -9,7 +9,12 @@ import {
 } from "react";
 import { BookOpenIcon, PlusIcon, XIcon } from "lucide-react";
 import { useStoreWithEqualityFn } from "zustand/traditional";
-import { chatTabStripPlan } from "@/lib/chat-tab-strip";
+import {
+  CHAT_STRIP_FONT_STACK,
+  chatTabStripPlan,
+  measureChatStripCanvasPx,
+  type ChatTabStripTextPx,
+} from "@/lib/chat-tab-strip";
 import { cn } from "@/lib/utils";
 import {
   pendingApprovalTabKey,
@@ -23,47 +28,17 @@ import { LATEX_LEARN_PURPOSE } from "@/lib/latex-learn-tab";
 import { tabsForProject } from "@/stores/chat-persistence";
 import { tabOpenedUnderOtherAccount } from "@/lib/provider-account";
 import { useI18n } from "@/lib/use-i18n";
+import { useProviderStore } from "@/stores/provider-store";
 import { SessionSelector } from "./session-selector";
-import { WorkspaceAccountButton } from "./workspace-account-button";
+import {
+  WorkspaceAccountButton,
+  workspaceAccountChipText,
+} from "./workspace-account-button";
 
-export type AccountHeaderChrome = {
-  utilities: boolean;
-  hideLabel: boolean;
-  density: "full" | "provider";
-  accountMin: string;
-};
-
-/**
- * Wide bars keep new-tab, history, and the account chip as a tight group on
- * the right. Tabs take the leftover width and scroll. The chip stays as wide
- * as its label and ellipsizes only when the bar cannot fit that label.
- * Mid bars drop those icons so the label can show `SiliconFlow · Qw…`.
- * Very narrow bars keep the provider name only.
- */
-export function accountHeaderChrome(widthPx: number): AccountHeaderChrome {
-  if (!Number.isFinite(widthPx) || widthPx <= 0 || widthPx >= 420) {
-    return {
-      utilities: true,
-      hideLabel: false,
-      density: "full",
-      accountMin: "min-w-[4.5rem]",
-    };
-  }
-  if (widthPx >= 200) {
-    return {
-      utilities: false,
-      hideLabel: false,
-      density: "full",
-      accountMin: "min-w-[10rem]",
-    };
-  }
-  return {
-    utilities: false,
-    hideLabel: true,
-    density: "provider",
-    accountMin: "min-w-0",
-  };
-}
+export {
+  accountHeaderChrome,
+  type AccountHeaderChrome,
+} from "@/lib/chat-tab-strip";
 
 type TabBarItem = {
   id: string;
@@ -121,26 +96,98 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
   );
   const scrollRef = useRef<HTMLDivElement>(null);
   const barRef = useRef<HTMLDivElement>(null);
+  const measureRef = useRef<HTMLDivElement>(null);
   const [barWidth, setBarWidth] = useState(0);
-  const chrome = accountHeaderChrome(barWidth);
+  const [textPx, setTextPx] = useState<ChatTabStripTextPx>({});
+  const cards = useProviderStore((state) => state.cards);
+  const activeAccount =
+    cards.find((card) => card.isActive) ??
+    cards.find((card) => card.authenticated);
+  const signedIn = Boolean(activeAccount?.authenticated);
+  const providerName = activeAccount?.name?.trim() ?? "";
+  const accountLabel = activeAccount?.accountLabel?.trim() ?? "";
+  const accountFull = signedIn
+    ? workspaceAccountChipText(providerName, accountLabel, t("chat.signedIn"))
+    : t("chat.signIn");
+  const accountProvider = signedIn ? providerName || accountFull : accountFull;
+  const learnLabel = t("teach.sessionTitle");
+  const leadingLabel = t("chrome.hide");
   const learnTabs = tabs.filter((tab) => tab.purpose === LATEX_LEARN_PURPOSE);
   const writingTabs = tabs.filter((tab) => tab.purpose !== LATEX_LEARN_PURPOSE);
   const strip = chatTabStripPlan({
     barWidthPx: barWidth,
     writingTabCount: writingTabs.length,
     hasLearnTab: learnTabs.length > 0,
-    chrome,
+    labels: {
+      learn: learnLabel,
+      leading: leadingLabel,
+      accountFull,
+      accountProvider,
+    },
+    textPx,
   });
 
   useLayoutEffect(() => {
     const node = barRef.current;
-    if (!node || typeof ResizeObserver === "undefined") return;
-    const update = () => setBarWidth(node.clientWidth);
-    update();
-    const observer = new ResizeObserver(update);
+    if (!node) return;
+    const readBar = () => {
+      const next = Math.round(
+        node.clientWidth || node.getBoundingClientRect().width || 0,
+      );
+      setBarWidth((prev) => (prev === next ? prev : next));
+    };
+    const readText = () => {
+      const root = measureRef.current;
+      const next: ChatTabStripTextPx = {};
+      const assign = (
+        key: keyof ChatTabStripTextPx,
+        label: string,
+        rendered?: number,
+      ) => {
+        const canvas = measureChatStripCanvasPx(label);
+        const width = Math.max(rendered ?? 0, canvas);
+        if (width > 0) next[key] = width;
+      };
+      if (root) {
+        for (const el of root.querySelectorAll<HTMLElement>(
+          "[data-strip-measure]",
+        )) {
+          const key = el.dataset.stripMeasure;
+          if (
+            key === "learn" ||
+            key === "leading" ||
+            key === "accountFull" ||
+            key === "accountProvider"
+          ) {
+            assign(key, el.textContent ?? "", el.scrollWidth);
+          }
+        }
+      } else {
+        assign("learn", learnLabel);
+        assign("leading", leadingLabel);
+        assign("accountFull", accountFull);
+        assign("accountProvider", accountProvider);
+      }
+      setTextPx((prev) =>
+        prev.learn === next.learn &&
+        prev.leading === next.leading &&
+        prev.accountFull === next.accountFull &&
+        prev.accountProvider === next.accountProvider
+          ? prev
+          : next,
+      );
+    };
+    readBar();
+    readText();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      readBar();
+      readText();
+    });
     observer.observe(node);
+    if (measureRef.current) observer.observe(measureRef.current);
     return () => observer.disconnect();
-  }, []);
+  }, [accountFull, accountProvider, learnLabel, leadingLabel]);
 
   // Scroll active tab into view when it changes
   useEffect(() => {
@@ -212,8 +259,20 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
     <div
       ref={barRef}
       data-testid="chat-tab-bar"
-      className="flex min-w-0 flex-col overflow-hidden border-border/70 border-b bg-background"
+      className="relative flex min-w-0 flex-col overflow-hidden border-border/70 border-b bg-background"
     >
+      <div
+        ref={measureRef}
+        data-testid="chat-tab-measure"
+        aria-hidden="true"
+        className="pointer-events-none absolute h-0 w-0 overflow-hidden whitespace-nowrap text-xs"
+        style={{ fontFamily: CHAT_STRIP_FONT_STACK }}
+      >
+        <span data-strip-measure="learn">{learnLabel}</span>
+        <span data-strip-measure="leading">{leadingLabel}</span>
+        <span data-strip-measure="accountFull">{accountFull}</span>
+        <span data-strip-measure="accountProvider">{accountProvider}</span>
+      </div>
       {/* Caption buttons occupy this band. The row below spans the panel. */}
       <div
         data-testid="chat-titlebar-band"
@@ -222,13 +281,13 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
       />
       <div
         data-testid="chat-tab-toolbar"
-        className="flex h-11 min-w-0 items-center overflow-hidden"
+        data-account-density={strip.accountDensity}
+        className="flex h-11 min-w-0 items-center overflow-hidden text-xs"
+        style={{ fontFamily: CHAT_STRIP_FONT_STACK }}
       >
         <div
-          className={cn(
-            "shrink-0",
-            (chrome.hideLabel || strip.hideLeadingLabel) && "[&_span]:sr-only",
-          )}
+          data-leading-label={strip.hideLeadingLabel ? "hidden" : "visible"}
+          className="shrink-0"
         >
           {leading}
         </div>
@@ -286,13 +345,10 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
         ) : null}
         <div
           data-testid="chat-account-cluster"
-          className={cn(
-            "flex w-max min-w-0 max-w-full shrink grow-0 items-center gap-1 overflow-hidden pr-2.5",
-            chrome.accountMin,
-          )}
+          className="flex w-max shrink-0 grow-0 items-center gap-1 pr-2.5"
           style={{ minWidth: strip.accountMinPx }}
         >
-          {chrome.utilities ? (
+          {strip.showUtilities ? (
             <button
               type="button"
               onClick={handleCreate}
@@ -302,11 +358,8 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
               <PlusIcon className="size-3.5" />
             </button>
           ) : null}
-          {chrome.utilities ? <SessionSelector /> : null}
-          <div
-            data-testid="chat-account-chip"
-            className="min-w-0 max-w-full shrink overflow-hidden"
-          >
+          {strip.showUtilities ? <SessionSelector /> : null}
+          <div data-testid="chat-account-chip" className="shrink-0">
             <WorkspaceAccountButton density={strip.accountDensity} />
           </div>
         </div>
@@ -362,7 +415,7 @@ function TabButton({
       }}
       className={cn(
         "group relative flex h-full shrink-0 items-center gap-1.5 overflow-hidden border-b-2 px-3.5 text-xs transition-colors",
-        learn ? "whitespace-nowrap" : "max-w-full",
+        learn ? "whitespace-nowrap" : "w-max max-w-full",
         isActive
           ? "border-primary/80 bg-muted/40 text-foreground"
           : "border-transparent text-muted-foreground hover:bg-muted/25 hover:text-foreground",

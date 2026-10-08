@@ -1,4 +1,12 @@
-import { type FC, memo, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type FC,
+  memo,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   AlertCircleIcon,
   ArrowDownIcon,
@@ -33,7 +41,12 @@ import {
   settleChatMessages,
 } from "@/lib/chat-turn-settlement";
 import { canOfferCompression } from "@/lib/chat-compression";
-import { transcriptHasContentBelow } from "@/lib/chat-scroll";
+import {
+  CHAT_SCROLL_JUMP_INSET_PX,
+  chatScrollJumpRightPx,
+  scrollbarGutterPx,
+  transcriptHasContentBelow,
+} from "@/lib/chat-scroll";
 import {
   canRewindTo,
   isUserPrompt,
@@ -229,6 +242,7 @@ export const ChatMessages: FC = () => {
   const followEpochRef = useRef(0);
   const appliedFollowEpochRef = useRef(0);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [scrollbarGutter, setScrollbarGutter] = useState(0);
 
   // Build a map of tool_use_id → tool_result for inline display
   const toolResultMap = useMemo(() => {
@@ -310,6 +324,20 @@ export const ChatMessages: FC = () => {
     [displayMessages, isStreaming],
   );
   const openTurnStart = lastUserTextMessageIndex(settledMessages);
+
+  useLayoutEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const measure = () => {
+      const next = scrollbarGutterPx(el.offsetWidth, el.clientWidth);
+      setScrollbarGutter((prev) => (prev === next ? prev : next));
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   const contentBelow = (el: HTMLElement) =>
     transcriptHasContentBelow({
@@ -475,12 +503,15 @@ export const ChatMessages: FC = () => {
           </button>
         </div>
       ) : null}
-      <div className="relative min-h-0 flex-1">
+      <div
+        data-testid="chat-transcript-frame"
+        className="relative min-h-0 flex-1"
+      >
         <div
           ref={viewportRef}
           onScroll={handleScroll}
           data-testid="chat-transcript"
-          className="absolute inset-0 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden scroll-smooth px-5 pt-5 pb-2"
+          className="absolute inset-0 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden scroll-smooth px-5 pt-5 pb-2 [scrollbar-gutter:stable]"
         >
           {settledMessages.length === 0 &&
             pendingGuidance.length === 0 &&
@@ -541,7 +572,12 @@ export const ChatMessages: FC = () => {
             size="icon"
             type="button"
             data-testid="scroll-to-bottom"
-            className="absolute bottom-3 left-1/2 z-10 size-9 -translate-x-1/2 rounded-full bg-background/95 shadow-sm"
+            data-placement="bottom-end"
+            className="absolute z-10 size-9 rounded-full border border-border/70 bg-background shadow-md"
+            style={{
+              right: chatScrollJumpRightPx(scrollbarGutter),
+              bottom: CHAT_SCROLL_JUMP_INSET_PX,
+            }}
             onClick={jumpToLatest}
           >
             <ArrowDownIcon className="size-4" />
