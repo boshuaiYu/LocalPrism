@@ -121,3 +121,11 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
   save: vi.fn(),
 }));
+
+// jsdom logs a not-implemented error on every canvas getContext. The footer
+// measures labels with canvas; return null so that probe stays quiet.
+// Tests that need a measurement replace this and restore it.
+if (typeof HTMLCanvasElement !== "undefined") {
+  HTMLCanvasElement.prototype.getContext = (() =>
+    null) as typeof HTMLCanvasElement.prototype.getContext;
+}
