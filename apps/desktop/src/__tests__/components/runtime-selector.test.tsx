@@ -473,6 +473,18 @@ function escapeKey(): KeyboardEvent {
   });
 }
 
+async function setComposerValue(field: HTMLTextAreaElement, value: string) {
+  const setValue = Object.getOwnPropertyDescriptor(
+    HTMLTextAreaElement.prototype,
+    "value",
+  )?.set;
+  setValue?.call(field, value);
+  await act(async () => {
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    await Promise.resolve();
+  });
+}
+
 function ComposerWithSearch() {
   const [open, setOpen] = useState(true);
   return (
@@ -1181,8 +1193,61 @@ describe("ChatComposer provider wiring", () => {
     };
   }
 
-  it("lets the slash picker consume Escape while the model menu stays open", async () => {
+  it("closes the slash picker when the model menu opens, then Escape closes only the model menu", async () => {
     const view = mountLayeredComposer("tab-slash");
+    try {
+      await view.paint(<ChatComposer />);
+      const trigger = view.container.querySelector(
+        '[data-testid="composer-model-trigger"]',
+      );
+      const field = view.container.querySelector("textarea");
+      if (!(trigger instanceof HTMLButtonElement)) {
+        throw new Error("Composer model trigger not found");
+      }
+      if (!(field instanceof HTMLTextAreaElement)) {
+        throw new Error("Composer field not found");
+      }
+      await setComposerValue(field, "/");
+      expect(field.value).toBe("/");
+      expect(
+        document.querySelector('[aria-label="Close command picker"]'),
+      ).toBeTruthy();
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeNull();
+      const before = view.selection();
+      await act(async () => trigger.click());
+      expect(field.value).toBe("/");
+      expect(
+        document.querySelector('[aria-label="Close command picker"]'),
+      ).toBeNull();
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeTruthy();
+      expect(trigger.getAttribute("aria-expanded")).toBe("true");
+      const fromChip = escapeKey();
+      await act(async () => {
+        trigger.focus();
+        trigger.dispatchEvent(fromChip);
+      });
+      expect(fromChip.defaultPrevented).toBe(true);
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeNull();
+      expect(
+        document.querySelector('[aria-label="Close command picker"]'),
+      ).toBeNull();
+      expect(field.value).toBe("/");
+      expect(view.selection()).toEqual(before);
+      expect(document.activeElement).toBe(trigger);
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("closes the model menu when slash opens, then Escape closes only the slash picker", async () => {
+    const view = mountLayeredComposer("tab-slash-after-model");
     try {
       await view.paint(<ChatComposer />);
       const trigger = view.container.querySelector(
@@ -1200,31 +1265,34 @@ describe("ChatComposer provider wiring", () => {
       expect(
         document.querySelector('[aria-label="Runtime controls"]'),
       ).toBeTruthy();
-      const setValue = Object.getOwnPropertyDescriptor(
-        HTMLTextAreaElement.prototype,
-        "value",
-      )?.set;
-      setValue?.call(field, "/");
-      await act(async () => {
-        field.dispatchEvent(new Event("input", { bubbles: true }));
-        await Promise.resolve();
-      });
+      expect(
+        document.querySelector('[aria-label="Close command picker"]'),
+      ).toBeNull();
+      await setComposerValue(field, "/");
+      expect(field.value).toBe("/");
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeNull();
       expect(
         document.querySelector('[aria-label="Close command picker"]'),
       ).toBeTruthy();
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+      const fromField = escapeKey();
       await act(async () => {
         field.focus();
-        field.dispatchEvent(escapeKey());
+        field.dispatchEvent(fromField);
       });
+      expect(fromField.defaultPrevented).toBe(true);
       expect(
         document.querySelector('[aria-label="Close command picker"]'),
       ).toBeNull();
       expect(
         document.querySelector('[aria-label="Runtime controls"]'),
-      ).toBeTruthy();
+      ).toBeNull();
+      expect(field.value).toBe("/");
       expect(view.selection()).toEqual(before);
       expect(document.activeElement).toBe(field);
-      expect(trigger.getAttribute("aria-expanded")).toBe("true");
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
     } finally {
       await view.cleanup();
     }
@@ -1382,6 +1450,52 @@ describe("ChatComposer provider wiring", () => {
     }
   });
 
+  it("dismisses an open mention list when the model menu opens without editing the draft", async () => {
+    const view = mountLayeredComposer("tab-mention-dismiss");
+    useDocumentStore.setState({
+      files: [
+        {
+          id: "notes.tex",
+          name: "notes.tex",
+          relativePath: "notes.tex",
+          absolutePath: "C:/project/notes.tex",
+          type: "tex",
+          content: "",
+          isDirty: false,
+        },
+      ],
+    });
+    try {
+      await view.paint(<ChatComposer />);
+      const trigger = view.container.querySelector(
+        '[data-testid="composer-model-trigger"]',
+      );
+      const field = view.container.querySelector("textarea");
+      if (!(trigger instanceof HTMLButtonElement)) {
+        throw new Error("Composer model trigger not found");
+      }
+      if (!(field instanceof HTMLTextAreaElement)) {
+        throw new Error("Composer field not found");
+      }
+      const mention = () =>
+        Array.from(view.container.querySelectorAll("button")).find((button) =>
+          button.textContent?.includes("notes.tex"),
+        );
+      await setComposerValue(field, "@");
+      expect(field.value).toBe("@");
+      expect(mention()).toBeInstanceOf(HTMLButtonElement);
+      await act(async () => trigger.click());
+      expect(field.value).toBe("@");
+      expect(mention()).toBeUndefined();
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeTruthy();
+      expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
   it("closes the model menu on Escape from the chip while a mention list stays open", async () => {
     const view = mountLayeredComposer("tab-mention");
     useDocumentStore.setState({
@@ -1409,25 +1523,17 @@ describe("ChatComposer provider wiring", () => {
       if (!(field instanceof HTMLTextAreaElement)) {
         throw new Error("Composer field not found");
       }
-      const setValue = Object.getOwnPropertyDescriptor(
-        HTMLTextAreaElement.prototype,
-        "value",
-      )?.set;
-      setValue?.call(field, "@");
-      await act(async () => {
-        field.dispatchEvent(new Event("input", { bubbles: true }));
-        await Promise.resolve();
-      });
       const mention = () =>
         Array.from(view.container.querySelectorAll("button")).find((button) =>
           button.textContent?.includes("notes.tex"),
         );
-      expect(mention()).toBeInstanceOf(HTMLButtonElement);
       const before = view.selection();
       await act(async () => trigger.click());
       expect(
         document.querySelector('[aria-label="Runtime controls"]'),
       ).toBeTruthy();
+      await setComposerValue(field, "@");
+      expect(field.value).toBe("@");
       expect(mention()).toBeInstanceOf(HTMLButtonElement);
       await act(async () => {
         trigger.focus();
