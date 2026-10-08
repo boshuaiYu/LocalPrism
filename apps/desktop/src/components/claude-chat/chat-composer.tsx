@@ -1359,10 +1359,12 @@ export const ChatComposer: FC<{
       // Detect / slash command trigger — only at the very start of input
       const slashMatch = value.match(/^\/(\S*)$/);
       if (slashMatch) {
-        // Typing /query with no space yet — open picker
+        // Typing /query with no space yet — open picker. The model menu
+        // cannot stay up underneath it.
         slashSelectedRef.current = false;
         setSlashQuery(slashMatch[1]);
         setMentionQuery(null);
+        setModelPickerOpen(false);
       } else if (slashSelectedRef.current) {
         // User already selected a command — don't re-open picker
       } else if (!value.startsWith("/")) {
@@ -1399,9 +1401,10 @@ export const ChatComposer: FC<{
   // on the document bubble. Capture-phase Radix dialogs and the composer
   // field's slash / mention handlers run first. A pending tool approval is
   // only an overlay on the thread; it consumes Escape from its own keydown,
-  // which arrives here as defaultPrevented. One Escape closes only that top
-  // layer, and focus returns to the chip only when the key came from the
-  // chip, the menu, or the composer.
+  // which arrives here as defaultPrevented. The slash picker and this menu
+  // are not open together; a slash picker that is still mounted keeps
+  // Escape. Focus returns to the chip only when the key came from the chip,
+  // the menu, or the composer.
   useEffect(() => {
     if (!modelPickerOpen) return;
     const handleClickOutside = (e: MouseEvent) => {
@@ -1420,9 +1423,9 @@ export const ChatComposer: FC<{
     };
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
-      // The slash picker closes from a window listener. Mention only closes
-      // from the textarea, so an already-open list must not swallow Escape
-      // once focus has moved to the chip.
+      // Mention only closes from the textarea, so an already-open list must
+      // not swallow Escape once focus has moved to the chip. A slash picker
+      // still wins if one is mounted.
       if (slashQuery !== null) return;
       if (
         document.querySelector(
@@ -1825,7 +1828,16 @@ export const ChatComposer: FC<{
                   providerName={activeProviderName}
                   disabled={runtimeBusy}
                   expanded={modelPickerOpen}
-                  onClick={() => setModelPickerOpen((open) => !open)}
+                  onClick={() => {
+                    if (!modelPickerOpen) {
+                      // Drop the slash picker and @ list without editing the
+                      // draft, so Escape closes this menu instead of the one
+                      // underneath.
+                      setSlashQuery(null);
+                      setMentionQuery(null);
+                    }
+                    setModelPickerOpen((open) => !open);
+                  }}
                 />
               </div>
             </div>
