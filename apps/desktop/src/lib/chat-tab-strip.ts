@@ -185,8 +185,6 @@ export function chatTabWritingPreferredPx(): number {
 export type AccountHeaderChrome = {
   utilities: boolean;
   hideLabel: boolean;
-  density: "full" | "provider";
-  accountMin: string;
 };
 
 /**
@@ -195,27 +193,12 @@ export type AccountHeaderChrome = {
  */
 export function accountHeaderChrome(widthPx: number): AccountHeaderChrome {
   if (!Number.isFinite(widthPx) || widthPx <= 0 || widthPx >= 420) {
-    return {
-      utilities: true,
-      hideLabel: false,
-      density: "full",
-      accountMin: "min-w-[4.5rem]",
-    };
+    return { utilities: true, hideLabel: false };
   }
   if (widthPx >= 200) {
-    return {
-      utilities: false,
-      hideLabel: false,
-      density: "full",
-      accountMin: "min-w-[10rem]",
-    };
+    return { utilities: false, hideLabel: false };
   }
-  return {
-    utilities: false,
-    hideLabel: true,
-    density: "provider",
-    accountMin: "min-w-0",
-  };
+  return { utilities: false, hideLabel: true };
 }
 
 export type AccountDensity = "full" | "provider" | "icon";

@@ -14,6 +14,7 @@ import {
   normalizeReasoningEffort,
 } from "@/components/runtime/runtime-selector";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { composerModelChipPlan } from "@/lib/composer-model-chip";
 import type {
   ChangeTabRuntimeResult,
   ChatRuntimePeer,
@@ -828,9 +829,12 @@ describe("ChatComposer provider wiring", () => {
         document.querySelector('[aria-label^="Select custom agent"]'),
       ).toBeTruthy();
 
-      const trigger = document.querySelector('button[title="opus"]');
+      const trigger = document.querySelector(
+        '[data-testid="composer-model-trigger"]',
+      );
+      expect(trigger?.getAttribute("title")).toBe("Opus · High");
       expect(trigger?.getAttribute("aria-label")).toBe(
-        "Switch model opus, High",
+        "Switch model Opus · High",
       );
       if (!(trigger instanceof HTMLButtonElement)) {
         throw new Error("Composer runtime trigger not found");
@@ -1006,14 +1010,15 @@ describe("ChatComposer provider wiring", () => {
       expect(sendSlot?.previousElementSibling).toBe(contextSlot);
       expect(contextSlot?.previousElementSibling).toBe(leading);
       const triggerClasses = trigger?.className.split(/\s+/) ?? [];
-      expect(triggerClasses).toContain("max-w-full");
-      expect(triggerClasses).toContain("min-w-0");
-      expect(triggerClasses).toContain("overflow-hidden");
-      expect(triggerClasses).toContain("shrink");
-      expect(triggerClasses).not.toContain("shrink-0");
-      expect(trigger?.querySelector("span")?.className.split(/\s+/)).toContain(
-        "truncate",
-      );
+      expect(triggerClasses).toContain("shrink-0");
+      expect(triggerClasses).not.toContain("overflow-hidden");
+      expect(triggerClasses).not.toContain("truncate");
+      expect(trigger?.getAttribute("data-model-form")).toBe("full");
+      expect(trigger?.getAttribute("title")).toBe("GPT-5.6 Luna Fast · High");
+      expect(
+        trigger?.querySelector("[data-testid='composer-model-name']")
+          ?.className,
+      ).not.toContain("truncate");
       expect(trigger?.textContent).toContain("GPT-5.6 Luna Fast");
       expect(trigger?.textContent).toContain("High");
     } finally {
@@ -1146,9 +1151,14 @@ describe("ChatComposer provider wiring", () => {
       );
       expect(
         modelSlot
-          ?.querySelector('[data-testid="composer-model-trigger"] span')
+          ?.querySelector("[data-testid='composer-model-name']")
           ?.className.split(/\s+/),
-      ).toContain("truncate");
+      ).not.toContain("truncate");
+      expect(
+        modelSlot
+          ?.querySelector('[data-testid="composer-model-trigger"]')
+          ?.getAttribute("data-model-form"),
+      ).toBe("full");
       expect(contextSlot?.className).not.toContain("flex-1");
       expect(leading?.nextElementSibling).toBe(contextSlot);
       expect(contextSlot?.nextElementSibling).toBe(sendSlot);
@@ -1160,6 +1170,146 @@ describe("ChatComposer provider wiring", () => {
           ?.querySelector('[data-testid="chat-token-meter-ring"]')
           ?.getAttribute("data-state"),
       ).toBe("empty");
+    } finally {
+      globalThis.ResizeObserver = OriginalResizeObserver;
+      await act(async () => root.unmount());
+      container.remove();
+      resetProviderStoreForTests();
+      useClaudeChatStore.setState(chatSnapshot, true);
+      useClaudeSetupStore.setState(setupSnapshot, true);
+      useDocumentStore.setState(documentSnapshot, true);
+      useRuntimeStore.setState(runtimeSnapshot, true);
+    }
+  });
+
+  it("collapses a narrow model chip without slicing the model name", async () => {
+    const chatSnapshot = useClaudeChatStore.getState();
+    const setupSnapshot = useClaudeSetupStore.getState();
+    const documentSnapshot = useDocumentStore.getState();
+    const runtimeSnapshot = useRuntimeStore.getState();
+    const baseTab = chatSnapshot.tabs[0];
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const OriginalResizeObserver = globalThis.ResizeObserver;
+    class TightSlotObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(target: Element) {
+        Object.defineProperty(target, "clientWidth", {
+          configurable: true,
+          value: 110,
+        });
+        this.callback([], this);
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+    globalThis.ResizeObserver =
+      TightSlotObserver as unknown as typeof ResizeObserver;
+    useProviderStore.setState({
+      ready: true,
+      cards: [
+        {
+          id: "deepseek",
+          kind: "third-party",
+          name: "DeepSeek",
+          authenticated: true,
+          isActive: true,
+          accountLabel: "DeepSeek",
+        },
+      ],
+      models: [
+        {
+          id: "deepseek-v4-flash",
+          displayName: "deepseek-v4-flash",
+          reasoningEfforts: ["low", "medium", "high"],
+          isDefault: true,
+        },
+      ],
+    });
+    useDocumentStore.setState({ projectRoot: "C:/project" });
+    useClaudeSetupStore.setState({
+      status: "ready",
+      providerKind: "claude-code",
+      claudeProviderConfigured: true,
+      openAiCredentials: [],
+      activeOpenAiCredentialId: null,
+    });
+    useRuntimeStore.setState({
+      accounts: {
+        claude: runtimeAccount("claude", true),
+        codex: runtimeAccount("codex", true),
+      },
+      models: { claude: [], codex: [] },
+      loading: {},
+      login: {},
+    });
+    useClaudeChatStore.setState({
+      tabs: [
+        {
+          ...baseTab,
+          id: "tab-tight",
+          projectPath: "C:/project",
+          runtime: "claude",
+          chatPeer: "claude",
+          runtimeModel: "deepseek-v4-flash",
+          reasoningEffort: "low",
+          providerKey: null,
+        },
+      ],
+      activeTabId: "tab-tight",
+      activeProjectPath: "C:/project",
+      selectedModel: "deepseek-v4-flash",
+      effortLevel: "low",
+      selectedProviderCredentialId: CLAUDE_CODE_PROVIDER_ID,
+      selectedProviderModels: {},
+      messages: [],
+      sessionId: null,
+      isStreaming: false,
+    });
+    (
+      globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+
+    try {
+      await act(async () => {
+        root.render(
+          <TooltipProvider>
+            <ChatComposer />
+          </TooltipProvider>,
+        );
+        await Promise.resolve();
+      });
+      const trigger = container.querySelector(
+        '[data-testid="composer-model-trigger"]',
+      );
+      const expected = composerModelChipPlan({
+        slotPx: 110,
+        modelLabel: "deepseek-v4-flash",
+        effortLabel: "Low",
+        hasIcon: true,
+      });
+      expect(expected).not.toBe("full");
+      expect(trigger?.getAttribute("data-model-form")).toBe(expected);
+      expect(trigger?.getAttribute("title")).toBe("deepseek-v4-flash · Low");
+      expect(trigger?.getAttribute("aria-label")).toBe(
+        "Switch model deepseek-v4-flash · Low",
+      );
+      expect(
+        trigger?.querySelector("[data-testid='composer-model-name']"),
+      ).toBeNull();
+      expect(trigger?.textContent ?? "").not.toContain("deepseek");
+      expect(
+        trigger?.querySelector("[data-testid='composer-model-effort']")
+          ?.textContent,
+      ).toBe("Low");
+      if (!(trigger instanceof HTMLButtonElement)) {
+        throw new Error("Composer model trigger not found");
+      }
+      await act(async () => trigger.click());
+      expect(
+        buttonByLabel(document.body, "Select model deepseek-v4-flash"),
+      ).toBeInstanceOf(HTMLButtonElement);
     } finally {
       globalThis.ResizeObserver = OriginalResizeObserver;
       await act(async () => root.unmount());
@@ -1444,9 +1594,12 @@ describe("ChatComposer provider wiring", () => {
         );
         await Promise.resolve();
       });
-      const trigger = document.querySelector('button[title="opus"]');
+      const trigger = document.querySelector(
+        '[data-testid="composer-model-trigger"]',
+      );
+      expect(trigger?.getAttribute("title")).toBe("Opus · High");
       expect(trigger?.getAttribute("aria-label")).toBe(
-        "Switch model opus, High",
+        "Switch model Opus · High",
       );
       if (!(trigger instanceof HTMLButtonElement)) {
         throw new Error("Composer runtime trigger not found");

@@ -180,12 +180,6 @@
   scrollbar-color: var(--sidebar-border) transparent;
 }
 
-/* Hide the chat-pane label without removing its button tooltip or aria-label.
-   The attribute sits on the leading control only, so tab titles stay visible. */
-[data-leading-label="hidden"] span {
-  display: none;
-}
-
 /* MuPDF text selection layer */
 .mupdf-text-layer {
   position: absolute;
