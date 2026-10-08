@@ -89,6 +89,7 @@ import { TeachEmptyEntry } from "./teach-panel";
 import {
   releaseSelectionLessonForToolbar,
   selectionExplainAction,
+  shouldReleaseSelectionLesson,
 } from "@/lib/latex-selection-teach";
 import type { TeachAnchor } from "@/lib/teach-float";
 import { useI18n } from "@/lib/use-i18n";
@@ -229,6 +230,10 @@ export function LatexEditor() {
   // When the selection toolbar is visible, prevent CM selection changes from clearing it.
   // Only explicit dismiss/send/action should clear the toolbar.
   const toolbarStickyRef = useRef(false);
+  // Selection key Explain just opened. A later echo of that same range
+  // must not run the toolbar's "dismiss the float" path.
+  const explainedSelectionRef = useRef<string | null>(null);
+  const explainSnapshotRef = useRef<ReturnType<typeof selectionSnapshot>>(null);
   const parentRef = useRef<HTMLDivElement>(null);
 
   const { resolvedTheme } = useTheme();
@@ -592,10 +597,28 @@ export function LatexEditor() {
             });
           }
           toolbarStickyRef.current = true;
+          explainSnapshotRef.current = selectionSnapshot(update.view, {
+            start: from,
+            end: to,
+          });
           // The Proofread toolbar occupies this selection. Teaching waits
           // for Explain on that toolbar instead of opening the float here.
+          // Hold the range Explain just opened so the focus echo of that
+          // same selection does not close the card on the first click.
           if (!isMergeActiveRef.current && !isSearchOpenRef.current) {
-            releaseSelectionLessonForToolbar(useLatexTeachStore.getState());
+            const teach = useLatexTeachStore.getState();
+            const selectionKey = `sel:${from}:${to}`;
+            if (
+              shouldReleaseSelectionLesson({
+                open: teach.open,
+                sourceKey: teach.sourceKey,
+                heldSelectionKey: explainedSelectionRef.current,
+                selectionKey,
+              })
+            ) {
+              explainedSelectionRef.current = null;
+              releaseSelectionLessonForToolbar(teach);
+            }
           }
         } else if (!toolbarStickyRef.current) {
           // Only clear selection/coords if the toolbar is not being interacted with.
@@ -1207,8 +1230,8 @@ export function LatexEditor() {
       if (actionId !== "explain") return;
       const view = viewRef.current;
       const range = useDocumentStore.getState().selectionRange;
-      if (!view || !range) return;
-      const snapshot = selectionSnapshot(view, range);
+      const live = view && range ? selectionSnapshot(view, range) : null;
+      const snapshot = live ?? explainSnapshotRef.current;
       if (!snapshot) return;
       const action = selectionExplainAction({
         teachingEnabled: useSettingsStore.getState().latexTeaching === true,
@@ -1216,12 +1239,13 @@ export function LatexEditor() {
         ...snapshot,
       });
       if (!action) return;
+      explainedSelectionRef.current = action.sourceKey;
       useLatexTeachStore
         .getState()
         .forcePresent(
           action.lesson,
           action.sourceKey,
-          teachAnchorForRange(view, snapshot.from, snapshot.to),
+          view ? teachAnchorForRange(view, snapshot.from, snapshot.to) : null,
           { selectedText: snapshot.selected },
         );
       toolbarStickyRef.current = false;

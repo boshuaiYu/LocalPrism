@@ -34,6 +34,7 @@ export function SelectionToolbar({
   const [input, setInput] = useState("");
   const toolbarRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const pointerActionRef = useRef<string | null>(null);
 
   const handleSend = useCallback(() => {
     const trimmed = input.trim();
@@ -119,7 +120,22 @@ export function SelectionToolbar({
             <button
               key={action.id}
               data-testid={`selection-action-${action.id}`}
-              onClick={() => onAction(action.id)}
+              onMouseDown={(event) => {
+                // Keep the CodeMirror selection. Taking focus here emits a
+                // selection echo that used to dismiss a card opened on this
+                // same press, so the first Explain click looked ignored.
+                event.preventDefault();
+                event.stopPropagation();
+                pointerActionRef.current = action.id;
+                onAction(action.id);
+              }}
+              onClick={() => {
+                if (pointerActionRef.current === action.id) {
+                  pointerActionRef.current = null;
+                  return;
+                }
+                onAction(action.id);
+              }}
               className="flex items-center gap-2.5 px-3 py-1.5 text-left text-foreground text-sm transition-colors hover:bg-muted"
             >
               <span className="size-4 text-muted-foreground">

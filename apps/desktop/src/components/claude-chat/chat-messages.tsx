@@ -188,6 +188,13 @@ export const ChatMessages: FC = () => {
     (s) => s.compressEarlierMessages,
   );
   const isStreaming = useClaudeChatStore((s) => s.isStreaming);
+  const activeTabId = useClaudeChatStore((s) => s.activeTabId);
+  const transcriptFollowTabId = useClaudeChatStore(
+    (s) => s.transcriptFollowTabId,
+  );
+  const transcriptFollowNonce = useClaudeChatStore(
+    (s) => s.transcriptFollowNonce,
+  );
   const streamingStartedAt = useClaudeChatStore((s) => s.streamingStartedAt);
   const streamingStatus = useClaudeChatStore((s) => s.streamingStatus);
   const streamingRuntime = useClaudeChatStore(
@@ -212,6 +219,10 @@ export const ChatMessages: FC = () => {
   const followScrollRef = useRef(false);
   const anchorScrollTopRef = useRef(0);
   const wasStreamingRef = useRef(false);
+  const seenTabRef = useRef(activeTabId);
+  const seenFollowNonceRef = useRef(
+    transcriptFollowTabId === activeTabId ? transcriptFollowNonce : 0,
+  );
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
 
   // Build a map of tool_use_id → tool_result for inline display
@@ -311,6 +322,22 @@ export const ChatMessages: FC = () => {
     const streamingNow = isStreaming;
     const streamingJustEnded = wasStreamingRef.current && !streamingNow;
     wasStreamingRef.current = streamingNow;
+    const tabChanged = seenTabRef.current !== activeTabId;
+    const followForActiveTab =
+      transcriptFollowTabId === activeTabId &&
+      transcriptFollowNonce !== seenFollowNonceRef.current;
+    seenTabRef.current = activeTabId;
+    if (transcriptFollowTabId === activeTabId) {
+      seenFollowNonceRef.current = transcriptFollowNonce;
+    }
+    // Ask AI and other user sends re-arm follow before this frame's scroll
+    // decision. A tab switch does too, so landing on the learning tab does
+    // not keep a "scrolled up" flag from the writing chat. Token updates
+    // and a turn ending do not re-arm here.
+    if (tabChanged || followForActiveTab) {
+      shouldAutoScrollRef.current = true;
+      userHasScrolledRef.current = false;
+    }
     const frame = window.requestAnimationFrame(() => {
       const el = viewportRef.current;
       if (!el) return;
@@ -332,7 +359,14 @@ export const ChatMessages: FC = () => {
       }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [settledMessages, pendingGuidance, isStreaming]);
+  }, [
+    settledMessages,
+    pendingGuidance,
+    isStreaming,
+    activeTabId,
+    transcriptFollowTabId,
+    transcriptFollowNonce,
+  ]);
 
   const offerCompression = canOfferCompression(messages);
 

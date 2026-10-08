@@ -7,8 +7,9 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { PlusIcon, XIcon } from "lucide-react";
+import { BookOpenIcon, PlusIcon, XIcon } from "lucide-react";
 import { useStoreWithEqualityFn } from "zustand/traditional";
+import { chatTabStripPlan } from "@/lib/chat-tab-strip";
 import { cn } from "@/lib/utils";
 import {
   pendingApprovalTabKey,
@@ -122,6 +123,14 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
   const barRef = useRef<HTMLDivElement>(null);
   const [barWidth, setBarWidth] = useState(0);
   const chrome = accountHeaderChrome(barWidth);
+  const learnTabs = tabs.filter((tab) => tab.purpose === LATEX_LEARN_PURPOSE);
+  const writingTabs = tabs.filter((tab) => tab.purpose !== LATEX_LEARN_PURPOSE);
+  const strip = chatTabStripPlan({
+    barWidthPx: barWidth,
+    writingTabCount: writingTabs.length,
+    hasLearnTab: learnTabs.length > 0,
+    chrome,
+  });
 
   useLayoutEffect(() => {
     const node = barRef.current;
@@ -215,42 +224,73 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
         data-testid="chat-tab-toolbar"
         className="flex h-11 min-w-0 items-center overflow-hidden"
       >
-        <div className={cn("shrink-0", chrome.hideLabel && "[&_span]:sr-only")}>
+        <div
+          className={cn(
+            "shrink-0",
+            (chrome.hideLabel || strip.hideLeadingLabel) && "[&_span]:sr-only",
+          )}
+        >
           {leading}
         </div>
         {/* Horizontal tab scroll only. overflow-x:auto would otherwise
-            compute overflow-y to auto and paint a second scrollbar in the bar. */}
+            compute overflow-y to auto and paint a second scrollbar in the bar.
+            The learning tab sits outside this scroller so activating it cannot
+            scroll the writing chat out of sight. */}
         <div
           ref={scrollRef}
           data-testid="chat-tab-scroller"
           className="scrollbar-none flex min-w-[4.5rem] flex-1 items-center self-stretch overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          style={{ minWidth: strip.writingScrollerMinPx }}
         >
-          {tabs.map((tab) => (
+          {writingTabs.map((tab) => (
             <TabButton
               key={tab.id}
               tabId={tab.id}
-              title={
-                tab.purpose === LATEX_LEARN_PURPOSE
-                  ? t("teach.sessionTitle")
-                  : tab.title || t("chat.newChat")
-              }
+              title={tab.title || t("chat.newChat")}
               isActive={tab.id === activeTabId}
               isStreaming={tab.isStreaming}
               isLoadingHistory={tab.isLoadingHistory}
               isStopping={tab.isStopping}
               closableWhileBusy={tab.closableWhileBusy}
               hasPendingApproval={pendingTabIds.has(tab.id)}
+              minWidth={strip.writingTabMinPx}
+              maxWidth={strip.writingTabMaxPx}
               onClick={() => setActiveTab(tab.id)}
               onClose={(e) => handleClose(e, tab.id)}
             />
           ))}
         </div>
+        {learnTabs.length > 0 ? (
+          <div
+            data-testid="chat-tab-learn-slot"
+            className="flex shrink-0 items-center self-stretch"
+          >
+            {learnTabs.map((tab) => (
+              <TabButton
+                key={tab.id}
+                tabId={tab.id}
+                title={t("teach.sessionTitle")}
+                learn
+                isActive={tab.id === activeTabId}
+                isStreaming={tab.isStreaming}
+                isLoadingHistory={tab.isLoadingHistory}
+                isStopping={tab.isStopping}
+                closableWhileBusy={tab.closableWhileBusy}
+                hasPendingApproval={pendingTabIds.has(tab.id)}
+                minWidth={strip.learnSlotPx}
+                onClick={() => setActiveTab(tab.id)}
+                onClose={(e) => handleClose(e, tab.id)}
+              />
+            ))}
+          </div>
+        ) : null}
         <div
           data-testid="chat-account-cluster"
           className={cn(
             "flex w-max min-w-0 max-w-full shrink grow-0 items-center gap-1 overflow-hidden pr-2.5",
             chrome.accountMin,
           )}
+          style={{ minWidth: strip.accountMinPx }}
         >
           {chrome.utilities ? (
             <button
@@ -267,7 +307,7 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
             data-testid="chat-account-chip"
             className="min-w-0 max-w-full shrink overflow-hidden"
           >
-            <WorkspaceAccountButton density={chrome.density} />
+            <WorkspaceAccountButton density={strip.accountDensity} />
           </div>
         </div>
       </div>
@@ -278,23 +318,29 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
 function TabButton({
   tabId,
   title,
+  learn = false,
   isActive,
   isStreaming,
   isLoadingHistory,
   isStopping,
   closableWhileBusy,
   hasPendingApproval,
+  minWidth = 0,
+  maxWidth,
   onClick,
   onClose,
 }: {
   tabId: string;
   title: string;
+  learn?: boolean;
   isActive: boolean;
   isStreaming: boolean;
   isLoadingHistory: boolean;
   isStopping: boolean;
   closableWhileBusy: boolean;
   hasPendingApproval: boolean;
+  minWidth?: number;
+  maxWidth?: number;
   onClick: () => void;
   onClose: (e: React.MouseEvent) => void;
 }) {
@@ -303,18 +349,31 @@ function TabButton({
     <button
       type="button"
       data-tab-id={tabId}
+      data-learn-tab={learn ? "true" : undefined}
+      title={title}
       aria-label={
         hasPendingApproval ? t("chat.needsApproval", { title }) : title
       }
       aria-busy={isLoadingHistory || undefined}
       onClick={onClick}
+      style={{
+        ...(minWidth > 0 ? { minWidth } : {}),
+        ...(maxWidth ? { maxWidth } : {}),
+      }}
       className={cn(
-        "group relative flex h-full max-w-[11rem] shrink-0 items-center gap-1.5 overflow-hidden border-b-2 px-3.5 text-xs transition-colors",
+        "group relative flex h-full shrink-0 items-center gap-1.5 overflow-hidden border-b-2 px-3.5 text-xs transition-colors",
+        learn ? "whitespace-nowrap" : "max-w-full",
         isActive
           ? "border-primary/80 bg-muted/40 text-foreground"
           : "border-transparent text-muted-foreground hover:bg-muted/25 hover:text-foreground",
       )}
     >
+      {learn ? (
+        <BookOpenIcon
+          data-testid="chat-tab-learn-icon"
+          className="size-3.5 shrink-0 text-muted-foreground"
+        />
+      ) : null}
       {(isStreaming || hasPendingApproval || isLoadingHistory) && (
         <span
           className="relative flex size-2 shrink-0"
@@ -340,17 +399,22 @@ function TabButton({
           />
         </span>
       )}
-      <span data-testid="chat-tab-title" className="min-w-0 truncate">
+      <span
+        data-testid="chat-tab-title"
+        className={learn ? "shrink-0" : "min-w-0 truncate"}
+      >
         {title}
       </span>
-      {/* Close stays available for a session opened under another account. */}
+      {/* Close stays available for a session opened under another account.
+          It overlays the label so a short title is not ellipsized to make
+          room for a control that is hidden until hover. */}
       {(closableWhileBusy || (!isStreaming && !isStopping)) && (
         <span
           role="button"
           tabIndex={-1}
           aria-label={t("chat.closeTab")}
           onClick={onClose}
-          className="ml-auto shrink-0 rounded-sm p-0.5 opacity-0 transition-opacity hover:bg-muted-foreground/20 group-hover:opacity-100"
+          className="absolute top-1/2 right-1 shrink-0 -translate-y-1/2 rounded-sm bg-background/80 p-0.5 opacity-0 transition-opacity hover:bg-muted-foreground/20 group-hover:opacity-100"
         >
           <XIcon className="size-3" />
         </span>

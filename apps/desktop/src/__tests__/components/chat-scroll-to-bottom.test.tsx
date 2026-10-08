@@ -308,6 +308,101 @@ describe("chat scroll to bottom", () => {
     ).toBeTruthy();
   });
 
+  it.each([
+    "en",
+    "zh",
+  ] as const)("follows an Ask AI send in %s after the reader scrolled up", async (language) => {
+    useSettingsStore.setState({ uiLanguage: language });
+    const transcript = await renderTranscript();
+    await scrollTranscript(transcript, {
+      scrollHeight: 800,
+      clientHeight: 300,
+      scrollTop: 0,
+    });
+    expect(
+      container.querySelector('[data-testid="scroll-to-bottom"]'),
+    ).toBeTruthy();
+
+    scrollTo.mockClear();
+    const tabId = useClaudeChatStore.getState().activeTabId;
+    await act(async () => {
+      useClaudeChatStore
+        .getState()
+        .queueGuidance(tabId, "Explain the section heading");
+    });
+
+    expect(scrollTo).toHaveBeenCalledWith(
+      expect.objectContaining({ top: 800 }),
+    );
+    expect(useClaudeChatStore.getState().transcriptFollowTabId).toBe(tabId);
+    expect(useClaudeChatStore.getState().transcriptFollowNonce).toBeGreaterThan(
+      0,
+    );
+
+    await scrollTranscript(transcript, {
+      scrollHeight: 800,
+      clientHeight: 300,
+      scrollTop: 0,
+    });
+    scrollTo.mockClear();
+    const queued =
+      useClaudeChatStore.getState().tabs.find((tab) => tab.id === tabId)
+        ?.queuedGuidance ?? [];
+    const queuedId = queued[queued.length - 1]?.id;
+    await act(async () => {
+      useClaudeChatStore
+        .getState()
+        .displayQueuedGuidanceInChat(tabId, queuedId);
+    });
+    expect(scrollTo).toHaveBeenCalledWith(
+      expect.objectContaining({ top: 800 }),
+    );
+
+    await scrollTranscript(transcript, {
+      scrollHeight: 900,
+      clientHeight: 300,
+      scrollTop: 0,
+    });
+    scrollTo.mockClear();
+    await act(async () => {
+      useClaudeChatStore.getState()._appendMessage(tabId, user("token"));
+    });
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
+  it("follows the learning tab when Ask AI switches to it", async () => {
+    const transcript = await renderTranscript();
+    await scrollTranscript(transcript, {
+      scrollHeight: 800,
+      clientHeight: 300,
+      scrollTop: 0,
+    });
+    const state = useClaudeChatStore.getState();
+    const learnId = "tab-learn";
+    useClaudeChatStore.setState({
+      tabs: [
+        ...state.tabs,
+        {
+          ...state.tabs[0],
+          id: learnId,
+          title: "Learn LaTeX",
+          messages: [user("What is a section?")],
+          sessionId: null,
+          sessionRef: null,
+          isStreaming: false,
+        },
+      ],
+    });
+    scrollTo.mockClear();
+    await act(async () => {
+      useClaudeChatStore.getState().setActiveTab(learnId);
+    });
+    expect(useClaudeChatStore.getState().activeTabId).toBe(learnId);
+    expect(scrollTo).toHaveBeenCalledWith(
+      expect.objectContaining({ top: 800 }),
+    );
+  });
+
   it("labels the control in Chinese", async () => {
     useSettingsStore.setState({ uiLanguage: "zh" });
     const transcript = await renderTranscript();

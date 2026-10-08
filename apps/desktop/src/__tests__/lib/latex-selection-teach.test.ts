@@ -5,6 +5,7 @@ import {
   isSelectionTeachSource,
   releaseSelectionLessonForToolbar,
   selectionExplainAction,
+  shouldReleaseSelectionLesson,
 } from "@/lib/latex-selection-teach";
 import { useLatexTeachStore } from "@/stores/latex-teach-store";
 import { useSettingsStore } from "@/stores/settings-store";
@@ -205,5 +206,66 @@ describe("selection toolbar and teach float", () => {
     expect(
       resolveLesson(useLatexTeachStore.getState().lesson!, "zh").what,
     ).toContain("编号");
+  });
+
+  it("keeps a card open when the same selection echoes after Explain", () => {
+    useSettingsStore.getState().setLatexTeaching(true);
+    const figure = selectionExplainAction({
+      teachingEnabled: true,
+      isTex: true,
+      from: 2,
+      to: figureLine.length,
+      selected: String.raw`\begin{figure}[htbp]`,
+      line: figureLine,
+      selectionStartInLine: 2,
+      selectionEndInLine: figureLine.length,
+    })!;
+    useLatexTeachStore.getState().forcePresent(figure.lesson, figure.sourceKey);
+    const section = selectionExplainAction({
+      teachingEnabled: true,
+      isTex: true,
+      from: 0,
+      to: sectionLine.length,
+      selected: sectionLine,
+      line: sectionLine,
+      selectionStartInLine: 0,
+      selectionEndInLine: sectionLine.length,
+    })!;
+
+    expect(
+      shouldReleaseSelectionLesson({
+        open: true,
+        sourceKey: figure.sourceKey,
+        heldSelectionKey: figure.sourceKey,
+        selectionKey: section.sourceKey,
+      }),
+    ).toBe(true);
+    releaseSelectionLessonForToolbar(useLatexTeachStore.getState());
+    expect(useLatexTeachStore.getState().open).toBe(false);
+
+    useLatexTeachStore
+      .getState()
+      .forcePresent(section.lesson, section.sourceKey, null, {
+        selectedText: sectionLine,
+      });
+    expect(
+      shouldReleaseSelectionLesson({
+        open: true,
+        sourceKey: section.sourceKey,
+        heldSelectionKey: section.sourceKey,
+        selectionKey: section.sourceKey,
+      }),
+    ).toBe(false);
+    expect(useLatexTeachStore.getState().open).toBe(true);
+    expect(useLatexTeachStore.getState().lesson?.id).toBe("section");
+
+    expect(
+      shouldReleaseSelectionLesson({
+        open: true,
+        sourceKey: section.sourceKey,
+        heldSelectionKey: section.sourceKey,
+        selectionKey: "sel:40:48",
+      }),
+    ).toBe(true);
   });
 });
