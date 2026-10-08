@@ -1,7 +1,7 @@
 import { act, type ComponentType, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatComposer } from "@/components/claude-chat/chat-composer";
 import * as runtimeSelectorModule from "@/components/runtime/runtime-selector";
 import {
@@ -14,7 +14,10 @@ import {
   normalizeReasoningEffort,
 } from "@/components/runtime/runtime-selector";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { composerModelChipPlan } from "@/lib/composer-model-chip";
+import {
+  composerModelChipChevronPx,
+  composerModelChipPlan,
+} from "@/lib/composer-model-chip";
 import type {
   ChangeTabRuntimeResult,
   ChatRuntimePeer,
@@ -35,6 +38,12 @@ import {
   resetProviderStoreForTests,
   useProviderStore,
 } from "@/stores/provider-store";
+
+if (typeof globalThis.PointerEvent === "undefined") {
+  class PointerEventPolyfill extends MouseEvent {}
+  globalThis.PointerEvent =
+    PointerEventPolyfill as unknown as typeof PointerEvent;
+}
 
 const codexModel: RuntimeModel = {
   runtime: "codex",
@@ -708,9 +717,18 @@ describe("RuntimeSelector", () => {
 });
 
 describe("ChatComposer provider wiring", () => {
+  const originalGetContext = HTMLCanvasElement.prototype.getContext;
+
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
     vi.mocked(invoke).mockResolvedValue([] as never);
+    HTMLCanvasElement.prototype.getContext = (() => ({
+      measureText: () => ({ width: 0 }),
+    })) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+  });
+
+  afterEach(() => {
+    HTMLCanvasElement.prototype.getContext = originalGetContext;
   });
 
   function seedClaudeProvider() {
@@ -832,7 +850,7 @@ describe("ChatComposer provider wiring", () => {
       const trigger = document.querySelector(
         '[data-testid="composer-model-trigger"]',
       );
-      expect(trigger?.getAttribute("title")).toBe("Opus · High");
+      expect(trigger?.getAttribute("title")).toBeNull();
       expect(trigger?.getAttribute("aria-label")).toBe(
         "Switch model Opus · High",
       );
@@ -860,6 +878,143 @@ describe("ChatComposer provider wiring", () => {
         ),
       ).toBe("true");
     } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      resetProviderStoreForTests();
+      useClaudeChatStore.setState(chatSnapshot, true);
+      useClaudeSetupStore.setState(setupSnapshot, true);
+      useDocumentStore.setState(documentSnapshot, true);
+      useRuntimeStore.setState(runtimeSnapshot, true);
+    }
+  });
+
+  it("closes the model menu on Escape without changing the selection", async () => {
+    const chatSnapshot = useClaudeChatStore.getState();
+    const setupSnapshot = useClaudeSetupStore.getState();
+    const documentSnapshot = useDocumentStore.getState();
+    const runtimeSnapshot = useRuntimeStore.getState();
+    const baseTab = chatSnapshot.tabs[0];
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const OriginalResizeObserver = globalThis.ResizeObserver;
+    class NoopResizeObserver {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    globalThis.ResizeObserver =
+      NoopResizeObserver as unknown as typeof ResizeObserver;
+    vi.mocked(invoke).mockResolvedValue(undefined as never);
+    seedClaudeProvider();
+    useDocumentStore.setState({ projectRoot: "C:/project" });
+    useClaudeSetupStore.setState({
+      status: "ready",
+      providerKind: "claude-code",
+      claudeProviderConfigured: true,
+      openAiCredentials: [],
+      activeOpenAiCredentialId: null,
+    });
+    useRuntimeStore.setState({
+      accounts: {
+        claude: runtimeAccount("claude", true),
+        codex: runtimeAccount("codex", true),
+      },
+      models: { claude: [], codex: [] },
+      loading: {},
+      login: {},
+    });
+    useClaudeChatStore.setState({
+      tabs: [
+        {
+          ...baseTab,
+          id: "tab-escape",
+          projectPath: "C:/project",
+          runtime: "claude",
+          chatPeer: "claude",
+          runtimeModel: "opus",
+          reasoningEffort: "high",
+          providerKey: null,
+        },
+      ],
+      activeTabId: "tab-escape",
+      activeProjectPath: "C:/project",
+      selectedModel: "opus",
+      effortLevel: "high",
+      selectedProviderCredentialId: CLAUDE_CODE_PROVIDER_ID,
+      selectedProviderModels: {},
+      messages: [],
+      sessionId: null,
+      isStreaming: false,
+    });
+    (
+      globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+
+    const selection = () => {
+      const state = useClaudeChatStore.getState();
+      const tab = state.tabs.find((item) => item.id === "tab-escape");
+      return {
+        runtimeModel: tab?.runtimeModel,
+        reasoningEffort: tab?.reasoningEffort,
+        selectedModel: state.selectedModel,
+        effortLevel: state.effortLevel,
+      };
+    };
+
+    try {
+      await act(async () => {
+        root.render(
+          <TooltipProvider>
+            <ChatComposer />
+          </TooltipProvider>,
+        );
+        await Promise.resolve();
+      });
+      const trigger = container.querySelector(
+        '[data-testid="composer-model-trigger"]',
+      );
+      const field = container.querySelector("textarea");
+      if (!(trigger instanceof HTMLButtonElement)) {
+        throw new Error("Composer model trigger not found");
+      }
+      if (!(field instanceof HTMLTextAreaElement)) {
+        throw new Error("Composer field not found");
+      }
+      const before = selection();
+
+      await act(async () => trigger.click());
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeTruthy();
+      await act(async () => {
+        trigger.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+        );
+      });
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeNull();
+      expect(selection()).toEqual(before);
+      expect(document.activeElement).toBe(trigger);
+
+      await act(async () => trigger.click());
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeTruthy();
+      await act(async () => {
+        field.focus();
+        field.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+        );
+      });
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeNull();
+      expect(selection()).toEqual(before);
+      expect(document.activeElement).toBe(trigger);
+    } finally {
+      globalThis.ResizeObserver = OriginalResizeObserver;
       await act(async () => root.unmount());
       container.remove();
       resetProviderStoreForTests();
@@ -1014,7 +1169,10 @@ describe("ChatComposer provider wiring", () => {
       expect(triggerClasses).not.toContain("overflow-hidden");
       expect(triggerClasses).not.toContain("truncate");
       expect(trigger?.getAttribute("data-model-form")).toBe("full");
-      expect(trigger?.getAttribute("title")).toBe("GPT-5.6 Luna Fast · High");
+      expect(trigger?.getAttribute("title")).toBeNull();
+      expect(trigger?.getAttribute("aria-label")).toBe(
+        "Switch model GPT-5.6 Luna Fast · High",
+      );
       expect(
         trigger?.querySelector("[data-testid='composer-model-name']")
           ?.className,
@@ -1291,7 +1449,7 @@ describe("ChatComposer provider wiring", () => {
       });
       expect(expected).not.toBe("full");
       expect(trigger?.getAttribute("data-model-form")).toBe(expected);
-      expect(trigger?.getAttribute("title")).toBe("deepseek-v4-flash · Low");
+      expect(trigger?.getAttribute("title")).toBeNull();
       expect(trigger?.getAttribute("aria-label")).toBe(
         "Switch model deepseek-v4-flash · Low",
       );
@@ -1306,10 +1464,151 @@ describe("ChatComposer provider wiring", () => {
       if (!(trigger instanceof HTMLButtonElement)) {
         throw new Error("Composer model trigger not found");
       }
+      await act(async () => {
+        trigger.dispatchEvent(
+          new PointerEvent("pointermove", {
+            bubbles: true,
+            pointerType: "mouse",
+          }),
+        );
+        await new Promise((resolve) => {
+          setTimeout(resolve, 0);
+        });
+      });
+      const tip = document.querySelector(
+        "[data-testid='composer-model-tooltip']",
+      );
+      expect(tip?.textContent).toContain("deepseek-v4-flash · Low");
+      expect(
+        container
+          .querySelector("[data-testid='composer-controls-model']")
+          ?.contains(tip),
+      ).toBe(false);
       await act(async () => trigger.click());
       expect(
         buttonByLabel(document.body, "Select model deepseek-v4-flash"),
       ).toBeInstanceOf(HTMLButtonElement);
+    } finally {
+      globalThis.ResizeObserver = OriginalResizeObserver;
+      await act(async () => root.unmount());
+      container.remove();
+      resetProviderStoreForTests();
+      useClaudeChatStore.setState(chatSnapshot, true);
+      useClaudeSetupStore.setState(setupSnapshot, true);
+      useDocumentStore.setState(documentSnapshot, true);
+      useRuntimeStore.setState(runtimeSnapshot, true);
+    }
+  });
+
+  it("keeps the chevron when the slot is narrower than the effort form", async () => {
+    const chatSnapshot = useClaudeChatStore.getState();
+    const setupSnapshot = useClaudeSetupStore.getState();
+    const documentSnapshot = useDocumentStore.getState();
+    const runtimeSnapshot = useRuntimeStore.getState();
+    const baseTab = chatSnapshot.tabs[0];
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const OriginalResizeObserver = globalThis.ResizeObserver;
+    class ChevronSlotObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(target: Element) {
+        Object.defineProperty(target, "clientWidth", {
+          configurable: true,
+          value: 40,
+        });
+        this.callback([], this);
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+    globalThis.ResizeObserver =
+      ChevronSlotObserver as unknown as typeof ResizeObserver;
+    vi.mocked(invoke).mockResolvedValue(undefined as never);
+    seedClaudeProvider();
+    useDocumentStore.setState({ projectRoot: "C:/project" });
+    useClaudeSetupStore.setState({
+      status: "ready",
+      providerKind: "claude-code",
+      claudeProviderConfigured: true,
+      openAiCredentials: [],
+      activeOpenAiCredentialId: null,
+    });
+    useRuntimeStore.setState({
+      accounts: {
+        claude: runtimeAccount("claude", true),
+        codex: runtimeAccount("codex", true),
+      },
+      models: { claude: [], codex: [] },
+      loading: {},
+      login: {},
+    });
+    useClaudeChatStore.setState({
+      tabs: [
+        {
+          ...baseTab,
+          id: "tab-chevron",
+          projectPath: "C:/project",
+          runtime: "claude",
+          chatPeer: "claude",
+          runtimeModel: "opus",
+          reasoningEffort: "high",
+          providerKey: null,
+        },
+      ],
+      activeTabId: "tab-chevron",
+      activeProjectPath: "C:/project",
+      selectedModel: "opus",
+      effortLevel: "high",
+      selectedProviderCredentialId: CLAUDE_CODE_PROVIDER_ID,
+      selectedProviderModels: {},
+      messages: [],
+      sessionId: null,
+      isStreaming: false,
+    });
+    (
+      globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+
+    try {
+      await act(async () => {
+        root.render(
+          <TooltipProvider>
+            <ChatComposer />
+          </TooltipProvider>,
+        );
+        await Promise.resolve();
+      });
+      const slot = container.querySelector(
+        "[data-testid='composer-controls-model']",
+      );
+      const trigger = container.querySelector(
+        '[data-testid="composer-model-trigger"]',
+      );
+      expect(
+        composerModelChipPlan({
+          slotPx: 40,
+          modelLabel: "Opus",
+          effortLabel: "High",
+          hasIcon: true,
+        }),
+      ).toBe("chevron");
+      expect(trigger?.getAttribute("data-model-form")).toBe("chevron");
+      expect(
+        trigger?.querySelector("[data-testid='composer-model-effort']"),
+      ).toBeNull();
+      expect(
+        trigger?.querySelector("[data-testid='composer-model-name']"),
+      ).toBeNull();
+      expect(
+        trigger?.querySelector("[data-testid='composer-model-chevron']"),
+      ).toBeTruthy();
+      expect(slot instanceof HTMLElement ? slot.style.minWidth : "").toBe(
+        `${composerModelChipChevronPx()}px`,
+      );
+      expect(trigger?.getAttribute("aria-label")).toBe(
+        "Switch model Opus · High",
+      );
     } finally {
       globalThis.ResizeObserver = OriginalResizeObserver;
       await act(async () => root.unmount());
@@ -1597,7 +1896,7 @@ describe("ChatComposer provider wiring", () => {
       const trigger = document.querySelector(
         '[data-testid="composer-model-trigger"]',
       );
-      expect(trigger?.getAttribute("title")).toBe("Opus · High");
+      expect(trigger?.getAttribute("title")).toBeNull();
       expect(trigger?.getAttribute("aria-label")).toBe(
         "Switch model Opus · High",
       );

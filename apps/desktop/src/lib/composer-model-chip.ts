@@ -9,7 +9,7 @@ export const COMPOSER_MODEL_CHIP_CHEVRON_PX = 14;
 /** size-3.5 provider mark. */
 export const COMPOSER_MODEL_CHIP_ICON_PX = 14;
 
-export type ComposerModelChipForm = "full" | "icon" | "effort";
+export type ComposerModelChipForm = "full" | "icon" | "effort" | "chevron";
 
 /** Tooltip and accessible name. The chip never shows a slice of this string. */
 export function composerModelChipFullLabel(
@@ -35,10 +35,16 @@ function rowWidth(parts: number[]): number {
   );
 }
 
+/** Chevron-only chip. The floor so a tighter slot clips a word, not the chevron. */
+export function composerModelChipChevronPx(): number {
+  return rowWidth([COMPOSER_MODEL_CHIP_CHEVRON_PX]);
+}
+
 /**
  * Full model name when the slot can hold it. Otherwise the provider mark
- * plus the effort, or the effort alone. An unmeasured slot stays on the
- * full name; the layout effect measures before paint.
+ * plus the effort, or the effort alone. Below that, the chevron stays whole.
+ * An unmeasured slot stays on the full name; the layout effect measures
+ * before paint.
  */
 export function composerModelChipPlan(input: {
   slotPx: number;
@@ -70,7 +76,5 @@ export function composerModelChipPlan(input: {
   if (slot <= 0 || full <= slot) return "full";
   if (input.hasIcon && icon <= slot) return "icon";
   if (effort && effortOnly <= slot) return "effort";
-  if (effort) return "effort";
-  if (input.hasIcon) return "icon";
-  return "full";
+  return "chevron";
 }

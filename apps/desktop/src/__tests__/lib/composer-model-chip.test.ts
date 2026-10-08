@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  composerModelChipChevronPx,
   composerModelChipFullLabel,
   composerModelChipPlan,
 } from "@/lib/composer-model-chip";
@@ -31,6 +32,7 @@ describe("composer model chip", () => {
     expect(forms.has("full")).toBe(true);
     expect(forms.has("icon")).toBe(true);
     expect(forms.has("effort")).toBe(true);
+    expect(forms.has("chevron")).toBe(true);
 
     const iconSlot = Array.from({ length: 361 }, (_, index) => index + 40).find(
       (slot) => composerModelChipPlan({ ...DEEPSEEK, slotPx: slot }) === "icon",
@@ -43,7 +45,14 @@ describe("composer model chip", () => {
         slotPx: iconSlot ?? 0,
       }),
     ).not.toBe("icon");
-    expect(composerModelChipPlan({ ...DEEPSEEK, slotPx: 1 })).toBe("effort");
+    const chevronPx = composerModelChipChevronPx();
+    expect(composerModelChipPlan({ ...DEEPSEEK, slotPx: chevronPx })).toBe(
+      "chevron",
+    );
+    expect(composerModelChipPlan({ ...DEEPSEEK, slotPx: 1 })).toBe("chevron");
+    expect(composerModelChipPlan({ ...DEEPSEEK, slotPx: chevronPx - 1 })).toBe(
+      "chevron",
+    );
   });
 
   it("does not let a narrow measurement reveal a label the shared bound would clip", () => {
