@@ -80,13 +80,15 @@ describe("WorkspaceAccountButton", () => {
     expect(button?.getAttribute("title")).toBe(
       "ChatGPT Official · writer@example.com",
     );
-    expect(button?.className).toContain("min-w-[4.5rem]");
-    expect(button?.className).toContain("w-full");
-    expect(button?.className).toContain("max-w-full");
-    expect(button?.className).not.toContain("max-w-[14rem]");
-    expect(button?.querySelector("span")?.className).toContain("min-w-0");
-    expect(button?.className).toContain("overflow-hidden");
-    expect(button?.querySelector("span")?.className).toContain("truncate");
+    expect(button?.className.split(/\s+/)).toContain("shrink-0");
+    expect(button?.className).toContain("w-auto");
+    expect(button?.className).not.toContain("w-full");
+    expect(button?.className).not.toContain("truncate");
+    expect(button?.className).not.toContain("overflow-hidden");
+    expect(button?.querySelector("span")?.className).toContain(
+      "whitespace-nowrap",
+    );
+    expect(button?.querySelector("span")?.className).not.toContain("truncate");
     expect(container.querySelector('[role="dialog"]')).toBeNull();
 
     await act(async () => button?.click());
@@ -156,6 +158,48 @@ describe("WorkspaceAccountButton", () => {
     expect(button?.textContent).toContain("SiliconFlow");
     expect(button?.getAttribute("title")).toBe("SiliconFlow");
     expect(button?.getAttribute("aria-label")).toBe("Account: SiliconFlow");
+  });
+
+  it("collapses a short column to the provider logo and keeps the full name", async () => {
+    useProviderStore.setState({
+      cards: [
+        {
+          id: "deepseek",
+          kind: "third-party",
+          name: "DeepSeek",
+          authenticated: true,
+          isActive: true,
+          accountLabel: "DeepSeek",
+        },
+      ],
+    });
+
+    await act(async () =>
+      root.render(<WorkspaceAccountButton density="icon" />),
+    );
+
+    const button = container.querySelector("button");
+    expect(button?.textContent ?? "").not.toContain("DeepSeek");
+    expect(button?.querySelector("span")).toBeNull();
+    expect(button?.querySelector("img, svg")).not.toBeNull();
+    expect(button?.getAttribute("title")).toBe("DeepSeek");
+    expect(button?.getAttribute("aria-label")).toBe("Account: DeepSeek");
+    expect(
+      workspaceAccountVisibleLabel("DeepSeek", "DeepSeek", "Signed in", "icon"),
+    ).toBe("");
+  });
+
+  it("hides the sign-in words at icon density without dropping the accessible name", async () => {
+    await act(async () =>
+      root.render(<WorkspaceAccountButton density="icon" />),
+    );
+
+    const button = container.querySelector("button");
+    expect(button?.textContent ?? "").not.toContain("Sign in");
+    expect(button?.getAttribute("aria-label")).toBe("Sign in");
+    expect(button?.getAttribute("title")).toBe(
+      "Sign in or switch accounts without leaving this project",
+    );
   });
 
   it("prompts sign-in when no account is active", async () => {

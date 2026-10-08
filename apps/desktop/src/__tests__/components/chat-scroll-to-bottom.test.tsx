@@ -132,9 +132,25 @@ describe("chat scroll to bottom", () => {
     const button = container.querySelector(
       '[data-testid="scroll-to-bottom"]',
     ) as HTMLButtonElement | null;
+    const frame = container.querySelector(
+      '[data-testid="chat-transcript-frame"]',
+    );
     expect(button).toBeTruthy();
     expect(button?.getAttribute("aria-label")).toBe("Scroll to latest");
     expect(button?.textContent).toContain("Scroll to latest");
+    expect(button?.getAttribute("data-placement")).toBe("bottom-end");
+    expect(button?.className).toContain("absolute");
+    expect(button?.className).not.toContain("left-1/2");
+    expect(button?.className).not.toContain("-translate-x-1/2");
+    expect(button?.className).not.toContain("fixed");
+    expect(button?.className).toContain("bg-background");
+    expect(button?.className).toContain("shadow-md");
+    expect(button?.className.split(/\s+/)).toContain("z-10");
+    expect(button?.style.right).toBe("12px");
+    expect(button?.style.bottom).toBe("12px");
+    expect(button?.parentElement).toBe(frame);
+    expect(transcript.contains(button!)).toBe(false);
+    expect(transcript.className).toContain("[scrollbar-gutter:stable]");
 
     scrollTo.mockClear();
     await act(async () => {
@@ -147,6 +163,48 @@ describe("chat scroll to bottom", () => {
     expect(
       container.querySelector('[data-testid="scroll-to-bottom"]'),
     ).toBeNull();
+  });
+
+  it("keeps the jump control inset from a classic scrollbar gutter", async () => {
+    const original = globalThis.ResizeObserver;
+    class GutterObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(target: Element) {
+        Object.defineProperty(target, "offsetWidth", {
+          configurable: true,
+          value: 317,
+        });
+        Object.defineProperty(target, "clientWidth", {
+          configurable: true,
+          value: 300,
+        });
+        this.callback([], this);
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+    globalThis.ResizeObserver =
+      GutterObserver as unknown as typeof ResizeObserver;
+    try {
+      const transcript = await renderTranscript();
+      await scrollTranscript(transcript, {
+        scrollHeight: 800,
+        clientHeight: 300,
+        scrollTop: 0,
+      });
+      const button = container.querySelector(
+        '[data-testid="scroll-to-bottom"]',
+      ) as HTMLButtonElement | null;
+      const frame = container.querySelector(
+        '[data-testid="chat-transcript-frame"]',
+      );
+      expect(button?.style.right).toBe("29px");
+      expect(button?.style.bottom).toBe("12px");
+      expect(button?.parentElement).toBe(frame);
+      expect(transcript.contains(button!)).toBe(false);
+    } finally {
+      globalThis.ResizeObserver = original;
+    }
   });
 
   it("stays hidden when the viewport is already on the latest messages", async () => {
