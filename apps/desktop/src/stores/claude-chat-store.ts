@@ -54,6 +54,11 @@ import {
   meaningfulChatTitle,
   STORED_CHAT_TITLE_PLACEHOLDER,
 } from "@/lib/chat-tab-title";
+import {
+  LATEX_LEARN_PURPOSE,
+  latexLearnSessionTitle,
+  type LatexLearnPurpose,
+} from "@/lib/latex-learn-tab";
 import { tabOpenedUnderOtherAccount } from "@/lib/provider-account";
 import { uiText } from "@/lib/use-i18n";
 import { sameProjectPath } from "./chat-persistence";
@@ -224,6 +229,8 @@ export interface QueuedGuidance {
   contextOverride?: PromptContextOverride;
   createdAt: number;
   displayedInChat?: boolean;
+  /** Keep a self-contained prompt from picking up the open file or selection. */
+  skipAmbientContext?: boolean;
 }
 
 export interface AttemptCancellation {
@@ -279,6 +286,11 @@ const rewindInFlight = new Set<string>();
 export interface TabState {
   id: string;
   title: string;
+  /**
+   * Stable role for a tab whose visible title should not follow the first
+   * prompt. `latex-learn` is the one teaching session for its project.
+   */
+  purpose?: LatexLearnPurpose | null;
   projectPath: string | null;
   runtime: RuntimeKind;
   /**
@@ -446,6 +458,7 @@ function makeDefaultTab(
   return {
     id,
     title: STORED_CHAT_TITLE_PLACEHOLDER,
+    purpose: null,
     projectPath,
     runtime: "claude",
     chatPeer: peerFromTab({ runtime: "claude", providerKey }),
@@ -476,6 +489,13 @@ function makeDefaultTab(
     cancelledAttempts: [],
     compressionCarryover: null,
   };
+}
+
+function latexLearnTitleLock(
+  tab: Pick<TabState, "purpose"> | null | undefined,
+): string | null {
+  if (tab?.purpose !== LATEX_LEARN_PURPOSE) return null;
+  return latexLearnSessionTitle(useSettingsStore.getState().uiLanguage);
 }
 
 function currentAccountOwnership(
@@ -1248,6 +1268,7 @@ interface ClaudeChatState {
     prompt: string,
     contextOverride?: PromptContextOverride,
     displayPrompt?: string,
+    options?: { skipAmbientContext?: boolean },
   ) => void;
   consumeQueuedGuidance: (
     tabId: string,
@@ -1291,7 +1312,7 @@ interface ClaudeChatState {
   createTab: () => string;
   ensureWritableTab: () => string;
   closeTab: (tabId: string) => void;
-  setActiveTab: (tabId: string) => void;
+  setActiveTab: (tabId: string, options?: { resumeHistory?: boolean }) => void;
   saveDraft: (tabId: string, draft: TabDraft) => void;
 
   /** True when any tab is streaming */
@@ -1726,9 +1747,12 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     // Auto-set tab title from first prompt
     const isFirstMessage =
       activeTab && activeTab.messages.length === 0 && !keepTrailingUserMessage;
-    const tabTitle = isFirstMessage
-      ? meaningfulChatTitle(summarizeChatTitle(visiblePrompt) ?? "")
-      : null;
+    const learnTitle = latexLearnTitleLock(activeTab);
+    const tabTitle = learnTitle
+      ? learnTitle
+      : isFirstMessage
+        ? meaningfulChatTitle(summarizeChatTitle(visiblePrompt) ?? "")
+        : null;
 
     set((s) => {
       const currentTab = s.tabs.find((t) => t.id === activeTabId);
@@ -1968,7 +1992,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     }
   },
 
-  queueGuidance: (tabId, prompt, contextOverride, displayPrompt) => {
+  queueGuidance: (tabId, prompt, contextOverride, displayPrompt, options) => {
     const trimmed = prompt.trim();
     const temporaryFilePaths = contextOverride?.temporaryFilePaths ?? [];
     if (!trimmed) {
@@ -1989,6 +2013,9 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
           displayPrompt: displayPrompt?.trim() || undefined,
           contextOverride,
           createdAt: Date.now(),
+          ...(options?.skipAmbientContext
+            ? { skipAmbientContext: true as const }
+            : {}),
         },
       ];
       return applyTabUpdate(state, tabId, { queuedGuidance });
@@ -2537,6 +2564,11 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       get().ensureWritableTab();
       return;
     }
+    // New chat must not wipe the teaching session. Open a writing tab beside it.
+    if (activeTab?.purpose === LATEX_LEARN_PURPOSE) {
+      get().createTab();
+      return;
+    }
     const projectPath =
       get().activeProjectPath ??
       useDocumentStore.getState().projectRoot ??
@@ -2984,6 +3016,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       ...applyTabUpdate(current, tabId, {
         chatPeer: nextPeer,
         runtime: nextRuntime,
+        ...(nextRuntime !== "claude" ? { purpose: null } : {}),
         providerKey: nextProviderKey,
         sessionRef: null,
         sessionId: null,
@@ -3156,6 +3189,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
 
     const targetTab = get().tabs.find((tab) => tab.id === activeTabId);
     if (!targetTab || isBusy(targetTab)) return;
+    const learnTitle = latexLearnTitleLock(targetTab);
     const resumeRequestId = nextResumeRequestId(activeTabId);
     const discardedTemporaryFilePaths = temporaryFilesOwnedByTab(targetTab);
     const runtimeChanged = targetTab.runtime !== reference.runtime;
@@ -3218,7 +3252,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         lastTurnUsage: null,
         usageFromPreviousTurn: false,
         ignoreTranscriptUsage: false,
-        title: sessionTitle ?? STORED_CHAT_TITLE_PLACEHOLDER,
+        title: learnTitle ?? sessionTitle ?? STORED_CHAT_TITLE_PLACEHOLDER,
         queuedGuidance: [],
         forceQueuedGuidanceOnComplete: false,
         forcedQueuedGuidanceId: null,
@@ -3329,6 +3363,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
           messages,
           ...runtimeUpdates,
           title:
+            learnTitle ??
             sessionTitle ??
             preservedTitle ??
             derivedTitle ??
@@ -3523,7 +3558,7 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     cleanupDiscardedTemporaryFiles(discardedTemporaryFilePaths);
   },
 
-  setActiveTab: (tabId: string) => {
+  setActiveTab: (tabId: string, options?: { resumeHistory?: boolean }) => {
     const state = get();
     if (tabId === state.activeTabId) return;
     const targetTab = state.tabs.find((t) => t.id === tabId);
@@ -3547,6 +3582,8 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       lastTurnUsage: targetTab.lastTurnUsage ?? null,
       selectedProviderCredentialId: nextSelectedProviderCredentialId,
     });
+
+    if (options?.resumeHistory === false) return;
 
     const emptyShell =
       targetTab.messages.length === 0 &&
@@ -3738,7 +3775,8 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     set((state) => ({
       tabs: state.tabs.map((tab) =>
         tab.sessionId === sessionId &&
-        tab.projectPath === state.activeProjectPath
+        tab.projectPath === state.activeProjectPath &&
+        tab.purpose !== LATEX_LEARN_PURPOSE
           ? { ...tab, title: cleanTitle }
           : tab,
       ),
@@ -3759,7 +3797,8 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
                 projectPath: tab.projectPath,
               }
             : null);
-        return sameConversationReference(tabReference, reference)
+        return sameConversationReference(tabReference, reference) &&
+          tab.purpose !== LATEX_LEARN_PURPOSE
           ? { ...tab, title: cleanTitle }
           : tab;
       }),

@@ -12,6 +12,8 @@ describe("translate", () => {
     expect(translate("zh", "settings.preview")).toBe("预览功能");
     expect(translate("en", "teach.ask")).toBe("Ask AI");
     expect(translate("zh", "teach.ask")).toBe("问 AI");
+    expect(translate("en", "teach.sessionTitle")).toBe("Learn LaTeX");
+    expect(translate("zh", "teach.sessionTitle")).toBe("边写边学");
     expect(translate("zh", "chat.compress")).toBe("压缩更早的消息");
     expect(translate("en", "chat.scrollToBottom")).toBe("Scroll to latest");
     expect(translate("zh", "chat.scrollToBottom")).toBe("跳到最新");

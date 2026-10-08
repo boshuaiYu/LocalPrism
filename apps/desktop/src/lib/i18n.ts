@@ -574,6 +574,7 @@ const en = {
   "teach.kind.error": "Error",
   "teach.kind.guide": "Guide",
   "teach.ask": "Ask AI",
+  "teach.sessionTitle": "Learn LaTeX",
   "teach.askConstruct":
     "Explain this LaTeX construct.\n\nConstruct: {{tag}}\nTitle: {{title}}\nWhat it is: {{what}}",
   "teach.askSelected": "Selected text:\n{{selected}}",
@@ -1129,6 +1130,7 @@ const zh: Record<MessageKey, string> = {
   "teach.kind.error": "报错",
   "teach.kind.guide": "入门",
   "teach.ask": "问 AI",
+  "teach.sessionTitle": "边写边学",
   "teach.askConstruct":
     "请讲解这个 LaTeX 结构。\n\n结构：{{tag}}\n标题：{{title}}\n是什么：{{what}}",
   "teach.askSelected": "选中文本：\n{{selected}}",

@@ -18,6 +18,7 @@ import {
   displayedChatTabTitle,
   useClaudeChatStore,
 } from "@/stores/claude-chat-store";
+import { LATEX_LEARN_PURPOSE } from "@/lib/latex-learn-tab";
 import { tabsForProject } from "@/stores/chat-persistence";
 import { tabOpenedUnderOtherAccount } from "@/lib/provider-account";
 import { useI18n } from "@/lib/use-i18n";
@@ -66,6 +67,7 @@ export function accountHeaderChrome(widthPx: number): AccountHeaderChrome {
 type TabBarItem = {
   id: string;
   title: string;
+  purpose: "latex-learn" | null;
   isStreaming: boolean;
   isStopping: boolean;
   closableWhileBusy: boolean;
@@ -78,6 +80,7 @@ function sameTabBarItems(left: TabBarItem[], right: TabBarItem[]): boolean {
       (item, index) =>
         item.id === right[index].id &&
         item.title === right[index].title &&
+        item.purpose === right[index].purpose &&
         item.isStreaming === right[index].isStreaming &&
         item.isStopping === right[index].isStopping &&
         item.closableWhileBusy === right[index].closableWhileBusy,
@@ -93,6 +96,8 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
       tabsForProject(s.tabs, s.activeProjectPath).map((tab) => ({
         id: tab.id,
         title: displayedChatTabTitle(tab.title, tab.messages),
+        purpose:
+          tab.purpose === LATEX_LEARN_PURPOSE ? LATEX_LEARN_PURPOSE : null,
         isStreaming: tab.isStreaming,
         isStopping: (tab.cancelledAttempts?.length ?? 0) > 0,
         closableWhileBusy: tabOpenedUnderOtherAccount(tab, s),
@@ -221,7 +226,11 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
             <TabButton
               key={tab.id}
               tabId={tab.id}
-              title={tab.title || t("chat.newChat")}
+              title={
+                tab.purpose === LATEX_LEARN_PURPOSE
+                  ? t("teach.sessionTitle")
+                  : tab.title || t("chat.newChat")
+              }
               isActive={tab.id === activeTabId}
               isStreaming={tab.isStreaming}
               isStopping={tab.isStopping}

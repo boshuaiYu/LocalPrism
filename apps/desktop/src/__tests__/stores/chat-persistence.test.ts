@@ -421,6 +421,7 @@ describe("chat persistence I/O", () => {
         "providerKey",
         "reasoningEffort",
         "openedUnderAccountKey",
+        "purpose",
         "runtime",
         "runtimeModel",
         "sessionProviderKey",
@@ -444,6 +445,34 @@ describe("chat persistence I/O", () => {
     ]) {
       expect(json).not.toContain(forbidden);
     }
+  });
+
+  it("keeps a learning-session marker and drops unknown purposes", () => {
+    const kept = migratePersistedChat({
+      version: 2,
+      activeTabId: "tab-learn",
+      tabs: [
+        persistedTab({
+          id: "tab-learn",
+          purpose: "latex-learn",
+          title: "边写边学",
+        }),
+        persistedTab({ id: "tab-other", purpose: "scratch" }),
+      ],
+    });
+    expect(kept.tabs.map((tab) => tab.purpose)).toEqual(["latex-learn", null]);
+
+    const projected = projectPersistedChat({
+      activeTabId: "tab-learn",
+      tabs: kept.tabs,
+    });
+    expect(projected.tabs.map((tab) => tab.purpose)).toEqual([
+      "latex-learn",
+      null,
+    ]);
+    expect(migratePersistedChat(projected).tabs[0]?.purpose).toBe(
+      "latex-learn",
+    );
   });
 
   it("returns a safe default for malformed JSON and storage get failures", () => {
