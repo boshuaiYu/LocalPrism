@@ -403,6 +403,188 @@ describe("chat scroll to bottom", () => {
     );
   });
 
+  it.each([
+    "en",
+    "zh",
+  ] as const)("follows Ask AI on an already-active tab in %s after history settles", async (language) => {
+    useSettingsStore.setState({ uiLanguage: language });
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+      delete frames[id - 1];
+    });
+
+    const flush = async () => {
+      const pending = frames.splice(0);
+      await act(async () => {
+        for (const frame of pending) frame?.(0);
+      });
+    };
+
+    await act(async () => {
+      root.render(<ChatMessages />);
+    });
+    const transcript = container.querySelector(
+      '[data-testid="chat-transcript"]',
+    );
+    expect(transcript).toBeInstanceOf(HTMLElement);
+    const viewport = transcript as HTMLElement;
+    await flush();
+
+    await scrollTranscript(viewport, {
+      scrollHeight: 800,
+      clientHeight: 300,
+      scrollTop: 120,
+    });
+    expect(
+      container.querySelector('[data-testid="scroll-to-bottom"]'),
+    ).toBeTruthy();
+    scrollTo.mockClear();
+
+    const history = [
+      user("older section answer"),
+      user("the figure explanation from last time"),
+    ];
+    setTranscriptMetrics(viewport, {
+      scrollHeight: 1000,
+      clientHeight: 300,
+      scrollTop: 120,
+    });
+    await act(async () => {
+      const state = useClaudeChatStore.getState();
+      const tab = state.tabs[0];
+      useClaudeChatStore.setState({
+        messages: history,
+        isStreaming: false,
+        tabs: [
+          {
+            ...tab,
+            messages: history,
+            isStreaming: false,
+            resumeRequestId: "resume-learn",
+          },
+        ],
+      });
+    });
+    await act(async () => {
+      const state = useClaudeChatStore.getState();
+      const tab = state.tabs[0];
+      useClaudeChatStore.setState({
+        tabs: [{ ...tab, resumeRequestId: null }],
+      });
+    });
+    await act(async () => {
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    await flush();
+    expect(scrollTo).not.toHaveBeenCalled();
+
+    const tabId = useClaudeChatStore.getState().activeTabId;
+    const asked = [...history, user("Explain the figure")];
+    setTranscriptMetrics(viewport, {
+      scrollHeight: 1400,
+      clientHeight: 300,
+      scrollTop: 120,
+    });
+    await act(async () => {
+      const state = useClaudeChatStore.getState();
+      useClaudeChatStore.setState({
+        messages: asked,
+        isStreaming: true,
+        activeTabId: tabId,
+        transcriptFollowTabId: tabId,
+        transcriptFollowNonce: state.transcriptFollowNonce + 1,
+        tabs: state.tabs.map((candidate) =>
+          candidate.id === tabId
+            ? { ...candidate, messages: asked, isStreaming: true }
+            : candidate,
+        ),
+      });
+    });
+    expect(useClaudeChatStore.getState().activeTabId).toBe(tabId);
+    await act(async () => {
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    await flush();
+    expect(scrollTo).toHaveBeenCalledWith(
+      expect.objectContaining({ top: 1400, behavior: "instant" }),
+    );
+
+    scrollTo.mockClear();
+    const streamed = [
+      ...asked,
+      {
+        type: "assistant" as const,
+        message: { content: [{ type: "text" as const, text: "token" }] },
+      },
+    ];
+    setTranscriptMetrics(viewport, {
+      scrollHeight: 1800,
+      clientHeight: 300,
+      scrollTop: viewport.scrollTop,
+    });
+    await act(async () => {
+      const state = useClaudeChatStore.getState();
+      useClaudeChatStore.setState({
+        messages: streamed,
+        isStreaming: true,
+        tabs: state.tabs.map((candidate) =>
+          candidate.id === tabId
+            ? { ...candidate, messages: streamed, isStreaming: true }
+            : candidate,
+        ),
+      });
+    });
+    await flush();
+    expect(scrollTo).toHaveBeenCalledWith(
+      expect.objectContaining({ top: 1800, behavior: "instant" }),
+    );
+
+    scrollTo.mockClear();
+    await scrollTranscript(viewport, {
+      scrollHeight: 1800,
+      clientHeight: 300,
+      scrollTop: 200,
+    });
+    const later = [
+      ...streamed,
+      {
+        type: "assistant" as const,
+        message: {
+          content: [{ type: "text" as const, text: "more tokens" }],
+        },
+      },
+    ];
+    setTranscriptMetrics(viewport, {
+      scrollHeight: 2100,
+      clientHeight: 300,
+      scrollTop: 200,
+    });
+    await act(async () => {
+      const state = useClaudeChatStore.getState();
+      useClaudeChatStore.setState({
+        messages: later,
+        isStreaming: true,
+        tabs: state.tabs.map((candidate) =>
+          candidate.id === tabId
+            ? { ...candidate, messages: later, isStreaming: true }
+            : candidate,
+        ),
+      });
+    });
+    await act(async () => {
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    await flush();
+    expect(scrollTo).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="scroll-to-bottom"]'),
+    ).toBeTruthy();
+  });
+
   it("labels the control in Chinese", async () => {
     useSettingsStore.setState({ uiLanguage: "zh" });
     const transcript = await renderTranscript();

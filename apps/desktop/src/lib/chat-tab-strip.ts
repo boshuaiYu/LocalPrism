@@ -25,9 +25,14 @@ export const CHAT_TAB_LEADING_ICON_PX = 40;
 export const CHAT_TAB_LEADING_LABEL_PX = 76;
 export const CHAT_TAB_LEARN_TEXT_PX = 72;
 export const CHAT_TAB_LEARN_CHROME_PX = 48;
+/** Streaming dot (8px) plus the tab's 6px gap. */
+export const CHAT_TAB_LEARN_STATUS_PX = 14;
 export const CHAT_TAB_LEARN_SLOT_PX =
-  CHAT_TAB_LEARN_CHROME_PX + CHAT_TAB_LEARN_TEXT_PX + 8;
+  CHAT_TAB_LEARN_CHROME_PX + CHAT_TAB_LEARN_STATUS_PX + CHAT_TAB_LEARN_TEXT_PX;
+/** Floor that still shows a short writing title at the 307px default column. */
 export const CHAT_TAB_WRITING_SLOT_PX = 92;
+/** Used when the bar has room after the learning tab, including its status dot. */
+export const CHAT_TAB_WRITING_PREFERRED_PX = 128;
 export const CHAT_TAB_WRITING_MANY_SLOT_PX = 72;
 export const CHAT_TAB_ACCOUNT_FULL_PX = 72;
 export const CHAT_TAB_ACCOUNT_COMFORT_PX = 160;
@@ -121,7 +126,7 @@ export function chatTabStripPlan(input: {
   let writingTabMinPx = many
     ? CHAT_TAB_WRITING_MANY_SLOT_PX
     : input.writingTabCount > 0
-      ? CHAT_TAB_WRITING_SLOT_PX
+      ? CHAT_TAB_WRITING_PREFERRED_PX
       : 0;
 
   const reserved = () =>
@@ -148,6 +153,11 @@ export function chatTabStripPlan(input: {
   if (cramped() && accountMinPx > CHAT_TAB_ACCOUNT_TIGHT_PX) {
     accountMinPx = CHAT_TAB_ACCOUNT_TIGHT_PX;
     accountDensity = "provider";
+  }
+  if (!many) {
+    while (cramped() && writingTabMinPx > CHAT_TAB_WRITING_SLOT_PX) {
+      writingTabMinPx -= 4;
+    }
   }
   if (cramped() && writingTabMinPx > CHAT_TAB_WRITING_MANY_SLOT_PX) {
     writingTabMinPx = CHAT_TAB_WRITING_MANY_SLOT_PX;

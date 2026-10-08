@@ -3,6 +3,7 @@ import { accountHeaderChrome } from "@/components/claude-chat/chat-tab-bar";
 import {
   CHAT_TAB_LEARN_CHROME_PX,
   CHAT_TAB_LEARN_SLOT_PX,
+  CHAT_TAB_LEARN_STATUS_PX,
   CHAT_TAB_LEARN_TEXT_PX,
   CHAT_TAB_WRITING_MANY_MAX_PX,
   CHAT_TAB_WRITING_SLOT_PX,
@@ -15,8 +16,10 @@ describe("chat tab strip budget", () => {
   it("fits Learn LaTeX and a writing tab in the default 1280 three-pane chat column", () => {
     const barWidth = defaultThreePaneChatBarPx(1280);
     expect(barWidth).toBe(307);
-    expect(CHAT_TAB_LEARN_SLOT_PX).toBeGreaterThanOrEqual(
-      CHAT_TAB_LEARN_CHROME_PX + CHAT_TAB_LEARN_TEXT_PX,
+    expect(CHAT_TAB_LEARN_SLOT_PX).toBe(
+      CHAT_TAB_LEARN_CHROME_PX +
+        CHAT_TAB_LEARN_STATUS_PX +
+        CHAT_TAB_LEARN_TEXT_PX,
     );
     // 「边写边学」 is four 12px ems, shorter than the English label.
     expect(CHAT_TAB_LEARN_TEXT_PX).toBeGreaterThanOrEqual(48);
@@ -31,9 +34,7 @@ describe("chat tab strip budget", () => {
 
     expect(plan.pinLearnTab).toBe(true);
     expect(plan.learnSlotPx).toBe(CHAT_TAB_LEARN_SLOT_PX);
-    expect(plan.writingTabMinPx).toBeGreaterThanOrEqual(
-      CHAT_TAB_WRITING_SLOT_PX,
-    );
+    expect(plan.writingTabMinPx).toBe(CHAT_TAB_WRITING_SLOT_PX);
     expect(plan.hideLeadingLabel).toBe(true);
     expect(chatTabStripReservedPx(plan, chrome.utilities)).toBeLessThanOrEqual(
       barWidth,
@@ -52,9 +53,7 @@ describe("chat tab strip budget", () => {
     });
     expect(plan.pinLearnTab).toBe(true);
     expect(plan.learnSlotPx).toBe(CHAT_TAB_LEARN_SLOT_PX);
-    expect(plan.writingTabMinPx).toBeGreaterThanOrEqual(
-      CHAT_TAB_WRITING_SLOT_PX,
-    );
+    expect(plan.writingTabMinPx).toBeGreaterThan(CHAT_TAB_WRITING_SLOT_PX);
     expect(chatTabStripReservedPx(plan, chrome.utilities)).toBeLessThanOrEqual(
       barWidth,
     );

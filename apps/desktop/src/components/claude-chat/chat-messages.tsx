@@ -223,6 +223,11 @@ export const ChatMessages: FC = () => {
   const seenFollowNonceRef = useRef(
     transcriptFollowTabId === activeTabId ? transcriptFollowNonce : 0,
   );
+  // A user send must scroll once even if layout emits a scroll event before
+  // the frame. That event is not a reader gesture, but it used to clear
+  // stick-to-bottom after the nonce had already been consumed.
+  const followEpochRef = useRef(0);
+  const appliedFollowEpochRef = useRef(0);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
 
   // Build a map of tool_use_id → tool_result for inline display
@@ -331,23 +336,43 @@ export const ChatMessages: FC = () => {
       seenFollowNonceRef.current = transcriptFollowNonce;
     }
     // Ask AI and other user sends re-arm follow before this frame's scroll
-    // decision. A tab switch does too, so landing on the learning tab does
-    // not keep a "scrolled up" flag from the writing chat. Token updates
-    // and a turn ending do not re-arm here.
+    // decision, including when this tab was already active. A tab switch does
+    // too. Token updates and a turn ending do not re-arm here, so a reader
+    // who scrolls up during streaming stays where they are.
     if (tabChanged || followForActiveTab) {
+      followEpochRef.current += 1;
       shouldAutoScrollRef.current = true;
       userHasScrolledRef.current = false;
+      followScrollRef.current = true;
+      const el = viewportRef.current;
+      if (el) anchorScrollTopRef.current = el.scrollTop;
     }
+    const followEpoch = followEpochRef.current;
     const frame = window.requestAnimationFrame(() => {
       const el = viewportRef.current;
       if (!el) return;
+      // Layout can emit scroll after this effect and before the frame, which
+      // clears the stick flag while the reader is still on an older answer.
+      // The send's epoch has not been painted yet, so this frame still jumps.
+      const pendingUserSend =
+        followEpoch !== 0 && followEpoch !== appliedFollowEpochRef.current;
+      if (pendingUserSend) {
+        appliedFollowEpochRef.current = followEpoch;
+        shouldAutoScrollRef.current = true;
+        userHasScrolledRef.current = false;
+        followScrollRef.current = true;
+        anchorScrollTopRef.current = el.scrollTop;
+      }
       if (shouldAutoScrollRef.current) {
         followScrollRef.current = true;
         anchorScrollTopRef.current = el.scrollTop;
+        const previousScrollBehavior = el.style.scrollBehavior;
+        if (streamingNow) el.style.scrollBehavior = "auto";
         el.scrollTo({
           top: el.scrollHeight,
           behavior: streamingNow ? "instant" : "smooth",
         });
+        if (streamingNow) el.style.scrollBehavior = previousScrollBehavior;
         if (el.scrollTop > anchorScrollTopRef.current) {
           anchorScrollTopRef.current = el.scrollTop;
         }
