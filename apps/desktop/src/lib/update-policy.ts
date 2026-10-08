@@ -309,7 +309,8 @@ function prereleaseManifestForVersion(version: string): string | null {
 }
 
 /**
- * Stable builds from `releases/latest` may download immediately.
+ * Stable builds from `releases/latest` return `download`: that payload is
+ * the updater handle. The desktop store asks before downloading it.
  * Prereleases, including `v1.0.8beta3`, stay hidden unless `allowPrerelease`.
  * A compact beta of the same core is newer than that plain stable tag
  * while Beta stays on. `1.0.8beta2` is the same post-release build as

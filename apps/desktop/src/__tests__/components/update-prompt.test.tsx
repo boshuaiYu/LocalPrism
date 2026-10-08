@@ -90,7 +90,7 @@ describe("AppStatusBar updates", () => {
     });
   }
 
-  it("downloads a stable update from Latest and flashes restart text", async () => {
+  it("asks before a stable download and restarts from the footer when ready", async () => {
     const update = updateFixture();
     vi.mocked(check).mockResolvedValue(update as never);
 
@@ -99,16 +99,48 @@ describe("AppStatusBar updates", () => {
       await Promise.resolve();
     });
 
-    expect(update.download).toHaveBeenCalledOnce();
+    expect(update.download).not.toHaveBeenCalled();
     expect(update.install).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
     expect(container.querySelector("[data-testid='update-prompt']")).toBeNull();
+    const dialog = document.body.querySelector(
+      "[data-testid='update-available-dialog']",
+    );
+    expect(dialog?.getAttribute("data-channel")).toBe("stable");
+    expect(dialog?.textContent).toContain(
+      translate("en", "updates.availableTitle"),
+    );
+    expect(dialog?.textContent).toContain(
+      translate("en", "updates.availableLine", {
+        version: "9.9.9",
+        current: "1.0.0",
+      }),
+    );
+    expect(
+      dialog?.querySelector("[data-testid='update-beta-badge']"),
+    ).toBeNull();
     const flash = container.querySelector("[data-testid='update-flash']");
-    expect(flash?.textContent).toMatch(/Restart 9\.9\.9/);
-    expect(flash?.className).toMatch(/lp-update-flash/);
+    expect(flash?.textContent).toMatch(/Update 9\.9\.9/);
+    expect(flash).not.toBeInstanceOf(HTMLButtonElement);
+
+    const download = dialog?.querySelector(
+      "[data-testid='update-dialog-download']",
+    );
+    await act(async () => {
+      if (download instanceof HTMLButtonElement) download.click();
+      await Promise.resolve();
+    });
+
+    expect(update.download).toHaveBeenCalledOnce();
+    const restart = container.querySelector("[data-testid='update-flash']");
+    expect(restart?.textContent).toMatch(/Restart 9\.9\.9/);
+    expect(restart?.className).toMatch(/lp-update-flash/);
+    expect(
+      document.body.querySelector("[data-testid='update-dialog-restart']"),
+    ).toBeInstanceOf(HTMLButtonElement);
 
     await act(async () => {
-      if (flash instanceof HTMLButtonElement) flash.click();
+      if (restart instanceof HTMLButtonElement) restart.click();
       await Promise.resolve();
     });
 
@@ -131,6 +163,16 @@ describe("AppStatusBar updates", () => {
 
     expect(update.download).not.toHaveBeenCalled();
     expect(update.close).toHaveBeenCalledOnce();
+    const dialog = document.body.querySelector(
+      "[data-testid='update-available-dialog']",
+    );
+    expect(dialog?.getAttribute("data-phase")).toBe("manual");
+    expect(
+      dialog?.querySelector("[data-testid='update-dialog-download']"),
+    ).toBeNull();
+    expect(
+      dialog?.querySelector("[data-testid='update-manual-note']")?.textContent,
+    ).toMatch(/deb or \.rpm/i);
     const flash = container.querySelector("[data-testid='update-flash']");
     expect(flash?.getAttribute("title")).toMatch(/deb or \.rpm/i);
     expect(container.textContent).not.toMatch(/Restart to update/);
@@ -181,6 +223,9 @@ describe("AppStatusBar updates", () => {
     expect(update.close).toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
     expect(container.querySelector("[data-testid='update-flash']")).toBeNull();
+    expect(
+      document.body.querySelector("[data-testid='update-available-dialog']"),
+    ).toBeNull();
     expect(container.textContent).not.toContain("1.0.8beta2");
   });
 
@@ -251,13 +296,23 @@ describe("AppStatusBar updates", () => {
     expect(flash?.textContent).toContain("1.0.8beta3");
     expect(flash?.className).toMatch(/lp-update-flash/);
     expect(container.querySelector("[data-testid='update-prompt']")).toBeNull();
+    const dialog = document.body.querySelector(
+      "[data-testid='update-available-dialog']",
+    );
+    expect(dialog?.getAttribute("data-channel")).toBe("beta");
+    expect(
+      dialog?.querySelector("[data-testid='update-beta-badge']"),
+    ).not.toBeNull();
     expect(invoke).not.toHaveBeenCalledWith(
       "download_manifest_update",
       expect.anything(),
     );
 
+    const download = dialog?.querySelector(
+      "[data-testid='update-dialog-download']",
+    );
     await act(async () => {
-      if (flash instanceof HTMLButtonElement) flash.click();
+      if (download instanceof HTMLButtonElement) download.click();
       await Promise.resolve();
     });
 
@@ -299,7 +354,9 @@ describe("AppStatusBar updates", () => {
       await Promise.resolve();
     });
 
-    const offer = container.querySelector("[data-testid='update-flash']");
+    const offer = document.body.querySelector(
+      "[data-testid='update-dialog-download']",
+    );
     await act(async () => {
       if (offer instanceof HTMLButtonElement) offer.click();
       await Promise.resolve();

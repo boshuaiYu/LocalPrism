@@ -4,6 +4,7 @@ import { RefreshCwIcon } from "lucide-react";
 import { LanguageSwitch } from "@/components/language-switch";
 import { Button } from "@/components/ui/button";
 import { classifyUpdateError } from "@/lib/update-policy";
+import { UpdateAvailableDialog } from "@/components/update-available-dialog";
 import { useI18n } from "@/lib/use-i18n";
 import { cn } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settings-store";
@@ -61,7 +62,6 @@ export function AppStatusBar({
   const { t } = useI18n();
   const status = useUpdateStore((state) => state.status);
   const checkForUpdate = useUpdateStore((state) => state.checkForUpdate);
-  const confirmDownload = useUpdateStore((state) => state.confirmDownload);
   const applyUpdate = useUpdateStore((state) => state.applyUpdate);
   const openReleases = useUpdateStore((state) => state.openReleases);
   const joinBeta = useSettingsStore((state) => state.joinBetaChannel);
@@ -84,10 +84,6 @@ export function AppStatusBar({
   const notice = mode === "hidden" ? null : flashCopy(status, t);
   const blink = mode === "blink";
   const onNotice = () => {
-    if (status.state === "confirm") {
-      void confirmDownload();
-      return;
-    }
     if (status.state === "ready") {
       void applyUpdate();
       return;
@@ -101,7 +97,6 @@ export function AppStatusBar({
     }
   };
   const noticeInteractive =
-    status.state === "confirm" ||
     status.state === "ready" ||
     status.state === "manual" ||
     (status.state === "error" &&
@@ -159,7 +154,10 @@ export function AppStatusBar({
             ) : (
               <span
                 data-testid="update-flash"
-                className="min-w-0 truncate text-foreground"
+                className={cn(
+                  "min-w-0 truncate text-foreground",
+                  blink && "lp-update-flash",
+                )}
                 title={notice.title}
               >
                 {notice.label}
@@ -215,6 +213,7 @@ export function AppStatusBar({
           {trailing}
         </div>
       </div>
+      <UpdateAvailableDialog />
     </div>
   );
 }
@@ -224,6 +223,7 @@ function flashCopy(
   t: (
     key:
       | "updates.flashBeta"
+      | "updates.flashAvailable"
       | "updates.flashReady"
       | "updates.flashManual"
       | "updates.flashDownloading"
@@ -233,6 +233,7 @@ function flashCopy(
       | "updates.flashError"
       | "updates.flashCurrent"
       | "updates.betaAvailable"
+      | "updates.availableLine"
       | "updates.ready"
       | "updates.manual"
       | "updates.missingPlatform",
@@ -241,9 +242,18 @@ function flashCopy(
 ): { label: string; title: string } {
   switch (status.state) {
     case "confirm":
+      if (status.channel === "beta") {
+        return {
+          label: t("updates.flashBeta", { version: status.version }),
+          title: t("updates.betaAvailable", { version: status.version }),
+        };
+      }
       return {
-        label: t("updates.flashBeta", { version: status.version }),
-        title: t("updates.betaAvailable", { version: status.version }),
+        label: t("updates.flashAvailable", { version: status.version }),
+        title: t("updates.availableLine", {
+          version: status.version,
+          current: status.currentVersion,
+        }),
       };
     case "ready":
       return {
