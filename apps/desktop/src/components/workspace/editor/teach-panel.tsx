@@ -30,8 +30,12 @@ import {
   TEACH_FLOAT_WIDTH,
   type TeachAnchor,
 } from "@/lib/teach-float";
+import { isLatexLearnTab } from "@/lib/latex-learn-tab";
 import { useI18n } from "@/lib/use-i18n";
 import { cn } from "@/lib/utils";
+import { useClaudeChatStore } from "@/stores/claude-chat-store";
+import { sameProjectPath } from "@/stores/chat-persistence";
+import { useDocumentStore } from "@/stores/document-store";
 import {
   askRegisteredTeach,
   insertRegisteredTeachSnippet,
@@ -77,6 +81,16 @@ export function TeachPanel({
   const placement = useLatexTeachStore((state) => state.placement);
   const insertReady = useLatexTeachStore((state) => state.insertReady);
   const askReady = useLatexTeachStore((state) => state.askReady);
+  const projectRoot = useDocumentStore((state) => state.projectRoot);
+  const learnHistoryLoading = useClaudeChatStore((state) =>
+    state.tabs.some(
+      (tab) =>
+        isLatexLearnTab(tab) &&
+        Boolean(tab.resumeRequestId) &&
+        projectRoot != null &&
+        sameProjectPath(tab.projectPath, projectRoot),
+    ),
+  );
   const dismiss = useLatexTeachStore((state) => state.dismiss);
   const { t } = useI18n();
   const cardRef = useRef<HTMLDivElement>(null);
@@ -317,14 +331,16 @@ export function TeachPanel({
           )}
           {ask && (
             <Button
+              aria-busy={learnHistoryLoading || undefined}
               className="min-w-0 flex-1"
               data-testid="latex-teach-ask"
+              disabled={learnHistoryLoading}
               onClick={askAboutLesson}
               size="sm"
               type="button"
               variant={canInsert ? "secondary" : "default"}
             >
-              {t("teach.ask")}
+              {learnHistoryLoading ? t("teach.askLoading") : t("teach.ask")}
             </Button>
           )}
         </footer>

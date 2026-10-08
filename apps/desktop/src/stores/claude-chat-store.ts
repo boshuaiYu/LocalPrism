@@ -786,6 +786,37 @@ function sanitizeStoredUserMessageForDisplay(
     : message;
 }
 
+function tabCarriesConversation(
+  tab: Pick<TabState, "runtime" | "projectPath" | "sessionId" | "sessionRef">,
+  reference: ConversationRef,
+): boolean {
+  if (
+    tab.runtime !== reference.runtime ||
+    tab.projectPath !== reference.projectPath
+  ) {
+    return false;
+  }
+  const sessionId =
+    tab.sessionRef?.sessionId?.trim() || tab.sessionId?.trim() || "";
+  if (sessionId !== reference.sessionId) return false;
+  if (!tab.sessionRef) return true;
+  return sameConversationReference(tab.sessionRef, reference);
+}
+
+/** A teaching tab only accepts a resume of its own session. */
+function learningTabRejectsForeignSession(
+  tab: Pick<
+    TabState,
+    "purpose" | "runtime" | "projectPath" | "sessionId" | "sessionRef"
+  >,
+  reference: ConversationRef,
+): boolean {
+  return (
+    tab.purpose === LATEX_LEARN_PURPOSE &&
+    !tabCarriesConversation(tab, reference)
+  );
+}
+
 function sameConversationReference(
   left: ConversationRef | null | undefined,
   right: ConversationRef | null | undefined,
@@ -1578,6 +1609,13 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       state.activeProjectPath !== projectPath ||
       activeTab.projectPath !== projectPath
     ) {
+      // A named tab belongs to the project that was current when the caller
+      // chose it. Resetting here would retarget the prompt onto whatever tab
+      // is active after the switch, and tab ids are reused across projects.
+      if (options?.tabId) {
+        discardRejectedPrompt(activeTabId);
+        return;
+      }
       const resetResult = get().resetForProject(projectPath);
       if (resetResult === "blocked-stopping") {
         discardRejectedPrompt(activeTabId);
@@ -2003,7 +2041,11 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
     set((state) => {
       const tab = state.tabs.find((t) => t.id === tabId);
       if (!tab) return {};
-      if ((tab.cancelledAttempts?.length ?? 0) > 0) return {};
+      if ((tab.cancelledAttempts?.length ?? 0) > 0) {
+        return applyTabUpdate(state, tabId, {
+          error: uiText("errors.waitingStop"),
+        });
+      }
       accepted = true;
       const queuedGuidance = [
         ...(tab.queuedGuidance ?? []),
@@ -3145,7 +3187,8 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
       const mustOpenNewTab =
         !activeTab ||
         isBusy(activeTab) ||
-        activeTab.runtime !== reference.runtime;
+        activeTab.runtime !== reference.runtime ||
+        learningTabRejectsForeignSession(activeTab, reference);
       if (mustOpenNewTab) {
         const id = nextTabId();
         const newTab = {
@@ -3287,7 +3330,19 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
 
     try {
       const history = await runtimeReadConversation(reference);
-      if (!ownsHistoryRequest(get())) return;
+      if (!ownsHistoryRequest(get())) {
+        // A superseded or abandoned read must not leave the tab looking busy.
+        set((current) => {
+          const tab = current.tabs.find(
+            (candidate) => candidate.id === activeTabId,
+          );
+          if (tab?.resumeRequestId !== resumeRequestId) return {};
+          return applyTabUpdate(current, activeTabId, {
+            resumeRequestId: null,
+          });
+        });
+        return;
+      }
       if (!sameConversationReference(history.reference, reference)) {
         set((s) =>
           ownsHistoryRequest(s)

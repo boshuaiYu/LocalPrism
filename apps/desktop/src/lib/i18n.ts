@@ -327,6 +327,7 @@ const en = {
   "chat.readOnly": "Read-only",
   "chat.sessionHistory": "Session history",
   "chat.ask": "Ask about this paper",
+  "chat.loadingHistory": "Loading conversation…",
   "chat.compress": "Compress earlier messages",
   "chat.compressing": "Compressing…",
   "chat.scrollToBottom": "Scroll to latest",
@@ -574,6 +575,7 @@ const en = {
   "teach.kind.error": "Error",
   "teach.kind.guide": "Guide",
   "teach.ask": "Ask AI",
+  "teach.askLoading": "Loading history…",
   "teach.sessionTitle": "Learn LaTeX",
   "teach.askConstruct":
     "Explain this LaTeX construct.\n\nConstruct: {{tag}}\nTitle: {{title}}\nWhat it is: {{what}}",
@@ -886,6 +888,7 @@ const zh: Record<MessageKey, string> = {
   "chat.readOnly": "只读",
   "chat.sessionHistory": "会话历史",
   "chat.ask": "问问这篇文稿",
+  "chat.loadingHistory": "正在载入对话…",
   "chat.compress": "压缩更早的消息",
   "chat.compressing": "正在压缩…",
   "chat.scrollToBottom": "跳到最新",
@@ -1130,6 +1133,7 @@ const zh: Record<MessageKey, string> = {
   "teach.kind.error": "报错",
   "teach.kind.guide": "入门",
   "teach.ask": "问 AI",
+  "teach.askLoading": "正在载入历史…",
   "teach.sessionTitle": "边写边学",
   "teach.askConstruct":
     "请讲解这个 LaTeX 结构。\n\n结构：{{tag}}\n标题：{{title}}\n是什么：{{what}}",

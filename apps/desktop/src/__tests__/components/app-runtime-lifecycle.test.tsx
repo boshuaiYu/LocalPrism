@@ -26,12 +26,18 @@ const {
         id: string;
         projectPath: string | null;
         runtime: "claude" | "codex";
+        purpose?: "latex-learn" | null;
+        title?: string;
         attemptEpoch: number;
         isStreaming: boolean;
         cancelledAttempts?: unknown[];
         messages?: unknown[];
         sessionId?: string | null;
-        sessionRef?: unknown;
+        sessionRef?: {
+          runtime: "claude" | "codex";
+          sessionId: string;
+          projectPath: string;
+        } | null;
       }>,
       activeTabId: "missing-tab",
       pendingInitialPrompt: null as string | null,
@@ -509,6 +515,78 @@ describe("App runtime event lifecycle", () => {
       await Promise.resolve();
     });
 
+    expect(resumeConversation).not.toHaveBeenCalled();
+    expect(newSession).not.toHaveBeenCalled();
+  });
+
+  it("resumes a learning tab's own session instead of the latest writing chat", async () => {
+    documentState.projectRoot = "/project";
+    documentState.initialized = true;
+    const own = {
+      runtime: "claude" as const,
+      sessionId: "learn-session",
+      projectPath: "/project",
+    };
+    chatState.tabs = [
+      makeTab({
+        id: "learn-tab",
+        runtime: "claude",
+        purpose: "latex-learn",
+        title: "Learn LaTeX",
+        sessionId: own.sessionId,
+        sessionRef: own,
+      }),
+    ];
+    chatState.activeTabId = "learn-tab";
+    runtimeListConversations.mockResolvedValue([
+      conversation(
+        "claude",
+        "writing-latest",
+        "/project",
+        50,
+        "Latest writing",
+      ),
+      conversation("claude", "learn-session", "/project", 10, "Learn LaTeX"),
+    ]);
+
+    await act(async () => root.render(<App />));
+    await vi.waitFor(() => expect(resumeConversation).toHaveBeenCalled());
+
+    expect(resumeConversation).toHaveBeenCalledTimes(1);
+    expect(resumeConversation).toHaveBeenCalledWith(own, "Learn LaTeX");
+    expect(newSession).not.toHaveBeenCalled();
+  });
+
+  it("does not auto-resume a writing chat into a learning tab with no session", async () => {
+    documentState.projectRoot = "/project";
+    documentState.initialized = true;
+    chatState.tabs = [
+      makeTab({
+        id: "learn-tab",
+        runtime: "claude",
+        purpose: "latex-learn",
+        sessionId: null,
+        sessionRef: null,
+      }),
+    ];
+    chatState.activeTabId = "learn-tab";
+    runtimeListConversations.mockResolvedValue([
+      conversation(
+        "claude",
+        "writing-latest",
+        "/project",
+        50,
+        "Latest writing",
+      ),
+    ]);
+
+    await act(async () => root.render(<App />));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(runtimeListConversations).toHaveBeenCalledWith("claude", "/project");
     expect(resumeConversation).not.toHaveBeenCalled();
     expect(newSession).not.toHaveBeenCalled();
   });

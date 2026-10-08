@@ -475,6 +475,44 @@ describe("chat persistence I/O", () => {
     );
   });
 
+  it("treats a missing purpose on old v1 and v2 documents as null", () => {
+    const v1 = migratePersistedChat({
+      version: 1,
+      activeTabId: "legacy-tab",
+      tabs: [
+        {
+          id: "legacy-tab",
+          title: "Legacy",
+          projectPath: "/legacy",
+          sessionId: "legacy-session",
+        },
+      ],
+    });
+    expect(v1.tabs[0]?.purpose).toBeNull();
+
+    const v2 = migratePersistedChat({
+      version: 2,
+      activeTabId: "tab-old",
+      tabs: [
+        {
+          id: "tab-old",
+          title: "Old",
+          projectPath: "/project-a",
+          runtime: "claude",
+        },
+      ],
+    });
+    expect(v2.tabs[0]?.purpose).toBeNull();
+  });
+
+  it("treats a purpose change as a different persistable tab", () => {
+    const plain = persistedTab({ purpose: null });
+    const learning = persistedTab({ purpose: "latex-learn" });
+    expect(samePersistableTab(plain, learning)).toBe(false);
+    expect(samePersistableTab(learning, { ...learning })).toBe(true);
+    expect(samePersistableTabs([plain], [learning])).toBe(false);
+  });
+
   it("returns a safe default for malformed JSON and storage get failures", () => {
     const malformedStorage = { getItem: () => "{not-json" };
     const throwingStorage = {

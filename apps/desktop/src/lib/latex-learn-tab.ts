@@ -22,9 +22,20 @@ export interface LatexLearnTabLike {
   purpose?: string | null;
   runtime?: string | null;
   sessionId?: string | null;
+  sessionRef?: { sessionId?: string | null } | null;
+  /** Set while a history read for this tab is in flight. */
+  resumeRequestId?: string | null;
   messages?: readonly unknown[] | null;
   isStreaming?: boolean;
   cancelledAttempts?: readonly unknown[] | null;
+}
+
+/** Same id resume uses: the session reference wins over the legacy field. */
+export function latexLearnSessionId(tab: {
+  sessionId?: string | null;
+  sessionRef?: { sessionId?: string | null } | null;
+}): string {
+  return tab.sessionRef?.sessionId?.trim() || tab.sessionId?.trim() || "";
 }
 
 export type LatexTeachAskPlan =
@@ -50,10 +61,13 @@ export function planLatexTeachAsk(
   );
   if (!existing) return { kind: "create" };
   const stopping = (existing.cancelledAttempts?.length ?? 0) > 0;
-  const sessionId = existing.sessionId?.trim() ?? "";
+  const sessionId = latexLearnSessionId(existing);
+  // An in-flight resume is busy. A second ask must wait for it, not start
+  // another read or send against the cleared transcript.
   const loadHistory =
     !stopping &&
     existing.isStreaming !== true &&
+    !existing.resumeRequestId &&
     (existing.messages?.length ?? 0) === 0 &&
     sessionId.length > 0;
   return { kind: "reuse", tabId: existing.id, loadHistory };

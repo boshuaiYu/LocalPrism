@@ -6,7 +6,12 @@ import {
   planLatexTeachAsk,
   type LatexLearnTabLike,
 } from "@/lib/latex-learn-tab";
-import { sendLatexTeachAsk } from "@/lib/latex-teach-session";
+import {
+  resetLatexTeachAskQueue,
+  sendLatexTeachAsk,
+} from "@/lib/latex-teach-session";
+import { translate } from "@/lib/i18n";
+import { writePersistedChatForProject } from "@/stores/chat-persistence";
 import type { ConversationRef, RuntimeTurnRequest } from "@/runtime/types";
 import { useChatLayoutStore } from "@/stores/chat-layout-store";
 import {
@@ -253,6 +258,7 @@ const guidePrompt = buildTeachAskPrompt({
 });
 
 beforeEach(() => {
+  resetLatexTeachAskQueue();
   localStorage.clear();
   vi.clearAllMocks();
   vi.mocked(invoke).mockReset();
@@ -323,6 +329,32 @@ describe("planLatexTeachAsk", () => {
         PROJECT_A,
       ),
     ).toEqual({ kind: "reuse", tabId: "tab-shell", loadHistory: true });
+
+    expect(
+      planLatexTeachAsk(
+        [
+          learn("tab-ref", PROJECT_A, {
+            sessionId: null,
+            sessionRef: { sessionId: "from-ref" },
+            messages: [],
+          }),
+        ],
+        PROJECT_A,
+      ),
+    ).toEqual({ kind: "reuse", tabId: "tab-ref", loadHistory: true });
+
+    expect(
+      planLatexTeachAsk(
+        [
+          learn("tab-busy", PROJECT_A, {
+            sessionId: "sess-a",
+            messages: [],
+            resumeRequestId: "resume-1",
+          }),
+        ],
+        PROJECT_A,
+      ),
+    ).toEqual({ kind: "reuse", tabId: "tab-busy", loadHistory: false });
 
     expect(
       planLatexTeachAsk(
@@ -630,6 +662,303 @@ describe("sendLatexTeachAsk", () => {
     expect(learn[0]?.id).not.toBe(learnId);
     expect(learn[0]?.runtime).toBe("claude");
     expect(userTexts(learn[0])).toEqual([errorPrompt]);
+  });
+
+  it("reloads history from sessionRef when the legacy session id is empty", async () => {
+    await sendLatexTeachAsk(constructPrompt);
+    const learnId = learnTabs()[0]?.id ?? "";
+    finishTurn(learnId, "learn-a");
+    useClaudeChatStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === learnId
+          ? {
+              ...tab,
+              messages: [],
+              sessionId: null,
+              isStreaming: false,
+              activeAttemptId: null,
+            }
+          : tab,
+      ),
+      messages: [],
+      isStreaming: false,
+      sessionId: null,
+    }));
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command !== "runtime_read_conversation") return undefined;
+      const reference = (args as { reference: ConversationRef }).reference;
+      return {
+        reference,
+        items: [
+          {
+            type: "user",
+            message: { content: [{ type: "text", text: constructPrompt }] },
+          },
+        ],
+      };
+    });
+
+    await sendLatexTeachAsk("follow-up from ref");
+
+    expect(invoke).toHaveBeenCalledWith("runtime_read_conversation", {
+      reference: {
+        runtime: "claude",
+        projectPath: PROJECT_A,
+        sessionId: "learn-a",
+      },
+    });
+    expect(userTexts(learnTabs()[0])).toEqual([
+      constructPrompt,
+      "follow-up from ref",
+    ]);
+  });
+
+  it("delivers overlapping asks in order through one history reload", async () => {
+    await sendLatexTeachAsk(constructPrompt);
+    const learnId = learnTabs()[0]?.id ?? "";
+    finishTurn(learnId, "learn-a");
+    useClaudeChatStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === learnId
+          ? {
+              ...tab,
+              messages: [],
+              isStreaming: false,
+              activeAttemptId: null,
+              error: null,
+              resumeRequestId: null,
+            }
+          : tab,
+      ),
+      messages: [],
+      isStreaming: state.activeTabId === learnId ? false : state.isStreaming,
+    }));
+
+    let reads = 0;
+    let releaseHistory!: () => void;
+    const historyGate = new Promise<void>((resolve) => {
+      releaseHistory = resolve;
+    });
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command !== "runtime_read_conversation") return undefined;
+      reads += 1;
+      await historyGate;
+      const reference = (args as { reference: ConversationRef }).reference;
+      return {
+        reference,
+        items: [
+          {
+            type: "user",
+            message: { content: [{ type: "text", text: "saved lesson" }] },
+          },
+          {
+            type: "assistant",
+            message: { content: [{ type: "text", text: "saved answer" }] },
+          },
+        ],
+      };
+    });
+    vi.mocked(invoke).mockClear();
+
+    const first = sendLatexTeachAsk("first lesson");
+    await vi.waitFor(() => expect(reads).toBe(1));
+    const second = sendLatexTeachAsk("second lesson");
+    expect(reads).toBe(1);
+    releaseHistory();
+    await first;
+    await second;
+
+    expect(reads).toBe(1);
+    const learn = learnTabs()[0];
+    expect(learn?.id).toBe(learnId);
+    expect(userTexts(learn)).toEqual(["saved lesson", "first lesson"]);
+    expect(learn?.queuedGuidance).toEqual([
+      expect.objectContaining({
+        prompt: "second lesson",
+        skipAmbientContext: true,
+      }),
+    ]);
+    expect(startRequests()).toHaveLength(1);
+    expect(startRequests()[0]?.prompt).toContain("first lesson");
+    expect(startRequests()[0]?.prompt).not.toContain("second lesson");
+    expect(userTexts(mainTab())).toEqual(["writing chat"]);
+    expect(mainTab()?.draft.input).toBe("draft in progress");
+  });
+
+  it("does not send a lesson into the project switched to during resume", async () => {
+    await sendLatexTeachAsk("seed lesson");
+    const learnId = learnTabs()[0]?.id ?? "";
+    finishTurn(learnId, "learn-a");
+    stopTab("tab-main");
+    stopTab(learnId);
+    useClaudeChatStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === learnId
+          ? {
+              ...tab,
+              messages: [],
+              isStreaming: false,
+              activeAttemptId: null,
+              error: null,
+              resumeRequestId: null,
+            }
+          : tab,
+      ),
+    }));
+
+    let reads = 0;
+    let releaseHistory!: () => void;
+    const historyGate = new Promise<void>((resolve) => {
+      releaseHistory = resolve;
+    });
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command !== "runtime_read_conversation") return undefined;
+      reads += 1;
+      await historyGate;
+      const reference = (args as { reference: ConversationRef }).reference;
+      return {
+        reference,
+        items: [
+          {
+            type: "user",
+            message: { content: [{ type: "text", text: "saved lesson" }] },
+          },
+        ],
+      };
+    });
+    vi.mocked(invoke).mockClear();
+
+    const first = sendLatexTeachAsk("lesson for A");
+    await vi.waitFor(() => expect(reads).toBe(1));
+    const second = sendLatexTeachAsk("also for A");
+    writePersistedChatForProject(PROJECT_B, {
+      version: 2,
+      activeTabId: learnId,
+      tabs: [
+        {
+          id: learnId,
+          title: "Writing in B",
+          projectPath: PROJECT_B,
+          runtime: "claude",
+          purpose: null,
+        },
+      ],
+    });
+    setDocument(PROJECT_B);
+    expect(useClaudeChatStore.getState().resetForProject(PROJECT_B)).not.toBe(
+      "blocked-stopping",
+    );
+    releaseHistory();
+    await first;
+    await second;
+
+    expect(reads).toBe(1);
+    expect(startRequests()).toEqual([]);
+    const state = useClaudeChatStore.getState();
+    expect(state.activeProjectPath).toBe(PROJECT_B);
+    const delivered = state.tabs.flatMap((tab) => userTexts(tab));
+    expect(delivered).not.toContain("lesson for A");
+    expect(delivered).not.toContain("also for A");
+    expect(state.tabs.some((tab) => tab.purpose === "latex-learn")).toBe(false);
+  });
+
+  it("does not retarget an explicit tab when the open project has changed", async () => {
+    await sendLatexTeachAsk("seed lesson");
+    const learnId = learnTabs()[0]?.id ?? "";
+    finishTurn(learnId, "learn-a");
+    stopTab("tab-main");
+    stopTab(learnId);
+    vi.mocked(invoke).mockClear();
+    setDocument(PROJECT_B);
+
+    await useClaudeChatStore.getState().sendPrompt("lesson for A", undefined, {
+      tabId: learnId,
+      skipAmbientContext: true,
+    });
+
+    expect(startRequests()).toEqual([]);
+    expect(useClaudeChatStore.getState().activeProjectPath).toBe(PROJECT_A);
+    expect(userTexts(learnTabs()[0])).toEqual(["seed lesson"]);
+    expect(
+      useClaudeChatStore
+        .getState()
+        .tabs.some((tab) => tab.projectPath === PROJECT_B),
+    ).toBe(false);
+  });
+
+  it("reports the waiting-stop error instead of dropping a second ask", async () => {
+    await sendLatexTeachAsk(constructPrompt);
+    const learnId = learnTabs()[0]?.id ?? "";
+    useClaudeChatStore.setState((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.id === learnId
+          ? {
+              ...tab,
+              cancelledAttempts: [
+                {
+                  attemptId: "stopping",
+                  attemptEpoch: 1,
+                  runtime: "claude" as const,
+                  mode: "interrupt" as const,
+                },
+              ],
+            }
+          : tab,
+      ),
+    }));
+
+    await sendLatexTeachAsk(errorPrompt);
+
+    const learn = learnTabs()[0];
+    expect(learn?.queuedGuidance).toEqual([]);
+    expect(userTexts(learn)).toEqual([constructPrompt]);
+    expect(learn?.error).toBe(translate("zh", "errors.waitingStop"));
+    expect(startRequests()).toHaveLength(1);
+  });
+
+  it("opens another tab when auto-resume would bind a writing session", async () => {
+    await sendLatexTeachAsk(constructPrompt);
+    const learnId = learnTabs()[0]?.id ?? "";
+    finishTurn(learnId, "learn-a");
+    stopTab("tab-main");
+    useClaudeChatStore.getState().setActiveTab(learnId);
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command !== "runtime_read_conversation") return undefined;
+      const reference = (args as { reference: ConversationRef }).reference;
+      return {
+        reference,
+        items: [
+          {
+            type: "user",
+            message: {
+              content: [{ type: "text", text: "writing history" }],
+            },
+          },
+        ],
+      };
+    });
+
+    await useClaudeChatStore.getState().resumeConversation(
+      {
+        runtime: "claude",
+        sessionId: "writing-session",
+        projectPath: PROJECT_A,
+      },
+      "Writing",
+    );
+
+    const learn = useClaudeChatStore
+      .getState()
+      .tabs.find((tab) => tab.id === learnId);
+    expect(learn?.purpose).toBe("latex-learn");
+    expect(learn?.sessionId).toBe("learn-a");
+    expect(userTexts(learn)).toEqual([constructPrompt]);
+    const writing = useClaudeChatStore
+      .getState()
+      .tabs.find((tab) => tab.sessionId === "writing-session");
+    expect(writing?.id).not.toBe(learnId);
+    expect(writing?.purpose ?? null).toBeNull();
+    expect(userTexts(writing)).toEqual(["writing history"]);
   });
 });
 

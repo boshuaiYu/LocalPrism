@@ -69,6 +69,7 @@ type TabBarItem = {
   title: string;
   purpose: "latex-learn" | null;
   isStreaming: boolean;
+  isLoadingHistory: boolean;
   isStopping: boolean;
   closableWhileBusy: boolean;
 };
@@ -82,6 +83,7 @@ function sameTabBarItems(left: TabBarItem[], right: TabBarItem[]): boolean {
         item.title === right[index].title &&
         item.purpose === right[index].purpose &&
         item.isStreaming === right[index].isStreaming &&
+        item.isLoadingHistory === right[index].isLoadingHistory &&
         item.isStopping === right[index].isStopping &&
         item.closableWhileBusy === right[index].closableWhileBusy,
     )
@@ -99,6 +101,7 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
         purpose:
           tab.purpose === LATEX_LEARN_PURPOSE ? LATEX_LEARN_PURPOSE : null,
         isStreaming: tab.isStreaming,
+        isLoadingHistory: Boolean(tab.resumeRequestId),
         isStopping: (tab.cancelledAttempts?.length ?? 0) > 0,
         closableWhileBusy: tabOpenedUnderOtherAccount(tab, s),
       })),
@@ -233,6 +236,7 @@ export function ChatTabBar({ leading }: { leading?: ReactNode }) {
               }
               isActive={tab.id === activeTabId}
               isStreaming={tab.isStreaming}
+              isLoadingHistory={tab.isLoadingHistory}
               isStopping={tab.isStopping}
               closableWhileBusy={tab.closableWhileBusy}
               hasPendingApproval={pendingTabIds.has(tab.id)}
@@ -276,6 +280,7 @@ function TabButton({
   title,
   isActive,
   isStreaming,
+  isLoadingHistory,
   isStopping,
   closableWhileBusy,
   hasPendingApproval,
@@ -286,6 +291,7 @@ function TabButton({
   title: string;
   isActive: boolean;
   isStreaming: boolean;
+  isLoadingHistory: boolean;
   isStopping: boolean;
   closableWhileBusy: boolean;
   hasPendingApproval: boolean;
@@ -300,6 +306,7 @@ function TabButton({
       aria-label={
         hasPendingApproval ? t("chat.needsApproval", { title }) : title
       }
+      aria-busy={isLoadingHistory || undefined}
       onClick={onClick}
       className={cn(
         "group relative flex h-full max-w-[11rem] shrink-0 items-center gap-1.5 overflow-hidden border-b-2 px-3.5 text-xs transition-colors",
@@ -308,13 +315,15 @@ function TabButton({
           : "border-transparent text-muted-foreground hover:bg-muted/25 hover:text-foreground",
       )}
     >
-      {(isStreaming || hasPendingApproval) && (
+      {(isStreaming || hasPendingApproval || isLoadingHistory) && (
         <span
           className="relative flex size-2 shrink-0"
           data-testid={
             hasPendingApproval
               ? "tab-approval-indicator"
-              : "tab-streaming-indicator"
+              : isStreaming
+                ? "tab-streaming-indicator"
+                : "tab-history-indicator"
           }
         >
           <span

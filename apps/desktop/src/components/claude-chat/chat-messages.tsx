@@ -193,6 +193,9 @@ export const ChatMessages: FC = () => {
   const streamingRuntime = useClaudeChatStore(
     (s) => s.tabs.find((tab) => tab.id === s.activeTabId)?.runtime ?? "claude",
   );
+  const loadingHistory = useClaudeChatStore((s) =>
+    Boolean(s.tabs.find((tab) => tab.id === s.activeTabId)?.resumeRequestId),
+  );
   const queuedGuidance =
     useClaudeChatStore(
       (s) => s.tabs.find((tab) => tab.id === s.activeTabId)?.queuedGuidance,
@@ -422,11 +425,19 @@ export const ChatMessages: FC = () => {
         >
           {settledMessages.length === 0 &&
             pendingGuidance.length === 0 &&
-            !isStreaming && (
+            !isStreaming &&
+            (loadingHistory ? (
+              <div
+                className="flex h-full items-center justify-center px-6 text-center text-muted-foreground text-sm leading-relaxed"
+                data-testid="chat-history-loading"
+              >
+                {t("chat.loadingHistory")}
+              </div>
+            ) : (
               <div className="flex h-full items-center justify-center px-6 text-center text-muted-foreground text-sm leading-relaxed">
                 {t("chat.ask")}
               </div>
-            )}
+            ))}
 
           {settledMessages.map((msg, idx) => (
             <div

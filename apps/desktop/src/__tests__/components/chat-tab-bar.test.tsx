@@ -472,6 +472,7 @@ describe("ChatTabBar runtime badges", () => {
         {
           ...makeTab("tab-learn", "请讲解这个结构", "claude"),
           purpose: LATEX_LEARN_PURPOSE,
+          resumeRequestId: "resume-1",
           messages: [userText("请讲解这个结构")],
         },
       ]);
@@ -480,6 +481,11 @@ describe("ChatTabBar runtime badges", () => {
           "[data-testid='chat-tab-title']",
         )?.textContent,
       ).toBe("边写边学");
+      expect(
+        tabButton(container, "tab-learn").querySelector(
+          "[data-testid='tab-history-indicator']",
+        ),
+      ).not.toBeNull();
 
       await act(async () => {
         useSettingsStore.setState({ uiLanguage: "en" });

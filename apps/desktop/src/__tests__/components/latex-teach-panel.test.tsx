@@ -11,6 +11,8 @@ import {
   lessonRefForSelection,
 } from "@/lib/latex-teaching";
 import { newProjectFileTemplate } from "@/lib/new-project-file";
+import { useClaudeChatStore } from "@/stores/claude-chat-store";
+import { useDocumentStore } from "@/stores/document-store";
 import {
   registerTeachAsk,
   useLatexTeachStore,
@@ -318,6 +320,50 @@ Hello
     expect(
       document.body.querySelector('[data-testid="latex-teach-panel"]'),
     ).not.toBeNull();
+  });
+
+  it("shows a loading label while the learning session reloads history", async () => {
+    const previousRoot = useDocumentStore.getState().projectRoot;
+    const previousChat = useClaudeChatStore.getState();
+    useSettingsStore.setState({ latexTeaching: true, uiLanguage: "zh" });
+    useDocumentStore.setState({ projectRoot: "/teach-project" });
+    const base = previousChat.tabs[0];
+    useClaudeChatStore.setState({
+      activeProjectPath: "/teach-project",
+      activeTabId: "tab-learn",
+      tabs: [
+        {
+          ...base,
+          id: "tab-learn",
+          projectPath: "/teach-project",
+          purpose: "latex-learn",
+          resumeRequestId: "resume-1",
+          messages: [],
+          isStreaming: false,
+        },
+      ],
+    });
+    useLatexTeachStore.getState().forcePresent(figure, "sel:0:20");
+    const onAskAi = vi.fn();
+
+    try {
+      await act(async () => {
+        root.render(<TeachPanel onAskAi={onAskAi} />);
+      });
+      const ask = document.body.querySelector(
+        '[data-testid="latex-teach-ask"]',
+      );
+      expect(ask?.textContent).toContain("正在载入历史");
+      expect(ask).toHaveProperty("disabled", true);
+      expect(ask?.getAttribute("aria-busy")).toBe("true");
+    } finally {
+      useDocumentStore.setState({ projectRoot: previousRoot });
+      useClaudeChatStore.setState({
+        tabs: previousChat.tabs,
+        activeTabId: previousChat.activeTabId,
+        activeProjectPath: previousChat.activeProjectPath,
+      });
+    }
   });
 
   it("asks about an error without an insert action", async () => {

@@ -27,6 +27,7 @@ import {
   markWelcomeCompleted,
   REOPEN_WELCOME_EVENT,
 } from "@/lib/welcome";
+import { LATEX_LEARN_PURPOSE } from "@/lib/latex-learn-tab";
 import { runtimeListConversations } from "@/runtime/commands";
 
 const log = createLogger("app");
@@ -211,6 +212,44 @@ function WorkspaceWithClaude() {
           (active?.messages.length ?? 0) > 0 ||
           !!active?.isStreaming ||
           (active?.cancelledAttempts?.length ?? 0) > 0;
+
+        // The learning tab is not an empty writing shell. Resume its own
+        // session, never the newest writing chat.
+        if (capturedTab.purpose === LATEX_LEARN_PURPOSE) {
+          const ownSessionId =
+            capturedTab.sessionRef?.sessionId?.trim() ||
+            capturedTab.sessionId?.trim() ||
+            "";
+          if (
+            capturedRuntime !== "claude" ||
+            hasLocalActivity ||
+            !ownSessionId
+          ) {
+            return;
+          }
+          const own = conversations.find(
+            (conversation) =>
+              conversation.reference.runtime === capturedRuntime &&
+              conversation.reference.projectPath === capturedProjectPath &&
+              conversation.reference.sessionId === ownSessionId,
+          );
+          current
+            .resumeConversation(
+              own?.reference ?? {
+                runtime: "claude",
+                sessionId: ownSessionId,
+                projectPath: capturedProjectPath,
+              },
+              own?.title,
+            )
+            .catch((err) => {
+              log.warn("Failed to auto-resume learning session", {
+                sessionId: ownSessionId,
+                error: String(err),
+              });
+            });
+          return;
+        }
 
         if (!latest?.reference.sessionId) {
           // Empty remote history must not wipe an in-progress or local draft.
