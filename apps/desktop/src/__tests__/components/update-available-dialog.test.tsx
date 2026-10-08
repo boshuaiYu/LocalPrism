@@ -116,13 +116,12 @@ describe("UpdateAvailableDialog", () => {
     expect(update.download).not.toHaveBeenCalled();
 
     const link = offer?.querySelector("[data-testid='update-release-link']");
-    expect(link).toBeInstanceOf(HTMLAnchorElement);
-    expect(link?.getAttribute("href")).toBe(
-      "https://github.com/boshuaiYu/LocalPrism/releases/tag/v1.2.0",
-    );
+    expect(link).toBeInstanceOf(HTMLButtonElement);
+    expect(link?.getAttribute("href")).toBeNull();
+    expect(offer?.querySelector("a[href]")).toBeNull();
     const before = window.location.href;
     await act(async () => {
-      if (link instanceof HTMLAnchorElement) link.click();
+      if (link instanceof HTMLButtonElement) link.click();
     });
     expect(window.location.href).toBe(before);
     expect(open).toHaveBeenCalledWith(
@@ -523,17 +522,16 @@ describe("UpdateAvailableDialog", () => {
     expect(table?.className).toMatch(/overflow-x-auto/);
     expect(table?.querySelector("table")).not.toBeNull();
 
-    const links = [...(box?.querySelectorAll("a") ?? [])];
-    expect(
-      links.map((link) => link.getAttribute("href")).filter((href) => href),
-    ).toEqual(["https://example.com/a-very-long-release-note-url"]);
+    expect(box?.querySelector("a")).toBeNull();
     expect(box?.innerHTML ?? "").not.toMatch(/javascript:/i);
+    const links = [
+      ...(box?.querySelectorAll("[data-testid='update-release-link']") ?? []),
+    ];
+    expect(links).toHaveLength(1);
     await act(async () => {
       for (const link of links) {
-        if (link instanceof HTMLAnchorElement) link.click();
+        if (link instanceof HTMLButtonElement) link.click();
       }
-      const bad = box?.querySelector("a[href^='javascript']");
-      if (bad instanceof HTMLAnchorElement) bad.click();
     });
     expect(open).toHaveBeenCalledTimes(1);
     expect(open).toHaveBeenCalledWith(

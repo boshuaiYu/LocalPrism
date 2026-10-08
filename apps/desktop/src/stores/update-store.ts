@@ -12,6 +12,8 @@ import { create } from "zustand";
 import {
   betaCandidatesFromGithub,
   chooseUpdateOffer,
+  installCoversLoadedBetas,
+  isNewerVersion,
   isPlaceholderReleaseNotes,
   isPrereleaseVersion,
   releasePageUrl,
@@ -60,9 +62,9 @@ export type UpdateStatus =
       explicit: boolean;
       /**
        * Install and download failures keep the raw message as the status
-       * label. Check failures use the generic check-failed label.
+       * label. Check failures omit phase and use the generic check-failed label.
        */
-      phase?: "check" | "download" | "install";
+      phase?: "download" | "install";
     };
 
 interface UpdateStore {
@@ -99,6 +101,8 @@ type ReleaseNotesCacheEntry =
 
 const releaseNotesCache = new Map<string, ReleaseNotesCacheEntry>();
 const releaseNotesInflight = new Set<string>();
+/** Explicit checks may retry an unavailable body once per version. */
+const releaseNotesRetryCounts = new Map<string, number>();
 let releaseNotesEpoch = 0;
 
 function releaseNotesPatch(
@@ -190,8 +194,21 @@ function requestReleaseNotes(version: string) {
 function notesForOffer(
   version: string,
   notes: string | undefined,
+  explicit: boolean,
 ): Pick<UpdateOfferFields, "notes" | "notesState"> {
   if (!isPlaceholderReleaseNotes(notes, version)) return { notes };
+  const failed = releaseNotesCache.get(version);
+  if (
+    failed?.state === "unavailable" &&
+    explicit &&
+    (releaseNotesRetryCounts.get(version) ?? 0) < 1
+  ) {
+    releaseNotesCache.delete(version);
+    releaseNotesRetryCounts.set(
+      version,
+      (releaseNotesRetryCounts.get(version) ?? 0) + 1,
+    );
+  }
   const cached = releaseNotesPatch(version);
   if (cached) return cached;
   requestReleaseNotes(version);
@@ -209,18 +226,27 @@ function logBetaFeedFallback(feed: BetaFeedResult, offer: UpdateOffer) {
   const offeredStable =
     offer.action === "download" ||
     (offer.action === "confirm" && !isPrereleaseVersion(offer.version));
-  const reason = rateLimited
-    ? "Beta release list hit the GitHub API rate limit"
-    : "Beta release list failed";
-  const outcome = offeredStable
-    ? "offering the stable update instead"
-    : "prereleases are hidden for this check";
-  log.warn(`${reason}; ${outcome}`, {
+  log.warn("beta list unavailable", {
     message,
     rateLimited,
     offeredVersion,
     offeredStable,
   });
+}
+
+/** A cancelled newer version stays until a loaded beta list covers this install. */
+function dismissedOfferStillApplies(
+  currentVersion: string,
+  betaFeedLoaded: boolean,
+  betas: readonly ReleaseCandidate[],
+): boolean {
+  const dismissed = useUpdateStore.getState().dismissedOffer;
+  if (!dismissed) return false;
+  if (!isNewerVersion(dismissed.version, currentVersion)) return false;
+  if (betaFeedLoaded && installCoversLoadedBetas(currentVersion, betas)) {
+    return false;
+  }
+  return true;
 }
 
 function notesFrom(update: Update): string | undefined {
@@ -249,6 +275,17 @@ type StoreSet = (
     | Partial<UpdateStore>
     | ((state: UpdateStore) => Partial<UpdateStore>),
 ) => void;
+
+function commitOfferStatus(
+  set: StoreSet,
+  status: UpdateStatus,
+  extra?: Partial<UpdateStore>,
+) {
+  set({ status, ...extra });
+  if ("version" in status && status.notesState === "loading") {
+    applyCachedReleaseNotes(status.version);
+  }
+}
 
 function withResolvedNotes(meta: UpdateOfferFields): UpdateOfferFields {
   if (meta.notesState !== "loading") return meta;
@@ -399,8 +436,9 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
       return;
     }
     const { kind, ...fields } = offer;
+    const notesPatch = releaseNotesPatch(offer.version);
     set({
-      status: { state: kind, ...fields },
+      status: { state: kind, ...fields, ...(notesPatch ?? {}) },
       offerDialogHidden: false,
       bannerDismissed: false,
     });
@@ -537,11 +575,13 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
 
         if (offer.action === "none") {
           await discardFreshStable();
+          let failureAction: "surface-error" | "up-to-date" | "idle" | null =
+            null;
           if (!stableResult.ok) {
             // up-to-date only when a loaded beta list already covers this
             // install. An empty or failed list stays idle: do not rethrow
             // the stable error, and do not claim a newer beta was ruled out.
-            const action = stableCheckFailureAction({
+            failureAction = stableCheckFailureAction({
               allowPrerelease,
               explicit,
               errorMessage: formatUpdateError(stableResult.error),
@@ -549,26 +589,11 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
               currentVersion,
               betas,
             });
-            if (action === "surface-error") throw stableResult.error;
-            if (action === "up-to-date") {
-              await releaseParked(null);
-              pending = null;
-              pendingManifest = null;
-              set({
-                status: { state: "up-to-date" },
-                dismissedOffer: null,
-              });
-              return;
-            }
-            pending = parkedUpdate;
-            pendingManifest = parkedManifest;
-            set({ status: { state: "idle" } });
-            return;
-          }
-          // The stable payload was dropped after verify failed. Report that
-          // only when policy would have installed it. Plain 1.0.8 over a
-          // newer 1.0.8-N build is already declined.
-          if (stableVerifyError && stablePayload) {
+            if (failureAction === "surface-error") throw stableResult.error;
+          } else if (stableVerifyError && stablePayload) {
+            // The stable payload was dropped after verify failed. Report that
+            // only when policy would have installed it. Plain 1.0.8 over a
+            // newer 1.0.8-N build is already declined.
             const unverified = chooseUpdateOffer({
               currentVersion,
               stable: {
@@ -580,11 +605,36 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
             });
             if (unverified.action !== "none") throw stableVerifyError;
           }
+
+          // A later `none` must not drop a cancelled newer build just
+          // because the beta list failed or came back empty.
+          if (
+            dismissedOfferStillApplies(currentVersion, betaFeed.loaded, betas)
+          ) {
+            pending = parkedUpdate;
+            pendingManifest = parkedManifest;
+            set({ status: { state: "idle" } });
+            return;
+          }
+
+          const dismissed = useUpdateStore.getState().dismissedOffer;
+          if (failureAction === "idle" && !dismissed) {
+            pending = parkedUpdate;
+            pendingManifest = parkedManifest;
+            set({ status: { state: "idle" } });
+            return;
+          }
+
           await releaseParked(null);
           pending = null;
           pendingManifest = null;
+          const state =
+            failureAction === "up-to-date" ||
+            (failureAction === null && explicit)
+              ? "up-to-date"
+              : "idle";
           set({
-            status: { state: explicit ? "up-to-date" : "idle" },
+            status: { state },
             dismissedOffer: null,
           });
           return;
@@ -593,7 +643,7 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
         const offerFields: UpdateOfferFields = {
           version: offer.version,
           currentVersion,
-          ...notesForOffer(offer.version, offer.notes),
+          ...notesForOffer(offer.version, offer.notes, explicit),
           channel: offer.action === "confirm" ? "beta" : "stable",
         };
         // Cancel hides this exact version from later automatic checks.
@@ -613,12 +663,15 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
           await releaseParked(null);
           pending = null;
           pendingManifest = null;
-          set({
-            status: { state: "manual", ...offerFields },
-            bannerDismissed: false,
-            offerDialogHidden: false,
-            dismissedOffer: null,
-          });
+          commitOfferStatus(
+            set,
+            { state: "manual", ...offerFields },
+            {
+              bannerDismissed: false,
+              offerDialogHidden: false,
+              dismissedOffer: null,
+            },
+          );
           return;
         }
 
@@ -633,12 +686,15 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
             pending = stableUpdate;
             pendingManifest = null;
           }
-          set({
-            status: { state: "confirm", ...offerFields, channel: "beta" },
-            bannerDismissed: false,
-            offerDialogHidden: false,
-            dismissedOffer: null,
-          });
+          commitOfferStatus(
+            set,
+            { state: "confirm", ...offerFields, channel: "beta" },
+            {
+              bannerDismissed: false,
+              offerDialogHidden: false,
+              dismissedOffer: null,
+            },
+          );
           return;
         }
 
@@ -657,12 +713,15 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
         await releaseParked(stableUpdate);
         pending = stableUpdate;
         pendingManifest = null;
-        set({
-          status: { state: "confirm", ...offerFields, channel: "stable" },
-          bannerDismissed: false,
-          offerDialogHidden: false,
-          dismissedOffer: null,
-        });
+        commitOfferStatus(
+          set,
+          { state: "confirm", ...offerFields, channel: "stable" },
+          {
+            bannerDismissed: false,
+            offerDialogHidden: false,
+            dismissedOffer: null,
+          },
+        );
       } catch (err) {
         if (pending === null && pendingManifest === null) {
           if (stableUpdate && stableUpdate !== parkedUpdate) {
@@ -825,6 +884,7 @@ export function resetUpdateStoreForTests() {
   releaseNotesEpoch += 1;
   releaseNotesCache.clear();
   releaseNotesInflight.clear();
+  releaseNotesRetryCounts.clear();
   useSettingsStore.setState({ joinBetaChannel: false });
   useUpdateStore.setState({
     status: { state: "idle" },

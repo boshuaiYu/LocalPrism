@@ -22,6 +22,12 @@ if [[ -z "$TAG" ]]; then
   exit 0
 fi
 
+if [[ ! "$TAG" =~ ^v[A-Za-z0-9._+-]+$ ]]; then
+  echo "Release tag is not valid; latest.json notes will fall back to the release title." >&2
+  write_empty
+  exit 0
+fi
+
 token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 if [[ -z "$token" ]]; then
   echo "No GitHub token; latest.json notes will fall back to the release title." >&2
@@ -31,7 +37,7 @@ fi
 export GH_TOKEN="$token"
 
 existing=""
-if existing="$(gh release view "$TAG" --json body --jq .body 2>/dev/null)"; then
+if existing="$(gh release view --json body --jq .body -- "$TAG" 2>/dev/null)"; then
   if [[ -n "${existing//[[:space:]]/}" ]]; then
     printf '%s\n' "$existing" > "$OUT"
     echo "Using the existing GitHub release body for latest.json notes."

@@ -175,4 +175,33 @@ describe("generate-latest-json", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("does not call gh when the release tag is not a version tag", () => {
+    const root = mkdtempSync(join(tmpdir(), "localprism-notes-tag-"));
+    try {
+      const notesFile = join(root, "updater-release-notes.md");
+      const bin = join(root, "bin");
+      mkdirSync(bin, { recursive: true });
+      const gh = join(bin, "gh");
+      writeFileSync(gh, "#!/bin/sh\necho called-gh >&2\nexit 99\n");
+      chmodSync(gh, 0o755);
+      const result = spawnSync("bash", [notesScript], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH ?? ""}`,
+          GH_TOKEN: "token",
+          TAG: "v1.0.9;touch-pwned",
+          GITHUB_REPOSITORY: "boshuaiYu/LocalPrism",
+          UPDATER_RELEASE_NOTES_FILE: notesFile,
+        },
+      });
+      expect(result.status, result.stderr || result.stdout).toBe(0);
+      expect(readFileSync(notesFile, "utf8")).toBe("");
+      expect(result.stderr).not.toMatch(/called-gh/);
+      expect(result.stderr).toMatch(/not valid/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

@@ -36,16 +36,19 @@ function ReleaseNoteLink({
     if (!openable) return;
     void shellOpen(url).catch(() => undefined);
   };
+  if (!openable) {
+    return <span className="break-all">{children}</span>;
+  }
   return (
-    <a
-      href={openable ? url : undefined}
+    <button
+      type="button"
       data-testid="update-release-link"
-      className="break-all text-primary underline underline-offset-2"
+      className="inline cursor-pointer break-all border-0 bg-transparent p-0 text-left font-inherit text-primary underline underline-offset-2"
       onClick={openLink}
       onAuxClick={openLink}
     >
       {children}
-    </a>
+    </button>
   );
 }
 

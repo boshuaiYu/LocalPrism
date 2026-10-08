@@ -688,6 +688,9 @@ async fn fetch_github_releases() -> Result<serde_json::Value, String> {
     fetch_github_releases_list().await
 }
 
+const GITHUB_RELEASE_TAG_MAX_LEN: usize = 128;
+const GITHUB_RELEASE_BODY_MAX_BYTES: usize = 1024 * 1024;
+
 fn github_release_tag(version: &str) -> Result<String, String> {
     let trimmed = version.trim();
     if trimmed.is_empty() {
@@ -704,7 +707,19 @@ fn github_release_tag(version: &str) -> Result<String, String> {
     {
         return Err("Release tag is not valid.".to_string());
     }
+    // The published tag is `v` plus the bare version, and that whole tag is capped.
+    if bare.len() >= GITHUB_RELEASE_TAG_MAX_LEN {
+        return Err("Release tag is too long.".to_string());
+    }
     Ok(format!("v{bare}"))
+}
+
+fn append_limited(buf: &mut Vec<u8>, chunk: &[u8], max_bytes: usize) -> Result<(), String> {
+    if buf.len().saturating_add(chunk.len()) > max_bytes {
+        return Err("GitHub release response is too large.".to_string());
+    }
+    buf.extend_from_slice(chunk);
+    Ok(())
 }
 
 fn github_release_by_tag_url(version: &str) -> Result<String, String> {
@@ -716,6 +731,9 @@ fn github_release_by_tag_url(version: &str) -> Result<String, String> {
 
 /// Notes from one published tag. Error documents are not an empty changelog.
 fn parse_github_release_notes(body: &str) -> Result<String, String> {
+    if body.len() > GITHUB_RELEASE_BODY_MAX_BYTES {
+        return Err("GitHub release response is too large.".to_string());
+    }
     let value: serde_json::Value = serde_json::from_str(body)
         .map_err(|err| format!("GitHub release response was not JSON: {err}"))?;
     let object = value
@@ -748,8 +766,24 @@ async fn fetch_github_release_notes(tag: &str) -> Result<String, String> {
     if !status.is_success() {
         return Err(format!("GitHub release request failed ({status})."));
     }
-    let body = response.text().await.map_err(|err| err.to_string())?;
+    let body = read_response_text_limited(response, GITHUB_RELEASE_BODY_MAX_BYTES).await?;
     parse_github_release_notes(&body)
+}
+
+async fn read_response_text_limited(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<String, String> {
+    let mut received = Vec::new();
+    loop {
+        let next = response.chunk().await.map_err(|err| err.to_string())?;
+        let Some(chunk) = next else {
+            break;
+        };
+        append_limited(&mut received, &chunk, max_bytes)?;
+    }
+    String::from_utf8(received)
+        .map_err(|err| format!("GitHub release response was not UTF-8: {err}"))
 }
 
 /// One release body, fetched in the shell so the webview makes no GitHub call.
@@ -1324,6 +1358,22 @@ mod update_channel_tests {
         )
         .is_err());
         assert!(super::parse_github_release_notes("[]").is_err());
+    }
+
+    #[test]
+    fn github_release_tag_and_body_are_capped() {
+        assert!(super::github_release_tag(&"a".repeat(128)).is_err());
+        assert!(super::github_release_by_tag_url(&"a".repeat(200)).is_err());
+        assert!(super::github_release_tag(&format!("v{}", "a".repeat(127))).is_ok());
+        let max = super::GITHUB_RELEASE_BODY_MAX_BYTES;
+        assert_eq!(max, 1024 * 1024);
+        let mut buf = Vec::new();
+        assert!(super::append_limited(&mut buf, &vec![b'x'; max], max).is_ok());
+        assert!(super::append_limited(&mut buf, b"x", max).is_err());
+        let huge = "x".repeat(max + 1);
+        assert!(super::parse_github_release_notes(&huge)
+            .expect_err("oversized body")
+            .contains("too large"));
     }
 
     #[test]

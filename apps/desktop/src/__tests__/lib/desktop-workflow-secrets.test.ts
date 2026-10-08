@@ -38,6 +38,10 @@ describe("desktop release workflow secrets", () => {
     );
     expect(notesScript).toContain("releases/generate-notes");
     expect(notesScript).toContain("gh release view");
+    expect(notesScript).toContain(
+      'gh release view --json body --jq .body -- "$TAG"',
+    );
+    expect(notesScript).toContain("^v[A-Za-z0-9._+-]+$");
   });
 
   it("still publishes from the signed latest.json after the split", () => {

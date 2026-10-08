@@ -467,14 +467,152 @@ describe("update store check", () => {
       .getEntries()
       .find(
         (entry) =>
-          entry.level === "warn" &&
-          entry.message ===
-            "Beta release list hit the GitHub API rate limit; offering the stable update instead",
+          entry.level === "warn" && entry.message === "beta list unavailable",
       );
     expect(warning?.data).toMatchObject({
       rateLimited: true,
       offeredStable: true,
       offeredVersion: "1.0.9",
+    });
+  });
+
+  it("keeps a cancelled beta after a later check returns none", async () => {
+    useSettingsStore.setState({ joinBetaChannel: true });
+    vi.mocked(getVersion).mockResolvedValue("1.0.9");
+    const stable = stableRelease("1.0.9");
+    vi.mocked(check).mockResolvedValue(stable as never);
+    stubReleases([betaRelease("v1.0.9beta2")]);
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+    expect(useUpdateStore.getState().status).toMatchObject({
+      state: "confirm",
+      version: "1.0.9beta2",
+      channel: "beta",
+    });
+    useUpdateStore.getState().dismissOfferDialog();
+    expect(useUpdateStore.getState().dismissedOffer).toMatchObject({
+      version: "1.0.9beta2",
+      kind: "confirm",
+    });
+
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === "fetch_github_releases") {
+        throw new Error("GitHub releases request failed (403 Forbidden).");
+      }
+      if (command === "download_manifest_update") return "1.0.9beta2";
+      return invokeUpdateCommand(command);
+    });
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+
+    expect(useUpdateStore.getState().status).toEqual({ state: "idle" });
+    expect(useUpdateStore.getState().dismissedOffer).toMatchObject({
+      version: "1.0.9beta2",
+      kind: "confirm",
+    });
+    expect(stable.download).not.toHaveBeenCalled();
+
+    const checksAfterNone = vi.mocked(check).mock.calls.length;
+    useUpdateStore.getState().reopenDismissedOffer();
+    expect(useUpdateStore.getState().status).toMatchObject({
+      state: "confirm",
+      version: "1.0.9beta2",
+      channel: "beta",
+    });
+    expect(vi.mocked(check).mock.calls.length).toBe(checksAfterNone);
+    expect(stable.download).not.toHaveBeenCalled();
+
+    await useUpdateStore.getState().confirmDownload();
+    expect(invoke).toHaveBeenCalledWith("download_manifest_update", {
+      manifestUrl:
+        "https://github.com/boshuaiYu/LocalPrism/releases/download/v1.0.9beta2/latest.json",
+    });
+    expect(vi.mocked(check).mock.calls.length).toBe(checksAfterNone);
+    expect(stable.download).not.toHaveBeenCalled();
+    expect(useUpdateStore.getState().status).toMatchObject({
+      state: "ready",
+      version: "1.0.9beta2",
+    });
+  });
+
+  it("applies release notes that resolve before the offer is stored", async () => {
+    vi.mocked(getVersion).mockResolvedValue("1.0.0");
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === "fetch_github_release_body") return "real changelog";
+      return invokeUpdateCommand(command);
+    });
+    const stable = stableRelease("1.1.0");
+    stable.body = "LocalPrism v1.1.0";
+    vi.mocked(check).mockResolvedValue(stable as never);
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+
+    expect(useUpdateStore.getState().status).toMatchObject({
+      state: "confirm",
+      version: "1.1.0",
+      notes: "real changelog",
+    });
+    expect(useUpdateStore.getState().status).not.toHaveProperty(
+      "notesState",
+      "loading",
+    );
+
+    useUpdateStore.setState({
+      status: { state: "idle" },
+      dismissedOffer: {
+        kind: "confirm",
+        version: "1.1.0",
+        currentVersion: "1.0.0",
+        notesState: "loading",
+        channel: "stable",
+      },
+    });
+    useUpdateStore.getState().reopenDismissedOffer();
+    expect(useUpdateStore.getState().status).toMatchObject({
+      state: "confirm",
+      version: "1.1.0",
+      notes: "real changelog",
+    });
+  });
+
+  it("retries unavailable release notes once on an explicit check", async () => {
+    vi.mocked(getVersion).mockResolvedValue("1.0.0");
+    let notesCalls = 0;
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === "fetch_github_release_body") {
+        notesCalls += 1;
+        throw new Error("GitHub release request failed (403).");
+      }
+      return invokeUpdateCommand(command);
+    });
+    const stable = stableRelease("1.1.0");
+    stable.body = "LocalPrism v1.1.0";
+    vi.mocked(check).mockResolvedValue(stable as never);
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+    expect(useUpdateStore.getState().status).toMatchObject({
+      notesState: "unavailable",
+    });
+
+    useUpdateStore.setState({ status: { state: "idle" } });
+    await useUpdateStore.getState().checkForUpdate({ explicit: false });
+    expect(notesCalls).toBe(1);
+    expect(useUpdateStore.getState().status).toMatchObject({
+      state: "confirm",
+      notesState: "unavailable",
+    });
+
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+    expect(notesCalls).toBe(2);
+    expect(useUpdateStore.getState().status).toMatchObject({
+      notesState: "unavailable",
+    });
+
+    useUpdateStore.setState({ status: { state: "idle" } });
+    await useUpdateStore.getState().checkForUpdate({ explicit: true });
+    expect(notesCalls).toBe(2);
+    expect(useUpdateStore.getState().status).toMatchObject({
+      notesState: "unavailable",
     });
   });
 
