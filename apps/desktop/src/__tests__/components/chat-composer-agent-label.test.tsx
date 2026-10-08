@@ -41,7 +41,12 @@ describe("ChatComposer agent label", () => {
   const agentSnapshot = useAgentStore.getState();
   const settingsSnapshot = useSettingsStore.getState();
 
+  const originalGetContext = HTMLCanvasElement.prototype.getContext;
+
   beforeEach(() => {
+    HTMLCanvasElement.prototype.getContext = (() => ({
+      measureText: () => ({ width: 0 }),
+    })) as unknown as typeof HTMLCanvasElement.prototype.getContext;
     invokeMock.mockReset();
     invokeMock.mockImplementation((command: string) => {
       if (command === "list_agents") return Promise.resolve(builtinAgents);
@@ -131,6 +136,7 @@ describe("ChatComposer agent label", () => {
   });
 
   afterEach(async () => {
+    HTMLCanvasElement.prototype.getContext = originalGetContext;
     await act(async () => {
       root.unmount();
     });

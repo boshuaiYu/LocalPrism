@@ -59,6 +59,7 @@ import {
   measureChatStripCanvasPx,
 } from "@/lib/chat-tab-strip";
 import {
+  composerModelChipChevronPx,
   composerModelChipFullLabel,
   composerModelChipPlan,
 } from "@/lib/composer-model-chip";
@@ -82,6 +83,11 @@ import {
   shouldFlashPresetAgentSwitch,
 } from "@/lib/reply-mode";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/lib/use-i18n";
 import { useRuntimeStore } from "@/stores/runtime-store";
@@ -344,40 +350,51 @@ function ComposerModelChip({
           </span>
         ) : null}
       </div>
-      <button
-        ref={buttonRef}
-        type="button"
-        data-testid="composer-model-trigger"
-        data-model-form={form}
-        onClick={onClick}
-        title={fullLabel}
-        aria-label={fullLabel ? `Switch model ${fullLabel}` : "Switch model"}
-        disabled={disabled}
-        className="flex h-8 w-fit shrink-0 items-center gap-1.5 self-start whitespace-nowrap rounded-full border border-border/80 bg-background/70 px-2.5 text-foreground text-xs transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
-        style={{ fontFamily: CHAT_STRIP_FONT_STACK }}
-      >
-        {form === "icon" && iconSrc ? (
-          <img src={iconSrc} alt="" className="size-3.5 shrink-0" />
-        ) : null}
-        {form === "full" ? (
-          <span
-            data-testid="composer-model-name"
-            className="whitespace-nowrap text-left"
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            ref={buttonRef}
+            type="button"
+            data-testid="composer-model-trigger"
+            data-model-form={form}
+            onClick={onClick}
+            aria-label={
+              fullLabel ? `Switch model ${fullLabel}` : "Switch model"
+            }
+            disabled={disabled}
+            className="flex h-8 w-fit shrink-0 items-center gap-1.5 self-start whitespace-nowrap rounded-full border border-border/80 bg-background/70 px-2.5 text-foreground text-xs transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+            style={{ fontFamily: CHAT_STRIP_FONT_STACK }}
           >
-            {label}
-          </span>
-        ) : null}
-        {effortLabel ? (
-          <span
-            data-testid="composer-model-effort"
-            className="shrink-0 whitespace-nowrap text-muted-foreground/60"
-          >
-            {form === "full" ? ` · ${effortLabel}` : effortLabel}
-          </span>
-        ) : null}
-        <span className="sr-only">{providerName}</span>
-        <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
-      </button>
+            {form === "icon" && iconSrc ? (
+              <img src={iconSrc} alt="" className="size-3.5 shrink-0" />
+            ) : null}
+            {form === "full" ? (
+              <span
+                data-testid="composer-model-name"
+                className="whitespace-nowrap text-left"
+              >
+                {label}
+              </span>
+            ) : null}
+            {effortLabel && form !== "chevron" ? (
+              <span
+                data-testid="composer-model-effort"
+                className="shrink-0 whitespace-nowrap text-muted-foreground/60"
+              >
+                {form === "full" ? ` · ${effortLabel}` : effortLabel}
+              </span>
+            ) : null}
+            <span className="sr-only">{providerName}</span>
+            <ChevronDownIcon
+              data-testid="composer-model-chevron"
+              className="size-3.5 shrink-0 text-muted-foreground"
+            />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top" data-testid="composer-model-tooltip">
+          {fullLabel}
+        </TooltipContent>
+      </Tooltip>
     </>
   );
 }
@@ -1370,7 +1387,11 @@ export const ChatComposer: FC<{
     }
   }, [mentionIndex]);
 
-  // Close model picker on click outside
+  // The menu is portaled and does not take focus, so a keydown listener on
+  // the menu never sees Escape. The composer field only consumes Escape for
+  // the slash and mention pickers. Listen on document, as the token meter
+  // and history menu do, and return focus to the chip without changing the
+  // selection. This close path predates the chip layout in #134.
   useEffect(() => {
     if (!modelPickerOpen) return;
     const handleClickOutside = (e: MouseEvent) => {
@@ -1384,8 +1405,18 @@ export const ChatComposer: FC<{
         setModelPickerOpen(false);
       }
     };
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setModelPickerOpen(false);
+      modelButtonRef.current?.focus();
+    };
     document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleEscape);
+    };
   }, [modelPickerOpen]);
 
   const composerCatalogModel =
@@ -1752,6 +1783,7 @@ export const ChatComposer: FC<{
               <div
                 data-testid="composer-controls-model"
                 className="relative flex min-w-0 max-w-full flex-1 basis-0 overflow-hidden"
+                style={{ minWidth: composerModelChipChevronPx() }}
               >
                 <ComposerModelChip
                   buttonRef={modelButtonRef}
