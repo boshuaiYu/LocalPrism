@@ -24,9 +24,14 @@ serde_yaml = "0.9"
 tokio = { version = "1", features = ["full"] }
 dirs = "5"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "system-proxy", "socks"] }
-# Same crate as tauri-plugin-updater, so the loopback CA type matches that client.
-updater-reqwest = { package = "reqwest", version = "=0.13.4", default-features = false, features = ["rustls-no-provider"] }
+# Same crate as tauri-plugin-updater 2.10.1, so the loopback CA type matches
+# that client. The plugin turns reqwest's default features off and has no
+# system-proxy flag, so these features are unified into its 0.13.4 client.
+# Direct connections stay direct when no proxy is configured. The version pin
+# stays exact so the two reqwest copies remain one crate.
+updater-reqwest = { package = "reqwest", version = "=0.13.4", default-features = false, features = ["rustls-no-provider", "system-proxy", "socks"] }
 url = "2"
+ipnet = "2"
 hmac = "0.12"
 sha1 = "0.10"
 base64 = "0.22"
@@ -54,8 +59,12 @@ expect_used = "deny"
 
 [dev-dependencies]
 tempfile = "3"
+# Tests that build the updater client need the same ring provider the plugin
+# installs before a real check or download.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+system-configuration = "0.7"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSRunningApplication"] }
 objc2-foundation = { version = "0.3", features = ["NSData"] }
