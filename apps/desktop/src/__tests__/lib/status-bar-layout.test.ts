@@ -4,7 +4,9 @@ import { translate } from "@/lib/i18n";
 import {
   STATUS_NOTICE_BUTTON_PAD_PX,
   STATUS_VERSION_NOTICE_GAP_PX,
+  measuredLabelPx,
   planStatusVersionNotice,
+  rememberMeasuredLabel,
   statusLabelMeasurementPx,
 } from "@/lib/status-bar-layout";
 
@@ -160,5 +162,23 @@ describe("status bar version hint layout", () => {
     } finally {
       HTMLCanvasElement.prototype.getContext = original;
     }
+  });
+
+  it("keeps a measured width only for the label that produced it", () => {
+    const wide = rememberMeasuredLabel(undefined, "Beta 1.0.9beta2", 2000);
+    expect(wide).toEqual({ label: "Beta 1.0.9beta2", px: 2000 });
+    expect(measuredLabelPx(wide, "Beta 1.0.9beta2")).toBe(2000);
+    expect(measuredLabelPx(wide, "Beta 1.0.9")).toBeUndefined();
+    expect(rememberMeasuredLabel(wide, "Beta 1.0.9beta2", 2000)).toBe(wide);
+    expect(rememberMeasuredLabel(wide, "Beta 1.0.9", 40)).toEqual({
+      label: "Beta 1.0.9",
+      px: 40,
+    });
+    expect(rememberMeasuredLabel(wide, "Beta 1.0.9beta2", undefined)).toBe(
+      undefined,
+    );
+    expect(
+      measuredLabelPx({ label: "Beta 1.0.9beta2", px: 0 }, "Beta 1.0.9beta2"),
+    ).toBe(undefined);
   });
 });

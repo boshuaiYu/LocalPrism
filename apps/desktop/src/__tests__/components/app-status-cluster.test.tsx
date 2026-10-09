@@ -98,4 +98,24 @@ describe("AppStatusBar tour anchor", () => {
       actions?.querySelector('[data-testid="check-for-updates"]'),
     ).not.toBeNull();
   });
+
+  it("hides the width measurer and gives the beta toggle a focus ring", async () => {
+    await act(async () => {
+      root.render(<AppStatusBar />);
+    });
+
+    const measure = container.querySelector(
+      '[data-testid="app-status-measure"]',
+    );
+    expect(measure?.getAttribute("aria-hidden")).toBe("true");
+    expect(measure?.className).toContain("invisible");
+    expect(measure?.className).toContain("absolute");
+    expect(measure?.className).toContain("pointer-events-none");
+    expect(measure?.className).not.toContain("h-0");
+    expect(measure?.className).not.toContain("overflow-hidden");
+
+    const beta = container.querySelector('[data-testid="beta-channel-toggle"]');
+    expect(beta).toBeInstanceOf(HTMLButtonElement);
+    expect(beta?.className).toContain("lp-focus");
+  });
 });
