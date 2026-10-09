@@ -6,7 +6,7 @@ import { Sidebar } from "@/components/workspace/sidebar";
 import { resetTourChromeBaseline } from "@/lib/product-tour";
 
 vi.mock("@tauri-apps/api/app", () => ({
-  getVersion: vi.fn().mockResolvedValue("1.0.9-4"),
+  getVersion: vi.fn().mockResolvedValue("1.0.9-5"),
 }));
 
 vi.mock("next-themes", () => ({

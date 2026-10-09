@@ -17,7 +17,7 @@ import {
 } from "@/stores/runtime-store";
 
 vi.mock("@tauri-apps/api/app", () => ({
-  getVersion: vi.fn().mockResolvedValue("1.0.9-4"),
+  getVersion: vi.fn().mockResolvedValue("1.0.9-5"),
 }));
 
 vi.mock("next-themes", () => ({
@@ -188,9 +188,9 @@ describe("ProjectPicker runtime settings", () => {
   it("keeps version, Beta, and the refresh check in the bottom bar", async () => {
     const download = vi.fn();
     vi.mocked(check).mockResolvedValue({
-      version: "1.0.9-5",
+      version: "1.0.9-6",
       body: "beta",
-      currentVersion: "1.0.9-4",
+      currentVersion: "1.0.9-5",
       download,
       install: vi.fn(),
       close: vi.fn(async () => undefined),
@@ -205,7 +205,7 @@ describe("ProjectPicker runtime settings", () => {
     });
 
     const header = container.querySelector("[data-testid='app-chrome-header']");
-    expect(header?.textContent).not.toContain("v1.0.9-4");
+    expect(header?.textContent).not.toContain("v1.0.9-5");
     expect(header?.querySelector("[data-testid='language-switch']")).toBeNull();
     expect(
       header?.querySelector("[data-testid='check-for-updates']"),
@@ -216,10 +216,10 @@ describe("ProjectPicker runtime settings", () => {
       document.body.querySelector("[data-testid='update-available-dialog']"),
     ).toBeNull();
     expect(download).not.toHaveBeenCalled();
-    expect(container.textContent).not.toContain("1.0.9-5");
+    expect(container.textContent).not.toContain("1.0.9-6");
 
     const bar = container.querySelector("[data-testid='app-status-bar']");
-    expect(bar?.textContent).toContain("v1.0.9-4");
+    expect(bar?.textContent).toContain("v1.0.9-5");
     expect(
       bar?.querySelector("[data-testid='check-for-updates']"),
     ).toBeTruthy();
@@ -237,7 +237,7 @@ describe("ProjectPicker runtime settings", () => {
     expect(download).not.toHaveBeenCalled();
     expect(container.querySelector("[data-testid='update-prompt']")).toBeNull();
     const flash = container.querySelector("[data-testid='update-flash']");
-    expect(flash?.textContent).toContain("1.0.9-5");
+    expect(flash?.textContent).toContain("1.0.9-6");
     expect(flash?.className).toMatch(/lp-update-flash/);
     const dialog = document.body.querySelector(
       "[data-testid='update-available-dialog']",
