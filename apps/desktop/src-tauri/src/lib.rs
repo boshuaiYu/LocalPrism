@@ -15,6 +15,7 @@ mod providers;
 mod runtime;
 mod skills;
 mod slash_commands;
+mod updater_proxy;
 mod usage_debug;
 mod uv;
 mod zotero;
@@ -573,20 +574,34 @@ async fn download_manifest_update(
     let root_pem = gated.root_pem.clone();
     let check_url = gated.url.clone();
     let parsed = url::Url::parse(&check_url).map_err(|err| err.to_string())?;
+    // Resolved once for both the manifest check and the package download.
+    // Do not use UpdaterBuilder::proxy: that installs Proxy::all before this
+    // callback and would send the loopback manifest through the proxy.
+    let resolved_proxy = updater_proxy::current();
     let mut builder = app
         .updater_builder()
         .endpoints(vec![parsed])
         .map_err(|err| err.to_string())?;
-    if let Some(pem) = root_pem {
-        // Compact tags still need the loopback gate. Hyphenated semver
-        // betas keep the published GitHub endpoint so that path stays
-        // the same as today's working updater.
-        let certificate = updater_reqwest::Certificate::from_pem(pem.as_bytes())
-            .map_err(|err| format!("Could not load the loopback update certificate: {err}"))?;
-        builder = builder.configure_client(move |client| {
-            client.tls_certs_merge(std::iter::once(certificate.clone()))
-        });
-    }
+    // Compact tags still need the loopback gate. Hyphenated semver betas keep
+    // the published GitHub endpoint. Signature verification stays inside
+    // `update.download`; this only configures the client that fetches it.
+    let certificate = if let Some(pem) = root_pem {
+        Some(
+            updater_reqwest::Certificate::from_pem(pem.as_bytes()).map_err(|err| {
+                format!("Could not load the loopback update certificate: {err}")
+            })?,
+        )
+    } else {
+        None
+    };
+    builder = builder.configure_client(move |client| {
+        let client = if let Some(certificate) = certificate.clone() {
+            client.tls_certs_merge(std::iter::once(certificate))
+        } else {
+            client
+        };
+        updater_proxy::install_on_updater_client(client, resolved_proxy.clone())
+    });
     let updater = builder.build().map_err(|err| err.to_string())?;
     let update = updater
         .check()
