@@ -12,8 +12,11 @@ import { Button } from "@/components/ui/button";
 import { classifyUpdateError } from "@/lib/update-policy";
 import {
   STATUS_NOTICE_BUTTON_PAD_PX,
+  measuredLabelPx,
   planStatusVersionNotice,
+  rememberMeasuredLabel,
   statusLabelMeasurementPx,
+  type MeasuredLabelWidth,
 } from "@/lib/status-bar-layout";
 import { UpdateAvailableDialog } from "@/components/update-available-dialog";
 import { useI18n } from "@/lib/use-i18n";
@@ -143,11 +146,11 @@ export function AppStatusBar({
   const clusterRef = useRef<HTMLDivElement>(null);
   const measureRef = useRef<HTMLDivElement>(null);
   const [clusterPx, setClusterPx] = useState(0);
-  const [measuredVersionPx, setMeasuredVersionPx] = useState<
-    number | undefined
+  const [measuredVersion, setMeasuredVersion] = useState<
+    MeasuredLabelWidth | undefined
   >();
-  const [measuredNoticePx, setMeasuredNoticePx] = useState<
-    number | undefined
+  const [measuredNotice, setMeasuredNotice] = useState<
+    MeasuredLabelWidth | undefined
   >();
 
   useLayoutEffect(() => {
@@ -171,10 +174,12 @@ export function AppStatusBar({
       const nextNotice = noticeLabel
         ? statusLabelMeasurementPx(noticeLabel, renderedLabelPx(noticeNode))
         : undefined;
-      setMeasuredVersionPx((prev) =>
-        prev === nextVersion ? prev : nextVersion,
+      setMeasuredVersion((prev) =>
+        rememberMeasuredLabel(prev, versionLabel, nextVersion),
       );
-      setMeasuredNoticePx((prev) => (prev === nextNotice ? prev : nextNotice));
+      setMeasuredNotice((prev) =>
+        rememberMeasuredLabel(prev, noticeLabel, nextNotice),
+      );
     };
     read();
     const fonts = document.fonts;
@@ -198,8 +203,8 @@ export function AppStatusBar({
     versionLabel,
     noticeLabel,
     noticeChromePx,
-    measuredVersionPx,
-    measuredNoticePx,
+    measuredVersionPx: measuredLabelPx(measuredVersion, versionLabel),
+    measuredNoticePx: measuredLabelPx(measuredNotice, noticeLabel),
   });
   const stacked = versionPlan.layout === "stacked";
 
@@ -228,7 +233,10 @@ export function AppStatusBar({
           ref={measureRef}
           data-testid="app-status-measure"
           aria-hidden="true"
-          className="pointer-events-none absolute top-0 left-0 -z-10 h-0 overflow-hidden whitespace-nowrap"
+          className={cn(
+            "pointer-events-none invisible absolute top-0 left-0 -z-10",
+            "whitespace-nowrap",
+          )}
         >
           <span
             className="inline-block"
@@ -270,6 +278,7 @@ export function AppStatusBar({
                 type="button"
                 data-testid="update-flash"
                 className={cn(
+                  "lp-focus",
                   footerLabelClass(versionPlan.noticeFits, stacked),
                   "rounded px-1 text-left text-foreground hover:bg-muted/70",
                   blink && "lp-update-flash",
@@ -311,7 +320,7 @@ export function AppStatusBar({
             data-testid="beta-channel-toggle"
             disabled={busy}
             className={cn(
-              "h-6 rounded-md px-1.5 font-medium text-[11px] disabled:cursor-not-allowed disabled:opacity-40",
+              "lp-focus h-6 rounded-md px-1.5 font-medium text-[11px] disabled:cursor-not-allowed disabled:opacity-40",
               joinBeta
                 ? "bg-foreground text-background"
                 : "text-muted-foreground hover:bg-muted/70 hover:text-foreground",

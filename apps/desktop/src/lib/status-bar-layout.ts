@@ -52,6 +52,34 @@ export function statusLabelMeasurementPx(
   return Math.ceil(measured);
 }
 
+export type MeasuredLabelWidth = {
+  label: string;
+  px: number;
+};
+
+/**
+ * A live width belongs to the label that was measured. A leftover wider
+ * width does not apply to the next string.
+ */
+export function measuredLabelPx(
+  measured: MeasuredLabelWidth | undefined,
+  label: string,
+): number | undefined {
+  if (!measured || measured.label !== label) return undefined;
+  if (!Number.isFinite(measured.px) || measured.px <= 0) return undefined;
+  return measured.px;
+}
+
+export function rememberMeasuredLabel(
+  previous: MeasuredLabelWidth | undefined,
+  label: string,
+  px: number | undefined,
+): MeasuredLabelWidth | undefined {
+  if (px == null || !Number.isFinite(px) || px <= 0) return undefined;
+  if (previous?.label === label && previous.px === px) return previous;
+  return { label, px };
+}
+
 export function planStatusVersionNotice(input: {
   /** Content box of the version cluster, not the whole footer. */
   availablePx: number;

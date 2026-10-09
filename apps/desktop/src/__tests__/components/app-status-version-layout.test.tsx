@@ -105,6 +105,7 @@ describe("AppStatusBar version hint layout", () => {
     expect(version?.className).not.toContain("truncate");
     expect(hint?.className).not.toContain("truncate");
     expect(hint).toBeInstanceOf(HTMLButtonElement);
+    expect(hint?.className).toContain("lp-focus");
     return { version, hint };
   }
 

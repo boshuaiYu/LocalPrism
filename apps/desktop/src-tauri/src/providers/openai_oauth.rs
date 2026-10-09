@@ -255,50 +255,39 @@ pub fn enrich_oauth_claims(mut tokens: OAuthTokens) -> OAuthTokens {
     tokens
 }
 
+/// Literal JWT object keys. Slashes are part of the key, not a JSON Pointer path.
+const OPENAI_AUTH_CLAIM: &str = "https://api.openai.com/auth";
+const OPENAI_PROFILE_CLAIM: &str = "https://api.openai.com/profile";
+
+fn non_empty_claim(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn nested_claim(claims: &Value, object_key: &str, field: &str) -> Option<String> {
+    claims
+        .get(object_key)
+        .and_then(|object| non_empty_claim(object, field))
+}
+
 fn jwt_account_id(claims: Option<&Value>) -> Option<String> {
     let claims = claims?;
-    claims
-        .get("chatgpt_account_id")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            claims
-                .pointer("/https://api.openai.com/auth/chatgpt_account_id")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        })
-        .filter(|value| !value.is_empty())
+    non_empty_claim(claims, "chatgpt_account_id")
+        .or_else(|| nested_claim(claims, OPENAI_AUTH_CLAIM, "chatgpt_account_id"))
 }
 
 fn jwt_email(claims: Option<&Value>) -> Option<String> {
     let claims = claims?;
-    claims
-        .get("email")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            claims
-                .pointer("/https://api.openai.com/profile/email")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-        })
+    non_empty_claim(claims, "email").or_else(|| nested_claim(claims, OPENAI_PROFILE_CLAIM, "email"))
 }
 
 fn jwt_plan(claims: Option<&Value>) -> Option<String> {
     let claims = claims?;
-    claims
-        .get("chatgpt_plan_type")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            claims
-                .pointer("/https://api.openai.com/auth/chatgpt_plan_type")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        })
-        .filter(|value| !value.is_empty())
+    non_empty_claim(claims, "chatgpt_plan_type")
+        .or_else(|| nested_claim(claims, OPENAI_AUTH_CLAIM, "chatgpt_plan_type"))
 }
 
 fn now_ms() -> i64 {
@@ -357,7 +346,13 @@ pub async fn refresh_tokens(refresh_token: &str) -> Result<OAuthTokens, String> 
     if !status.is_success() {
         return Err(format!("ChatGPT token refresh failed: {status}"));
     }
-    let mut tokens = parse_token_response(&text)?;
+    parse_refresh_response(&text, refresh_token)
+}
+
+/// A refresh body may omit `refresh_token`. Account id and plan still come
+/// from the new JWT, including the nested ChatGPT claim objects.
+fn parse_refresh_response(body: &str, refresh_token: &str) -> Result<OAuthTokens, String> {
+    let mut tokens = parse_token_response(body)?;
     if tokens.refresh_token.is_none() {
         tokens.refresh_token = Some(refresh_token.to_string());
     }
@@ -423,6 +418,84 @@ mod tests {
         assert_eq!(tokens.account_id.as_deref(), Some("acc-1"));
         assert_eq!(tokens.subscription_type.as_deref(), Some("pro"));
         assert_eq!(tokens.email.as_deref(), Some("a@b.c"));
+    }
+
+    #[test]
+    fn parse_token_response_reads_nested_plan_and_keeps_top_level_plan() {
+        let nested = unsigned_jwt(
+            r#"{"https://api.openai.com/auth":{"chatgpt_plan_type":"team","chatgpt_account_id":""}}"#,
+        );
+        let nested_tokens = parse_token_response(&format!(
+            r#"{{"access_token":"{nested}","refresh_token":"ref","expires_in":60}}"#
+        ))
+        .unwrap();
+        assert_eq!(nested_tokens.subscription_type.as_deref(), Some("team"));
+        assert_eq!(nested_tokens.account_id, None);
+
+        let top_level = unsigned_jwt(
+            r#"{"chatgpt_plan_type":"plus","chatgpt_account_id":"acc-top","email":"top@example.com","https://api.openai.com/auth":{"chatgpt_plan_type":"team","chatgpt_account_id":"acc-nested"},"https://api.openai.com/profile":{"email":"profile@example.com"}}"#,
+        );
+        let top_tokens = parse_token_response(&format!(
+            r#"{{"access_token":"{top_level}","refresh_token":"ref","expires_in":60}}"#
+        ))
+        .unwrap();
+        assert_eq!(top_tokens.subscription_type.as_deref(), Some("plus"));
+        assert_eq!(top_tokens.account_id.as_deref(), Some("acc-top"));
+        assert_eq!(top_tokens.email.as_deref(), Some("top@example.com"));
+    }
+
+    #[test]
+    fn parse_token_response_falls_back_to_profile_email() {
+        let jwt = unsigned_jwt(
+            r#"{"https://api.openai.com/profile":{"email":"profile@example.com"},"https://api.openai.com/auth":{"chatgpt_account_id":"acc-9","chatgpt_plan_type":"enterprise"}}"#,
+        );
+        let tokens = parse_token_response(&format!(
+            r#"{{"access_token":"opaque","id_token":"{jwt}","refresh_token":"ref","expires_in":60}}"#
+        ))
+        .unwrap();
+        assert_eq!(tokens.email.as_deref(), Some("profile@example.com"));
+        assert_eq!(tokens.account_id.as_deref(), Some("acc-9"));
+        assert_eq!(tokens.subscription_type.as_deref(), Some("enterprise"));
+        assert_eq!(tokens.access_token, "opaque");
+    }
+
+    #[test]
+    fn empty_top_level_account_id_falls_through_to_nested_claim() {
+        let jwt = unsigned_jwt(
+            r#"{"chatgpt_account_id":"","https://api.openai.com/auth":{"chatgpt_account_id":"acc-real"}}"#,
+        );
+        let tokens = parse_token_response(&format!(
+            r#"{{"access_token":"{jwt}","refresh_token":"ref","expires_in":60}}"#
+        ))
+        .unwrap();
+        assert_eq!(tokens.account_id.as_deref(), Some("acc-real"));
+    }
+
+    #[test]
+    fn refresh_response_keeps_nested_account_id() {
+        let jwt = unsigned_jwt(
+            r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acc-refresh","chatgpt_plan_type":"team"},"https://api.openai.com/profile":{"email":"refresh@example.com"}}"#,
+        );
+        let tokens = parse_refresh_response(
+            &format!(r#"{{"access_token":"{jwt}","expires_in":60,"id_token":"{jwt}"}}"#),
+            "previous-refresh",
+        )
+        .unwrap();
+        assert_eq!(tokens.account_id.as_deref(), Some("acc-refresh"));
+        assert_eq!(tokens.subscription_type.as_deref(), Some("team"));
+        assert_eq!(tokens.email.as_deref(), Some("refresh@example.com"));
+        assert_eq!(tokens.refresh_token.as_deref(), Some("previous-refresh"));
+        assert_eq!(tokens.access_token, jwt);
+
+        let rotated = parse_refresh_response(
+            &format!(
+                r#"{{"access_token":"{jwt}","refresh_token":"rotated","expires_in":60}}"#
+            ),
+            "previous-refresh",
+        )
+        .unwrap();
+        assert_eq!(rotated.account_id.as_deref(), Some("acc-refresh"));
+        assert_eq!(rotated.refresh_token.as_deref(), Some("rotated"));
     }
 
     fn unsigned_jwt(payload: &str) -> String {

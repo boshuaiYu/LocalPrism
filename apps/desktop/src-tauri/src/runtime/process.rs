@@ -2620,15 +2620,58 @@ mod tests {
                 .as_deref(),
             Some("turn-a")
         );
+        // The failed interrupt leaves this attempt in flight. A duplicate
+        // start of the same attempt stays rejected.
         assert!(state
             .begin_codex_turn(codex_attempt_route(
                 "window-a",
                 "tab-a",
                 Some("thread-a"),
-                "attempt-new",
+                "attempt-a",
             ))
             .await
             .is_err());
+        assert_eq!(
+            state
+                .get("window-a", "tab-a")
+                .await
+                .unwrap()
+                .turn_id
+                .as_deref(),
+            Some("turn-a")
+        );
+        // A new user attempt supersedes the stuck turn instead of staying blocked.
+        let retry = reserved(
+            state
+                .begin_codex_turn(codex_attempt_route(
+                    "window-a",
+                    "tab-a",
+                    Some("thread-a"),
+                    "attempt-new",
+                ))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(retry.route.attempt_id, "attempt-new");
+        assert_eq!(retry.generation, generation);
+        assert_eq!(
+            state
+                .get("window-a", "tab-a")
+                .await
+                .and_then(|route| route.turn_id),
+            None
+        );
+        assert_eq!(
+            state
+                .get("window-a", "tab-a")
+                .await
+                .map(|route| route.attempt_id),
+            Some("attempt-new".into())
+        );
+        assert!(state
+            .codex_turn_owner("thread-a", "turn-a", generation)
+            .await
+            .is_none());
     }
 
     #[tokio::test]

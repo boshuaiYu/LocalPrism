@@ -1298,6 +1298,110 @@ describe("ChatComposer provider wiring", () => {
     }
   });
 
+  it("reopens the model menu after typing '/' closed it", async () => {
+    const view = mountLayeredComposer("tab-slash-reopen-model");
+    try {
+      await view.paint(<ChatComposer />);
+      const trigger = view.container.querySelector(
+        '[data-testid="composer-model-trigger"]',
+      );
+      const field = view.container.querySelector("textarea");
+      if (!(trigger instanceof HTMLButtonElement)) {
+        throw new Error("Composer model trigger not found");
+      }
+      if (!(field instanceof HTMLTextAreaElement)) {
+        throw new Error("Composer field not found");
+      }
+      const before = view.selection();
+      await act(async () => trigger.click());
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeTruthy();
+      await setComposerValue(field, "/");
+      expect(field.value).toBe("/");
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeNull();
+      expect(
+        document.querySelector('[aria-label="Close command picker"]'),
+      ).toBeTruthy();
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+      await act(async () => trigger.click());
+      expect(field.value).toBe("/");
+      expect(
+        document.querySelector('[aria-label="Close command picker"]'),
+      ).toBeNull();
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeTruthy();
+      expect(trigger.getAttribute("aria-expanded")).toBe("true");
+      expect(view.selection()).toEqual(before);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it("reopens the slash picker when '/' is typed again after the chip dismissed it", async () => {
+    const view = mountLayeredComposer("tab-slash-reopen");
+    try {
+      await view.paint(<ChatComposer />);
+      const trigger = view.container.querySelector(
+        '[data-testid="composer-model-trigger"]',
+      );
+      const field = view.container.querySelector("textarea");
+      if (!(trigger instanceof HTMLButtonElement)) {
+        throw new Error("Composer model trigger not found");
+      }
+      if (!(field instanceof HTMLTextAreaElement)) {
+        throw new Error("Composer field not found");
+      }
+      const before = view.selection();
+      await setComposerValue(field, "/");
+      expect(field.value).toBe("/");
+      expect(
+        document.querySelector('[aria-label="Close command picker"]'),
+      ).toBeTruthy();
+      await act(async () => trigger.click());
+      expect(field.value).toBe("/");
+      expect(
+        document.querySelector('[aria-label="Close command picker"]'),
+      ).toBeNull();
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeTruthy();
+      await setComposerValue(field, "/h");
+      expect(field.value).toBe("/h");
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeNull();
+      expect(
+        document.querySelector('[aria-label="Close command picker"]'),
+      ).toBeTruthy();
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+      await act(async () => trigger.click());
+      expect(field.value).toBe("/h");
+      expect(
+        document.querySelector('[aria-label="Close command picker"]'),
+      ).toBeNull();
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeTruthy();
+      await setComposerValue(field, "");
+      await setComposerValue(field, "/");
+      expect(field.value).toBe("/");
+      expect(
+        document.querySelector('[aria-label="Runtime controls"]'),
+      ).toBeNull();
+      expect(
+        document.querySelector('[aria-label="Close command picker"]'),
+      ).toBeTruthy();
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+      expect(view.selection()).toEqual(before);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
   it("lets editor search consume Escape without closing the model menu", async () => {
     const view = mountLayeredComposer("tab-search");
     try {
