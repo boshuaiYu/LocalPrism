@@ -225,6 +225,7 @@ export function ScientificSkillsOnboarding({
       buildSkillsBrowserCategories({
         installedSkills: [
           ...installedRuntimeSkills.map((skill) => ({
+            id: skill.managed ? skill.id : undefined,
             name: skill.name,
             folder: skill.folder,
             category: skill.category,
@@ -547,6 +548,7 @@ export function ScientificSkillsOnboarding({
 
   const handleUninstallPack = useCallback(async () => {
     if (!uninstallPack) return;
+    const packName = uninstallPack.name;
     setIsUninstalling(true);
     try {
       await invoke("skill_remove_pack", {
@@ -559,7 +561,7 @@ export function ScientificSkillsOnboarding({
       await reloadOptOuts();
       await checkStatus();
       await refreshSkills(projectPath ?? undefined);
-      toast.success(t("skills.toastUninstalled"));
+      toast.success(t("skills.toastPackUninstalled", { name: packName }));
     } catch (error) {
       toast.error(t("skills.toastUninstallFailed"), {
         description: String(error),
@@ -577,11 +579,13 @@ export function ScientificSkillsOnboarding({
   ]);
 
   const handleConfirmDeleteSkill = useCallback(async () => {
-    if (!deleteTarget) return;
+    if (!deleteTarget?.id) return;
+    const entryId = deleteTarget.id;
     setDeletingSkillFolder(deleteTarget.folder);
     try {
-      await invoke("delete_installed_skill", {
-        skillFolder: deleteTarget.folder,
+      await invoke("skill_delete_managed", {
+        entryId,
+        confirmModified: false,
       });
       toast.success(t("skills.toastDeleted"), {
         description: deleteTarget.name,
@@ -967,6 +971,7 @@ export function ScientificSkillsOnboarding({
               size="sm"
               disabled={deletingSkillFolder !== null}
               onClick={handleConfirmDeleteSkill}
+              data-testid="skill-delete-confirm"
               className="gap-1.5"
             >
               {deletingSkillFolder ? (
@@ -1437,7 +1442,8 @@ function CategoryDetail({
         ) : (
           <div className="grid grid-cols-2 gap-1.5">
             {category.skills.map((skill) => {
-              const canDelete = installedSkillFolders.has(skill.folder);
+              const canDelete =
+                Boolean(skill.id) && installedSkillFolders.has(skill.folder);
               const isDeleting = deletingSkillFolder === skill.folder;
               return (
                 <div

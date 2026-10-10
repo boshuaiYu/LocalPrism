@@ -2,6 +2,16 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
+
+const { toastSuccess } = vi.hoisted(() => ({ toastSuccess: vi.fn() }));
+
+vi.mock("sonner", () => ({
+  toast: {
+    success: toastSuccess,
+    error: vi.fn(),
+    message: vi.fn(),
+  },
+}));
 import { ScientificSkillsOnboarding } from "@/components/scientific-skills/scientific-skills-onboarding";
 import { PAPERSPINE_SKILLS_URL } from "@/lib/paperspine";
 import { SCIENTIFIC_AGENT_SKILLS_URL } from "@/lib/default-skill-packs";
@@ -128,6 +138,7 @@ describe("ScientificSkillsOnboarding pack actions", () => {
     document.body.innerHTML = "";
     useSkillStore.setState(snapshot, true);
     vi.mocked(invoke).mockReset();
+    toastSuccess.mockReset();
   });
 
   async function renderDialog() {
@@ -213,6 +224,34 @@ describe("ScientificSkillsOnboarding pack actions", () => {
       defaultPackId: "paper-spine",
       optOut: true,
     });
+    expect(toastSuccess).toHaveBeenCalledWith("Uninstalled PaperSpine");
+  });
+
+  it("deletes one managed skill through the manifest command", async () => {
+    await renderDialog();
+    await act(async () => {
+      (
+        document.body.querySelector(
+          '[aria-label="Delete PaperSpine"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    await act(async () => {
+      (
+        document.body.querySelector(
+          '[data-testid="skill-delete-confirm"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    expect(invoke).toHaveBeenCalledWith("skill_delete_managed", {
+      entryId: "claude:user:paper-spine",
+      confirmModified: false,
+    });
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.some(([command]) => command === "delete_installed_skill"),
+    ).toBe(false);
   });
 
   it("keeps uninstall-all inside the overflow menu and offers folder, zip, and link import", async () => {

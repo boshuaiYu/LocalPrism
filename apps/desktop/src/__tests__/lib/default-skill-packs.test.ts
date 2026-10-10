@@ -7,6 +7,7 @@ import {
   SCIENTIFIC_URL_PACK_ID,
   installedSourcePack,
   isDefaultPackSkill,
+  isScientificAgentSkillsSource,
   resolveSkillPackId,
   SCIENTIFIC_AGENT_SKILLS_URL,
   githubRepoLabel,
@@ -232,6 +233,28 @@ describe("default skill packs", () => {
       }),
     ).toBe("imported");
     expect(resolveSkillPackId({ folder: "my-writer" })).toBe("imported");
+    expect(
+      resolveSkillPackId({
+        folder: "nature-custom",
+        name: "nature-figure",
+        sourceFolder: "/tmp/imports/nature-custom",
+      }),
+    ).toBe("imported");
+    expect(
+      installedSourcePack({
+        sourceFolder: "/tmp/imports/nature-custom",
+      })?.kind,
+    ).toBe("folder");
+    expect(
+      isScientificAgentSkillsSource(
+        "https://github.com/someone-else/scientific-agent-skills",
+      ),
+    ).toBe(false);
+    expect(
+      installedSourcePack({
+        sourceUrl: "https://github.com/someone-else/scientific-agent-skills",
+      })?.id,
+    ).not.toBe(SCIENTIFIC_URL_PACK_ID);
     expect(
       resolveSkillPackId({ folder: "lab-helper", name: "nature-figure" }),
     ).toBe("nature-skills");

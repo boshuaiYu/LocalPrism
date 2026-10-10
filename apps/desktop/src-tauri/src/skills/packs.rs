@@ -1,12 +1,14 @@
 use crate::skills::domain::{SkillImportOutcome, SkillScope, SkillTarget};
 use crate::skills::import::{self, config_dir};
 use crate::skills::manifest::{
-    stable_entry_id, ManagedSkillEntry, ManifestStore, SkillManifest, SkillSource,
+    assess_managed_copy, atomic_replace, deletion_allowed, metadata_is_unsafe_link,
+    stable_entry_id, ManagedSkillEntry, ManifestStore, ObservedFingerprint, SkillManifest,
+    SkillSource,
 };
-use crate::skills::paths::validate_skill_slug;
+use crate::skills::paths::{self, validate_skill_slug};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 const PREFS_FILENAME: &str = "skills-pack-preferences.json";
 const PREFS_VERSION: u32 = 1;
@@ -112,7 +114,7 @@ fn save_preferences(config: &Path, prefs: &SkillPackPreferences) -> Result<(), S
         .map_err(|error| format!("Failed to write skill pack preferences: {error}"))?;
     std::fs::write(&tmp, bytes)
         .map_err(|error| format!("Failed to write {}: {error}", tmp.display()))?;
-    std::fs::rename(&tmp, &path)
+    atomic_replace(&tmp, &path)
         .map_err(|error| format!("Failed to save {}: {error}", path.display()))?;
     Ok(())
 }
@@ -226,12 +228,10 @@ fn parse_github_repo(url: &str) -> Option<GithubRepo> {
 }
 
 pub(crate) fn is_scientific_repo_url(url: &str) -> bool {
-    matches!(
-        parse_github_repo(url)
-            .as_ref()
-            .map(|repo| repo.repo.as_str()),
-        Some("scientific-agent-skills" | "claude-scientific-skills")
-    )
+    const OWNER: &str = "k-dense-ai";
+    const REPOS: &[&str] = &["scientific-agent-skills", "claude-scientific-skills"];
+    parse_github_repo(url)
+        .is_some_and(|repo| repo.owner == OWNER && REPOS.contains(&repo.repo.as_str()))
 }
 
 pub(crate) fn is_retired_scientific_source(source: &SkillSource) -> bool {
@@ -263,50 +263,8 @@ pub(crate) fn default_pack_id_from_source(source: &SkillSource) -> Option<&'stat
     }
 }
 
-fn folder_matches_default_pack(folder: &str, pack_id: &str) -> bool {
-    let key = folder.trim().to_ascii_lowercase();
-    match pack_id {
-        "paper-spine" => matches!(
-            key.as_str(),
-            "paper-spine" | "paperspine" | "paper-spine-intake"
-        ),
-        "academic-research-skills" => {
-            matches!(
-                key.as_str(),
-                "deep-research"
-                    | "academic-paper"
-                    | "academic-paper-reviewer"
-                    | "academic-pipeline"
-                    | "academic-research-suite"
-                    | "literature-review"
-                    | "peer-review"
-                    | "reference-checker"
-            ) || key.starts_with("academic-")
-                || key.starts_with("academic_")
-        }
-        "nature-skills" => {
-            matches!(
-                key.as_str(),
-                "nature-polishing" | "nature-figure" | "nature-writing" | "nature-citation"
-            ) || key.starts_with("nature-")
-                || key.starts_with("nature_")
-        }
-        "paper-humanizer-skill" => key == "paper-humanizer" || key.starts_with("paper-humanizer"),
-        _ => false,
-    }
-}
-
 fn entry_belongs_to_default_pack(entry: &ManagedSkillEntry, pack_id: &str) -> bool {
-    if let Some(id) = default_pack_id_from_source(&entry.source) {
-        return id == pack_id;
-    }
-    if matches!(
-        entry.source,
-        SkillSource::Url { .. } | SkillSource::Curated { .. }
-    ) {
-        return false;
-    }
-    folder_matches_default_pack(&entry.folder, pack_id)
+    default_pack_id_from_source(&entry.source) == Some(pack_id)
 }
 
 pub(crate) fn urls_same_pack(left: &str, right: &str) -> bool {
@@ -346,15 +304,82 @@ fn folder_paths_same(left: &str, right: &str) -> bool {
     {
         return left_canon == right_canon;
     }
-    normalize_folder_key(left) == normalize_folder_key(right)
+    folder_keys_equal(left, right)
 }
 
 fn normalize_folder_key(path: &str) -> String {
     let mut value = path.trim().replace('\\', "/");
+    if let Some(rest) = value.strip_prefix("//?/UNC/") {
+        value = format!("//{rest}");
+    } else if let Some(rest) = value.strip_prefix("//?/") {
+        value = rest.to_string();
+    }
     while value.ends_with('/') {
         value.pop();
     }
     value
+}
+
+/// Compare recorded folder paths. `case_insensitive` is the Windows rule so
+/// Linux tests can exercise `C:\Pack` versus `c:\pack` without a Windows host.
+pub(crate) fn folder_keys_equal_with(left: &str, right: &str, case_insensitive: bool) -> bool {
+    let left = normalize_folder_key(left);
+    let right = normalize_folder_key(right);
+    if case_insensitive {
+        left.eq_ignore_ascii_case(&right)
+    } else {
+        left == right
+    }
+}
+
+fn folder_keys_equal(left: &str, right: &str) -> bool {
+    folder_keys_equal_with(left, right, cfg!(windows))
+}
+
+fn is_portable_absolute(normalized: &str) -> bool {
+    if normalized.starts_with('/') {
+        return true;
+    }
+    let bytes = normalized.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
+}
+
+/// Lexical check for an installed skill directory. `Component::Prefix` is not
+/// a rejection: Windows destinations always have one. `..` is rejected here,
+/// the same way archive-relative extraction rejects parent segments.
+pub(crate) fn lexical_skill_destination_error(
+    destination: &str,
+    root: &str,
+    folder: &str,
+    case_insensitive: bool,
+) -> Option<&'static str> {
+    if folder.is_empty()
+        || folder.contains('/')
+        || folder.contains('\\')
+        || folder == "."
+        || folder == ".."
+    {
+        return Some("folder");
+    }
+    let destination = normalize_folder_key(destination);
+    let root = normalize_folder_key(root);
+    if destination.split('/').any(|part| part == "..") || root.split('/').any(|part| part == "..") {
+        return Some("parent");
+    }
+    if !is_portable_absolute(&destination) || !is_portable_absolute(&root) {
+        return Some("relative");
+    }
+    let expected = format!("{root}/{folder}");
+    let matches = if case_insensitive {
+        destination.eq_ignore_ascii_case(&expected)
+    } else {
+        destination == expected
+    };
+    if matches {
+        None
+    } else {
+        Some("outside")
+    }
 }
 
 pub(crate) fn purge_retired_default_packs() -> Result<SkillPackUpdateReport, String> {
@@ -461,13 +486,44 @@ fn remove_matching_entries(
     config: &Path,
     predicate: impl Fn(&ManagedSkillEntry) -> bool,
 ) -> Result<Vec<String>, String> {
+    let (store, entries) = plan_removals(config, predicate)?;
+    commit_removals(&store, &entries)
+}
+
+pub(crate) fn uninstall_all_managed_skills() -> Result<Vec<String>, String> {
+    let config = config_dir().map_err(|error| error.to_string())?;
+    let (store, entries) = plan_removals(&config, |_| true)?;
+    opt_out_all_default_packs()?;
+    commit_removals(&store, &entries)
+}
+
+fn plan_removals(
+    config: &Path,
+    predicate: impl Fn(&ManagedSkillEntry) -> bool,
+) -> Result<(ManifestStore, Vec<ManagedSkillEntry>), String> {
     let store = ManifestStore::new(config);
     let manifest = store
         .load()
         .map_err(|error| format!("Failed to read skill manifest: {error}"))?;
+    let entries: Vec<ManagedSkillEntry> = manifest
+        .entries
+        .iter()
+        .filter(|entry| predicate(entry))
+        .cloned()
+        .collect();
+    for entry in &entries {
+        ensure_entry_deletable(&manifest, entry)?;
+    }
+    Ok((store, entries))
+}
+
+fn commit_removals(
+    store: &ManifestStore,
+    entries: &[ManagedSkillEntry],
+) -> Result<Vec<String>, String> {
     let mut removed = Vec::new();
-    for entry in manifest.entries.iter().filter(|entry| predicate(entry)) {
-        delete_skill_destination(entry)?;
+    for entry in entries {
+        delete_skill_files(entry)?;
         store
             .remove(&entry.id)
             .map_err(|error| format!("Failed to remove {}: {error}", entry.folder))?;
@@ -478,55 +534,86 @@ fn remove_matching_entries(
     Ok(removed)
 }
 
-fn delete_skill_destination(entry: &ManagedSkillEntry) -> Result<(), String> {
+fn skills_root_for_entry(entry: &ManagedSkillEntry) -> Result<PathBuf, String> {
+    match entry.target.scope {
+        SkillScope::User => paths::resolve_skill_root(entry.target.runtime, SkillScope::User, None)
+            .map_err(|error| error.to_string()),
+        SkillScope::Project => {
+            let destination = Path::new(&entry.destination);
+            let skills = destination.parent().ok_or_else(|| {
+                format!(
+                    "Refusing to delete skill {}: destination has no skills root",
+                    entry.folder
+                )
+            })?;
+            let localprism = skills.parent().ok_or_else(|| {
+                format!(
+                    "Refusing to delete skill {}: destination is outside the project skills root",
+                    entry.folder
+                )
+            })?;
+            let project = localprism.parent().ok_or_else(|| {
+                format!(
+                    "Refusing to delete skill {}: destination is outside the project skills root",
+                    entry.folder
+                )
+            })?;
+            if !folder_keys_equal(
+                &skills.file_name().unwrap_or_default().to_string_lossy(),
+                "skills",
+            ) || !folder_keys_equal(
+                &localprism.file_name().unwrap_or_default().to_string_lossy(),
+                ".localprism",
+            ) {
+                return Err(format!(
+                    "Refusing to delete skill {}: destination is outside the project skills root",
+                    entry.folder
+                ));
+            }
+            paths::resolve_skill_root(entry.target.runtime, SkillScope::Project, Some(project))
+                .map_err(|error| error.to_string())
+        }
+    }
+}
+
+fn ensure_entry_deletable(
+    manifest: &SkillManifest,
+    entry: &ManagedSkillEntry,
+) -> Result<(), String> {
     if validate_skill_slug(&entry.folder).is_err() {
         return Err(format!(
             "Refusing to delete skill {}: invalid folder name",
             entry.folder
         ));
     }
-    let dest = PathBuf::from(&entry.destination);
-    if !dest.is_absolute() {
-        return Err(format!(
-            "Refusing to delete skill {}: destination is not absolute",
-            entry.folder
-        ));
-    }
-    if dest
-        .components()
-        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    let root = skills_root_for_entry(entry)?;
+    if std::fs::symlink_metadata(&root)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
     {
         return Err(format!(
-            "Refusing to delete skill {}: destination is not contained",
+            "Refusing to delete skill {}: skills root is a symlink",
             entry.folder
         ));
     }
-    let basename = dest
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("");
-    if basename != entry.folder {
+    if let Some(reason) = lexical_skill_destination_error(
+        &entry.destination,
+        &root.to_string_lossy(),
+        &entry.folder,
+        cfg!(windows),
+    ) {
         return Err(format!(
-            "Refusing to delete skill {}: destination does not match the folder",
+            "Refusing to delete skill {}: destination is {reason}",
             entry.folder
         ));
     }
-    let parent = dest
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|name| name.to_str());
-    if parent != Some("skills") && parent != Some(".skills") {
-        return Err(format!(
-            "Refusing to delete skill {}: destination is outside the skills directory",
-            entry.folder
-        ));
-    }
+    let dest = PathBuf::from(&entry.destination);
     if !dest.exists() {
         return Ok(());
     }
     let metadata = std::fs::symlink_metadata(&dest)
         .map_err(|error| format!("Failed to inspect {}: {error}", dest.display()))?;
-    if metadata.file_type().is_symlink() {
+    if metadata_is_unsafe_link(&metadata) {
         return Err(format!(
             "Refusing to delete skill {}: destination is a symlink",
             entry.folder
@@ -535,6 +622,39 @@ fn delete_skill_destination(entry: &ManagedSkillEntry) -> Result<(), String> {
     if !metadata.is_dir() {
         return Err(format!(
             "Refusing to delete skill {}: destination is not a directory",
+            entry.folder
+        ));
+    }
+    paths::ensure_canonical_skill_containment(&root, &dest).map_err(|error| {
+        format!(
+            "Refusing to delete skill {}: destination is outside the skills root ({error})",
+            entry.folder
+        )
+    })?;
+    let fingerprint = match import::fingerprint_skill_dir(&dest) {
+        Ok(hash) => ObservedFingerprint::Sha256(hash),
+        Err(_) => ObservedFingerprint::Unreadable,
+    };
+    let state = assess_managed_copy(manifest, &entry.id, &dest, fingerprint);
+    if !deletion_allowed(state, false) {
+        return Err(format!(
+            "Refusing to delete skill {}: copy is {state:?}",
+            entry.folder
+        ));
+    }
+    Ok(())
+}
+
+fn delete_skill_files(entry: &ManagedSkillEntry) -> Result<(), String> {
+    let dest = PathBuf::from(&entry.destination);
+    if !dest.exists() {
+        return Ok(());
+    }
+    let metadata = std::fs::symlink_metadata(&dest)
+        .map_err(|error| format!("Failed to inspect {}: {error}", dest.display()))?;
+    if metadata_is_unsafe_link(&metadata) || !metadata.is_dir() {
+        return Err(format!(
+            "Refusing to delete skill {}: destination is not a managed directory",
             entry.folder
         ));
     }
@@ -664,10 +784,6 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    fn hash() -> String {
-        "a".repeat(64)
-    }
-
     fn user_target() -> SkillTarget {
         SkillTarget {
             runtime: RuntimeKind::Claude,
@@ -675,8 +791,12 @@ mod tests {
         }
     }
 
+    fn skills_root(home: &Path) -> PathBuf {
+        home.join("claude-home").join("skills")
+    }
+
     fn entry(root: &Path, folder: &str, name: &str, source: SkillSource) -> ManagedSkillEntry {
-        let destination = root.join("skills").join(folder);
+        let destination = skills_root(root).join(folder);
         fs::create_dir_all(&destination).unwrap();
         fs::write(destination.join("SKILL.md"), format!("# {name}\n")).unwrap();
         let target = user_target();
@@ -685,7 +805,7 @@ mod tests {
             declared_name: name.into(),
             folder: folder.into(),
             source,
-            content_sha256: hash(),
+            content_sha256: import::fingerprint_skill_dir(&destination).unwrap(),
             target,
             destination: destination.to_string_lossy().to_string(),
             installed_at: "2026-07-17T00:00:00Z".into(),
@@ -751,6 +871,72 @@ mod tests {
         .unwrap();
         let again = load_preferences(temp.path()).unwrap();
         assert_eq!(again.opted_out_pack_ids, vec!["nature-skills".to_string()]);
+    }
+
+    #[test]
+    fn preferences_save_replaces_an_existing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        update_preferences(temp.path(), |prefs| {
+            prefs.opted_out_pack_ids.push("paper-spine".into());
+        })
+        .unwrap();
+        update_preferences(temp.path(), |prefs| {
+            prefs.opted_out_pack_ids = vec!["nature-skills".into()];
+        })
+        .unwrap();
+        let loaded = load_preferences(temp.path()).unwrap();
+        assert_eq!(loaded.opted_out_pack_ids, vec!["nature-skills".to_string()]);
+        let raw = fs::read_to_string(preferences_path(temp.path())).unwrap();
+        assert!(raw.contains("nature-skills"));
+        assert!(!raw.contains("paper-spine"));
+    }
+
+    #[test]
+    fn windows_destinations_stay_inside_the_skills_root_without_rejecting_prefixes() {
+        let root = r"C:\Users\me\claude-home\skills";
+        assert_eq!(
+            lexical_skill_destination_error(
+                r"C:\Users\me\claude-home\skills\scanpy",
+                root,
+                "scanpy",
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            lexical_skill_destination_error(
+                r"\\?\C:\Users\me\claude-home\skills\scanpy",
+                root,
+                "scanpy",
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            lexical_skill_destination_error(
+                r"c:\users\me\claude-home\skills\Scanpy",
+                root,
+                "scanpy",
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            lexical_skill_destination_error(r"D:\elsewhere\skills\scanpy", root, "scanpy", true,),
+            Some("outside")
+        );
+        assert_eq!(
+            lexical_skill_destination_error(
+                r"C:\Users\me\claude-home\skills\..\windows\scanpy",
+                root,
+                "scanpy",
+                true,
+            ),
+            Some("parent")
+        );
+        assert!(folder_keys_equal_with(r"C:\Pack", r"c:\pack", true));
+        assert!(folder_keys_equal_with(r"\\?\C:\Pack", r"C:\pack", true));
+        assert!(!folder_keys_equal_with("/Pack", "/pack", false));
     }
 
     #[test]
@@ -830,6 +1016,187 @@ mod tests {
             .entries
             .iter()
             .any(|entry| entry.folder == "scanpy"));
+    }
+
+    #[test]
+    fn default_pack_removal_keeps_folder_imports_and_other_owners() {
+        let _provider = crate::providers::paths::lock_provider_env();
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let _home = HomeGuard::set(&home);
+        let official = entry(
+            &home,
+            "nature-polishing",
+            "Nature polishing",
+            SkillSource::Url {
+                url: "https://github.com/Yuan1z0825/nature-skills/tree/main/skills".into(),
+            },
+        );
+        let custom = entry(
+            &home,
+            "nature-custom",
+            "Nature custom",
+            SkillSource::Folder {
+                path: temp
+                    .path()
+                    .join("nature-custom")
+                    .to_string_lossy()
+                    .to_string(),
+            },
+        );
+        let fork = entry(
+            &home,
+            "nature-fork",
+            "Nature fork",
+            SkillSource::Url {
+                url: "https://github.com/someone-else/nature-skills".into(),
+            },
+        );
+        let custom_dir = PathBuf::from(&custom.destination);
+        write_manifest(&home, vec![official, custom, fork]);
+
+        let removed = remove_default_pack("nature-skills", true).unwrap();
+        assert_eq!(removed.removed, vec!["Nature polishing".to_string()]);
+        assert!(custom_dir.join("SKILL.md").is_file());
+        let folders: Vec<_> = manifest_entries(&home)
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|item| item.folder)
+            .collect();
+        assert_eq!(
+            folders,
+            vec!["nature-custom".to_string(), "nature-fork".to_string()]
+        );
+        assert!(is_opted_out(
+            &load_preferences(&home).unwrap(),
+            "nature-skills"
+        ));
+    }
+
+    #[test]
+    fn retired_pack_url_requires_the_official_owner() {
+        let _provider = crate::providers::paths::lock_provider_env();
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let _home = HomeGuard::set(&home);
+        let fork = entry(
+            &home,
+            "scanpy",
+            "Scanpy fork",
+            SkillSource::Url {
+                url: "https://github.com/someone-else/scientific-agent-skills".into(),
+            },
+        );
+        let fork_dir = PathBuf::from(&fork.destination);
+        write_manifest(&home, vec![fork]);
+        let removed = purge_retired_default_packs().unwrap();
+        assert!(removed.removed.is_empty());
+        assert!(fork_dir.join("SKILL.md").is_file());
+        assert!(!is_scientific_repo_url(
+            "https://github.com/someone-else/scientific-agent-skills"
+        ));
+        assert!(is_scientific_repo_url(
+            "https://github.com/K-Dense-AI/claude-scientific-skills"
+        ));
+    }
+
+    #[test]
+    fn pack_uninstall_refuses_a_modified_copy() {
+        let _provider = crate::providers::paths::lock_provider_env();
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let _home = HomeGuard::set(&home);
+        let skill = entry(
+            &home,
+            "nature-polishing",
+            "Nature polishing",
+            SkillSource::Url {
+                url: "https://github.com/Yuan1z0825/nature-skills".into(),
+            },
+        );
+        let dir = PathBuf::from(&skill.destination);
+        write_manifest(&home, vec![skill]);
+        fs::write(dir.join("SKILL.md"), "# edited\n").unwrap();
+        let error = remove_default_pack("nature-skills", true).unwrap_err();
+        assert!(error.contains("Modified"), "{error}");
+        assert!(dir.join("SKILL.md").is_file());
+        assert_eq!(manifest_entries(&home).unwrap().entries.len(), 1);
+        assert!(load_preferences(&home)
+            .unwrap()
+            .opted_out_pack_ids
+            .is_empty());
+    }
+
+    #[test]
+    fn uninstall_all_removes_only_manifest_entries() {
+        let _provider = crate::providers::paths::lock_provider_env();
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let _home = HomeGuard::set(&home);
+        let managed = entry(
+            &home,
+            "my-writer",
+            "My writer",
+            SkillSource::Folder {
+                path: temp.path().join("imports").to_string_lossy().to_string(),
+            },
+        );
+        let root = skills_root(&home);
+        let extra = root.join("hand-notes");
+        fs::create_dir_all(&extra).unwrap();
+        fs::write(extra.join("SKILL.md"), "# notes\n").unwrap();
+        write_manifest(&home, vec![managed]);
+
+        let removed = uninstall_all_managed_skills().unwrap();
+        assert_eq!(removed, vec!["My writer".to_string()]);
+        assert!(root.is_dir());
+        assert!(extra.join("SKILL.md").is_file());
+        assert!(manifest_entries(&home).unwrap().entries.is_empty());
+        let prefs = load_preferences(&home).unwrap();
+        assert!(is_opted_out(&prefs, "paper-spine"));
+        assert!(is_opted_out(&prefs, "nature-skills"));
+        assert!(prefs
+            .retired_packs_purged
+            .iter()
+            .any(|id| id == "scientific-agent-skills"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_all_refuses_a_symlinked_skills_root() {
+        use std::os::unix::fs::symlink;
+
+        let _provider = crate::providers::paths::lock_provider_env();
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let real = temp.path().join("real-skills");
+        fs::create_dir_all(&real).unwrap();
+        fs::create_dir_all(home.join("claude-home")).unwrap();
+        symlink(&real, home.join("claude-home").join("skills")).unwrap();
+        let _home = HomeGuard::set(&home);
+        let skill = entry(
+            &home,
+            "my-writer",
+            "My writer",
+            SkillSource::Folder {
+                path: temp.path().join("imports").to_string_lossy().to_string(),
+            },
+        );
+        write_manifest(&home, vec![skill]);
+        let error = uninstall_all_managed_skills().unwrap_err();
+        assert!(error.contains("symlink"), "{error}");
+        assert!(real.join("my-writer").join("SKILL.md").is_file());
+        assert_eq!(manifest_entries(&home).unwrap().entries.len(), 1);
     }
 
     #[test]

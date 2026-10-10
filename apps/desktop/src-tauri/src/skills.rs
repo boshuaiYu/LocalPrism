@@ -2427,15 +2427,9 @@ pub async fn delete_installed_skill(
 #[tauri::command]
 pub async fn uninstall_scientific_skills(
     app: tauri::AppHandle,
-    project_path: Option<String>,
+    _project_path: Option<String>,
 ) -> Result<(), String> {
-    packs::opt_out_all_default_packs()?;
-    let target = skills_dir(project_path.as_deref())?;
-
-    if target.exists() {
-        std::fs::remove_dir_all(&target).map_err(|e| format!("Failed to remove skills: {}", e))?;
-    }
-
+    packs::uninstall_all_managed_skills()?;
     emit_skills_changed(&app);
     Ok(())
 }

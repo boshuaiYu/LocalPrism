@@ -236,7 +236,10 @@ function skillKeys(skill: { folder: string; name?: string }): string[] {
 }
 
 function githubRepoPath(url: string): { owner: string; repo: string } | null {
-  const match = url.trim().match(/github\.com\/([^/]+)\/([^/#?]+)/i);
+  const trimmed = url.trim();
+  const match =
+    trimmed.match(/raw\.githubusercontent\.com\/([^/]+)\/([^/#?]+)/i) ??
+    trimmed.match(/github\.com\/([^/]+)\/([^/#?]+)/i);
   if (!match?.[1] || !match[2]) return null;
   return {
     owner: match[1].toLowerCase(),
@@ -244,13 +247,15 @@ function githubRepoPath(url: string): { owner: string; repo: string } | null {
   };
 }
 
-/** True when the install URL is the scientific-agent-skills repository. */
+/** True when the install URL is an official K-Dense-AI scientific skills repo. */
 export function isScientificAgentSkillsSource(
   sourceUrl?: string | null,
 ): boolean {
-  const repo = sourceUrl ? githubRepoPath(sourceUrl)?.repo : null;
+  const parsed = sourceUrl ? githubRepoPath(sourceUrl) : null;
   return (
-    repo === "scientific-agent-skills" || repo === "claude-scientific-skills"
+    parsed?.owner === "k-dense-ai" &&
+    (parsed.repo === "scientific-agent-skills" ||
+      parsed.repo === "claude-scientific-skills")
   );
 }
 
@@ -349,9 +354,19 @@ export function installedSourcePack(skill: {
 
 /** Group a skill by install URL, then by folder when no URL was recorded. */
 export function resolveSkillPackId(
-  skill: { folder: string; name?: string; sourceUrl?: string | null },
+  skill: {
+    folder: string;
+    name?: string;
+    sourceUrl?: string | null;
+    sourceFolder?: string | null;
+  },
   _scientificFolders?: ReadonlySet<string>,
 ): SkillPackGroupId {
+  // A recorded folder import is never an official pack, even when its
+  // folder or skill name matches a default-pack marker.
+  if (skill.sourceFolder?.trim()) {
+    return IMPORTED_SKILL_PACK_ID;
+  }
   if (skill.sourceUrl?.trim()) {
     return (
       defaultPackIdFromSourceUrl(skill.sourceUrl) ?? IMPORTED_SKILL_PACK_ID

@@ -13,6 +13,7 @@ import {
 } from "@/lib/skill-categories";
 
 export interface SkillsBrowserSkill {
+  id?: string;
   name: string;
   folder: string;
   category?: string | null;
@@ -70,11 +71,13 @@ function iconForPack(id: SkillPackGroupId): string {
 }
 
 function browserSkillEntry(skill: SkillsBrowserSkill): SkillsBrowserSkill {
-  return {
+  const entry: SkillsBrowserSkill = {
     name: skill.name,
     folder: skill.folder,
     category: skill.category,
   };
+  if (skill.id) entry.id = skill.id;
+  return entry;
 }
 
 export function buildSkillsBrowserCategories(input: {

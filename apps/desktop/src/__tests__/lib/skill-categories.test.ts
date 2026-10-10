@@ -200,6 +200,17 @@ describe("skill categories", () => {
     ).toBe("nature-skills");
     expect(
       resolveSkillCategory(
+        {
+          folder: "nature-new-skill",
+          name: "Nature new skill",
+          sourceFolder: "/tmp/imports/nature-new-skill",
+        },
+        snapshot,
+        catalog,
+      ).source,
+    ).toBe("folder");
+    expect(
+      resolveSkillCategory(
         { folder: "lab-helper", name: "literature-review" },
         snapshot,
         catalog,

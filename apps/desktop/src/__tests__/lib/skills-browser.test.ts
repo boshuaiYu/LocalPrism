@@ -124,6 +124,28 @@ describe("buildSkillsBrowserCategories", () => {
     ).toEqual(["lab-notes"]);
   });
 
+  it("keeps a folder import out of the official pack that shares its name", () => {
+    const categories = buildSkillsBrowserCategories({
+      installedSkills: [
+        {
+          folder: "nature-polishing",
+          name: "Draft",
+          sourceFolder: "/tmp/drafts/nature-polishing",
+        },
+      ],
+      catalog: [],
+    });
+    expect(
+      categories.find((category) => category.defaultPackId === "nature-skills")
+        ?.skill_count,
+    ).toBe(0);
+    expect(
+      categories
+        .find((category) => category.sourceKind === "folder")
+        ?.skills.map((skill) => skill.folder),
+    ).toEqual(["nature-polishing"]);
+  });
+
   it("hides an opted-out default pack until it has skills again", () => {
     const categories = buildSkillsBrowserCategories({
       installedSkills: [],
