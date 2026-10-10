@@ -596,6 +596,8 @@ const en = {
   "teach.askErrorMessage": "Message: {{message}}",
   "teach.askGuide":
     "Explain this LaTeX guide.\n\nTitle: {{title}}\nWhat it is: {{what}}",
+  "teach.askReplyFormat":
+    "Reply format: write inline math as $...$ and display math as a $$...$$ block on its own lines. Put LaTeX source in a fenced latex code block. Do not wrap $$ in backticks.",
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -1164,6 +1166,8 @@ const zh: Record<MessageKey, string> = {
   "teach.askErrorMessage": "报错信息：{{message}}",
   "teach.askGuide":
     "请讲解这份 LaTeX 入门引导。\n\n标题：{{title}}\n是什么：{{what}}",
+  "teach.askReplyFormat":
+    "回复格式：行内公式写成 $...$，独立公式用单独成行的 $$...$$。LaTeX 源码放在 latex 代码块里。不要用反引号包住 $$。",
 };
 
 function interpolate(

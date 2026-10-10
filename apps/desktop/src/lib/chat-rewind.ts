@@ -1,5 +1,6 @@
 import type { ClaudeStreamMessage } from "@/stores/claude-chat-store";
 import { messagePlainText } from "@/lib/chat-compression";
+import { stripTeachAskReplyNote } from "@/lib/latex-teach-ask";
 
 export interface RewindAnchor {
   role: "user" | "assistant";
@@ -16,8 +17,9 @@ const MATCH_LIMIT = 280;
 
 /**
  * Saved transcripts store the prompt that was sent, including reply-mode
- * instructions, the open-file header, and selected text. The chat shows the
- * user text after the last wrapper. Peel those wrappers before comparing.
+ * instructions, the open-file header, selected text, and the learning-tab
+ * reply-format note. The chat shows the user text after those wrappers.
+ * Peel them before comparing.
  */
 function extractRewindBody(text: string): string {
   const normalized = text.replace(/\r\n/g, "\n");
@@ -37,7 +39,13 @@ function extractRewindBody(text: string): string {
 }
 
 export function rewindMatchText(text: string): string {
-  let value = extractRewindBody(text).replace(/\s+/g, " ").trim();
+  // Strip the learning note before peeling wrappers. The note is appended as
+  // `\n\n` + note, so a lesson ending in `]` (`\begin{figure}[htbp]`) would
+  // make the last `]\n\n` land on the selection and leave only the note.
+  // Same order as visibleUserPromptText. Then cut to 280 characters.
+  let value = extractRewindBody(stripTeachAskReplyNote(text))
+    .replace(/\s+/g, " ")
+    .trim();
   let previous = "";
   while (value && value !== previous) {
     previous = value;

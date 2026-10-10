@@ -228,4 +228,97 @@ describe("normalizeChatMath", () => {
       "$$\n\\min_w F(w)\n$$\n\n```latex\n\\alpha",
     );
   });
+
+  it("keeps a backtick-wrapped equation example intact and typesets the reply around it", () => {
+    const formula = "\\min_{w} F(w) = \\sum_{i=1}^{N} \\frac{n_i}{n} F_i(w)";
+    const explanation =
+      "表示：选择参数 \\(w\\)，使全局目标函数 \\(F(w)\\) 最小。全局目标由 \\(N\\) 个客户端的局部目标函数 \\(F_i(w)\\) 加权求和；客户端 \\(i\\) 的权重为其样本数 \\(n_i\\) 占总样本数 \\(n\\) 的比例。 若要使用不编号的 `equation*`，通常需要在导言区加载 `amsmath` 宏包。 模板化表述：未涉及。";
+    const source = [
+      "`$$ \\begin{equation} ... \\end{equation}`",
+      "",
+      "公式",
+      "",
+      formula,
+      "",
+      explanation,
+    ].join("\n");
+    const expected = [
+      "`$$ \\begin{equation} ... \\end{equation}`",
+      "",
+      "公式",
+      "",
+      "$$",
+      formula,
+      "$$",
+      "",
+      "表示：选择参数 $w$，使全局目标函数 $F(w)$ 最小。全局目标由 $N$ 个客户端的局部目标函数 $F_i(w)$ 加权求和；客户端 $i$ 的权重为其样本数 $n_i$ 占总样本数 $n$ 的比例。 若要使用不编号的 `equation*`，通常需要在导言区加载 `amsmath` 宏包。 模板化表述：未涉及。",
+    ].join("\n");
+
+    expect(normalizeChatMath(source)).toBe(expected);
+    const alreadyDelimited = source.replace(
+      formula,
+      () => `$$\n${formula}\n$$`,
+    );
+    expect(normalizeChatMath(alreadyDelimited)).toBe(expected);
+  });
+
+  it("does not rewrite an equation inside inline code, including a span that crosses lines", () => {
+    const oneLine = "`\\begin{equation} \\min_w F(w) \\end{equation}`";
+    expect(normalizeChatMath(oneLine)).toBe(oneLine);
+
+    const multiline = [
+      "`$$",
+      "\\begin{equation}",
+      "\\min_w F(w)",
+      "\\end{equation}",
+      "$$`",
+      "",
+      "\\min_w F(w)",
+    ].join("\n");
+    expect(normalizeChatMath(multiline)).toBe(
+      [
+        "`$$",
+        "\\begin{equation}",
+        "\\min_w F(w)",
+        "\\end{equation}",
+        "$$`",
+        "",
+        "$$",
+        "\\min_w F(w)",
+        "$$",
+      ].join("\n"),
+    );
+
+    const unclosed = "`$$\n\\begin{equation}\n\\min_w F(w)\n\\end{equation}";
+    expect(normalizeChatMath(unclosed)).toBe(unclosed);
+  });
+
+  it("converts explicit \\\\( \\\\) and \\\\[ \\\\] around bare symbols", () => {
+    expect(
+      normalizeChatMath("参数 \\(w\\)、\\(F(w)\\)、\\(N\\) 与 \\(n_i\\)。"),
+    ).toBe("参数 $w$、$F(w)$、$N$ 与 $n_i$。");
+    expect(normalizeChatMath("\\[ n_i \\]")).toBe("$$\nn_i\n$$");
+    expect(normalizeChatMath("\\[ok\\]")).toBe("$$\nok\n$$");
+    expect(normalizeChatMath("\\[id\\]")).toBe("$$\nid\n$$");
+    expect(normalizeChatMath("\\[1\\]")).toBe("\\[1\\]");
+    expect(normalizeChatMath("\\[Figure 1\\]")).toBe("\\[Figure 1\\]");
+    expect(
+      normalizeChatMath(
+        "\\[ \\begin{equation} \\min_w F(w) \\end{equation} \\]",
+      ),
+    ).toBe("$$\n\\begin{equation} \\min_w F(w) \\end{equation}\n$$");
+  });
+
+  it("moves punctuation off an existing closing $$ fence", () => {
+    expect(normalizeChatMath("$$\nx\n$$。")).toBe("$$\nx\n$$\n。");
+    expect(normalizeChatMath("$$\nx = 1\n$$。下一句")).toBe(
+      "$$\nx = 1\n$$\n。下一句",
+    );
+    expect(normalizeChatMath("$$ label\nx = 1\n$$")).toBe(
+      "$$ label\nx = 1\n$$",
+    );
+    expect(normalizeChatMath("It costs $5 and $10.")).toBe(
+      "It costs $5 and $10.",
+    );
+  });
 });

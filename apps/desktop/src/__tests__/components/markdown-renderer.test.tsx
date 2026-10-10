@@ -296,4 +296,62 @@ describe("MarkdownRenderer links", () => {
       ),
     ).toBe(true);
   });
+
+  it("renders the learning-tab equation reply as math without a leaked backtick or red prose", async () => {
+    const formula = "\\min_{w} F(w) = \\sum_{i=1}^{N} \\frac{n_i}{n} F_i(w)";
+    await act(async () => {
+      root.render(
+        <MarkdownRenderer
+          content={[
+            "`$$ \\begin{equation} ... \\end{equation}`",
+            "",
+            "公式",
+            "",
+            formula,
+            "",
+            "表示：选择参数 \\(w\\)，使全局目标函数 \\(F(w)\\) 最小。全局目标由 \\(N\\) 个客户端的局部目标函数 \\(F_i(w)\\) 加权求和；客户端 \\(i\\) 的权重为其样本数 \\(n_i\\) 占总样本数 \\(n\\) 的比例。 若要使用不编号的 `equation*`，通常需要在导言区加载 `amsmath` 宏包。 模板化表述：未涉及。",
+            "",
+            "行内 $E=mc^2$ 与 $$y = \\frac{1}{x}$$，以及 \\[ a = \\frac{n_i}{n} \\]。",
+          ].join("\n")}
+        />,
+      );
+    });
+
+    await vi.waitFor(() => {
+      expect(container.querySelector(".katex-display")).toBeTruthy();
+    });
+
+    expect(container.querySelector(".katex-error")).toBeNull();
+    expect(container.innerHTML).not.toContain("#cc0000");
+    expect(container.textContent).not.toContain("`");
+    expect(container.textContent).toContain("公式");
+    expect(container.textContent).toContain("模板化表述：未涉及。");
+    expect(container.textContent).not.toContain("\\(w\\)");
+
+    const codes = Array.from(container.querySelectorAll("code")).map(
+      (node) => node.textContent ?? "",
+    );
+    expect(codes).toContain("$$ \\begin{equation} ... \\end{equation}");
+    expect(codes).toContain("equation*");
+    expect(codes).toContain("amsmath");
+
+    const katexText = Array.from(container.querySelectorAll(".katex"))
+      .map((node) => node.textContent ?? "")
+      .join("");
+    expect(katexText).not.toContain("公式");
+    expect(katexText).not.toContain("模板化表述");
+
+    const visible = Array.from(container.querySelectorAll(".katex-html")).map(
+      (node) => node.textContent ?? "",
+    );
+    expect(visible).toContain("w");
+    expect(visible).toContain("N");
+    expect(visible.some((text) => text.includes("F"))).toBe(true);
+    expect(visible.some((text) => text.includes("n"))).toBe(true);
+    expect(visible.join("")).not.toContain("\\sum");
+    expect(visible.join("")).not.toContain("\\frac");
+    expect(
+      container.querySelectorAll(".katex-display").length,
+    ).toBeGreaterThanOrEqual(2);
+  });
 });

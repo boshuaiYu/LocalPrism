@@ -2,6 +2,7 @@ import {
   BUILTIN_AGENT_PRESETS,
   isBuiltinAgentPresetId,
 } from "@/lib/agent-presets";
+import { stripTeachAskReplyNote } from "@/lib/latex-teach-ask";
 
 const COMPRESSION_LEAD =
   "The earlier part of this conversation was compressed. Continue from this summary and the recent turns.";
@@ -174,11 +175,12 @@ function peelLeadingContext(text: string): {
  */
 export function visibleUserPromptText(text: string): string {
   if (!text) return text;
-  const normalized = text.replace(/\r\n/g, "\n").replace(/^\n+/, "");
-  if (!normalized) return text;
+  const newlineNormalized = text.replace(/\r\n/g, "\n").replace(/^\n+/, "");
+  if (!newlineNormalized) return text;
+  const normalized = stripTeachAskReplyNote(newlineNormalized);
 
   let working = stripLeadingReplyMode(normalized);
-  let changed = working !== normalized;
+  let changed = normalized !== newlineNormalized || working !== normalized;
 
   const withoutCompression = stripLeadingCompression(working);
   if (withoutCompression !== working) {

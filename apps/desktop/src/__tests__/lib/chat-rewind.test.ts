@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ClaudeStreamMessage } from "@/stores/claude-chat-store";
 import {
@@ -8,6 +10,13 @@ import {
   rewindTextsMatch,
   rewindUserResendPrompt,
 } from "@/lib/chat-rewind";
+import {
+  appendTeachAskReplyNote,
+  buildTeachAskPrompt,
+  teachAskReplyNote,
+} from "@/lib/latex-teach-ask";
+import { lessonRefForSelection, resolveLesson } from "@/lib/latex-teaching";
+import { applyReplyStyleToPrompt } from "@/lib/reply-mode";
 
 function user(text: string, extra: Partial<ClaudeStreamMessage> = {}) {
   return {
@@ -64,6 +73,109 @@ describe("chat rewind", () => {
         "Rewrite the abstract carefully now",
       ),
     ).toBe(false);
+  });
+
+  it("matches a learning lesson to the saved prompt that ends with the reply-format note", () => {
+    const lesson = "请讲解这个 LaTeX 结构。\n\n结构：figure\n标题：单行公式";
+    const stored = appendTeachAskReplyNote(
+      applyReplyStyleToPrompt(lesson, "peer-review", [
+        { id: "peer-review", instructions: "自定义审稿口吻" },
+      ]),
+      "zh",
+    );
+    expect(stored).toContain("回复格式：");
+    expect(rewindMatchText(stored)).toBe(rewindMatchText(lesson));
+    expect(rewindMatchText(`${stored}\n`)).toBe(rewindMatchText(lesson));
+    expect(rewindMatchText(`${stored}\r\n`)).toBe(rewindMatchText(lesson));
+    expect(
+      rewindTextsMatch(rewindMatchText(stored), rewindMatchText(lesson)),
+    ).toBe(true);
+    expect(
+      rewindTextsMatch(
+        rewindMatchText(lesson),
+        rewindMatchText(`${lesson}更多`),
+      ),
+    ).toBe(false);
+    expect(
+      rewindMatchText(appendTeachAskReplyNote(`${lesson}更多`, "zh")),
+    ).not.toBe(rewindMatchText(lesson));
+
+    const messages = [
+      user(stored),
+      assistant("公式说明"),
+      user(lesson),
+      assistant("再讲一次"),
+    ];
+    expect(rewindAnchor(messages, 0)).toMatchObject({
+      role: "user",
+      text: rewindMatchText(lesson),
+      ordinal: 1,
+    });
+    expect(rewindAnchor(messages, 2)?.ordinal).toBe(2);
+  });
+
+  it("matches a figure lesson ending in [htbp] when the saved prompt has a reply-style wrapper and the note", () => {
+    const selectedText = String.raw`\begin{figure}[htbp]`;
+    const ref = lessonRefForSelection({
+      selected: selectedText,
+      line: selectedText,
+      selectionStartInLine: 0,
+      selectionEndInLine: selectedText.length,
+    });
+    if (!ref) throw new Error("figure lesson missing");
+    const lesson = buildTeachAskPrompt({
+      lesson: resolveLesson(ref, "zh"),
+      language: "zh",
+      selectedText,
+    });
+    expect(lesson.trimEnd().endsWith("[htbp]")).toBe(true);
+    const stored = appendTeachAskReplyNote(
+      applyReplyStyleToPrompt(lesson, "peer-review"),
+      "zh",
+    );
+    expect(stored).toContain("[Reply mode: peer-review.");
+    expect(stored).toContain("[/Reply mode]");
+    expect(stored.endsWith(teachAskReplyNote("zh"))).toBe(true);
+    expect(rewindMatchText(lesson).length).toBeGreaterThan(0);
+    expect(rewindMatchText(stored)).toBe(rewindMatchText(lesson));
+    expect(rewindMatchText(`${stored}\n`)).toBe(rewindMatchText(lesson));
+    expect(rewindMatchText(`${stored}\r\n`)).toBe(rewindMatchText(lesson));
+    expect(rewindMatchText(stored.replace(/\n/g, "\r\n"))).toBe(
+      rewindMatchText(lesson),
+    );
+    const storedEn = appendTeachAskReplyNote(
+      applyReplyStyleToPrompt(lesson, "peer-review"),
+      "en",
+    );
+    expect(rewindMatchText(`${storedEn}\r\n`)).toBe(rewindMatchText(lesson));
+
+    const longLesson = `${"请讲解这个公式。".repeat(40)}\n\\begin{figure}[htbp]`;
+    expect([...longLesson].length).toBeGreaterThan(280);
+    const longStored = appendTeachAskReplyNote(
+      applyReplyStyleToPrompt(longLesson, "peer-review"),
+      "zh",
+    );
+    expect(rewindMatchText(longStored)).toBe(rewindMatchText(longLesson));
+    expect([...rewindMatchText(longStored)].length).toBe(280);
+
+    const messages = [user(stored), assistant("figure 说明")];
+    expect(rewindAnchor(messages, 0)).toMatchObject({
+      role: "user",
+      text: rewindMatchText(lesson),
+      ordinal: 1,
+    });
+  });
+
+  it("keeps the Rust rewind notes identical to the i18n reply-format strings", () => {
+    const rust = readFileSync(
+      resolve(__dirname, "../../../src-tauri/src/claude.rs"),
+      "utf8",
+    );
+    for (const language of ["en", "zh"] as const) {
+      const note = teachAskReplyNote(language);
+      expect(note.length).toBeGreaterThan(0);
+      expect(rust).toContain(`"${note}"`);
+    }
   });
 
   it("keeps the selected user message and drops the later reply", () => {

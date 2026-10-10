@@ -22,8 +22,10 @@ const MATH_ENV_RE = new RegExp(
   String.raw`\\begin\{(${MATH_ENV_NAME})\}[\s\S]*?\\end\{\1\}`,
   "g",
 );
+const MATH_ENV_TEST_RE = new RegExp(MATH_ENV_RE.source);
 const MATH_ENV_OPEN_RE = new RegExp(String.raw`\\begin\{(${MATH_ENV_NAME})\}`);
 const ENV_PLACEHOLDER = "\u0000ENV";
+const CODE_PLACEHOLDER = "\u0000CODE";
 
 function hasMathSignal(text: string): boolean {
   if (MATH_COMMAND_RE.test(text)) return true;
@@ -72,6 +74,28 @@ function isSafeMathFragment(text: string): boolean {
   return true;
 }
 
+/**
+ * `\(...\)` / `\[...\]` are already marked as math. A bare symbol such as
+ * `w` or `n_i` is enough. Citations and prose stay text so `\[1\]` and a
+ * Chinese aside are not painted as a KaTeX error.
+ */
+function isExplicitMathInner(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length > 2000) return false;
+  if (
+    trimmed.includes("$") ||
+    trimmed.includes("](") ||
+    trimmed.includes("][")
+  ) {
+    return false;
+  }
+  if (isCitationLike(trimmed)) return false;
+  if (isSafeMathFragment(trimmed)) return true;
+  if (MATH_ENV_TEST_RE.test(trimmed)) return true;
+  if (isProse(trimmed) || trimmed.length > 160) return false;
+  return /^[0-9A-Za-z\\{}_^(),.+\-=<>|*/\s]+$/.test(trimmed);
+}
+
 function isProse(text: string): boolean {
   const stripped = text
     .replace(/\\[a-zA-Z]+\*?(?:\{[^{}]*\})*/g, " ")
@@ -100,7 +124,44 @@ function isStandaloneMathLine(line: string): boolean {
 function toDisplayMath(inner: string, trailing = ""): string {
   const body = inner.trim();
   const punct = trailing.trim();
-  return punct ? `$$\n${body}\n$$${punct}` : `$$\n${body}\n$$`;
+  const block = `$$\n${body}\n$$`;
+  // `$$.` is not a closing fence. Punctuation has to start the next line.
+  return punct ? `${block}\n${punct}` : block;
+}
+
+/**
+ * A line that is only `$$` closes display math. `$$。` does not, and KaTeX
+ * then paints the following prose red. Split that suffix off when a fence
+ * is already open. An opening `$$ label` line stays intact.
+ */
+function separateClosingMathFence(text: string): string {
+  const lines = text.split("\n");
+  let open = false;
+  const out: string[] = [];
+  for (const line of lines) {
+    const exact = /^[ \t]*\$\$[ \t]*$/.test(line);
+    if (!open) {
+      if (exact) open = true;
+      else if (
+        /^[ \t]*\$\$\S/.test(line) &&
+        line.indexOf("$$", line.indexOf("$$") + 2) < 0
+      ) {
+        open = true;
+      }
+      out.push(line);
+      continue;
+    }
+    const stuck = /^([ \t]*\$\$)[ \t]*(\S[\s\S]*)$/.exec(line);
+    if (stuck) {
+      out.push(stuck[1] ?? "$$");
+      out.push(stuck[2] ?? "");
+      open = false;
+      continue;
+    }
+    if (exact) open = false;
+    out.push(line);
+  }
+  return out.join("\n");
 }
 
 const TEX_DISPLAY_RE = /\\\[([\s\S]+?)\\\]/g;
@@ -119,20 +180,69 @@ const BARE_PAREN_RE = new RegExp(
 const DOLLAR_MATH_RE = /\$\$[\s\S]+?\$\$|\$[^$\n]+\$/g;
 const DOLLAR_PLACEHOLDER = "\u0000DOLLAR";
 
-function replaceOutsideInlineCode(
-  text: string,
-  replacer: (chunk: string) => string,
-): string {
-  return text
-    .split(/(`+[^`\n]*`+)/g)
-    .map((chunk, index) => (index % 2 === 1 ? chunk : replacer(chunk)))
-    .join("");
+function indexOfBacktickRun(source: string, from: number, run: number): number {
+  if (run <= 0) return -1;
+  let i = from;
+  while (i < source.length) {
+    if (source[i] !== "`") {
+      i += 1;
+      continue;
+    }
+    let len = 0;
+    while (i + len < source.length && source[i + len] === "`") len += 1;
+    if (len === run) return i + len;
+    i += len;
+  }
+  return -1;
 }
 
-function displayMathAt(text: string, offset: number, inner: string): string {
+/** Hide complete inline code, including spans that cross lines. */
+function maskInlineCode(source: string): {
+  text: string;
+  restore: (value: string) => string;
+} {
+  const stash: string[] = [];
+  let out = "";
+  let i = 0;
+  while (i < source.length) {
+    if (source[i] !== "`") {
+      out += source[i];
+      i += 1;
+      continue;
+    }
+    let run = 0;
+    while (i + run < source.length && source[i + run] === "`") run += 1;
+    const end = indexOfBacktickRun(source, i + run, run);
+    if (end < 0) {
+      out += source.slice(i);
+      break;
+    }
+    stash.push(source.slice(i, end));
+    out += `${CODE_PLACEHOLDER}${stash.length - 1}\u0000`;
+    i = end;
+  }
+  return {
+    text: out,
+    restore: (value) =>
+      value.replace(
+        new RegExp(`${CODE_PLACEHOLDER}(\\d+)\u0000`, "g"),
+        (_match, index: string) => stash[Number(index)] ?? "",
+      ),
+  };
+}
+
+function displayMathAt(
+  text: string,
+  offset: number,
+  inner: string,
+  matchLength: number,
+): string {
   const block = toDisplayMath(inner);
   const lineStart = offset === 0 || text[offset - 1] === "\n";
-  return lineStart ? block : `\n\n${block}`;
+  const next = text[offset + matchLength];
+  // `$$。` is not a closing fence, so trailing text must start on the next line.
+  const suffix = next !== undefined && next !== "\n" ? "\n" : "";
+  return `${lineStart ? "" : "\n\n"}${block}${suffix}`;
 }
 
 /** remark-math only tokenizes `$` / `$$`. `\[` `\]` survive as escaped brackets. */
@@ -141,11 +251,11 @@ function rewriteExplicitTex(text: string): string {
   TEX_INLINE_RE.lastIndex = 0;
   return text
     .replace(TEX_DISPLAY_RE, (full, inner: string, offset: number) => {
-      if (!isSafeMathFragment(inner)) return full;
-      return displayMathAt(text, offset, inner);
+      if (!isExplicitMathInner(inner)) return full;
+      return displayMathAt(text, offset, inner, full.length);
     })
     .replace(TEX_INLINE_RE, (full, inner: string) => {
-      if (!isSafeMathFragment(inner)) return full;
+      if (!isExplicitMathInner(inner)) return full;
       return `$${inner.trim()}$`;
     });
 }
@@ -196,7 +306,7 @@ function rewriteBareBrackets(text: string): string {
           if (!isSafeMathFragment(inner) || isProse(inner)) return full;
           if (lineHasTexOutside(line, offset, offset + full.length))
             return full;
-          return displayMathAt(line, offset, inner);
+          return displayMathAt(line, offset, inner, full.length);
         },
       );
     })
@@ -303,6 +413,9 @@ function convertInlineMathCode(text: string): string {
   return text.replace(INLINE_CODE_RE, (full, _ticks: string, code: string) => {
     const inner = code.trim();
     if (!inner || inner.includes("\n")) return full;
+    // An equation example is source, not inline math. `$...$` cannot hold
+    // `\begin{equation}` and KaTeX would paint the span red.
+    if (MATH_ENV_OPEN_RE.test(inner)) return full;
     if (isProse(inner) || !isSafeMathFragment(inner)) return full;
     return `$${inner}$`;
   });
@@ -352,14 +465,19 @@ function protectMathEnvironments(source: string): {
 
 function normalizeChunk(chunk: string): string {
   const withInline = convertInlineMathCode(chunk);
-  const rewritten = replaceOutsideInlineCode(withInline, (part) =>
-    rewriteBareTex(rewriteExplicitOutsideDollars(part)),
-  );
+  // Wrapping `\begin{equation}` inside a backtick span injects `$$` and
+  // splits the span. remark-math then treats the rest of the reply as display
+  // math: a later word is centered, the real formula stays raw, and KaTeX
+  // paints the prose red.
+  const masked = maskInlineCode(withInline);
+  const rewritten = rewriteBareTex(rewriteExplicitOutsideDollars(masked.text));
   const protectedMath = protectMath(rewritten);
   const protectedEnv = protectMathEnvironments(protectedMath.text);
-  return protectedMath.restore(
+  const restoredMath = protectedMath.restore(
     protectedEnv.restore(transformMathLines(protectedEnv.text)),
   );
+  // Inline code is still masked, so a backtick example of `$$。` stays source.
+  return masked.restore(separateClosingMathFence(restoredMath));
 }
 
 function lineStartOffset(lines: string[], index: number): number {
@@ -368,7 +486,11 @@ function lineStartOffset(lines: string[], index: number): number {
   return offset;
 }
 
-/** Leave an unclosed fence or `$$` tail untouched so streaming text is not rewritten. */
+/**
+ * Leave an unclosed fence, inline code span, or `$$` tail untouched so
+ * streaming text is not rewritten. Inline code can cross lines; `$$` inside
+ * it is not a math delimiter.
+ */
 function splitStreamingTail(source: string): {
   stable: string;
   pending: string;
@@ -376,42 +498,24 @@ function splitStreamingTail(source: string): {
   const lines = source.split("\n");
   let fence: { char: string; len: number } | null = null;
   let fenceLine = -1;
+  let inlineRun = 0;
+  let inlineAt = -1;
   let displayCount = 0;
   let displayAt = -1;
 
-  for (let n = 0; n < lines.length; n++) {
-    const line = lines[n];
-    if (fence) {
-      const close = /^(?:[ \t]{0,3})(`{3,}|~{3,})[ \t]*$/.exec(line);
-      if (close && close[1][0] === fence.char && close[1].length >= fence.len) {
-        fence = null;
-        fenceLine = -1;
-      }
-      continue;
-    }
-
-    const open = /^(?:[ \t]{0,3})(`{3,}|~{3,})(.*)$/.exec(line);
-    if (open) {
-      fence = { char: open[1][0], len: open[1].length };
-      fenceLine = n;
-      continue;
-    }
-
-    let i = 0;
-    let ticks = 0;
+  const scanLine = (line: string, base: number, start: number) => {
+    let i = start;
     while (i < line.length) {
       if (line[i] === "`") {
         let run = 0;
-        while (line[i] === "`") {
-          run += 1;
-          i += 1;
+        while (line[i + run] === "`") run += 1;
+        const end = indexOfBacktickRun(line, i + run, run);
+        if (end < 0) {
+          inlineRun = run;
+          inlineAt = base + i;
+          return;
         }
-        if (ticks === 0) ticks = run;
-        else if (run === ticks) ticks = 0;
-        continue;
-      }
-      if (ticks > 0) {
-        i += 1;
+        i = end;
         continue;
       }
       if (line[i] === "\\") {
@@ -420,31 +524,56 @@ function splitStreamingTail(source: string): {
       }
       if (line.startsWith("$$", i)) {
         displayCount += 1;
-        displayAt = lineStartOffset(lines, n) + i;
+        displayAt = base + i;
         i += 2;
         continue;
       }
       i += 1;
     }
+  };
+
+  for (let n = 0; n < lines.length; n++) {
+    const line = lines[n] ?? "";
+    const base = lineStartOffset(lines, n);
+    if (fence) {
+      const close = /^(?:[ \t]{0,3})(`{3,}|~{3,})[ \t]*$/.exec(line);
+      if (close && close[1][0] === fence.char && close[1].length >= fence.len) {
+        fence = null;
+        fenceLine = -1;
+      }
+      continue;
+    }
+    if (inlineRun > 0) {
+      const end = indexOfBacktickRun(line, 0, inlineRun);
+      if (end < 0) continue;
+      inlineRun = 0;
+      inlineAt = -1;
+      scanLine(line, base, end);
+      continue;
+    }
+    const open = /^(?:[ \t]{0,3})(`{3,}|~{3,})(.*)$/.exec(line);
+    if (open) {
+      fence = { char: open[1][0], len: open[1].length };
+      fenceLine = n;
+      continue;
+    }
+    scanLine(line, base, 0);
   }
 
-  if (fence && fenceLine >= 0) {
-    const at = lineStartOffset(lines, fenceLine);
-    return { stable: source.slice(0, at), pending: source.slice(at) };
-  }
-  if (displayCount % 2 === 1 && displayAt >= 0) {
-    return {
-      stable: source.slice(0, displayAt),
-      pending: source.slice(displayAt),
-    };
-  }
-  return { stable: source, pending: "" };
+  const cuts: number[] = [];
+  if (fence && fenceLine >= 0) cuts.push(lineStartOffset(lines, fenceLine));
+  if (inlineRun > 0 && inlineAt >= 0) cuts.push(inlineAt);
+  if (displayCount % 2 === 1 && displayAt >= 0) cuts.push(displayAt);
+  if (cuts.length === 0) return { stable: source, pending: "" };
+  const at = Math.min(...cuts);
+  return { stable: source.slice(0, at), pending: source.slice(at) };
 }
 
 /**
  * Rewrite common model math mistakes into remark-math delimiters.
- * Fenced code, existing `$` / `$$`, citations, links, and prose stay put.
- * `\[...\]` / `\(...\)` become `$$` / `$` because remark-math does not read them.
+ * Fenced code, inline code, existing `$` / `$$`, citations, links, and prose
+ * stay put. `\[...\]` / `\(...\)` become `$$` / `$` because remark-math does
+ * not read them. A bare symbol inside those delimiters is still math.
  */
 function normalizeClosed(markdown: string): string {
   const parts: string[] = [];

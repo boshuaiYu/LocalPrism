@@ -88,6 +88,7 @@ import {
 import { useApprovalStore } from "./approval-store";
 import { visibleUserPromptText } from "@/lib/chat-visible-prompt";
 import { builtInDefaultAgentId } from "@/lib/default-agent";
+import { appendTeachAskReplyNote } from "@/lib/latex-teach-ask";
 import { applyReplyStyleToPrompt } from "@/lib/reply-mode";
 import { useAgentStore } from "./agent-store";
 
@@ -1918,6 +1919,12 @@ export const useClaudeChatStore = create<ClaudeChatState>()((set, get) => ({
         selectedAgentId,
         useAgentStore.getState().agents,
       );
+      if (activeTab.purpose === LATEX_LEARN_PURPOSE) {
+        prompt = appendTeachAskReplyNote(
+          prompt,
+          useSettingsStore.getState().uiLanguage,
+        );
+      }
       log.info("invoking CLI", {
         promptLength: prompt.length,
         mode: resumeSessionId ? "resume" : "new",
