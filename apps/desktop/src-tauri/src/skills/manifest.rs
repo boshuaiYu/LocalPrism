@@ -39,6 +39,15 @@ pub enum SkillSource {
     },
     Url {
         url: String,
+        /// Directory inside the repository this skill was imported from.
+        /// Missing on older manifests; the URL's tree path is used then.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subpath: Option<String>,
+        /// This entry's installed folder. Empty means a legacy install whose
+        /// selection is the skill currently installed from this source.
+        /// Not a pack-wide checklist: each entry records only its own folder.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        selected: Vec<String>,
     },
     Curated {
         #[serde(rename = "packageId")]
@@ -46,9 +55,19 @@ pub enum SkillSource {
     },
 }
 
+impl SkillSource {
+    pub(crate) fn url(url: impl Into<String>) -> Self {
+        Self::Url {
+            url: url.into(),
+            subpath: None,
+            selected: Vec::new(),
+        }
+    }
+}
+
 pub fn source_url_from_skill_source(source: &SkillSource) -> Option<String> {
     match source {
-        SkillSource::Url { url } => Some(url.clone()),
+        SkillSource::Url { url, .. } => Some(url.clone()),
         SkillSource::Curated { package_id } => Some(format!("curated:{package_id}")),
         SkillSource::Folder { .. } => None,
     }
@@ -302,6 +321,22 @@ impl ManifestStore {
         Ok(result)
     }
 
+    /// Change only `source` on the entries `revise` selects, under one lock.
+    /// Other fields stay as they are in the locked snapshot.
+    pub(crate) fn revise_sources(
+        &self,
+        mut revise: impl FnMut(&ManagedSkillEntry) -> Option<SkillSource>,
+    ) -> Result<(), ManifestError> {
+        self.update(|manifest| {
+            for entry in &mut manifest.entries {
+                if let Some(source) = revise(entry) {
+                    entry.source = source;
+                }
+            }
+            Ok(())
+        })
+    }
+
     pub fn upsert(&self, mut entry: ManagedSkillEntry) -> Result<(), ManifestError> {
         entry.id = stable_entry_id(&entry.target, &entry.folder)?;
         validate_entry(&entry)?;
@@ -509,7 +544,7 @@ fn validate_entry(entry: &ManagedSkillEntry) -> Result<(), ManifestError> {
                 "folder source path must not be empty".into(),
             ));
         }
-        SkillSource::Url { url } if url.trim().is_empty() => {
+        SkillSource::Url { url, .. } if url.trim().is_empty() => {
             return Err(ManifestError::InvalidData(
                 "URL source must not be empty".into(),
             ));
@@ -1465,5 +1500,37 @@ mod tests {
     #[cfg(windows)]
     fn link_creation_is_not_permitted(error: &io::Error) -> bool {
         matches!(error.raw_os_error(), Some(5 | 1314))
+    }
+
+    #[test]
+    fn legacy_url_source_without_selection_still_loads() {
+        let source: SkillSource = serde_json::from_str(
+            r#"{"type":"url","url":"https://github.com/anthropics/skills/tree/main/skills/brand-guidelines"}"#,
+        )
+        .expect("legacy url source");
+        match source {
+            SkillSource::Url {
+                url,
+                subpath,
+                selected,
+            } => {
+                assert!(url.contains("brand-guidelines"));
+                assert_eq!(subpath, None);
+                assert!(selected.is_empty());
+            }
+            other => panic!("expected url source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn url_source_roundtrips_subpath_and_selected_skill() {
+        let source = SkillSource::Url {
+            url: "https://github.com/anthropics/skills".into(),
+            subpath: Some("skills/brand-guidelines".into()),
+            selected: vec!["brand-guidelines".into()],
+        };
+        let json = serde_json::to_string(&source).unwrap();
+        let loaded: SkillSource = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded, source);
     }
 }

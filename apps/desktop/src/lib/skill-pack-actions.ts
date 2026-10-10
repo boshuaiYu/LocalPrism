@@ -12,6 +12,12 @@ export interface SkillPackUpdateReport {
   updated: string[];
   removed: string[];
   unchanged: string[];
+  /** Skills present upstream that this pack did not install. */
+  available?: string[];
+  /** Selected skills that this download did not import. */
+  missing?: string[];
+  /** Selected skills that may have been renamed. The installed copy was kept. */
+  renamed?: string[];
   error?: string | null;
   errorCode?: string | null;
   detail?: string | null;
@@ -44,6 +50,9 @@ export function normalizePackUpdateReport(
     updated: stringList(record.updated),
     removed: stringList(record.removed),
     unchanged: stringList(record.unchanged),
+    available: stringList(record.available),
+    missing: stringList(record.missing),
+    renamed: stringList(record.renamed),
     error: typeof record.error === "string" ? record.error : null,
     errorCode: typeof record.errorCode === "string" ? record.errorCode : null,
     detail: typeof record.detail === "string" ? record.detail : null,
@@ -75,6 +84,16 @@ export function packUpdateSummary(
     return { kind: "latest", name: report.name };
   }
   return { kind: "counts", name: report.name, added, updated, removed };
+}
+
+/** Use the pack-list name. Refresh reports may lowercase a GitHub repo. */
+export function withPackListName(
+  report: SkillPackUpdateReport,
+  packListName: string,
+): SkillPackUpdateReport {
+  const name = packListName.trim();
+  if (!name || report.name === name) return report;
+  return { ...report, name };
 }
 
 /**

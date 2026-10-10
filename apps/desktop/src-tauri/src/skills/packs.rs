@@ -58,6 +58,15 @@ pub struct SkillPackUpdateReport {
     pub error_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Skills found in the refreshed tree that were not part of the selection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available: Vec<String>,
+    /// Selected skills that were not imported from this download.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
+    /// Selected skills whose folder may have been renamed. The installed copy stays.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub renamed: Vec<String>,
 }
 
 impl SkillPackUpdateReport {
@@ -72,6 +81,9 @@ impl SkillPackUpdateReport {
             error: None,
             error_code: None,
             detail: None,
+            available: Vec::new(),
+            missing: Vec::new(),
+            renamed: Vec::new(),
         }
     }
 }
@@ -197,10 +209,6 @@ fn is_default_pack_id(pack_id: &str) -> bool {
     default_pack_ids().contains(&pack_id)
 }
 
-pub(crate) fn github_repo(url: &str) -> Option<(String, String)> {
-    parse_github_repo(url).map(|repo| (repo.owner, repo.repo))
-}
-
 fn parse_github_repo(url: &str) -> Option<GithubRepo> {
     let trimmed = url.trim();
     let lower = trimmed.to_ascii_lowercase();
@@ -236,7 +244,7 @@ pub(crate) fn is_scientific_repo_url(url: &str) -> bool {
 
 pub(crate) fn is_retired_scientific_source(source: &SkillSource) -> bool {
     match source {
-        SkillSource::Url { url } => is_scientific_repo_url(url),
+        SkillSource::Url { url, .. } => is_scientific_repo_url(url),
         SkillSource::Curated { package_id } => {
             let id = package_id.trim().to_ascii_lowercase();
             id == "scientific-agent-skills" || id == "claude-scientific-skills"
@@ -254,7 +262,7 @@ pub(crate) fn default_pack_id_from_url(url: &str) -> Option<&'static str> {
 
 pub(crate) fn default_pack_id_from_source(source: &SkillSource) -> Option<&'static str> {
     match source {
-        SkillSource::Url { url } => default_pack_id_from_url(url),
+        SkillSource::Url { url, .. } => default_pack_id_from_url(url),
         SkillSource::Curated { package_id } => default_pack_ids()
             .iter()
             .copied()
@@ -284,7 +292,7 @@ fn normalize_url(url: &str) -> String {
 
 pub(crate) fn sources_same_pack(left: &SkillSource, right: &SkillSource) -> bool {
     match (left, right) {
-        (SkillSource::Url { url: left }, SkillSource::Url { url: right }) => {
+        (SkillSource::Url { url: left, .. }, SkillSource::Url { url: right, .. }) => {
             urls_same_pack(left, right)
         }
         (SkillSource::Folder { path: left }, SkillSource::Folder { path: right }) => {
@@ -424,7 +432,7 @@ pub(crate) fn remove_pack_source(
     if let Some(url) = source_url.map(str::trim).filter(|url| !url.is_empty()) {
         let mut report = SkillPackUpdateReport::named(url, url);
         report.removed = remove_matching_entries(&config, |entry| match &entry.source {
-            SkillSource::Url { url: recorded } => urls_same_pack(recorded, url),
+            SkillSource::Url { url: recorded, .. } => urls_same_pack(recorded, url),
             _ => false,
         })?;
         if let Some(pack_id) = default_pack_id_from_url(url) {
@@ -732,17 +740,559 @@ fn import_and_reconcile(
     Ok(report)
 }
 
-pub(crate) fn report_from_outcome(
+pub(crate) fn manifest_entries(config: &Path) -> Result<SkillManifest, String> {
+    ManifestStore::new(config)
+        .load()
+        .map_err(|error| format!("Failed to read skill manifest: {error}"))
+}
+
+/// Name shown for a refreshed pack. Default packs use the pack-list name;
+/// other GitHub repos keep the repository name's original casing.
+pub(crate) fn pack_refresh_display_name(url: &str) -> String {
+    if let Some(id) = default_pack_id_from_url(url) {
+        return match id {
+            "paper-spine" => "PaperSpine".to_string(),
+            other => other.to_string(),
+        };
+    }
+    github_repo_display_name(url).unwrap_or_else(|| url.trim().to_string())
+}
+
+fn github_repo_display_name(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let rest = if let Some(index) = lower.find("github.com/") {
+        &trimmed[index + "github.com/".len()..]
+    } else if let Some(index) = lower.find("raw.githubusercontent.com/") {
+        &trimmed[index + "raw.githubusercontent.com/".len()..]
+    } else if let Some(index) = lower.find("codeload.github.com/") {
+        &trimmed[index + "codeload.github.com/".len()..]
+    } else {
+        return None;
+    };
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    let mut parts = rest.split('/').filter(|part| !part.is_empty());
+    let _owner = parts.next()?;
+    let repo = parts.next()?.trim();
+    let repo = repo
+        .strip_suffix(".git")
+        .or_else(|| repo.strip_suffix(".GIT"))
+        .unwrap_or(repo);
+    if repo.is_empty() {
+        None
+    } else {
+        Some(repo.to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordedUrlSkill {
+    folder: String,
+    declared_name: String,
+    content_sha256: String,
+    url: String,
+    subpath: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UrlRefreshScope {
+    pub extract_subpath: Option<String>,
+    /// `None` means this source has no installed skills yet, so a refresh
+    /// installs every skill under the requested tree.
+    pub allow_folders: Option<Vec<String>>,
+    pub migrated: bool,
+    recorded: Vec<RecordedUrlSkill>,
+}
+
+pub(crate) fn load_url_refresh_scope(request_url: &str) -> Result<UrlRefreshScope, String> {
+    let config = config_dir().map_err(|error| error.to_string())?;
+    let manifest = manifest_entries(&config)?;
+    Ok(url_refresh_scope(request_url, &manifest.entries))
+}
+
+/// Skills a URL refresh may install, plus the tree to extract.
+///
+/// A recorded `selected` list wins. Older entries with no selection use the
+/// skill folders already installed from that source, so a later refresh cannot
+/// pick up new upstream skills.
+pub(crate) fn url_refresh_scope(
+    request_url: &str,
+    entries: &[ManagedSkillEntry],
+) -> UrlRefreshScope {
+    let matching: Vec<&ManagedSkillEntry> = entries
+        .iter()
+        .filter(|entry| match &entry.source {
+            SkillSource::Url { url, .. } => urls_same_pack(url, request_url),
+            _ => false,
+        })
+        .collect();
+    if matching.is_empty() {
+        return UrlRefreshScope {
+            extract_subpath: super::github_import_subpath(request_url),
+            allow_folders: None,
+            migrated: false,
+            recorded: Vec::new(),
+        };
+    }
+
+    let recorded = matching
+        .iter()
+        .filter_map(|entry| match &entry.source {
+            SkillSource::Url { url, subpath, .. } => Some(RecordedUrlSkill {
+                folder: entry.folder.clone(),
+                declared_name: entry.declared_name.clone(),
+                content_sha256: entry.content_sha256.clone(),
+                url: url.clone(),
+                subpath: subpath
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .and_then(super::normalize_portable_subpath)
+                    .or_else(|| super::github_import_subpath(url)),
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    let explicit = matching.iter().all(|entry| match &entry.source {
+        SkillSource::Url { selected, .. } => !selected.is_empty(),
+        _ => false,
+    });
+    let any_explicit = matching.iter().any(|entry| match &entry.source {
+        SkillSource::Url { selected, .. } => !selected.is_empty(),
+        _ => false,
+    });
+    let mut allow = Vec::new();
+    if explicit {
+        for entry in &matching {
+            if let SkillSource::Url { selected, .. } = &entry.source {
+                allow.extend(selected.iter().cloned());
+            }
+        }
+    } else if any_explicit {
+        for entry in &matching {
+            match &entry.source {
+                SkillSource::Url { selected, .. } if !selected.is_empty() => {
+                    allow.extend(selected.iter().cloned());
+                }
+                _ => allow.push(entry.folder.clone()),
+            }
+        }
+    } else {
+        allow.extend(matching.iter().map(|entry| entry.folder.clone()));
+    }
+
+    let request_subpath = super::github_import_subpath(request_url);
+    let extract_subpath = if request_subpath.is_some() {
+        request_subpath
+    } else {
+        let subs: Vec<String> = recorded
+            .iter()
+            .filter_map(|item| item.subpath.clone())
+            .collect();
+        if !recorded.is_empty() && subs.len() == recorded.len() {
+            common_subpath(&subs)
+        } else {
+            None
+        }
+    };
+
+    UrlRefreshScope {
+        extract_subpath,
+        allow_folders: Some(dedup_names(allow)),
+        migrated: !explicit,
+        recorded,
+    }
+}
+
+fn common_subpath(paths: &[String]) -> Option<String> {
+    let mut shared: Option<Vec<String>> = None;
+    for path in paths {
+        let next: Vec<String> = path
+            .replace('\\', "/")
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect();
+        if next.is_empty() {
+            return None;
+        }
+        shared = Some(match shared {
+            None => next,
+            Some(current) => {
+                let len = current.len().min(next.len());
+                let mut count = 0;
+                while count < len && current[count].eq_ignore_ascii_case(&next[count]) {
+                    count += 1;
+                }
+                if count == 0 {
+                    return None;
+                }
+                current.into_iter().take(count).collect()
+            }
+        });
+    }
+    shared
+        .filter(|items| !items.is_empty())
+        .map(|items| items.join("/"))
+}
+
+fn dedup_names(names: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut unique = Vec::new();
+    for name in names {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if seen.insert(trimmed.to_ascii_lowercase()) {
+            unique.push(trimmed.to_string());
+        }
+    }
+    unique
+}
+
+struct ParsedUpstream {
+    dir: PathBuf,
+    folder: String,
+    name: String,
+    fingerprint: Option<String>,
+}
+
+struct InvalidUpstream {
+    folder: String,
+    message: String,
+}
+
+fn inspect_upstream(skill_dirs: &[PathBuf]) -> (Vec<ParsedUpstream>, Vec<InvalidUpstream>) {
+    let mut valid = Vec::new();
+    let mut invalid = Vec::new();
+    for dir in skill_dirs {
+        let folder_name = dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string();
+        match import::validate_skill_dir(dir) {
+            Ok((parsed, _)) => valid.push(ParsedUpstream {
+                dir: dir.clone(),
+                folder: parsed.folder,
+                name: parsed.name,
+                fingerprint: import::fingerprint_skill_dir(dir).ok(),
+            }),
+            Err(error) => {
+                if import::find_skill_md(dir).is_some() {
+                    invalid.push(InvalidUpstream {
+                        folder: if folder_name.is_empty() {
+                            "skill".into()
+                        } else {
+                            folder_name
+                        },
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }
+    }
+    (valid, invalid)
+}
+
+fn folder_key(name: &str) -> String {
+    name.trim().to_ascii_lowercase()
+}
+
+fn same_folder(left: &str, right: &str) -> bool {
+    folder_key(left) == folder_key(right)
+}
+
+fn selection_label(scope: &UrlRefreshScope, folder: &str) -> String {
+    scope
+        .recorded
+        .iter()
+        .find(|item| same_folder(&item.folder, folder))
+        .map(|item| item.declared_name.trim())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| folder.to_string())
+}
+
+fn match_renamed<'a>(
+    recorded: &RecordedUrlSkill,
+    upstream: &'a [ParsedUpstream],
+    claimed: &HashSet<String>,
+) -> Option<&'a ParsedUpstream> {
+    let candidates: Vec<&ParsedUpstream> = upstream
+        .iter()
+        .filter(|item| !claimed.contains(&folder_key(&item.folder)))
+        .filter(|item| !same_folder(&item.folder, &recorded.folder))
+        .collect();
+    let by_hash: Vec<&ParsedUpstream> = candidates
+        .iter()
+        .copied()
+        .filter(|item| {
+            item.fingerprint.as_deref().is_some_and(|hash| {
+                !recorded.content_sha256.is_empty()
+                    && hash.eq_ignore_ascii_case(&recorded.content_sha256)
+            })
+        })
+        .collect();
+    if by_hash.len() == 1 {
+        return Some(by_hash[0]);
+    }
+    let declared = recorded.declared_name.trim();
+    let by_name: Vec<&ParsedUpstream> = candidates
+        .iter()
+        .copied()
+        .filter(|item| !declared.is_empty() && item.name.eq_ignore_ascii_case(declared))
+        .collect();
+    if by_name.len() == 1 {
+        Some(by_name[0])
+    } else {
+        None
+    }
+}
+
+pub(crate) fn import_new_url_skills(
+    source_url: &str,
+    skill_dirs: Vec<PathBuf>,
+    targets: &[SkillTarget],
+    project: Option<&Path>,
+    skip_existing: bool,
+) -> Result<SkillImportOutcome, String> {
+    let outcome = super::import_collected_skill_dirs(
+        skill_dirs,
+        targets,
+        project,
+        SkillSource::url(source_url),
+        skip_existing,
+    )?;
+    let folders: Vec<String> = outcome
+        .skills
+        .iter()
+        .map(|skill| skill.folder.clone())
+        .collect();
+    stamp_url_skills(source_url, None, &folders, &[])?;
+    Ok(outcome)
+}
+
+pub(crate) fn refresh_url_pack_from_dirs(
+    request_url: &str,
+    skill_dirs: Vec<PathBuf>,
+    targets: &[SkillTarget],
+    project: Option<&Path>,
+    name: &str,
+    tree_complete: bool,
+) -> Result<SkillPackUpdateReport, String> {
+    let config = config_dir().map_err(|error| error.to_string())?;
+    let manifest = manifest_entries(&config)?;
+    let scope = url_refresh_scope(request_url, &manifest.entries);
+    let Some(allow) = scope.allow_folders.clone() else {
+        if skill_dirs.is_empty() {
+            return Err(
+                "Downloaded source does not contain any skills. A skill must contain SKILL.md."
+                    .into(),
+            );
+        }
+        let outcome = super::import_collected_skill_dirs(
+            skill_dirs,
+            targets,
+            project,
+            SkillSource::url(request_url),
+            false,
+        )?;
+        let kept: Vec<String> = outcome
+            .skills
+            .iter()
+            .map(|skill| skill.folder.clone())
+            .collect();
+        let removed = if outcome.errors.is_empty() {
+            remove_url_skills_except(request_url, &kept, None)?
+        } else {
+            Vec::new()
+        };
+        if outcome.errors.is_empty() {
+            stamp_url_skills(
+                request_url,
+                scope.extract_subpath.as_deref(),
+                &kept,
+                &scope.recorded,
+            )?;
+        }
+        return Ok(report_from_import(
+            request_url,
+            name,
+            outcome,
+            removed,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ));
+    };
+
+    let (valid, invalid) = inspect_upstream(&skill_dirs);
+    let mut claimed = HashSet::new();
+    let mut install_dirs = Vec::new();
+    let mut parse_errors = Vec::new();
+    let mut missing = Vec::new();
+    let mut renamed = Vec::new();
+    let mut vanished = Vec::new();
+    let mut replaced_old = Vec::new();
+    let mut replacement_folders: Vec<(String, String)> = Vec::new();
+    let mut replacement_names = Vec::new();
+    let mut pending = Vec::new();
+
+    for allow_name in &allow {
+        if let Some(found) = valid
+            .iter()
+            .find(|item| same_folder(&item.folder, allow_name))
+        {
+            claimed.insert(folder_key(&found.folder));
+            install_dirs.push(found.dir.clone());
+            continue;
+        }
+        if let Some(bad) = invalid
+            .iter()
+            .find(|item| same_folder(&item.folder, allow_name))
+        {
+            let label = selection_label(&scope, allow_name);
+            parse_errors.push(format!("{label}: {}", bad.message));
+            missing.push(label);
+            continue;
+        }
+        pending.push(allow_name.clone());
+    }
+
+    for allow_name in pending {
+        let recorded = scope
+            .recorded
+            .iter()
+            .find(|item| same_folder(&item.folder, &allow_name));
+        if let Some(recorded) = recorded {
+            if let Some(matched) = match_renamed(recorded, &valid, &claimed) {
+                claimed.insert(folder_key(&matched.folder));
+                install_dirs.push(matched.dir.clone());
+                replaced_old.push(recorded.folder.clone());
+                replacement_folders.push((recorded.folder.clone(), matched.folder.clone()));
+                replacement_names.push(matched.name.clone());
+                continue;
+            }
+        }
+        let extras = valid.iter().any(|item| {
+            !claimed.contains(&folder_key(&item.folder))
+                && !allow.iter().any(|name| same_folder(&item.folder, name))
+        });
+        let label = selection_label(&scope, &allow_name);
+        if tree_complete && !extras && parse_errors.is_empty() {
+            vanished.push(allow_name);
+        } else {
+            missing.push(label.clone());
+            if extras {
+                renamed.push(label);
+            }
+        }
+    }
+
+    let mut available: Vec<String> = valid
+        .iter()
+        .filter(|item| !claimed.contains(&folder_key(&item.folder)))
+        .map(|item| item.name.clone())
+        .collect();
+    available.sort();
+    available.dedup();
+
+    let mut outcome = if install_dirs.is_empty() {
+        SkillImportOutcome::empty()
+    } else {
+        super::import_collected_skill_dirs(
+            install_dirs,
+            targets,
+            project,
+            SkillSource::url(request_url),
+            false,
+        )?
+    };
+    for replacement in replacement_names {
+        if let Some(position) = outcome.added.iter().position(|name| name == &replacement) {
+            outcome.added.remove(position);
+            outcome.updated.push(replacement);
+        }
+    }
+    let kept: Vec<String> = outcome
+        .skills
+        .iter()
+        .map(|skill| skill.folder.clone())
+        .collect();
+    let mut drop_folders = Vec::new();
+    if outcome.errors.is_empty() {
+        // A confident rename already imported the new folder. Drop only that old
+        // folder. An unresolved absence or a parse failure never joins this list,
+        // so remove_url_skills_except cannot clear the selection.
+        drop_folders.extend(replaced_old);
+        if parse_errors.is_empty() && missing.is_empty() && renamed.is_empty() {
+            drop_folders.extend(vanished);
+        }
+    }
+    let mut removed = if drop_folders.is_empty() {
+        Vec::new()
+    } else {
+        remove_url_skills_except(request_url, &kept, Some(&drop_folders))?
+    };
+    removed.retain(|name| {
+        !outcome.added.iter().any(|added| added == name)
+            && !outcome.updated.iter().any(|updated| updated == name)
+            && !outcome.unchanged.iter().any(|unchanged| unchanged == name)
+    });
+    if outcome.errors.is_empty() {
+        let mut recorded_for_stamp = scope.recorded.clone();
+        for (old_folder, new_folder) in &replacement_folders {
+            if let Some(mut copy) = recorded_for_stamp
+                .iter()
+                .find(|item| same_folder(&item.folder, old_folder))
+                .cloned()
+            {
+                copy.folder = new_folder.clone();
+                recorded_for_stamp.push(copy);
+            }
+        }
+        stamp_url_skills(
+            request_url,
+            scope.extract_subpath.as_deref(),
+            &kept,
+            &recorded_for_stamp,
+        )?;
+    }
+    let mut report = report_from_import(
+        request_url,
+        name,
+        outcome,
+        removed,
+        available,
+        missing,
+        renamed,
+    );
+    if !parse_errors.is_empty() {
+        report.error = Some(parse_errors.join("\n"));
+        report.error_code = Some("invalid-skill".into());
+    }
+    Ok(report)
+}
+
+fn report_from_import(
     id: &str,
     name: &str,
     outcome: SkillImportOutcome,
     removed: Vec<String>,
+    available: Vec<String>,
+    missing: Vec<String>,
+    renamed: Vec<String>,
 ) -> SkillPackUpdateReport {
     let mut report = SkillPackUpdateReport::named(id, name);
     report.added = outcome.added;
     report.updated = outcome.updated;
     report.unchanged = outcome.unchanged;
     report.removed = removed;
+    report.available = available;
+    report.missing = missing;
+    report.renamed = renamed;
     if !outcome.errors.is_empty() {
         report.error = Some(outcome.errors.join("\n"));
         report.error_code = Some("import".into());
@@ -750,10 +1300,81 @@ pub(crate) fn report_from_outcome(
     report
 }
 
-pub(crate) fn manifest_entries(config: &Path) -> Result<SkillManifest, String> {
-    ManifestStore::new(config)
-        .load()
-        .map_err(|error| format!("Failed to read skill manifest: {error}"))
+fn stamp_url_skills(
+    request_url: &str,
+    incoming_subpath: Option<&str>,
+    folders: &[String],
+    recorded: &[RecordedUrlSkill],
+) -> Result<(), String> {
+    if folders.is_empty() {
+        return Ok(());
+    }
+    let config = config_dir().map_err(|error| error.to_string())?;
+    let store = ManifestStore::new(&config);
+    let wanted: HashSet<String> = folders.iter().map(|name| folder_key(name)).collect();
+    store
+        .revise_sources(|entry| {
+            if !wanted.contains(&folder_key(&entry.folder)) {
+                return None;
+            }
+            let SkillSource::Url { url, subpath, .. } = &entry.source else {
+                return None;
+            };
+            if !urls_same_pack(url, request_url) {
+                return None;
+            }
+            let preserved = recorded
+                .iter()
+                .find(|item| same_folder(&item.folder, &entry.folder));
+            let next_url = preserved
+                .map(|item| item.url.clone())
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| url.clone());
+            let next_subpath = subpath
+                .as_deref()
+                .and_then(super::normalize_portable_subpath)
+                .or_else(|| preserved.and_then(|item| item.subpath.clone()))
+                .or_else(|| incoming_subpath.and_then(super::normalize_portable_subpath))
+                .or_else(|| super::github_import_subpath(&next_url));
+            let folder = entry.folder.clone();
+            Some(SkillSource::Url {
+                url: next_url,
+                subpath: next_subpath.filter(|value| !value.is_empty()),
+                selected: vec![folder],
+            })
+        })
+        .map_err(|error| format!("Failed to record skill selection: {error}"))
+}
+
+fn remove_url_skills_except(
+    request_url: &str,
+    kept_folders: &[String],
+    only_folders: Option<&[String]>,
+) -> Result<Vec<String>, String> {
+    let config = config_dir().map_err(|error| error.to_string())?;
+    let source = SkillSource::url(request_url);
+    let kept: HashSet<String> = kept_folders
+        .iter()
+        .map(|folder| folder.to_ascii_lowercase())
+        .collect();
+    let only: Option<HashSet<String>> = only_folders.map(|names| {
+        names
+            .iter()
+            .map(|name| name.trim().to_ascii_lowercase())
+            .collect()
+    });
+    remove_matching_entries(&config, |entry| {
+        if !sources_same_pack(&entry.source, &source) {
+            return false;
+        }
+        if kept.contains(&entry.folder.to_ascii_lowercase()) {
+            return false;
+        }
+        match &only {
+            Some(allow) => allow.contains(&entry.folder.to_ascii_lowercase()),
+            None => true,
+        }
+    })
 }
 
 #[cfg(test)]
@@ -936,26 +1557,21 @@ mod tests {
             &home,
             "scanpy",
             "Scanpy",
-            SkillSource::Url {
-                url: "https://github.com/K-Dense-AI/scientific-agent-skills".into(),
-            },
+            SkillSource::url("https://github.com/K-Dense-AI/scientific-agent-skills"),
         );
         let legacy = entry(
             &home,
             "anndata",
             "AnnData",
-            SkillSource::Url {
-                url: "https://github.com/K-Dense-AI/claude-scientific-skills/tree/main/skills"
-                    .into(),
-            },
+            SkillSource::url(
+                "https://github.com/K-Dense-AI/claude-scientific-skills/tree/main/skills",
+            ),
         );
         let nature = entry(
             &home,
             "nature-polishing",
             "Nature polishing",
-            SkillSource::Url {
-                url: "https://github.com/Yuan1z0825/nature-skills/tree/main/skills".into(),
-            },
+            SkillSource::url("https://github.com/Yuan1z0825/nature-skills/tree/main/skills"),
         );
         let imported = entry(
             &home,
@@ -989,9 +1605,7 @@ mod tests {
             &home,
             "scanpy",
             "Scanpy",
-            SkillSource::Url {
-                url: "https://github.com/K-Dense-AI/scientific-agent-skills".into(),
-            },
+            SkillSource::url("https://github.com/K-Dense-AI/scientific-agent-skills"),
         );
         write_manifest(&home, vec![again]);
         let second = purge_retired_default_packs().unwrap();
@@ -1015,9 +1629,7 @@ mod tests {
             &home,
             "nature-polishing",
             "Nature polishing",
-            SkillSource::Url {
-                url: "https://github.com/Yuan1z0825/nature-skills/tree/main/skills".into(),
-            },
+            SkillSource::url("https://github.com/Yuan1z0825/nature-skills/tree/main/skills"),
         );
         let custom = entry(
             &home,
@@ -1035,9 +1647,7 @@ mod tests {
             &home,
             "nature-fork",
             "Nature fork",
-            SkillSource::Url {
-                url: "https://github.com/someone-else/nature-skills".into(),
-            },
+            SkillSource::url("https://github.com/someone-else/nature-skills"),
         );
         let custom_dir = PathBuf::from(&custom.destination);
         write_manifest(&home, vec![official, custom, fork]);
@@ -1073,9 +1683,7 @@ mod tests {
             &home,
             "scanpy",
             "Scanpy fork",
-            SkillSource::Url {
-                url: "https://github.com/someone-else/scientific-agent-skills".into(),
-            },
+            SkillSource::url("https://github.com/someone-else/scientific-agent-skills"),
         );
         let fork_dir = PathBuf::from(&fork.destination);
         write_manifest(&home, vec![fork]);
@@ -1102,9 +1710,7 @@ mod tests {
             &home,
             "nature-polishing",
             "Nature polishing",
-            SkillSource::Url {
-                url: "https://github.com/Yuan1z0825/nature-skills".into(),
-            },
+            SkillSource::url("https://github.com/Yuan1z0825/nature-skills"),
         );
         let dir = PathBuf::from(&skill.destination);
         write_manifest(&home, vec![skill]);
@@ -1243,5 +1849,678 @@ mod tests {
             format!("---\nname: {name}\ndescription: {description}\n---\n# {name}\n"),
         )
         .unwrap();
+    }
+
+    fn collect_dirs(root: &Path) -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        import::collect_skill_dirs(root, &mut dirs);
+        dirs.sort();
+        dirs
+    }
+
+    fn bare_url_entry(folder: &str, url: &str) -> ManagedSkillEntry {
+        let target = user_target();
+        ManagedSkillEntry {
+            id: stable_entry_id(&target, folder).unwrap(),
+            declared_name: folder.into(),
+            folder: folder.into(),
+            source: SkillSource::url(url),
+            content_sha256: "a".repeat(64),
+            target,
+            destination: format!("/tmp/skills/{folder}"),
+            installed_at: "2026-07-17T00:00:00Z".into(),
+            updated_at: "2026-07-17T00:00:00Z".into(),
+        }
+    }
+
+    fn url_fields(entry: &ManagedSkillEntry) -> (String, Option<String>, Vec<String>) {
+        match &entry.source {
+            SkillSource::Url {
+                url,
+                subpath,
+                selected,
+            } => (url.clone(), subpath.clone(), selected.clone()),
+            other => panic!("expected a url source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pack_refresh_display_name_matches_the_pack_list() {
+        assert_eq!(
+            pack_refresh_display_name(
+                "https://github.com/WUBING2023/PaperSpine/tree/main/dist/claude/skills"
+            ),
+            "PaperSpine"
+        );
+        assert_eq!(
+            pack_refresh_display_name("https://github.com/anthropics/skills"),
+            "skills"
+        );
+        assert_eq!(
+            pack_refresh_display_name("https://github.com/anthropics/Skills.git"),
+            "Skills"
+        );
+    }
+
+    #[test]
+    fn refresh_scope_migrates_a_legacy_skill_subpath() {
+        let entry = bare_url_entry(
+            "brand-guidelines",
+            "https://github.com/anthropics/skills/tree/main/skills/brand-guidelines",
+        );
+        let scope = url_refresh_scope("https://github.com/anthropics/skills", &[entry]);
+        assert!(scope.migrated);
+        assert_eq!(
+            scope.extract_subpath.as_deref(),
+            Some("skills/brand-guidelines")
+        );
+        assert_eq!(
+            scope.allow_folders,
+            Some(vec!["brand-guidelines".to_string()])
+        );
+    }
+
+    #[test]
+    fn refresh_scope_keeps_recorded_skills_under_their_common_subpath() {
+        let mut brand = bare_url_entry(
+            "brand-guidelines",
+            "https://github.com/anthropics/skills/tree/main/skills/brand-guidelines",
+        );
+        brand.source = SkillSource::Url {
+            url: "https://github.com/anthropics/skills/tree/main/skills/brand-guidelines".into(),
+            subpath: Some("skills/brand-guidelines".into()),
+            selected: vec!["brand-guidelines".into()],
+        };
+        let mut canvas = bare_url_entry(
+            "canvas-design",
+            "https://github.com/anthropics/skills/tree/main/skills/canvas-design",
+        );
+        canvas.source = SkillSource::Url {
+            url: "https://github.com/anthropics/skills/tree/main/skills/canvas-design".into(),
+            subpath: Some("skills/canvas-design".into()),
+            selected: vec!["canvas-design".into()],
+        };
+        let scope = url_refresh_scope("https://github.com/anthropics/skills", &[brand, canvas]);
+        assert!(!scope.migrated);
+        assert_eq!(scope.extract_subpath.as_deref(), Some("skills"));
+        assert_eq!(
+            scope.allow_folders,
+            Some(vec![
+                "brand-guidelines".to_string(),
+                "canvas-design".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn refresh_scope_uses_the_subpath_on_the_update_link() {
+        let entry = bare_url_entry("paper-spine", "https://github.com/WUBING2023/PaperSpine");
+        let scope = url_refresh_scope(
+            "https://github.com/WUBING2023/PaperSpine/tree/main/dist/claude/skills",
+            &[entry],
+        );
+        assert_eq!(scope.extract_subpath.as_deref(), Some("dist/claude/skills"));
+        assert_eq!(scope.allow_folders, Some(vec!["paper-spine".to_string()]));
+    }
+
+    #[test]
+    fn url_import_records_selection_and_update_skips_new_skills() {
+        let _provider = crate::providers::paths::lock_provider_env();
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let _home = HomeGuard::set(&home);
+        let repo = temp.path().join("repo");
+        write_skill(
+            &repo.join("skills").join("brand-guidelines"),
+            "Brand guidelines",
+            "Keep",
+        );
+        let imported = import_new_url_skills(
+            "https://github.com/anthropics/skills/tree/main/skills/brand-guidelines",
+            collect_dirs(&repo),
+            &[user_target()],
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(imported.added, vec!["Brand guidelines".to_string()]);
+        let saved = manifest_entries(&home).unwrap().entries;
+        assert_eq!(saved.len(), 1);
+        let (url, subpath, selected) = url_fields(&saved[0]);
+        assert!(url.contains("skills/brand-guidelines"), "{url}");
+        assert_eq!(subpath.as_deref(), Some("skills/brand-guidelines"));
+        assert_eq!(selected, vec!["brand-guidelines".to_string()]);
+
+        write_skill(&repo.join("skills").join("canvas-design"), "Canvas", "New");
+        write_skill(&repo.join("skills").join("docx"), "Docx", "New");
+        let report = refresh_url_pack_from_dirs(
+            "https://github.com/anthropics/skills",
+            collect_dirs(&repo),
+            &[user_target()],
+            None,
+            "skills",
+            true,
+        )
+        .unwrap();
+        assert!(report.added.is_empty(), "{report:?}");
+        assert_eq!(report.unchanged, vec!["Brand guidelines".to_string()]);
+        assert!(report.removed.is_empty(), "{report:?}");
+        assert_eq!(
+            report.available,
+            vec!["Canvas".to_string(), "Docx".to_string()]
+        );
+        let saved = manifest_entries(&home).unwrap().entries;
+        assert_eq!(
+            saved
+                .iter()
+                .map(|entry| entry.folder.clone())
+                .collect::<Vec<_>>(),
+            vec!["brand-guidelines".to_string()]
+        );
+        let (url, subpath, selected) = url_fields(&saved[0]);
+        assert!(url.contains("skills/brand-guidelines"), "{url}");
+        assert_eq!(subpath.as_deref(), Some("skills/brand-guidelines"));
+        assert_eq!(selected, vec!["brand-guidelines".to_string()]);
+
+        write_skill(&repo.join("skills").join("slack-gif"), "Slack gif", "Newer");
+        let again = refresh_url_pack_from_dirs(
+            "https://github.com/anthropics/skills",
+            collect_dirs(&repo),
+            &[user_target()],
+            None,
+            "skills",
+            true,
+        )
+        .unwrap();
+        assert!(again.added.is_empty(), "{again:?}");
+        assert!(again.available.iter().any(|name| name == "Slack gif"));
+        assert_eq!(manifest_entries(&home).unwrap().entries.len(), 1);
+    }
+
+    #[test]
+    fn legacy_url_pack_update_keeps_only_the_installed_skill() {
+        let _provider = crate::providers::paths::lock_provider_env();
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let _home = HomeGuard::set(&home);
+        let destination = skills_root(&home).join("brand-guidelines");
+        write_skill(&destination, "Brand guidelines", "Keep");
+        let target = user_target();
+        let legacy = ManagedSkillEntry {
+            id: stable_entry_id(&target, "brand-guidelines").unwrap(),
+            declared_name: "Brand guidelines".into(),
+            folder: "brand-guidelines".into(),
+            source: SkillSource::url(
+                "https://github.com/anthropics/skills/tree/main/skills/brand-guidelines",
+            ),
+            content_sha256: import::fingerprint_skill_dir(&destination).unwrap(),
+            target,
+            destination: destination.to_string_lossy().to_string(),
+            installed_at: "2026-07-17T00:00:00Z".into(),
+            updated_at: "2026-07-17T00:00:00Z".into(),
+        };
+        write_manifest(&home, vec![legacy]);
+
+        let repo = temp.path().join("repo");
+        write_skill(
+            &repo.join("skills").join("brand-guidelines"),
+            "Brand guidelines",
+            "Keep",
+        );
+        write_skill(&repo.join("skills").join("canvas-design"), "Canvas", "New");
+        let report = refresh_url_pack_from_dirs(
+            "https://github.com/anthropics/skills",
+            collect_dirs(&repo),
+            &[user_target()],
+            None,
+            "skills",
+            true,
+        )
+        .unwrap();
+        assert!(report.added.is_empty(), "{report:?}");
+        assert_eq!(report.unchanged, vec!["Brand guidelines".to_string()]);
+        assert_eq!(report.available, vec!["Canvas".to_string()]);
+        let saved = manifest_entries(&home).unwrap().entries;
+        assert_eq!(saved.len(), 1);
+        let (url, subpath, selected) = url_fields(&saved[0]);
+        assert!(url.contains("brand-guidelines"), "{url}");
+        assert_eq!(subpath.as_deref(), Some("skills/brand-guidelines"));
+        assert_eq!(selected, vec!["brand-guidelines".to_string()]);
+
+        let kept = refresh_url_pack_from_dirs(
+            "https://github.com/anthropics/skills",
+            collect_dirs(&repo.join("skills").join("canvas-design")),
+            &[user_target()],
+            None,
+            "skills",
+            false,
+        )
+        .unwrap();
+        assert!(kept.removed.is_empty(), "{kept:?}");
+        assert!(kept.added.is_empty(), "{kept:?}");
+        assert_eq!(kept.missing, vec!["Brand guidelines".to_string()]);
+        assert_eq!(kept.renamed, vec!["Brand guidelines".to_string()]);
+        let saved = manifest_entries(&home).unwrap().entries;
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].folder, "brand-guidelines");
+        let (_, _, selected) = url_fields(&saved[0]);
+        assert_eq!(selected, vec!["brand-guidelines".to_string()]);
+        assert!(destination.join("SKILL.md").is_file());
+    }
+
+    fn installed_url_skill(
+        home: &Path,
+        folder: &str,
+        name: &str,
+        description: &str,
+        url: &str,
+        subpath: Option<&str>,
+        selected: &[&str],
+    ) -> PathBuf {
+        let destination = skills_root(home).join(folder);
+        write_skill(&destination, name, description);
+        let target = user_target();
+        let source = if let Some(subpath) = subpath {
+            SkillSource::Url {
+                url: url.into(),
+                subpath: Some(subpath.into()),
+                selected: selected.iter().map(|name| (*name).to_string()).collect(),
+            }
+        } else {
+            SkillSource::url(url)
+        };
+        let entry = ManagedSkillEntry {
+            id: stable_entry_id(&target, folder).unwrap(),
+            declared_name: name.into(),
+            folder: folder.into(),
+            source,
+            content_sha256: import::fingerprint_skill_dir(&destination).unwrap(),
+            target,
+            destination: destination.to_string_lossy().to_string(),
+            installed_at: "2026-07-17T00:00:00Z".into(),
+            updated_at: "2026-07-17T00:00:00Z".into(),
+        };
+        write_manifest(home, vec![entry]);
+        destination
+    }
+
+    #[test]
+    fn invalid_selected_skill_markdown_is_not_deleted() {
+        let _provider = crate::providers::paths::lock_provider_env();
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let _home = HomeGuard::set(&home);
+        let destination = installed_url_skill(
+            &home,
+            "brand-guidelines",
+            "Brand guidelines",
+            "Keep",
+            "https://github.com/anthropics/skills/tree/main/skills/brand-guidelines",
+            Some("skills/brand-guidelines"),
+            &["brand-guidelines"],
+        );
+        let broken = temp.path().join("brand-guidelines");
+        fs::create_dir_all(&broken).unwrap();
+        fs::write(broken.join("SKILL.md"), "not a skill\n").unwrap();
+
+        let report = refresh_url_pack_from_dirs(
+            "https://github.com/anthropics/skills",
+            vec![broken],
+            &[user_target()],
+            None,
+            "skills",
+            true,
+        )
+        .unwrap();
+        assert!(report.removed.is_empty(), "{report:?}");
+        assert_eq!(report.error_code.as_deref(), Some("invalid-skill"));
+        assert_eq!(report.missing, vec!["Brand guidelines".to_string()]);
+        let saved = manifest_entries(&home).unwrap().entries;
+        assert_eq!(saved.len(), 1);
+        let (_, _, selected) = url_fields(&saved[0]);
+        assert_eq!(selected, vec!["brand-guidelines".to_string()]);
+        assert!(fs::read_to_string(destination.join("SKILL.md"))
+            .unwrap()
+            .contains("Brand guidelines"));
+    }
+
+    #[test]
+    fn nonempty_tree_without_the_selected_folder_keeps_the_selection() {
+        let _provider = crate::providers::paths::lock_provider_env();
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let _home = HomeGuard::set(&home);
+        installed_url_skill(
+            &home,
+            "brand-guidelines",
+            "Brand guidelines",
+            "Keep",
+            "https://github.com/anthropics/skills/tree/main/skills",
+            Some("skills"),
+            &["brand-guidelines"],
+        );
+        let canvas = temp.path().join("canvas-design");
+        write_skill(&canvas, "Canvas", "New");
+
+        let report = refresh_url_pack_from_dirs(
+            "https://github.com/anthropics/skills",
+            vec![canvas],
+            &[user_target()],
+            None,
+            "skills",
+            true,
+        )
+        .unwrap();
+        assert!(report.removed.is_empty(), "{report:?}");
+        assert!(report.added.is_empty(), "{report:?}");
+        assert_eq!(report.missing, vec!["Brand guidelines".to_string()]);
+        assert_eq!(report.renamed, vec!["Brand guidelines".to_string()]);
+        assert_eq!(report.available, vec!["Canvas".to_string()]);
+        let saved = manifest_entries(&home).unwrap().entries;
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].folder, "brand-guidelines");
+        let (_, subpath, selected) = url_fields(&saved[0]);
+        assert_eq!(subpath.as_deref(), Some("skills"));
+        assert_eq!(selected, vec!["brand-guidelines".to_string()]);
+    }
+
+    #[test]
+    fn complete_tree_deletes_a_skill_that_vanished_upstream() {
+        let _provider = crate::providers::paths::lock_provider_env();
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let _home = HomeGuard::set(&home);
+        installed_url_skill(
+            &home,
+            "brand-guidelines",
+            "Brand guidelines",
+            "Keep",
+            "https://github.com/anthropics/skills/tree/main/skills",
+            Some("skills"),
+            &["brand-guidelines"],
+        );
+
+        let report = refresh_url_pack_from_dirs(
+            "https://github.com/anthropics/skills",
+            Vec::new(),
+            &[user_target()],
+            None,
+            "skills",
+            true,
+        )
+        .unwrap();
+        assert_eq!(report.removed, vec!["Brand guidelines".to_string()]);
+        assert!(report.missing.is_empty(), "{report:?}");
+        assert!(report.renamed.is_empty(), "{report:?}");
+        assert!(manifest_entries(&home).unwrap().entries.is_empty());
+    }
+
+    #[test]
+    fn paperspine_refresh_keeps_the_selected_skill_and_lists_new_siblings() {
+        let _provider = crate::providers::paths::lock_provider_env();
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let _home = HomeGuard::set(&home);
+        let url = "https://github.com/WUBING2023/PaperSpine/tree/main/dist/claude/skills";
+        installed_url_skill(
+            &home,
+            "paper-spine",
+            "PaperSpine",
+            "Original",
+            url,
+            Some("dist/claude/skills"),
+            &["paper-spine"],
+        );
+        let root = temp.path().join("dist").join("claude").join("skills");
+        write_skill(&root.join("paper-spine"), "PaperSpine", "Revised");
+        write_skill(&root.join("citation-helper"), "Citation helper", "New");
+
+        let report = refresh_url_pack_from_dirs(
+            url,
+            collect_dirs(&root),
+            &[user_target()],
+            None,
+            "PaperSpine",
+            true,
+        )
+        .unwrap();
+        assert!(report.added.is_empty(), "{report:?}");
+        assert_eq!(report.updated, vec!["PaperSpine".to_string()]);
+        assert!(report.removed.is_empty(), "{report:?}");
+        assert_eq!(report.available, vec!["Citation helper".to_string()]);
+        let saved = manifest_entries(&home).unwrap().entries;
+        assert_eq!(
+            saved
+                .iter()
+                .map(|entry| entry.folder.clone())
+                .collect::<Vec<_>>(),
+            vec!["paper-spine".to_string()]
+        );
+        let (_, subpath, selected) = url_fields(&saved[0]);
+        assert_eq!(subpath.as_deref(), Some("dist/claude/skills"));
+        assert_eq!(selected, vec!["paper-spine".to_string()]);
+    }
+
+    #[test]
+    fn renamed_upstream_folder_follows_declared_name_or_fingerprint() {
+        let _provider = crate::providers::paths::lock_provider_env();
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let _home = HomeGuard::set(&home);
+        installed_url_skill(
+            &home,
+            "brand-guidelines",
+            "Brand guidelines",
+            "Keep",
+            "https://github.com/anthropics/skills/tree/main/skills/brand-guidelines",
+            Some("skills/brand-guidelines"),
+            &["brand-guidelines"],
+        );
+        let renamed = temp.path().join("brand_guidelines");
+        write_skill(&renamed, "Brand guidelines", "Keep");
+
+        let report = refresh_url_pack_from_dirs(
+            "https://github.com/anthropics/skills",
+            vec![renamed],
+            &[user_target()],
+            None,
+            "skills",
+            true,
+        )
+        .unwrap();
+        assert!(report.removed.is_empty(), "{report:?}");
+        assert!(report.renamed.is_empty(), "{report:?}");
+        assert!(report.missing.is_empty(), "{report:?}");
+        assert_eq!(report.updated, vec!["Brand guidelines".to_string()]);
+        let saved = manifest_entries(&home).unwrap().entries;
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].folder, "brand_guidelines");
+        let (url, subpath, selected) = url_fields(&saved[0]);
+        assert!(url.contains("brand-guidelines"), "{url}");
+        assert_eq!(subpath.as_deref(), Some("skills/brand-guidelines"));
+        assert_eq!(selected, vec!["brand_guidelines".to_string()]);
+        assert!(!skills_root(&home).join("brand-guidelines").exists());
+    }
+
+    #[test]
+    fn unmatched_rename_keeps_the_installed_copy() {
+        let _provider = crate::providers::paths::lock_provider_env();
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let _home = HomeGuard::set(&home);
+        let destination = installed_url_skill(
+            &home,
+            "brand-guidelines",
+            "Brand guidelines",
+            "Keep",
+            "https://github.com/anthropics/skills/tree/main/skills",
+            Some("skills"),
+            &["brand-guidelines"],
+        );
+        let renamed = temp.path().join("brand-voice");
+        write_skill(&renamed, "Brand voice", "Different");
+
+        let report = refresh_url_pack_from_dirs(
+            "https://github.com/anthropics/skills",
+            vec![renamed],
+            &[user_target()],
+            None,
+            "skills",
+            true,
+        )
+        .unwrap();
+        assert!(report.removed.is_empty(), "{report:?}");
+        assert!(report.added.is_empty(), "{report:?}");
+        assert_eq!(report.renamed, vec!["Brand guidelines".to_string()]);
+        assert_eq!(report.available, vec!["Brand voice".to_string()]);
+        assert!(destination.join("SKILL.md").is_file());
+        assert_eq!(
+            manifest_entries(&home).unwrap().entries[0].folder,
+            "brand-guidelines"
+        );
+    }
+
+    #[test]
+    fn display_name_change_updates_the_same_folder() {
+        let _provider = crate::providers::paths::lock_provider_env();
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let _home = HomeGuard::set(&home);
+        installed_url_skill(
+            &home,
+            "brand-guidelines",
+            "Brand guidelines",
+            "Keep",
+            "https://github.com/anthropics/skills/tree/main/skills/brand-guidelines",
+            Some("skills/brand-guidelines"),
+            &["brand-guidelines"],
+        );
+        let same = temp.path().join("brand-guidelines");
+        write_skill(&same, "Brand voice", "Keep");
+
+        let report = refresh_url_pack_from_dirs(
+            "https://github.com/anthropics/skills",
+            vec![same],
+            &[user_target()],
+            None,
+            "skills",
+            true,
+        )
+        .unwrap();
+        assert_eq!(report.updated, vec!["Brand voice".to_string()]);
+        assert!(report.removed.is_empty(), "{report:?}");
+        assert!(report.renamed.is_empty(), "{report:?}");
+        assert!(report.missing.is_empty(), "{report:?}");
+        let saved = manifest_entries(&home).unwrap().entries;
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].folder, "brand-guidelines");
+        assert_eq!(saved[0].declared_name, "Brand voice");
+    }
+
+    #[test]
+    fn selected_folder_match_is_case_insensitive() {
+        let _provider = crate::providers::paths::lock_provider_env();
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let _home = HomeGuard::set(&home);
+        installed_url_skill(
+            &home,
+            "brand-guidelines",
+            "Brand guidelines",
+            "Keep",
+            "https://github.com/anthropics/skills/tree/main/skills/brand-guidelines",
+            Some("skills/brand-guidelines"),
+            &["Brand-Guidelines"],
+        );
+        let same = temp.path().join("brand-guidelines");
+        write_skill(&same, "Brand guidelines", "Revised");
+
+        let report = refresh_url_pack_from_dirs(
+            "https://github.com/anthropics/skills",
+            vec![same],
+            &[user_target()],
+            None,
+            "skills",
+            true,
+        )
+        .unwrap();
+        assert!(report.missing.is_empty(), "{report:?}");
+        assert!(report.removed.is_empty(), "{report:?}");
+        assert_eq!(report.updated, vec!["Brand guidelines".to_string()]);
+        let saved = manifest_entries(&home).unwrap().entries;
+        assert_eq!(saved[0].folder, "brand-guidelines");
+        let (_, _, selected) = url_fields(&saved[0]);
+        assert_eq!(selected, vec!["brand-guidelines".to_string()]);
+    }
+
+    #[test]
+    fn backslash_subpath_is_normalized_to_forward_slashes() {
+        let brand = bare_url_entry(
+            "brand-guidelines",
+            "https://github.com/anthropics/skills/tree/main/skills/brand-guidelines",
+        );
+        let mut canvas = bare_url_entry(
+            "canvas-design",
+            "https://github.com/anthropics/skills/tree/main/skills/canvas-design",
+        );
+        if let SkillSource::Url { subpath, .. } = &mut canvas.source {
+            *subpath = Some("skills\\canvas-design".into());
+        }
+        let mut brand = brand;
+        if let SkillSource::Url { subpath, .. } = &mut brand.source {
+            *subpath = Some("skills\\brand-guidelines".into());
+        }
+        let scope = url_refresh_scope("https://github.com/anthropics/skills", &[brand, canvas]);
+        assert_eq!(scope.extract_subpath.as_deref(), Some("skills"));
+
+        let _provider = crate::providers::paths::lock_provider_env();
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let _home = HomeGuard::set(&home);
+        installed_url_skill(
+            &home,
+            "paper-spine",
+            "PaperSpine",
+            "Keep",
+            "https://github.com/WUBING2023/PaperSpine",
+            Some("dist\\claude\\skills"),
+            &["paper-spine"],
+        );
+        let skill = temp.path().join("paper-spine");
+        write_skill(&skill, "PaperSpine", "Keep");
+        let report = refresh_url_pack_from_dirs(
+            "https://github.com/WUBING2023/PaperSpine",
+            vec![skill],
+            &[user_target()],
+            None,
+            "PaperSpine",
+            true,
+        )
+        .unwrap();
+        assert!(report.missing.is_empty(), "{report:?}");
+        let (_, subpath, _) = url_fields(&manifest_entries(&home).unwrap().entries[0]);
+        assert_eq!(subpath.as_deref(), Some("dist/claude/skills"));
     }
 }

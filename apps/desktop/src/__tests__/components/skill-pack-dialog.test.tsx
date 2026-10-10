@@ -236,6 +236,58 @@ describe("ScientificSkillsOnboarding pack actions", () => {
     return row?.querySelector(`[data-testid="${testId}"] p`)?.textContent ?? "";
   }
 
+  it("shows the pack list name when the refresh report lowercases it", async () => {
+    mockSkillsCommands(() => ({
+      id: "paper-spine",
+      name: "paperspine",
+      added: [],
+      updated: ["PaperSpine"],
+      removed: [],
+      unchanged: [],
+      available: ["canvas-design", "docx"],
+    }));
+    await renderDialog();
+    await confirmUpdate('[data-testid="skill-pack-update"]');
+
+    const row = packRows()[0];
+    expect(summaryText(row)).toBe(
+      "PaperSpine · Added 0 · Updated 1 · Removed 0 · 2 available",
+    );
+    expect(summaryText(row)).not.toContain("paperspine");
+    expect(listedNames(row, "skill-update-available")).toEqual([
+      "canvas-design",
+      "docx",
+    ]);
+    expect(sectionLabel(row, "skill-update-available")).toBe("Available");
+  });
+
+  it("keeps a renamed skill and says so in the selected language", async () => {
+    useSettingsStore.setState({ uiLanguage: "zh" });
+    mockSkillsCommands(() => ({
+      id: "paper-spine",
+      name: "paperspine",
+      added: [],
+      updated: [],
+      removed: [],
+      unchanged: ["Brand guidelines"],
+      missing: ["Brand guidelines"],
+      renamed: ["Brand guidelines"],
+    }));
+    await renderDialog();
+    await confirmUpdate('[data-testid="skill-pack-update"]');
+
+    const row = packRows()[0];
+    expect(summaryText(row)).toBe(
+      "PaperSpine · 已是最新 · 缺失 1 · 已改名，未自动替换",
+    );
+    expect(listedNames(row, "skill-update-renamed")).toEqual([
+      "Brand guidelines",
+    ]);
+    expect(sectionLabel(row, "skill-update-renamed")).toBe(
+      "已改名，未自动替换",
+    );
+  });
+
   it("updates only the selected pack after naming it in the download confirm", async () => {
     await renderDialog();
     await act(async () => {
@@ -306,7 +358,7 @@ describe("ScientificSkillsOnboarding pack actions", () => {
 
     const row = packRows()[0];
     expect(row?.open).toBe(true);
-    expect(summaryText(row)).toBe("nature-skills · 已是最新");
+    expect(summaryText(row)).toBe("PaperSpine · 已是最新");
     expect(listedNames(row, "skill-update-unchanged")).toEqual([
       "nature-polishing",
       "nature-figure",
@@ -330,7 +382,7 @@ describe("ScientificSkillsOnboarding pack actions", () => {
 
     const row = packRows()[0];
     expect(row?.open).toBe(true);
-    expect(summaryText(row)).toBe("nature-skills · 新增 1 · 更新 3 · 移除 0");
+    expect(summaryText(row)).toBe("PaperSpine · 新增 1 · 更新 3 · 移除 0");
     expect(sectionLabel(row, "skill-update-added")).toBe("新增");
     expect(listedNames(row, "skill-update-added")).toEqual([
       "nature-polishing",
