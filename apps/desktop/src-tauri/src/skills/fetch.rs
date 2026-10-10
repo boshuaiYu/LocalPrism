@@ -286,6 +286,14 @@ fn canonicalize_skill_ip(ip: IpAddr) -> IpAddr {
     ip
 }
 
+/// Blocks non-public IPv4 destinations.
+///
+/// `198.18.0.0/15` (RFC 2544 benchmark space) is intentionally allowed.
+/// Clash, Mihomo, and other TUN/fake-ip proxies answer DNS with addresses
+/// in that range and then forward the real connection. Treating it as
+/// private rejects GitHub skill installs and per-pack updates. Loopback,
+/// RFC 1918, link-local, CGNAT (`100.64.0.0/10`), documentation, and
+/// metadata addresses stay blocked.
 fn is_blocked_ipv4(ip: Ipv4Addr) -> bool {
     let octets = ip.octets();
     ip.is_unspecified()
@@ -300,7 +308,6 @@ fn is_blocked_ipv4(ip: Ipv4Addr) -> bool {
         || (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
         || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
         || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
-        || (octets[0] == 198 && (18..=19).contains(&octets[1]))
         || octets[0] >= 240
         || ip == Ipv4Addr::new(168, 63, 129, 16)
 }
@@ -408,6 +415,57 @@ mod tests {
         assert!(!is_blocked_skill_hostname("localhost.com"));
         assert!(!is_blocked_skill_hostname("github.com"));
         assert!(!is_blocked_skill_hostname("raw.githubusercontent.com"));
+    }
+
+    #[test]
+    fn rfc2544_benchmark_range_is_allowed_for_proxy_fake_ip() {
+        for ip in [
+            "198.18.0.1",
+            "198.19.255.255",
+            "198.17.255.255",
+            "198.20.0.0",
+            "::ffff:198.18.0.1",
+        ] {
+            assert!(
+                !is_blocked_skill_ip(ip.parse().unwrap()),
+                "{ip} should be allowed"
+            );
+        }
+        for ip in ["127.0.0.1", "10.1.2.3", "192.168.1.10", "169.254.169.254"] {
+            assert!(
+                is_blocked_skill_ip(ip.parse().unwrap()),
+                "{ip} should be refused"
+            );
+        }
+
+        // Literal checks cover the initial add, per-pack update, and redirect
+        // paths. All three call this same address guard.
+        for url in [
+            "https://198.18.0.1/skill.md",
+            "https://198.19.255.255/x",
+            "https://198.17.255.255/x",
+            "https://198.20.0.0/x",
+            "https://[::ffff:198.18.0.1]/x",
+        ] {
+            validate_skill_fetch_url(&parse_url(url)).unwrap();
+            validate_skill_redirect_target(&parse_url(url)).unwrap();
+        }
+        for url in [
+            "http://127.0.0.1/skill.md",
+            "http://10.0.0.5/x",
+            "http://192.168.1.10/x",
+            "http://169.254.169.254/latest/meta-data",
+        ] {
+            for error in [
+                validate_skill_fetch_url(&parse_url(url)).unwrap_err(),
+                validate_skill_redirect_target(&parse_url(url)).unwrap_err(),
+            ] {
+                assert!(
+                    error.contains("private, loopback, or metadata"),
+                    "{url}: {error}"
+                );
+            }
+        }
     }
 
     #[test]
