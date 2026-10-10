@@ -6811,8 +6811,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("runtimes").join("node").join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("node"), b"node").unwrap();
+        std::fs::write(bin.join("node"), b"#!/bin/sh\necho v22.14.0\n").unwrap();
         std::fs::write(bin.join("npx"), b"npx").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                bin.join("node"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
         let previous_home = std::env::var("LOCALPRISM_HOME").ok();
         let previous_path = std::env::var("PATH").ok();
         std::env::set_var("LOCALPRISM_HOME", dir.path());

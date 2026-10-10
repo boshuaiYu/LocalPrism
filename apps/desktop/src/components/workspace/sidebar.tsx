@@ -2328,9 +2328,9 @@ function EnvironmentSection({
     ? nodeSource === "managed"
       ? t("env.active")
       : t("env.nodeSystem")
-    : nodeStatus === "checking"
-      ? ""
-      : t("env.notInstalled");
+    : nodeStatus === "missing"
+      ? t("env.notInstalled")
+      : "";
   const skillProblem = environmentSkillProblem(skillsCheckError, skillError);
   const skillsInstalled = Boolean(skillsStatus?.installed);
   const showSkillRetry = environmentSkillShowRetry(

@@ -2,12 +2,19 @@
 //!
 //! The official LTS archive is downloaded from nodejs.org, checked against
 //! `SHASUMS256.txt`, and extracted under `{LOCALPRISM_HOME}/runtimes/node`.
+//! `SHASUMS256.txt` is not GPG-signed. The threat model is nodejs.org's TLS:
+//! the release index, the checksum file, and the archive must all come from
+//! `https://nodejs.org`, and the archive digest must match that checksum file.
+//! A same-host or certificate compromise could still present a matching pair.
+//!
 //! Nothing is written to the system PATH or to a global Node install. Child
-//! processes started for agents see the managed `bin` directory first.
+//! processes started for agents see the managed `bin` directory first, and
+//! only after `node --version` succeeds.
 
 use std::io::{Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
@@ -20,6 +27,15 @@ const MAX_ARCHIVE_BYTES: usize = 80 * 1024 * 1024;
 const MAX_ENTRY_BYTES: usize = 128 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: usize = 400 * 1024 * 1024;
 const MAX_PATH_CHARS: usize = 1024;
+const MAX_NODE_REDIRECTS: usize = 5;
+const ALREADY_INSTALLING: &str = "Node.js installation is already running.";
+
+static NODE_INSTALL_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+std::thread_local! {
+    static FAIL_ROOT_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -234,7 +250,16 @@ pub(crate) fn prepend_managed_node_path(current: &str) -> String {
 
 fn managed_bin_dir() -> Option<PathBuf> {
     let layout = NodeLayout::resolve().ok()?;
-    runtime_bin_dir(&layout.root)
+    let bin = runtime_bin_dir(&layout.root)?;
+    let node = if tool_exists(&bin.join("node.exe")) {
+        bin.join("node.exe")
+    } else {
+        bin.join("node")
+    };
+    // Same usability bar as check_node_runtime: a present but broken,
+    // unfinished, or wrong-architecture copy must not hide a working system node.
+    node_version_blocking(&node)?;
+    Some(bin)
 }
 
 fn runtime_bin_dir(root: &Path) -> Option<PathBuf> {
@@ -260,10 +285,46 @@ fn node_download_client() -> Result<reqwest::Client, String> {
         .user_agent("LocalPrism")
         .connect_timeout(Duration::from_secs(30))
         .timeout(Duration::from_secs(600))
-        .redirect(reqwest::redirect::Policy::limited(5));
+        .https_only(true)
+        .redirect(node_redirect_policy());
     crate::updater_proxy::install_on_download_client(builder, crate::updater_proxy::current())
         .build()
         .map_err(|err| format!("Failed to start download: {err}"))
+}
+
+fn node_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= MAX_NODE_REDIRECTS {
+            return attempt.error("too many redirects");
+        }
+        match require_nodejs_org(attempt.url()) {
+            Ok(()) => attempt.follow(),
+            Err(error) => attempt.error(error),
+        }
+    })
+}
+
+pub(crate) fn official_node_download_url(url: &str) -> Result<reqwest::Url, String> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|err| format!("Refusing Node.js download URL {url}: {err}"))?;
+    require_nodejs_org(&parsed)?;
+    Ok(parsed)
+}
+
+fn require_nodejs_org(url: &reqwest::Url) -> Result<(), String> {
+    if url.scheme() != "https" {
+        return Err(format!(
+            "Refusing Node.js download URL {}: https is required.",
+            url.as_str()
+        ));
+    }
+    match url.host_str() {
+        Some(host) if host.eq_ignore_ascii_case("nodejs.org") => Ok(()),
+        _ => Err(format!(
+            "Refusing Node.js download URL {}: host must be nodejs.org.",
+            url.as_str()
+        )),
+    }
 }
 
 async fn download_limited(
@@ -271,8 +332,9 @@ async fn download_limited(
     url: &str,
     max_bytes: usize,
 ) -> Result<Vec<u8>, String> {
+    let url = official_node_download_url(url)?;
     let response = client
-        .get(url)
+        .get(url.clone())
         .send()
         .await
         .map_err(|err| format!("Failed to download {url}: {err}"))?;
@@ -301,20 +363,47 @@ async fn download_limited(
 }
 
 fn ensure_inside_home(layout: &NodeLayout, path: &Path) -> Result<(), String> {
-    if path.as_os_str().is_empty()
-        || path.components().any(|component| {
-            matches!(
-                component,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_)
-            )
-        })
+    if runtime_path_inside_home(
+        &path.to_string_lossy(),
+        &layout.home.to_string_lossy(),
+        cfg!(windows),
+    ) {
+        Ok(())
+    } else {
+        Err("Refusing to touch a Node.js path outside app data.".to_string())
+    }
+}
+
+/// App-data containment for install, swap, and remove.
+///
+/// Absolute homes always contain `Component::RootDir`, and Windows homes also
+/// contain `Component::Prefix`. Those are not escapes. The only lexical escape
+/// rejected here is `ParentDir`. Containment is `starts_with(home)` after the
+/// same verbatim-prefix and case normalization skill paths use, plus a
+/// separator so `LocalPrism-extra` is not inside `LocalPrism`.
+pub(crate) fn runtime_path_inside_home(path: &str, home: &str, case_insensitive: bool) -> bool {
+    if path.trim().is_empty() || home.trim().is_empty() {
+        return false;
+    }
+    let path = crate::skills::manifest::normalize_skill_path(path);
+    let home = crate::skills::manifest::normalize_skill_path(home);
+    if path.is_empty() || home.is_empty() || has_parent_segment(&path) || has_parent_segment(&home)
     {
-        return Err("Refusing to touch a Node.js path outside app data.".to_string());
+        return false;
     }
-    if layout.root == layout.home || !path.starts_with(&layout.home) || path == layout.home {
-        return Err("Refusing to touch a Node.js path outside app data.".to_string());
+    let (path_key, home_key) = if case_insensitive {
+        (path.to_ascii_lowercase(), home.to_ascii_lowercase())
+    } else {
+        (path, home)
+    };
+    match path_key.strip_prefix(&home_key) {
+        Some(rest) => rest.starts_with('/') && rest.len() > 1,
+        None => false,
     }
-    Ok(())
+}
+
+fn has_parent_segment(path: &str) -> bool {
+    path.split('/').any(|part| part == "..")
 }
 
 fn remove_tree(path: &Path) -> Result<(), String> {
@@ -328,14 +417,36 @@ fn remove_tree(path: &Path) -> Result<(), String> {
     }
 }
 
+fn rename_path(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    {
+        let fail_root = FAIL_ROOT_RENAME.with(|flag| flag.get());
+        if fail_root && from.file_name().and_then(|name| name.to_str()) == Some("node") {
+            return Err(std::io::Error::other("node runtime is in use"));
+        }
+    }
+    std::fs::rename(from, to)
+}
+
 fn reset_directory(path: &Path) -> Result<(), String> {
     remove_tree(path)?;
     std::fs::create_dir_all(path)
         .map_err(|err| format!("Failed to create {}: {err}", path.display()))
 }
 
-async fn node_version(path: &Path) -> Option<String> {
-    let mut command = tokio::process::Command::new(path);
+fn accepted_version(stdout: &str, stderr: &str) -> Option<String> {
+    let text = if stdout.trim().is_empty() {
+        stderr.trim()
+    } else {
+        stdout.trim()
+    };
+    if text.is_empty() || text.len() > 80 || text.chars().any(|ch| ch.is_control()) {
+        return None;
+    }
+    Some(text.to_string())
+}
+
+fn configure_version_command(command: &mut std::process::Command) {
     command
         .arg("--version")
         .stdin(std::process::Stdio::null())
@@ -346,6 +457,11 @@ async fn node_version(path: &Path) -> Option<String> {
         use std::os::windows::process::CommandExt;
         command.creation_flags(CREATE_NO_WINDOW);
     }
+}
+
+async fn node_version(path: &Path) -> Option<String> {
+    let mut command = tokio::process::Command::new(path);
+    configure_version_command(command.as_std_mut());
     let output = tokio::time::timeout(Duration::from_secs(8), command.output())
         .await
         .ok()?
@@ -355,15 +471,38 @@ async fn node_version(path: &Path) -> Option<String> {
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let text = if stdout.trim().is_empty() {
-        stderr.trim()
-    } else {
-        stdout.trim()
+    accepted_version(&stdout, &stderr)
+}
+
+fn node_version_blocking(path: &Path) -> Option<String> {
+    let mut command = std::process::Command::new(path);
+    configure_version_command(&mut command);
+    let mut child = command.spawn().ok()?;
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() > Duration::from_secs(8) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(15)),
+            Err(_) => return None,
+        }
     };
-    if text.is_empty() || text.len() > 80 || text.chars().any(|ch| ch.is_control()) {
+    if !status.success() {
         return None;
     }
-    Some(text.to_string())
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_string(&mut stdout);
+    }
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    accepted_version(&stdout, &stderr)
 }
 
 async fn probe_runtime(node: &Path, npx: &Path) -> Option<FoundRuntime> {
@@ -453,9 +592,30 @@ pub async fn remove_node_runtime() -> Result<(), String> {
     Ok(())
 }
 
+fn try_begin_node_install() -> Result<NodeInstallGuard, String> {
+    if NODE_INSTALL_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(ALREADY_INSTALLING.to_string());
+    }
+    Ok(NodeInstallGuard)
+}
+
+#[derive(Debug)]
+struct NodeInstallGuard;
+
+impl Drop for NodeInstallGuard {
+    fn drop(&mut self) {
+        NODE_INSTALL_IN_PROGRESS.store(false, Ordering::Release);
+    }
+}
+
 #[tauri::command]
 pub async fn install_node_runtime(window: WebviewWindow) -> Result<(), String> {
+    let guard = try_begin_node_install()?;
     tokio::spawn(async move {
+        let _guard = guard;
         let success = match install_managed(&window).await {
             Ok(()) => true,
             Err(err) => {
@@ -491,6 +651,8 @@ async fn install_managed(window: &WebviewWindow) -> Result<(), String> {
     let (os, arch) = (pinned_install::current_os(), pinned_install::current_arch());
     let asset = node_dist_asset(os, arch, &version)?;
     emit(format!("Downloading {}...", asset.filename));
+    // Checksums come from the same TLS host as the archive. There is no
+    // separate GPG signature; see the module comment for that threat model.
     let sums = download_limited(&client, &asset.shasums_url, MAX_SUMS_BYTES).await?;
     let sums_text =
         String::from_utf8(sums).map_err(|_| "SHASUMS256.txt was not valid UTF-8.".to_string())?;
@@ -518,12 +680,18 @@ fn swap_runtime(layout: &NodeLayout, partial: &Path) -> Result<(), String> {
     ensure_inside_home(layout, partial)?;
     ensure_inside_home(layout, &previous)?;
     remove_tree(&previous)?;
-    if layout.root.exists() && std::fs::rename(&layout.root, &previous).is_err() {
-        remove_tree(&layout.root)?;
+    if layout.root.exists() {
+        // A locked node.exe makes this rename fail on Windows. Leave the live
+        // tree in place so a failed swap can still roll forward later.
+        rename_path(&layout.root, &previous).map_err(|err| {
+            format!(
+                "Failed to move the existing Node.js runtime aside: {err}. The current copy was left in place."
+            )
+        })?;
     }
-    if let Err(err) = std::fs::rename(partial, &layout.root) {
+    if let Err(err) = rename_path(partial, &layout.root) {
         if previous.exists() {
-            let _ = std::fs::rename(&previous, &layout.root);
+            let _ = rename_path(&previous, &layout.root);
         }
         return Err(format!(
             "Failed to move the Node.js runtime into place: {err}"
@@ -976,6 +1144,13 @@ mod tests {
     use flate2::write::GzEncoder;
     use flate2::Compression;
 
+    #[cfg(unix)]
+    fn write_runnable_node(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, b"#!/bin/sh\necho v22.14.0\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     fn restore_env(key: &str, previous: Option<String>) {
         match previous {
             Some(value) => std::env::set_var(key, value),
@@ -1102,10 +1277,15 @@ mod tests {
         with_temp_home(|home| {
             let bin = home.join("runtimes").join("node").join("bin");
             std::fs::create_dir_all(&bin).unwrap();
-            std::fs::write(bin.join("node"), b"node").unwrap();
+            std::fs::write(bin.join("node"), b"not-a-program").unwrap();
             std::fs::write(bin.join("npx"), b"npx").unwrap();
-            let path = prepend_managed_node_path("/usr/bin");
-            assert_eq!(path, format!("{}:/usr/bin", bin.display()));
+            assert_eq!(prepend_managed_node_path("/usr/bin"), "/usr/bin");
+            #[cfg(unix)]
+            {
+                write_runnable_node(&bin.join("node"));
+                let path = prepend_managed_node_path("/usr/bin");
+                assert_eq!(path, format!("{}:/usr/bin", bin.display()));
+            }
             assert_eq!(std::env::var("PATH").ok(), before);
         });
         assert_eq!(std::env::var("PATH").ok(), before);
@@ -1232,17 +1412,169 @@ mod tests {
     }
 
     #[test]
-    fn windows_layout_is_prepended_from_the_runtime_root() {
+    fn windows_layout_is_the_runtime_root_but_a_broken_copy_is_not_prepended() {
         with_temp_home(|home| {
             let root = home.join("runtimes").join("node");
             std::fs::create_dir_all(&root).unwrap();
             std::fs::write(root.join("node.exe"), b"node").unwrap();
             std::fs::write(root.join("npx.cmd"), b"npx").unwrap();
-            let path = prepend_managed_node_path(r"C:\Windows");
-            let sep = path_sep();
-            assert!(path.starts_with(&root.to_string_lossy().to_string()));
-            assert!(path.contains(sep));
+            assert_eq!(runtime_bin_dir(&root).as_deref(), Some(root.as_path()));
+            assert_eq!(prepend_managed_node_path(r"C:\Windows"), r"C:\Windows");
         });
+    }
+
+    #[test]
+    fn absolute_app_data_paths_stay_inside_home_on_every_desktop() {
+        let linux_home = "/home/user/.config/LocalPrism";
+        let macos_home = "/Users/user/Library/Application Support/LocalPrism";
+        let windows_home = r"C:\Users\user\AppData\Roaming\LocalPrism";
+        assert!(runtime_path_inside_home(
+            "/home/user/.config/LocalPrism/runtimes/node",
+            linux_home,
+            false,
+        ));
+        assert!(runtime_path_inside_home(
+            "/home/user/.config/LocalPrism/runtimes/node.partial",
+            linux_home,
+            false,
+        ));
+        assert!(runtime_path_inside_home(
+            "/Users/user/Library/Application Support/LocalPrism/runtimes/node",
+            macos_home,
+            false,
+        ));
+        assert!(runtime_path_inside_home(
+            "/Users/user/Library/Application Support/LocalPrism/runtimes/node.previous",
+            macos_home,
+            false,
+        ));
+        for path in [
+            r"C:\Users\user\AppData\Roaming\LocalPrism\runtimes\node",
+            r"\\?\C:\Users\user\AppData\Roaming\LocalPrism\runtimes\node",
+            r"c:\users\user\appdata\roaming\localprism\runtimes\node.partial",
+        ] {
+            assert!(runtime_path_inside_home(path, windows_home, true), "{path}");
+        }
+        assert!(runtime_path_inside_home(
+            r"\\?\UNC\server\share\LocalPrism\runtimes\node",
+            r"\\server\share\LocalPrism",
+            true,
+        ));
+        assert!(!runtime_path_inside_home(linux_home, linux_home, false));
+        assert!(!runtime_path_inside_home(
+            "/home/user/.config/LocalPrism-extra/runtimes/node",
+            linux_home,
+            false,
+        ));
+        assert!(!runtime_path_inside_home(
+            "/home/user/.config/LocalPrism/runtimes/../../etc",
+            linux_home,
+            false,
+        ));
+        assert!(!runtime_path_inside_home(
+            r"C:\Users\user\AppData\Roaming\LocalPrism\..\Windows",
+            windows_home,
+            true,
+        ));
+        assert!(!runtime_path_inside_home(
+            r"D:\LocalPrism\runtimes\node",
+            windows_home,
+            true,
+        ));
+        assert!(!runtime_path_inside_home(
+            r"c:\users\user\appdata\roaming\localprism\runtimes\node",
+            windows_home,
+            false,
+        ));
+    }
+
+    #[test]
+    fn real_absolute_home_can_prepare_swap_and_remove_the_runtime() {
+        with_temp_home(|home| {
+            let layout = NodeLayout::resolve().unwrap();
+            assert!(layout.home.is_absolute());
+            assert!(layout.root.is_absolute());
+            assert!(layout
+                .root
+                .components()
+                .any(|component| matches!(component, Component::RootDir)));
+            ensure_inside_home(&layout, &layout.root).unwrap();
+            let parent = layout.root.parent().unwrap();
+            let partial = parent.join("node.partial");
+            let previous = parent.join("node.previous");
+            ensure_inside_home(&layout, &partial).unwrap();
+            ensure_inside_home(&layout, &previous).unwrap();
+            assert!(ensure_inside_home(&layout, home).is_err());
+            assert!(ensure_inside_home(&layout, &home.join("..").join("outside")).is_err());
+
+            std::fs::create_dir_all(partial.join("bin")).unwrap();
+            std::fs::write(partial.join("bin").join("node"), b"new").unwrap();
+            std::fs::create_dir_all(&layout.root).unwrap();
+            std::fs::write(layout.root.join("old.txt"), b"old").unwrap();
+            swap_runtime(&layout, &partial).unwrap();
+            assert_eq!(
+                std::fs::read(layout.root.join("bin").join("node")).unwrap(),
+                b"new"
+            );
+            assert!(!layout.root.join("old.txt").exists());
+            assert!(!partial.exists());
+
+            std::fs::create_dir_all(parent.join("node.partial")).unwrap();
+            std::fs::write(parent.join("node.previous"), b"stale").unwrap();
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(remove_node_runtime())
+                .unwrap();
+            assert!(!layout.root.exists());
+            assert!(!parent.join("node.partial").exists());
+            assert!(!parent.join("node.previous").exists());
+            assert!(home.exists());
+        });
+    }
+
+    #[test]
+    fn swap_keeps_the_live_runtime_when_it_cannot_be_moved_aside() {
+        with_temp_home(|_| {
+            let layout = NodeLayout::resolve().unwrap();
+            std::fs::create_dir_all(&layout.root).unwrap();
+            std::fs::write(layout.root.join("keep.txt"), b"live").unwrap();
+            let partial = layout.root.parent().unwrap().join("node.partial");
+            std::fs::create_dir_all(&partial).unwrap();
+            std::fs::write(partial.join("new.txt"), b"new").unwrap();
+            FAIL_ROOT_RENAME.with(|flag| flag.set(true));
+            let error = swap_runtime(&layout, &partial).unwrap_err();
+            FAIL_ROOT_RENAME.with(|flag| flag.set(false));
+            assert!(error.contains("left in place"), "{error}");
+            assert_eq!(
+                std::fs::read(layout.root.join("keep.txt")).unwrap(),
+                b"live"
+            );
+            assert!(partial.join("new.txt").is_file());
+            assert!(!layout.root.parent().unwrap().join("node.previous").exists());
+        });
+    }
+
+    #[test]
+    fn a_second_install_does_not_start_while_one_is_running() {
+        let first = try_begin_node_install().unwrap();
+        let second = try_begin_node_install().unwrap_err();
+        assert!(second.contains("already running"));
+        drop(first);
+        let third = try_begin_node_install().unwrap();
+        drop(third);
+        assert!(!NODE_INSTALL_IN_PROGRESS.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn node_downloads_stay_on_https_nodejs_org() {
+        official_node_download_url("https://nodejs.org/dist/index.json").unwrap();
+        official_node_download_url("https://nodejs.org/dist/v22.14.0/SHASUMS256.txt").unwrap();
+        assert!(official_node_download_url("http://nodejs.org/dist/index.json").is_err());
+        assert!(official_node_download_url("https://evil.example/node.tar.xz").is_err());
+        assert!(official_node_download_url("https://nodejs.org.evil.com/dist/index.json").is_err());
+        assert!(official_node_download_url("https://user:pass@nodejs.org/dist/index.json").is_ok());
     }
 
     #[test]

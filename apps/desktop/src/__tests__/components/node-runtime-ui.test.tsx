@@ -322,5 +322,30 @@ describe("Node.js runtime UI", () => {
     root = createRoot(container);
     const missing = await renderWith(null, "未安装");
     expect(missing.textContent).toContain("Node.js");
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "check_node_runtime") {
+        throw new Error("probe failed");
+      }
+      return undefined;
+    });
+    await act(async () => {
+      root.render(<Sidebar layoutControls={layoutControls} />);
+    });
+    const errorDeadline = Date.now() + 1500;
+    while (useNodeRuntimeStore.getState().status !== "error") {
+      if (Date.now() > errorDeadline) {
+        throw new Error("Node.js status did not become an error");
+      }
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+    }
+    expect(
+      container.querySelector('[data-testid="environment-node-status"]')
+        ?.textContent,
+    ).toBe("");
   });
 });

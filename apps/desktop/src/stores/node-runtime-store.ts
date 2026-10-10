@@ -102,10 +102,12 @@ export const useNodeRuntimeStore = create<NodeRuntimeState>((set, get) => ({
     try {
       await invoke("install_node_runtime");
     } catch (error: unknown) {
+      const message = errorMessage(error);
+      if (message.includes("already running")) return;
       set({
         isInstalling: false,
         status: "error",
-        error: errorMessage(error),
+        error: message,
       });
     }
   },
