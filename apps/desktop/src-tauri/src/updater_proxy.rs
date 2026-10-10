@@ -112,24 +112,6 @@ pub(crate) fn install_on_updater_client(
     builder.proxy(proxy)
 }
 
-/// Same proxy choice as the updater, for the app's reqwest 0.12 client.
-/// A direct connection is left alone so reqwest's `system-proxy` feature
-/// does not gain a proxy that was not configured.
-pub(crate) fn install_on_download_client(
-    builder: reqwest::ClientBuilder,
-    resolved: ResolvedProxy,
-) -> reqwest::ClientBuilder {
-    if resolved.is_direct() {
-        return builder;
-    }
-    eprintln!("[download] using proxy {}", describe_proxy(&resolved));
-    let proxy = reqwest::Proxy::custom(move |url| {
-        let host = url.host_str()?;
-        proxy_for_target(&resolved, url.scheme(), host)
-    });
-    builder.proxy(proxy)
-}
-
 fn describe_proxy(resolved: &ResolvedProxy) -> String {
     let mut parts = Vec::new();
     if let Some(http) = &resolved.http {

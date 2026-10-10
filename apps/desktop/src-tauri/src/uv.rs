@@ -150,10 +150,7 @@ fn apply_uv_runtime_env(cmd: &mut tokio::process::Command, venv_dir: Option<&Pat
             cmd.env_remove("VIRTUAL_ENV");
             cmd.env_remove("UV_PROJECT_ENVIRONMENT");
             let path = isolated_uv_path(&std::env::var("PATH").unwrap_or_default());
-            cmd.env(
-                "PATH",
-                crate::node_runtime::prepend_managed_node_path(&path),
-            );
+            cmd.env("PATH", path);
         }
     }
 }
@@ -292,10 +289,7 @@ fn venv_pip_shim(venv_dir: &std::path::Path) -> PathBuf {
 fn path_with_venv(venv_dir: &std::path::Path) -> String {
     let bin = venv_bin_dir(venv_dir);
     let current = isolated_uv_path(&std::env::var("PATH").unwrap_or_default());
-    let with_venv = format!("{}{}{}", bin.to_string_lossy(), path_sep(), current);
-    // uv run children are skills and MCP too. Put a usable managed Node
-    // ahead of the venv, matching Claude and Codex child PATH.
-    crate::node_runtime::prepend_managed_node_path(&with_venv)
+    format!("{}{}{}", bin.to_string_lossy(), path_sep(), current)
 }
 
 fn write_pip_shim(venv_dir: &Path) -> Result<(), String> {
