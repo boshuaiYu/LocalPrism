@@ -108,6 +108,22 @@ describe("translate", () => {
     );
   });
 
+  it("formats pack update summaries in English and Chinese", () => {
+    const counts = { name: "nature-skills", added: 1, updated: 3, removed: 0 };
+    expect(translate("zh", "skills.packUpdateSummary", counts)).toBe(
+      "nature-skills · 新增 1 · 更新 3 · 移除 0",
+    );
+    expect(translate("en", "skills.packUpdateSummary", counts)).toBe(
+      "nature-skills · Added 1 · Updated 3 · Removed 0",
+    );
+    expect(
+      translate("zh", "skills.packUpdateLatest", { name: "nature-skills" }),
+    ).toBe("nature-skills · 已是最新");
+    expect(
+      translate("en", "skills.packUpdateLatest", { name: "nature-skills" }),
+    ).toBe("nature-skills · Already up to date");
+  });
+
   it("interpolates named values", () => {
     expect(
       translate("en", "providers.signInTo", { name: "Claude Official" }),

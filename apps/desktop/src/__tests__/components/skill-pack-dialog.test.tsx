@@ -19,6 +19,98 @@ import { useSettingsStore } from "@/stores/settings-store";
 import { defaultSkillTargets, useSkillStore } from "@/stores/skill-store";
 import type { RuntimeSkill } from "@/runtime/types";
 
+function refreshReport(sourceUrl: string) {
+  if (sourceUrl.includes("nature-skills")) {
+    return {
+      id: "nature-skills",
+      name: "nature-skills",
+      added: ["nature-polishing"],
+      updated: ["nature-figure", "nature-writing", "nature-citation"],
+      removed: [],
+      unchanged: ["nature-data"],
+    };
+  }
+  if (sourceUrl.includes("paper-humanizer")) {
+    return Promise.reject(new Error("network down"));
+  }
+  if (sourceUrl.includes("PaperSpine")) {
+    return {
+      id: "paper-spine",
+      name: "PaperSpine",
+      added: [],
+      updated: ["PaperSpine"],
+      removed: [],
+      unchanged: [],
+    };
+  }
+  return {
+    id: "",
+    name: "",
+    added: [],
+    updated: [],
+    removed: [],
+    unchanged: ["kept"],
+  };
+}
+
+function mockSkillsCommands(
+  refresh: (sourceUrl: string) => unknown = () => ({
+    id: "paper-spine",
+    name: "PaperSpine",
+    added: [],
+    updated: ["PaperSpine"],
+    removed: [],
+    unchanged: [],
+  }),
+) {
+  vi.mocked(invoke).mockImplementation(
+    async (command: string, args?: unknown) => {
+      if (command === "check_skills_installed") {
+        return { installed: true, skill_count: 2, location: "/skills" };
+      }
+      if (command === "list_installed_skills") {
+        return [
+          {
+            id: "paper-spine",
+            name: "PaperSpine",
+            domain: "",
+            description: "",
+            folder: "paper-spine",
+          },
+          {
+            id: "scanpy",
+            name: "Scanpy",
+            domain: "",
+            description: "",
+            folder: "scanpy",
+          },
+        ];
+      }
+      if (command === "get_skill_categories") return [];
+      if (command === "skill_pack_preferences") {
+        return { version: 1, optedOutPackIds: [], retiredPacksPurged: [] };
+      }
+      if (command === "skill_refresh_pack") {
+        const sourceUrl = String(
+          (args as { sourceUrl?: string } | undefined)?.sourceUrl ?? "",
+        );
+        return refresh(sourceUrl);
+      }
+      if (command === "skill_remove_pack") {
+        return {
+          id: "paper-spine",
+          name: "PaperSpine",
+          added: [],
+          updated: [],
+          removed: ["PaperSpine"],
+          unchanged: [],
+        };
+      }
+      return [];
+    },
+  );
+}
+
 function skill(overrides: Partial<RuntimeSkill> = {}): RuntimeSkill {
   return {
     id: "claude:user:paper-spine",
@@ -76,54 +168,7 @@ describe("ScientificSkillsOnboarding pack actions", () => {
         errors: [],
       }),
     });
-    vi.mocked(invoke).mockImplementation(async (command: string) => {
-      if (command === "check_skills_installed") {
-        return { installed: true, skill_count: 2, location: "/skills" };
-      }
-      if (command === "list_installed_skills") {
-        return [
-          {
-            id: "paper-spine",
-            name: "PaperSpine",
-            domain: "",
-            description: "",
-            folder: "paper-spine",
-          },
-          {
-            id: "scanpy",
-            name: "Scanpy",
-            domain: "",
-            description: "",
-            folder: "scanpy",
-          },
-        ];
-      }
-      if (command === "get_skill_categories") return [];
-      if (command === "skill_pack_preferences") {
-        return { version: 1, optedOutPackIds: [], retiredPacksPurged: [] };
-      }
-      if (command === "skill_refresh_pack") {
-        return {
-          id: "paper-spine",
-          name: "PaperSpine",
-          added: [],
-          updated: ["PaperSpine"],
-          removed: [],
-          unchanged: [],
-        };
-      }
-      if (command === "skill_remove_pack") {
-        return {
-          id: "paper-spine",
-          name: "PaperSpine",
-          added: [],
-          updated: [],
-          removed: ["PaperSpine"],
-          unchanged: [],
-        };
-      }
-      return [];
-    });
+    mockSkillsCommands();
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -145,6 +190,50 @@ describe("ScientificSkillsOnboarding pack actions", () => {
     await act(async () => {
       root.render(<ScientificSkillsOnboarding onClose={() => undefined} />);
     });
+  }
+
+  async function confirmUpdate(buttonSelector: string) {
+    await act(async () => {
+      (
+        document.body.querySelector(buttonSelector) as HTMLButtonElement
+      ).click();
+    });
+    await act(async () => {
+      (
+        document.body.querySelector(
+          '[data-testid="skill-download-confirm-action"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+  }
+
+  function packRows(): HTMLDetailsElement[] {
+    return [
+      ...document.body.querySelectorAll('[data-testid="skill-update-pack"]'),
+    ] as HTMLDetailsElement[];
+  }
+
+  function summaryText(row: Element | null | undefined): string {
+    return (
+      row?.querySelector('[data-testid="skill-update-pack-summary"]')
+        ?.textContent ?? ""
+    );
+  }
+
+  function listedNames(
+    row: Element | null | undefined,
+    testId: string,
+  ): string[] {
+    return [
+      ...(row?.querySelectorAll(`[data-testid="${testId}"] li`) ?? []),
+    ].map((item) => item.textContent ?? "");
+  }
+
+  function sectionLabel(
+    row: Element | null | undefined,
+    testId: string,
+  ): string {
+    return row?.querySelector(`[data-testid="${testId}"] p`)?.textContent ?? "";
   }
 
   it("updates only the selected pack after naming it in the download confirm", async () => {
@@ -188,10 +277,120 @@ describe("ScientificSkillsOnboarding pack actions", () => {
             ),
         ),
     ).toBe(false);
+    const row = document.body.querySelector(
+      '[data-testid="skill-update-pack"]',
+    ) as HTMLDetailsElement | null;
+    expect(row?.open).toBe(true);
     expect(
-      document.body.querySelector('[data-testid="skill-update-summary"]')
+      row?.querySelector('[data-testid="skill-update-pack-summary"]')
         ?.textContent,
-    ).toContain("PaperSpine");
+    ).toBe("PaperSpine · Added 0 · Updated 1 · Removed 0");
+    expect(listedNames(row, "skill-update-updated")).toEqual(["PaperSpine"]);
+    expect(listedNames(row, "skill-update-added")).toEqual([]);
+    expect(listedNames(row, "skill-update-removed")).toEqual([]);
+    expect(listedNames(row, "skill-update-unchanged")).toEqual([]);
+  });
+
+  it("shows an already-current pack in the selected language and lists unchanged skills", async () => {
+    useSettingsStore.setState({ uiLanguage: "zh" });
+    mockSkillsCommands(() => ({
+      id: "nature-skills",
+      name: "nature-skills",
+      added: [],
+      updated: [],
+      removed: [],
+      unchanged: ["nature-polishing", "nature-figure"],
+    }));
+    await renderDialog();
+    await confirmUpdate('[data-testid="skill-pack-update"]');
+
+    const row = packRows()[0];
+    expect(row?.open).toBe(true);
+    expect(summaryText(row)).toBe("nature-skills · 已是最新");
+    expect(listedNames(row, "skill-update-unchanged")).toEqual([
+      "nature-polishing",
+      "nature-figure",
+    ]);
+    expect(row?.textContent).toContain("未变化");
+    expect(row?.textContent).toContain("无");
+  });
+
+  it("lists skill names under each change group for one pack", async () => {
+    useSettingsStore.setState({ uiLanguage: "zh" });
+    mockSkillsCommands(() => ({
+      id: "nature-skills",
+      name: "nature-skills",
+      added: ["nature-polishing"],
+      updated: ["nature-figure", "nature-writing", "nature-citation"],
+      removed: [],
+      unchanged: ["nature-data"],
+    }));
+    await renderDialog();
+    await confirmUpdate('[data-testid="skill-pack-update"]');
+
+    const row = packRows()[0];
+    expect(row?.open).toBe(true);
+    expect(summaryText(row)).toBe("nature-skills · 新增 1 · 更新 3 · 移除 0");
+    expect(sectionLabel(row, "skill-update-added")).toBe("新增");
+    expect(listedNames(row, "skill-update-added")).toEqual([
+      "nature-polishing",
+    ]);
+    expect(sectionLabel(row, "skill-update-updated")).toBe("已更新");
+    expect(listedNames(row, "skill-update-updated")).toEqual([
+      "nature-figure",
+      "nature-writing",
+      "nature-citation",
+    ]);
+    expect(sectionLabel(row, "skill-update-removed")).toBe("已移除");
+    expect(listedNames(row, "skill-update-removed")).toEqual([]);
+    expect(sectionLabel(row, "skill-update-unchanged")).toBe("未变化");
+    expect(listedNames(row, "skill-update-unchanged")).toEqual(["nature-data"]);
+  });
+
+  it("collapses many packs and still shows each count on the row", async () => {
+    mockSkillsCommands(refreshReport);
+    await renderDialog();
+    await confirmUpdate('[data-testid="skill-pack-update-all"]');
+
+    const rows = packRows();
+    expect(rows.map((row) => summaryText(row))).toEqual([
+      "PaperSpine · Added 0 · Updated 1 · Removed 0",
+      "academic-research-skills · Already up to date",
+      "nature-skills · Added 1 · Updated 3 · Removed 0",
+      "paper-humanizer-skill — Error: network down",
+      "scientific-agent-skills · Already up to date",
+    ]);
+    expect(rows.map((row) => row.open)).toEqual([
+      false,
+      false,
+      false,
+      true,
+      false,
+    ]);
+    expect(listedNames(rows[2], "skill-update-added")).toEqual([
+      "nature-polishing",
+    ]);
+    expect(listedNames(rows[2], "skill-update-updated")).toEqual([
+      "nature-figure",
+      "nature-writing",
+      "nature-citation",
+    ]);
+    expect(summaryText(rows[3])).toContain("network down");
+    expect(summaryText(rows[3])).not.toContain("Added");
+    expect(sectionLabel(rows[3], "skill-update-added")).toBe("Added");
+  });
+
+  it("keeps the update-failed dialog when every pack fails", async () => {
+    mockSkillsCommands(() => Promise.reject(new Error("network down")));
+    await renderDialog();
+    await confirmUpdate('[data-testid="skill-pack-update"]');
+
+    expect(document.body.textContent).toContain("Update Failed");
+    const row = packRows()[0];
+    expect(row?.open).toBe(true);
+    expect(summaryText(row)).toBe("PaperSpine — Error: network down");
+    expect(summaryText(row)).not.toContain("Added");
+    expect(document.body.textContent).toContain("network down");
   });
 
   it("uninstalls the selected pack after confirming its name and skill count", async () => {
