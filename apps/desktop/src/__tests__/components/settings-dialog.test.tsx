@@ -124,14 +124,14 @@ describe("SettingsDialog", () => {
       root.render(<SettingsDialog open onOpenChange={vi.fn()} />);
     });
 
-    expect(tabLabels()).toEqual(["服务商", "技能", "智能体", "预览功能"]);
+    expect(tabLabels()).toEqual(["服务商", "技能", "智能体", "实验功能"]);
     expect(tabLabels()).not.toContain("编辑器");
     expect(
       document.body.querySelector('[data-testid="latex-teaching-settings"]'),
     ).toBeNull();
     expect(document.body.textContent).not.toContain("启用 LaTeX 教学");
 
-    await activateTab("预览功能");
+    await activateTab("实验功能");
 
     const preview = activePanel();
     const teaching = preview.querySelector(

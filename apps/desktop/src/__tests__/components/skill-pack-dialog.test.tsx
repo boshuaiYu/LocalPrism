@@ -409,7 +409,7 @@ describe("ScientificSkillsOnboarding pack actions", () => {
       "PaperSpine · Added 0 · Updated 1 · Removed 0",
       "academic-research-skills · Already up to date",
       "nature-skills · Added 1 · Updated 3 · Removed 0",
-      "paper-humanizer-skill — Error: network down",
+      "paper-humanizer-skill · Update failed — Error: network down",
       "scientific-agent-skills · Already up to date",
     ]);
     expect(rows.map((row) => row.open)).toEqual([
@@ -419,6 +419,34 @@ describe("ScientificSkillsOnboarding pack actions", () => {
       true,
       false,
     ]);
+    const failed = rows[3];
+    failed.open = false;
+    expect(failed.open).toBe(false);
+    const failure = failed.querySelector(
+      '[data-testid="skill-update-pack-failure"]',
+    );
+    expect(failure?.className).toContain("text-destructive");
+    expect(
+      failed.querySelector('[data-testid="skill-update-pack-error-icon"]'),
+    ).not.toBeNull();
+    expect(summaryText(failed)).toContain("Update failed");
+    expect(
+      failed.querySelector('[data-testid="skill-update-pack-summary"]')
+        ?.className,
+    ).toContain("text-destructive");
+    for (const row of [rows[0], rows[1], rows[2], rows[4]]) {
+      expect(
+        row.querySelector('[data-testid="skill-update-pack-failure"]'),
+      ).toBeNull();
+      expect(
+        row.querySelector('[data-testid="skill-update-pack-error-icon"]'),
+      ).toBeNull();
+      expect(summaryText(row)).not.toContain("Update failed");
+      expect(
+        row.querySelector('[data-testid="skill-update-pack-summary"]')
+          ?.className,
+      ).not.toContain("text-destructive");
+    }
     expect(listedNames(rows[2], "skill-update-added")).toEqual([
       "nature-polishing",
     ]);
@@ -432,6 +460,32 @@ describe("ScientificSkillsOnboarding pack actions", () => {
     expect(sectionLabel(rows[3], "skill-update-added")).toBe("Added");
   });
 
+  it("keeps a collapsed failed pack marked in Chinese", async () => {
+    useSettingsStore.setState({ uiLanguage: "zh" });
+    mockSkillsCommands(refreshReport);
+    await renderDialog();
+    await confirmUpdate('[data-testid="skill-pack-update-all"]');
+
+    const rows = packRows();
+    const failed = rows[3];
+    failed.open = false;
+    expect(summaryText(rows[0])).toBe("PaperSpine · 新增 0 · 更新 1 · 移除 0");
+    expect(summaryText(failed)).toBe(
+      "paper-humanizer-skill · 更新失败 — Error: network down",
+    );
+    expect(
+      failed.querySelector('[data-testid="skill-update-pack-failure"]')
+        ?.className,
+    ).toContain("text-destructive");
+    expect(
+      failed.querySelector('[data-testid="skill-update-pack-error-icon"]'),
+    ).not.toBeNull();
+    expect(
+      rows[0].querySelector('[data-testid="skill-update-pack-failure"]'),
+    ).toBeNull();
+    expect(summaryText(rows[0])).not.toContain("更新失败");
+  });
+
   it("keeps the update-failed dialog when every pack fails", async () => {
     mockSkillsCommands(() => Promise.reject(new Error("network down")));
     await renderDialog();
@@ -440,7 +494,16 @@ describe("ScientificSkillsOnboarding pack actions", () => {
     expect(document.body.textContent).toContain("Update Failed");
     const row = packRows()[0];
     expect(row?.open).toBe(true);
-    expect(summaryText(row)).toBe("PaperSpine — Error: network down");
+    expect(summaryText(row)).toBe(
+      "PaperSpine · Update failed — Error: network down",
+    );
+    expect(
+      row?.querySelector('[data-testid="skill-update-pack-failure"]')
+        ?.className,
+    ).toContain("text-destructive");
+    expect(
+      row?.querySelector('[data-testid="skill-update-pack-error-icon"]'),
+    ).not.toBeNull();
     expect(summaryText(row)).not.toContain("Added");
     expect(document.body.textContent).toContain("network down");
   });

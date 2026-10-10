@@ -14,9 +14,28 @@ import {
 } from "@/lib/skill-import-flow";
 import { useI18n } from "@/lib/use-i18n";
 
+/**
+ * File dialogs on Windows, macOS, and Linux match the last suffix only.
+ * "tar.gz" would hide *.tar.gz; "gz" shows them, and the chosen path is checked below.
+ */
 export const SKILL_ARCHIVE_FILTERS = [
-  { name: "Skill archive", extensions: ["zip", "tar.gz", "tgz"] },
+  { name: "Skill archive", extensions: ["zip", "gz", "tgz"] },
 ];
+
+function archiveFileName(path: string): string {
+  const trimmed = path.trim().replace(/[\\/]+$/, "");
+  const slash = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  const name = slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
+  return name.toLowerCase();
+}
+
+/** True for .zip, .tar.gz, and .tgz. A plain .gz file is not a skill archive. */
+export function isSkillArchivePath(path: string): boolean {
+  const name = archiveFileName(path);
+  return (
+    name.endsWith(".zip") || name.endsWith(".tar.gz") || name.endsWith(".tgz")
+  );
+}
 
 export function toastImportOutcome(
   outcome: SkillImportOutcome,

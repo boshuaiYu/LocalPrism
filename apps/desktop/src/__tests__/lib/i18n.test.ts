@@ -9,7 +9,11 @@ describe("translate", () => {
     expect(translate("zh", "settings.title")).toBe("设置");
     expect(translate("zh", "settings.providers")).toBe("服务商");
     expect(translate("en", "settings.preview")).toBe("Preview");
-    expect(translate("zh", "settings.preview")).toBe("预览功能");
+    expect(translate("zh", "settings.preview")).toBe("实验功能");
+    expect(translate("zh", "settings.description")).toContain("实验功能");
+    expect(translate("zh", "settings.description")).not.toContain("预览功能");
+    expect(translate("en", "teach.previewBadge")).toBe("Preview");
+    expect(translate("zh", "teach.previewBadge")).toBe("预览 · 超前功能");
     expect(translate("en", "teach.ask")).toBe("Ask AI");
     expect(translate("zh", "teach.ask")).toBe("问 AI");
     expect(translate("en", "teach.askLoading")).toBe("Loading history…");
@@ -122,6 +126,14 @@ describe("translate", () => {
     expect(
       translate("en", "skills.packUpdateLatest", { name: "nature-skills" }),
     ).toBe("nature-skills · Already up to date");
+    expect(translate("zh", "skills.packRowFailed")).toBe("更新失败");
+    expect(translate("en", "skills.packRowFailed")).toBe("Update failed");
+    expect(translate("zh", "skills.archiveTypeRejected")).toBe(
+      "请选择 .zip、.tar.gz 或 .tgz 压缩包。",
+    );
+    expect(translate("en", "skills.archiveTypeRejected")).toBe(
+      "Choose a .zip, .tar.gz, or .tgz archive.",
+    );
   });
 
   it("interpolates named values", () => {
