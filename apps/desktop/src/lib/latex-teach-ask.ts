@@ -16,6 +16,36 @@ function clean(value: string | null | undefined): string {
   return value?.trim() ?? "";
 }
 
+export function teachAskReplyNote(language: UiLanguage): string {
+  return translate(language, "teach.askReplyFormat");
+}
+
+/** Both languages, so a resumed transcript can drop whichever note was sent. */
+export const TEACH_ASK_REPLY_NOTES: readonly string[] = [
+  teachAskReplyNote("en"),
+  teachAskReplyNote("zh"),
+];
+
+/** Appended to the model prompt only. The learning bubble keeps the lesson text. */
+export function appendTeachAskReplyNote(
+  prompt: string,
+  language: UiLanguage,
+): string {
+  const note = teachAskReplyNote(language);
+  const base = prompt.replace(/\s+$/, "");
+  if (!note || base.endsWith(note)) return base;
+  return `${base}\n\n${note}`;
+}
+
+export function stripTeachAskReplyNote(text: string): string {
+  const end = text.replace(/[ \t]+$/g, "");
+  for (const note of TEACH_ASK_REPLY_NOTES) {
+    if (!note || !end.endsWith(note)) continue;
+    return end.slice(0, -note.length).replace(/\n+$/, "");
+  }
+  return text;
+}
+
 /**
  * Diagnostic and compile lessons store the raw message after the second colon
  * (`diag:<id>:<message>`, `compile:<index>:<message>`).

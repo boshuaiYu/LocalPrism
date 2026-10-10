@@ -404,6 +404,9 @@ describe("sendLatexTeachAsk", () => {
     expect(first?.sessionId).toBeNull();
     expect(first?.agentId).toBe("peer-review");
     expect(first?.prompt).toContain("请讲解这个 LaTeX 结构");
+    expect(first?.prompt).toContain("回复格式：");
+    expect(first?.prompt).toContain("latex 代码块");
+    expect(userTexts(created[0])[0]).not.toContain("回复格式：");
     expect(first?.prompt).toContain("\\begin{figure}");
     expect(first?.prompt).toContain("[Reply mode: peer-review.");
     expect(first?.prompt).not.toContain(SECRET_SELECTION);
@@ -478,6 +481,8 @@ describe("sendLatexTeachAsk", () => {
     await sendLatexTeachAsk("Explain this construct.");
     const first = learnTabs()[0];
     expect(first?.title).toBe("Learn LaTeX");
+    expect(lastStart()?.prompt).toContain("Reply format:");
+    expect(userTexts(first)).toEqual(["Explain this construct."]);
     finishTurn(first?.id ?? "", "learn-en");
 
     useClaudeChatStore.getState().closeTab(first?.id ?? "");

@@ -5,6 +5,7 @@ import {
   prependCompressionCarryover,
 } from "@/lib/chat-compression";
 import { visibleUserPromptText } from "@/lib/chat-visible-prompt";
+import { appendTeachAskReplyNote } from "@/lib/latex-teach-ask";
 import { applyReplyStyleToPrompt } from "@/lib/reply-mode";
 import type { ClaudeStreamMessage } from "@/stores/claude-chat-store";
 
@@ -75,6 +76,9 @@ describe("visibleUserPromptText", () => {
     expect(styled).toContain("自定义审稿口吻");
     expect(styled).toContain("[/Reply mode]");
     expect(visibleUserPromptText(styled)).toBe("请审这一段");
+    expect(visibleUserPromptText(appendTeachAskReplyNote(styled, "zh"))).toBe(
+      "请审这一段",
+    );
   });
 
   it("strips built-in reply-mode instructions from older prompts without a file line", () => {

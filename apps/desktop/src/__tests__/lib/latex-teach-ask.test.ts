@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  appendTeachAskReplyNote,
   buildTeachAskPrompt,
   diagnosticMessageFromTeachSource,
+  stripTeachAskReplyNote,
 } from "@/lib/latex-teach-ask";
 import {
   EMPTY_PROJECT_LESSON,
@@ -126,5 +128,22 @@ describe("buildTeachAskPrompt", () => {
     expect(diagnosticMessageFromTeachSource("sel:0:12", "construct")).toBe("");
     expect(diagnosticMessageFromTeachSource("guide:empty", "guide")).toBe("");
     expect(diagnosticMessageFromTeachSource("diag:1", "error")).toBe("");
+  });
+
+  it("adds a reply-format note for the model and strips it back off", () => {
+    const lesson = "请讲解这个 LaTeX 结构。";
+    const zh = appendTeachAskReplyNote(lesson, "zh");
+    const en = appendTeachAskReplyNote("Explain this LaTeX construct.", "en");
+
+    expect(zh).toContain("回复格式：");
+    expect(zh).toContain("$$...$$");
+    expect(zh).toContain("latex 代码块");
+    expect(zh).not.toContain("```");
+    expect(en).toContain("Reply format:");
+    expect(en).toContain("fenced latex code block");
+    expect(stripTeachAskReplyNote(zh)).toBe(lesson);
+    expect(stripTeachAskReplyNote(en)).toBe("Explain this LaTeX construct.");
+    expect(appendTeachAskReplyNote(zh, "zh")).toBe(zh);
+    expect(stripTeachAskReplyNote(lesson)).toBe(lesson);
   });
 });
