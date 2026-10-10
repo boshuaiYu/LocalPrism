@@ -50,6 +50,11 @@ describe("translate", () => {
     expect(translate("en", "editor.choose")).toBe("Choose editor");
     expect(translate("zh", "editor.choose")).toBe("选择编辑器");
     expect(translate("zh", "env.pythonEnvironment")).toBe("Python 环境 (uv)");
+    expect(translate("en", "env.nodeManaged")).toBe("Private");
+    expect(translate("zh", "env.nodeManaged")).toBe("专用");
+    expect(translate("zh", "env.nodePromptTitle")).toBe("需要 Node.js");
+    expect(translate("en", "env.nodeNotNow")).toBe("Not now");
+    expect(translate("zh", "env.nodeNotNow")).toBe("暂不安装");
     expect(translate("en", "agents.default")).toBe("Default");
     expect(translate("zh", "agents.default")).toBe("默认智能体");
   });

@@ -113,9 +113,11 @@ impl AppServerSpawner for ProcessSpawner {
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
             crate::uv::apply_uv_isolation_env(&mut command);
+            let child_path =
+                crate::uv::isolated_uv_path(&std::env::var("PATH").unwrap_or_default());
             command.env(
                 "PATH",
-                crate::uv::isolated_uv_path(&std::env::var("PATH").unwrap_or_default()),
+                crate::node_runtime::prepend_managed_node_path(&child_path),
             );
             command.env_remove("VIRTUAL_ENV");
             command.env_remove("UV_PROJECT_ENVIRONMENT");

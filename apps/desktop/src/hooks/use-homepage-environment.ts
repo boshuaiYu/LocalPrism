@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { areDefaultSkillPacksReady } from "@/lib/default-skill-packs";
 import { useAgentStore } from "@/stores/agent-store";
 import { useSkillStore } from "@/stores/skill-store";
+import { useNodeRuntimeStore } from "@/stores/node-runtime-store";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
 
 export type PaperSpineBootstrapStatus =
@@ -19,7 +20,8 @@ export function resetHomepageEnvironmentBootstrapForTests() {
 
 async function bootstrapHomepageEnvironment(): Promise<void> {
   const uv = useUvSetupStore.getState();
-  await uv.checkStatus();
+  const node = useNodeRuntimeStore.getState();
+  await Promise.all([uv.checkStatus(), node.checkStatus()]);
   if (useUvSetupStore.getState().status === "not-installed") {
     await uv.install();
   }
@@ -33,6 +35,11 @@ export function useHomepageEnvironment() {
   const uvInstalling = useUvSetupStore((state) => state.isInstalling);
   const uvVersion = useUvSetupStore((state) => state.version);
   const uvError = useUvSetupStore((state) => state.error);
+  const nodeStatus = useNodeRuntimeStore((state) => state.status);
+  const nodeInstalling = useNodeRuntimeStore((state) => state.isInstalling);
+  const nodeVersion = useNodeRuntimeStore((state) => state.version);
+  const nodeSource = useNodeRuntimeStore((state) => state.source);
+  const nodeError = useNodeRuntimeStore((state) => state.error);
   const skills = useSkillStore((state) => state.skills);
   const skillError = useSkillStore((state) => state.error);
   const skillLoading = useSkillStore((state) => state.loading);
@@ -84,6 +91,11 @@ export function useHomepageEnvironment() {
     uvInstalling,
     uvVersion,
     uvError,
+    nodeStatus,
+    nodeInstalling,
+    nodeVersion,
+    nodeSource,
+    nodeError,
     paperSpine,
     paperSpineError: skillError,
     paperSpineInstalled: defaultReady,

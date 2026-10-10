@@ -24,6 +24,7 @@ import {
   AppWindowIcon,
   FlaskConicalIcon,
   TerminalIcon,
+  PackageIcon,
   SettingsIcon,
   MessageCircleIcon,
   Bot as BotIcon,
@@ -93,7 +94,9 @@ import { useSkillStore } from "@/stores/skill-store";
 import { useClaudeChatStore } from "@/stores/claude-chat-store";
 import { HelpMenu } from "@/components/help-menu";
 import { ProjectCloseButton } from "@/components/workspace/project-close-button";
+import { NodeRuntimeDialog } from "@/components/node-runtime-dialog";
 import { UvSetupDialog } from "@/components/uv-setup";
+import { useNodeRuntimeStore } from "@/stores/node-runtime-store";
 import { SettingsDialog } from "@/components/settings/settings-dialog";
 import {
   PRODUCT_TOUR_EVENT,
@@ -2205,6 +2208,14 @@ function EnvironmentSection({
   const venvReady = useUvSetupStore((s) => s.venvReady);
   const uvStatus = useUvSetupStore((s) => s.status);
   const [showUvDialog, setShowUvDialog] = useState(false);
+  const nodeStatus = useNodeRuntimeStore((state) => state.status);
+  const nodeSource = useNodeRuntimeStore((state) => state.source);
+  const checkNode = useNodeRuntimeStore((state) => state.checkStatus);
+  const [showNodeDialog, setShowNodeDialog] = useState(false);
+
+  useEffect(() => {
+    void checkNode();
+  }, [checkNode]);
 
   // ── Scientific Skills ──
   const [skillsStatus, setSkillsStatus] = useState<SkillsStatus | null>(null);
@@ -2312,6 +2323,14 @@ function EnvironmentSection({
       : uvStatus === "ready"
         ? t("env.noVenv")
         : "";
+  const nodeReady = nodeStatus === "ready";
+  const nodeLabel = nodeReady
+    ? nodeSource === "managed"
+      ? t("env.active")
+      : t("env.nodeSystem")
+    : nodeStatus === "missing"
+      ? t("env.notInstalled")
+      : "";
   const skillProblem = environmentSkillProblem(skillsCheckError, skillError);
   const skillsInstalled = Boolean(skillsStatus?.installed);
   const showSkillRetry = environmentSkillShowRetry(
@@ -2355,6 +2374,30 @@ function EnvironmentSection({
               )}
             >
               {pythonLabel}
+            </span>
+          </button>
+          <button
+            className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-sidebar-accent/50"
+            data-testid="environment-node"
+            onClick={() => setShowNodeDialog(true)}
+          >
+            <PackageIcon
+              className={cn(
+                "size-3.5 shrink-0",
+                nodeReady ? "text-foreground" : "text-muted-foreground",
+              )}
+            />
+            <span className="min-w-0 flex-1 truncate text-xs">
+              {t("env.nodeRuntime")}
+            </span>
+            <span
+              className={cn(
+                "shrink-0 text-xs",
+                nodeReady ? "text-foreground" : "text-muted-foreground",
+              )}
+              data-testid="environment-node-status"
+            >
+              {nodeLabel}
             </span>
           </button>
           <div className="space-y-0.5">
@@ -2444,6 +2487,10 @@ function EnvironmentSection({
       <UvSetupDialog
         open={showUvDialog}
         onClose={() => setShowUvDialog(false)}
+      />
+      <NodeRuntimeDialog
+        open={showNodeDialog}
+        onClose={() => setShowNodeDialog(false)}
       />
 
       {showOnboarding && OnboardingComponent && (
