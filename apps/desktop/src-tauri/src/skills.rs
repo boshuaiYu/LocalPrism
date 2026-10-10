@@ -1665,7 +1665,21 @@ pub(crate) fn github_import_subpath(url: &str) -> Option<String> {
     parse_github_import_url(url)
         .and_then(|spec| spec.subpath)
         .as_deref()
-        .and_then(safe_import_subpath)
+        .and_then(normalize_portable_subpath)
+}
+
+/// Store skill subpaths with `/` separators. `\` from a Windows `PathBuf` is
+/// normalized on read and on write.
+pub(crate) fn normalize_portable_subpath(raw: &str) -> Option<String> {
+    let slashed = raw.replace('\\', "/");
+    let safe = safe_import_subpath(&slashed)?;
+    let text = safe.replace('\\', "/");
+    let parts: Vec<&str> = text.split('/').filter(|part| !part.is_empty()).collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
 }
 
 fn archive_urls_for_import(url: &str) -> Vec<String> {
@@ -1925,11 +1939,11 @@ pub async fn skill_import_url(
         .map_err(|error| format!("Failed to create download workspace: {error}"))?;
 
     let import_result = async {
-        let skill_dirs = download_skill_directories(&app, &source_url, &tmp_dir, None).await?;
+        let downloaded = download_skill_directories(&app, &source_url, &tmp_dir, None).await?;
         emit_install_log(&app, "Copying skills...");
         let imported = packs::import_new_url_skills(
             &source_url,
-            skill_dirs,
+            downloaded.dirs,
             &targets,
             project,
             skip_existing,
@@ -2017,14 +2031,21 @@ pub async fn skill_refresh_pack(
         .map_err(|error| format!("Failed to create download workspace: {error}"))?;
     let name = packs::pack_refresh_display_name(&url);
     let refresh_result = async {
-        let skill_dirs =
+        let downloaded =
             download_skill_directories(&app, &url, &tmp_dir, scope.extract_subpath.as_deref())
                 .await?;
         let _ = crate::slash_commands::import_user_slash_commands_from_source(
             &tmp_dir.join("repo"),
             false,
         );
-        packs::refresh_url_pack_from_dirs(&url, skill_dirs, &targets, project, &name)
+        packs::refresh_url_pack_from_dirs(
+            &url,
+            downloaded.dirs,
+            &targets,
+            project,
+            &name,
+            downloaded.tree_complete,
+        )
     }
     .await;
     let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -2038,12 +2059,19 @@ pub async fn skill_refresh_pack(
     Ok(report)
 }
 
+struct DownloadedSkillTree {
+    dirs: Vec<PathBuf>,
+    /// True when the requested subpath itself was scanned. A missing subpath
+    /// that falls back to the rest of the archive is not a complete tree.
+    tree_complete: bool,
+}
+
 async fn download_skill_directories(
     app: &tauri::AppHandle,
     source_url: &str,
     tmp_dir: &Path,
     extract_subpath: Option<&str>,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<DownloadedSkillTree, String> {
     if is_skill_markdown_url(source_url) {
         let bytes = download_url_bytes(source_url, Some(app), MAX_SKILL_MARKDOWN_BYTES).await?;
         let text = String::from_utf8(bytes)
@@ -2059,7 +2087,10 @@ async fn download_skill_directories(
             .map_err(|error| format!("Failed to create skill folder: {error}"))?;
         std::fs::write(skill_dir.join("SKILL.md"), text)
             .map_err(|error| format!("Failed to write SKILL.md: {error}"))?;
-        return Ok(vec![skill_dir]);
+        return Ok(DownloadedSkillTree {
+            dirs: vec![skill_dir],
+            tree_complete: true,
+        });
     }
 
     let subpath = extract_subpath
@@ -2090,16 +2121,20 @@ async fn download_skill_directories(
         .as_ref()
         .map(|path| repo_dir.join(path))
         .filter(|path| path.exists() && path.starts_with(&repo_dir));
+    let tree_complete = subpath.is_none() || requested_root.is_some();
     let search_root = requested_root.unwrap_or(repo_dir);
     let mut skill_dirs = Vec::new();
     import::collect_skill_dirs(&search_root, &mut skill_dirs);
     skill_dirs.sort();
-    if skill_dirs.is_empty() {
+    if skill_dirs.is_empty() && !tree_complete {
         return Err(
             "Downloaded source does not contain any skills. A skill must contain SKILL.md.".into(),
         );
     }
-    Ok(skill_dirs)
+    Ok(DownloadedSkillTree {
+        dirs: skill_dirs,
+        tree_complete,
+    })
 }
 
 #[tauri::command]

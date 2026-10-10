@@ -43,8 +43,9 @@ pub enum SkillSource {
         /// Missing on older manifests; the URL's tree path is used then.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subpath: Option<String>,
-        /// Folder chosen for this skill. Empty means a legacy install whose
+        /// This entry's installed folder. Empty means a legacy install whose
         /// selection is the skill currently installed from this source.
+        /// Not a pack-wide checklist: each entry records only its own folder.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         selected: Vec<String>,
     },
@@ -318,6 +319,22 @@ impl ManifestStore {
         validate_manifest(&manifest)?;
         self.write_atomic(&manifest)?;
         Ok(result)
+    }
+
+    /// Change only `source` on the entries `revise` selects, under one lock.
+    /// Other fields stay as they are in the locked snapshot.
+    pub(crate) fn revise_sources(
+        &self,
+        mut revise: impl FnMut(&ManagedSkillEntry) -> Option<SkillSource>,
+    ) -> Result<(), ManifestError> {
+        self.update(|manifest| {
+            for entry in &mut manifest.entries {
+                if let Some(source) = revise(entry) {
+                    entry.source = source;
+                }
+            }
+            Ok(())
+        })
     }
 
     pub fn upsert(&self, mut entry: ManagedSkillEntry) -> Result<(), ManifestError> {

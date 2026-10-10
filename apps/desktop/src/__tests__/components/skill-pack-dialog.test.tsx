@@ -261,6 +261,33 @@ describe("ScientificSkillsOnboarding pack actions", () => {
     expect(sectionLabel(row, "skill-update-available")).toBe("Available");
   });
 
+  it("keeps a renamed skill and says so in the selected language", async () => {
+    useSettingsStore.setState({ uiLanguage: "zh" });
+    mockSkillsCommands(() => ({
+      id: "paper-spine",
+      name: "paperspine",
+      added: [],
+      updated: [],
+      removed: [],
+      unchanged: ["Brand guidelines"],
+      missing: ["Brand guidelines"],
+      renamed: ["Brand guidelines"],
+    }));
+    await renderDialog();
+    await confirmUpdate('[data-testid="skill-pack-update"]');
+
+    const row = packRows()[0];
+    expect(summaryText(row)).toBe(
+      "PaperSpine · 已是最新 · 缺失 1 · 已改名，未自动替换",
+    );
+    expect(listedNames(row, "skill-update-renamed")).toEqual([
+      "Brand guidelines",
+    ]);
+    expect(sectionLabel(row, "skill-update-renamed")).toBe(
+      "已改名，未自动替换",
+    );
+  });
+
   it("updates only the selected pack after naming it in the download confirm", async () => {
     await renderDialog();
     await act(async () => {

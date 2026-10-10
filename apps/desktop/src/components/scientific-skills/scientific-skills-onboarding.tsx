@@ -1230,17 +1230,28 @@ function packUpdateSummaryText(
 ): string {
   const summary = packUpdateSummary(report);
   const available = report.available?.length ?? 0;
-  const withAvailable = (text: string) =>
-    available > 0
-      ? `${text} · ${t("skills.packUpdateAvailable", { count: available })}`
-      : text;
+  const missing = report.missing?.length ?? 0;
+  const renamed = report.renamed?.length ?? 0;
+  const withNotes = (text: string) => {
+    let next = text;
+    if (available > 0) {
+      next = `${next} · ${t("skills.packUpdateAvailable", { count: available })}`;
+    }
+    if (missing > 0) {
+      next = `${next} · ${t("skills.packUpdateMissing", { count: missing })}`;
+    }
+    if (renamed > 0) {
+      next = `${next} · ${t("skills.packUpdateRenamed")}`;
+    }
+    return next;
+  };
   if (summary.kind === "error") {
     return `${summary.name} — ${summary.error}`;
   }
   if (summary.kind === "latest") {
-    return withAvailable(t("skills.packUpdateLatest", { name: summary.name }));
+    return withNotes(t("skills.packUpdateLatest", { name: summary.name }));
   }
-  return withAvailable(
+  return withNotes(
     t("skills.packUpdateSummary", {
       name: summary.name,
       added: summary.added,
@@ -1310,6 +1321,22 @@ function PackUpdateRow({
           names={report.available ?? []}
           emptyLabel={t("skills.summaryNone")}
           testId="skill-update-available"
+        />
+      )}
+      {(report.missing?.length ?? 0) > 0 && (
+        <PackChangeList
+          label={t("skills.updateSummaryMissing")}
+          names={report.missing ?? []}
+          emptyLabel={t("skills.summaryNone")}
+          testId="skill-update-missing"
+        />
+      )}
+      {(report.renamed?.length ?? 0) > 0 && (
+        <PackChangeList
+          label={t("skills.updateSummaryRenamed")}
+          names={report.renamed ?? []}
+          emptyLabel={t("skills.summaryNone")}
+          testId="skill-update-renamed"
         />
       )}
     </details>
