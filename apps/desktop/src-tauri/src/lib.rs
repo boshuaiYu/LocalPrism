@@ -10,7 +10,6 @@ mod claude_process;
 mod editors;
 mod history;
 mod latex;
-mod node_runtime;
 mod project_path_guard;
 mod providers;
 mod runtime;
@@ -1134,9 +1133,6 @@ pub fn run() {
             agents::delete_agent,
             uv::check_uv_status,
             uv::install_uv,
-            node_runtime::check_node_runtime,
-            node_runtime::install_node_runtime,
-            node_runtime::remove_node_runtime,
             uv::setup_project_venv,
             uv::uv_add_packages,
             uv::uv_run_command,

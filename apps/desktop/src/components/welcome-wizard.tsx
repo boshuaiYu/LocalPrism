@@ -17,8 +17,6 @@ import { useAgentStore } from "@/stores/agent-store";
 import { useClaudeSetupStore } from "@/stores/claude-setup-store";
 import { useProviderStore } from "@/stores/provider-store";
 import { useSkillStore } from "@/stores/skill-store";
-import { useNodeRuntimeInstallListener } from "@/hooks/use-node-runtime-install";
-import { useNodeRuntimeStore } from "@/stores/node-runtime-store";
 import { useUvSetupStore } from "@/stores/uv-setup-store";
 import { LanguageSwitch } from "@/components/language-switch";
 import { useI18n } from "@/lib/use-i18n";
@@ -90,14 +88,6 @@ function SetupStep() {
   const checkUv = useUvSetupStore((state) => state.checkStatus);
   const installUv = useUvSetupStore((state) => state.install);
   const finishUvInstall = useUvSetupStore((state) => state._finishInstall);
-  const nodeStatus = useNodeRuntimeStore((state) => state.status);
-  const nodeVersion = useNodeRuntimeStore((state) => state.version);
-  const nodeSource = useNodeRuntimeStore((state) => state.source);
-  const nodeInstalling = useNodeRuntimeStore((state) => state.isInstalling);
-  const nodeError = useNodeRuntimeStore((state) => state.error);
-  const checkNode = useNodeRuntimeStore((state) => state.checkStatus);
-  const installNode = useNodeRuntimeStore((state) => state.install);
-  useNodeRuntimeInstallListener();
 
   const paperSpineSkills = useSkillStore((state) => state.skills);
   const skillError = useSkillStore((state) => state.error);
@@ -143,17 +133,10 @@ function SetupStep() {
 
   useEffect(() => {
     void checkUv();
-    void checkNode();
     void refreshSkills();
     void ensureEngine();
     void ensureDefaultSkillPacks();
-  }, [
-    checkNode,
-    checkUv,
-    ensureDefaultSkillPacks,
-    ensureEngine,
-    refreshSkills,
-  ]);
+  }, [checkUv, ensureDefaultSkillPacks, ensureEngine, refreshSkills]);
 
   useEffect(() => {
     const unlisten = listen<boolean>("uv-install-complete", (event) => {
@@ -196,34 +179,6 @@ function SetupStep() {
             uvStatus === "not-installed" && !uvInstalling
               ? { label: t("env.install"), onClick: () => void installUv() }
               : uvInstalling
-                ? { label: t("env.installing"), loading: true }
-                : undefined
-          }
-        />
-        <SetupRow
-          ok={nodeStatus === "ready"}
-          busy={nodeInstalling || nodeStatus === "checking"}
-          label={t("env.nodeRuntime")}
-          detail={
-            nodeInstalling
-              ? t("env.installing")
-              : nodeStatus === "ready"
-                ? [
-                    nodeVersion,
-                    nodeSource === "managed"
-                      ? t("env.nodeManaged")
-                      : t("env.nodeSystem"),
-                  ]
-                    .filter(Boolean)
-                    .join(" · ")
-                : nodeStatus === "checking"
-                  ? t("env.checking")
-                  : (nodeError ?? t("env.notInstalled"))
-          }
-          action={
-            nodeStatus === "missing" && !nodeInstalling
-              ? { label: t("env.install"), onClick: () => void installNode() }
-              : nodeInstalling
                 ? { label: t("env.installing"), loading: true }
                 : undefined
           }

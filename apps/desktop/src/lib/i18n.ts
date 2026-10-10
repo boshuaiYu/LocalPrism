@@ -395,7 +395,7 @@ const en = {
   "chrome.folderPlaceholder": "folder name",
 
   "settings.environment": "Environment",
-  "settings.environmentMeta": "Python / Node / Skills",
+  "settings.environmentMeta": "Python / Skills",
 
   "env.active": "Active",
   "env.notInstalled": "Not installed",
@@ -444,25 +444,6 @@ const en = {
   "env.pythonBinary": "Python: {{name}}",
   "env.venvHelp":
     "Claude Code and LocalPrism terminal tools use this environment when running Python code. OpenAI-compatible providers use it through PowerShell/Bash tool calls. Use uv pip install to add packages.",
-  "env.nodeRuntime": "Node.js",
-  "env.nodeEnvironment": "Node.js runtime",
-  "env.manageNode":
-    "Private Node.js for agents, skills, and MCP servers. It stays in LocalPrism's data folder.",
-  "env.checkingNode": "Checking Node.js…",
-  "env.nodeMissing": "Node.js is not available",
-  "env.nodeReady": "Node.js is available",
-  "env.nodeManaged": "Private",
-  "env.nodeSystem": "System",
-  "env.nodeReinstall": "Reinstall",
-  "env.nodeRemove": "Remove",
-  "env.nodeNotNow": "Not now",
-  "env.nodeInstallPrivate": "Install private copy",
-  "env.nodePromptTitle": "Node.js is needed",
-  "env.nodePromptBody":
-    "Agents, skills, and MCP servers use node and npx. LocalPrism can download the official Node.js LTS into its private data folder. This does not change the system PATH or install Node.js globally.",
-  "env.nodeHelp":
-    "Only processes started by LocalPrism see a private Node.js. The system PATH is left unchanged.",
-  "env.nodePath": "Path: {{path}}",
   "env.workflow":
     "Skills help paper workflows. Default packs such as {{packs}} include PaperSpine-style helpers the agent can use while drafting and revising a paper.",
 
@@ -1035,7 +1016,7 @@ const zh: Record<MessageKey, string> = {
   "chrome.folderPlaceholder": "文件夹名称",
 
   "settings.environment": "环境",
-  "settings.environmentMeta": "Python / Node / 技能",
+  "settings.environmentMeta": "Python / 技能",
 
   "env.active": "已启用",
   "env.notInstalled": "未安装",
@@ -1084,25 +1065,6 @@ const zh: Record<MessageKey, string> = {
   "env.pythonBinary": "Python：{{name}}",
   "env.venvHelp":
     "Claude Code 和 LocalPrism 的终端工具在运行 Python 时会使用这个环境。兼容 OpenAI 的服务商通过 PowerShell 或 Bash 工具调用使用它。用 uv pip install 添加软件包。",
-  "env.nodeRuntime": "Node.js",
-  "env.nodeEnvironment": "Node.js 运行时",
-  "env.manageNode":
-    "供智能体、技能和 MCP 使用的专用 Node.js，只放在 LocalPrism 的数据目录里。",
-  "env.checkingNode": "正在检查 Node.js…",
-  "env.nodeMissing": "没有可用的 Node.js",
-  "env.nodeReady": "Node.js 可用",
-  "env.nodeManaged": "专用",
-  "env.nodeSystem": "系统",
-  "env.nodeReinstall": "重新安装",
-  "env.nodeRemove": "移除",
-  "env.nodeNotNow": "暂不安装",
-  "env.nodeInstallPrivate": "安装专用副本",
-  "env.nodePromptTitle": "需要 Node.js",
-  "env.nodePromptBody":
-    "智能体、技能和 MCP 服务需要 node 和 npx。LocalPrism 可以把官方 Node.js LTS 下载到自己的数据目录，不会修改系统 PATH，也不会做全局安装。",
-  "env.nodeHelp":
-    "只有 LocalPrism 启动的进程会看到专用 Node.js。系统 PATH 保持不变。",
-  "env.nodePath": "路径：{{path}}",
   "env.workflow":
     "技能会协助文稿写作。默认技能包（例如 {{packs}}）包含 PaperSpine 风格的助手，智能体起草和修改文稿时可以使用。",
 

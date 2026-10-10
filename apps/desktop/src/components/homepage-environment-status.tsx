@@ -45,11 +45,6 @@ export function HomepageEnvironmentStatus() {
     uvInstalling,
     uvVersion,
     uvError,
-    nodeStatus,
-    nodeInstalling,
-    nodeVersion,
-    nodeSource,
-    nodeError,
     paperSpine,
     paperSpineError,
     paperSpineInstalled,
@@ -57,18 +52,6 @@ export function HomepageEnvironmentStatus() {
 
   const uvBusy = uvInstalling || uvStatus === "checking";
   const uvOk = uvStatus === "ready";
-  const nodeBusy = nodeInstalling || nodeStatus === "checking";
-  const nodeOk = nodeStatus === "ready";
-  const nodeDetail = nodeBusy
-    ? t("env.installing")
-    : nodeOk
-      ? [
-          nodeVersion,
-          nodeSource === "managed" ? t("env.nodeManaged") : t("env.nodeSystem"),
-        ]
-          .filter(Boolean)
-          .join(" · ")
-      : (nodeError ?? t("env.notInstalled"));
   const paperBusy = paperSpine === "checking" || paperSpine === "installing";
 
   return (
@@ -85,12 +68,6 @@ export function HomepageEnvironmentStatus() {
                 ? (uvVersion ?? t("env.ready"))
                 : (uvError ?? t("env.notInstalled"))
           }
-        />
-        <StatusChip
-          ok={nodeOk}
-          busy={nodeBusy}
-          label={t("env.nodeRuntime")}
-          detail={nodeDetail}
         />
         <StatusChip
           ok={paperSpineInstalled}

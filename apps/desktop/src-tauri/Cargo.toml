@@ -47,7 +47,6 @@ tectonic = { version = "0.15", default-features = true, features = ["external-ha
 #   Windows: vcpkg install harfbuzz[graphite2] freetype icu fontconfig (with TECTONIC_DEP_BACKEND=vcpkg)
 flate2 = "1"
 tar = "0.4"
-lzma-rs = "0.3"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 fs2 = "0.4"
 sha2 = "0.10"
