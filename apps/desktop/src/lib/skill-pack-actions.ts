@@ -50,6 +50,44 @@ export function normalizePackUpdateReport(
   };
 }
 
+export type PackUpdateSummaryView =
+  | { kind: "error"; name: string; error: string }
+  | { kind: "latest"; name: string }
+  | {
+      kind: "counts";
+      name: string;
+      added: number;
+      updated: number;
+      removed: number;
+    };
+
+/** One-line result for a pack. Errors stay a name-and-message row. */
+export function packUpdateSummary(
+  report: SkillPackUpdateReport,
+): PackUpdateSummaryView {
+  if (report.error) {
+    return { kind: "error", name: report.name, error: report.error };
+  }
+  const added = report.added.length;
+  const updated = report.updated.length;
+  const removed = report.removed.length;
+  if (added === 0 && updated === 0 && removed === 0) {
+    return { kind: "latest", name: report.name };
+  }
+  return { kind: "counts", name: report.name, added, updated, removed };
+}
+
+/**
+ * Open the only pack so its skill names are visible. Keep a multi-pack
+ * result collapsed, and keep a failed pack open.
+ */
+export function packUpdateRowOpen(
+  packCount: number,
+  report: Pick<SkillPackUpdateReport, "error">,
+): boolean {
+  return Boolean(report.error) || packCount === 1;
+}
+
 export function categoryRefreshTarget(
   category: SkillsBrowserCategory,
 ): PackRefreshTarget | null {

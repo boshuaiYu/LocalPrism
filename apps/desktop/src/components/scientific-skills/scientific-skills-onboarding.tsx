@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -66,6 +73,8 @@ import {
   categoryRefreshTarget,
   normalizePackUpdateReport,
   optedOutPackIdSet,
+  packUpdateRowOpen,
+  packUpdateSummary,
   remoteRefreshTargets,
   updateAllTargets,
   type PackRefreshTarget,
@@ -647,36 +656,11 @@ export function ScientificSkillsOnboarding({
             {(isComplete || error) && updateReports.length > 0 && (
               <div className="space-y-2" data-testid="skill-update-summary">
                 {updateReports.map((report) => (
-                  <details
+                  <PackUpdateRow
                     key={`${report.id}:${report.name}`}
-                    className="rounded-md border border-border/70 px-3 py-2 text-xs"
-                    open={Boolean(report.error)}
-                  >
-                    <summary className="cursor-pointer font-medium">
-                      {report.name}
-                      {report.error ? ` — ${report.error}` : ""}
-                    </summary>
-                    <PackChangeList
-                      label={t("skills.updateSummaryAdded")}
-                      names={report.added}
-                      emptyLabel={t("skills.summaryNone")}
-                    />
-                    <PackChangeList
-                      label={t("skills.updateSummaryUpdated")}
-                      names={report.updated}
-                      emptyLabel={t("skills.summaryNone")}
-                    />
-                    <PackChangeList
-                      label={t("skills.updateSummaryRemoved")}
-                      names={report.removed}
-                      emptyLabel={t("skills.summaryNone")}
-                    />
-                    <PackChangeList
-                      label={t("skills.updateSummaryUnchanged")}
-                      names={report.unchanged}
-                      emptyLabel={t("skills.summaryNone")}
-                    />
-                  </details>
+                    report={report}
+                    packCount={updateReports.length}
+                  />
                 ))}
               </div>
             )}
@@ -1237,19 +1221,107 @@ function SkillGithubLink({ href, label }: { href: string; label: string }) {
   );
 }
 
+function packUpdateSummaryText(
+  report: SkillPackUpdateReport,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  const summary = packUpdateSummary(report);
+  if (summary.kind === "error") {
+    return `${summary.name} — ${summary.error}`;
+  }
+  if (summary.kind === "latest") {
+    return t("skills.packUpdateLatest", { name: summary.name });
+  }
+  return t("skills.packUpdateSummary", {
+    name: summary.name,
+    added: summary.added,
+    updated: summary.updated,
+    removed: summary.removed,
+  });
+}
+
+function PackUpdateRow({
+  report,
+  packCount,
+}: {
+  report: SkillPackUpdateReport;
+  packCount: number;
+}) {
+  const { t } = useI18n();
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+  const openStateApplied = useRef(false);
+  useLayoutEffect(() => {
+    if (openStateApplied.current) return;
+    const element = detailsRef.current;
+    if (!element) return;
+    openStateApplied.current = true;
+    element.open = packUpdateRowOpen(packCount, report);
+  }, [packCount, report]);
+
+  return (
+    <details
+      ref={detailsRef}
+      className="rounded-md border border-border/70 px-3 py-2 text-xs"
+      data-testid="skill-update-pack"
+    >
+      <summary
+        className="cursor-pointer font-medium"
+        data-testid="skill-update-pack-summary"
+      >
+        {packUpdateSummaryText(report, t)}
+      </summary>
+      <PackChangeList
+        label={t("skills.updateSummaryAdded")}
+        names={report.added}
+        emptyLabel={t("skills.summaryNone")}
+        testId="skill-update-added"
+      />
+      <PackChangeList
+        label={t("skills.updateSummaryUpdated")}
+        names={report.updated}
+        emptyLabel={t("skills.summaryNone")}
+        testId="skill-update-updated"
+      />
+      <PackChangeList
+        label={t("skills.updateSummaryRemoved")}
+        names={report.removed}
+        emptyLabel={t("skills.summaryNone")}
+        testId="skill-update-removed"
+      />
+      <PackChangeList
+        label={t("skills.updateSummaryUnchanged")}
+        names={report.unchanged}
+        emptyLabel={t("skills.summaryNone")}
+        testId="skill-update-unchanged"
+      />
+    </details>
+  );
+}
+
 function PackChangeList({
   label,
   names,
   emptyLabel,
+  testId,
 }: {
   label: string;
   names: string[];
   emptyLabel: string;
+  testId: string;
 }) {
   return (
-    <p className="mt-1 text-muted-foreground">
-      {label}: {names.length > 0 ? names.join(", ") : emptyLabel}
-    </p>
+    <div className="mt-2" data-testid={testId}>
+      <p className="font-medium">{label}</p>
+      {names.length > 0 ? (
+        <ul className="mt-0.5 list-disc space-y-0.5 pl-4 text-muted-foreground">
+          {names.map((name, index) => (
+            <li key={`${name}:${index}`}>{name}</li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-0.5 text-muted-foreground">{emptyLabel}</p>
+      )}
+    </div>
   );
 }
 
