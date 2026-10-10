@@ -532,6 +532,8 @@ const en = {
   "skills.packUpdateSummary":
     "{{name}} · Added {{added}} · Updated {{updated}} · Removed {{removed}}",
   "skills.packUpdateLatest": "{{name}} · Already up to date",
+  "skills.packUpdateAvailable": "{{count}} available",
+  "skills.updateSummaryAvailable": "Available",
   "skills.summaryNone": "None",
   "skills.retiredRemoved":
     "scientific-agent-skills is no longer a default pack. Removed {{count}} managed skills from that pack.",
@@ -1142,6 +1144,8 @@ const zh: Record<MessageKey, string> = {
   "skills.packUpdateSummary":
     "{{name}} · 新增 {{added}} · 更新 {{updated}} · 移除 {{removed}}",
   "skills.packUpdateLatest": "{{name}} · 已是最新",
+  "skills.packUpdateAvailable": "可添加 {{count}}",
+  "skills.updateSummaryAvailable": "可添加",
   "skills.summaryNone": "无",
   "skills.retiredRemoved":
     "scientific-agent-skills 已不再是默认技能包，已移除其中 {{count}} 个受管理技能。",

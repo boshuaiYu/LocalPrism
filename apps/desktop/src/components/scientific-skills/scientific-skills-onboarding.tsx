@@ -77,6 +77,7 @@ import {
   packUpdateSummary,
   remoteRefreshTargets,
   updateAllTargets,
+  withPackListName,
   type PackRefreshTarget,
   type SkillPackUpdateReport,
 } from "@/lib/skill-pack-actions";
@@ -331,15 +332,17 @@ export function ScientificSkillsOnboarding({
           if (!mountedRef.current) return;
           setInstallLogs((previous) => [...previous, target.name]);
           try {
-            const report = normalizePackUpdateReport(
-              await invoke("skill_refresh_pack", {
-                sourceUrl: target.sourceUrl ?? null,
-                sourceFolder: target.sourceFolder ?? null,
-                targets: useSkillStore.getState().selectedTargets,
-                projectPath: null,
-              }),
+            const report = withPackListName(
+              normalizePackUpdateReport(
+                await invoke("skill_refresh_pack", {
+                  sourceUrl: target.sourceUrl ?? null,
+                  sourceFolder: target.sourceFolder ?? null,
+                  targets: useSkillStore.getState().selectedTargets,
+                  projectPath: null,
+                }),
+              ),
+              target.name,
             );
-            if (!report.name) report.name = target.name;
             if (!report.id) report.id = target.id;
             reports.push(report);
           } catch (error) {
@@ -1226,18 +1229,25 @@ function packUpdateSummaryText(
   t: ReturnType<typeof useI18n>["t"],
 ): string {
   const summary = packUpdateSummary(report);
+  const available = report.available?.length ?? 0;
+  const withAvailable = (text: string) =>
+    available > 0
+      ? `${text} · ${t("skills.packUpdateAvailable", { count: available })}`
+      : text;
   if (summary.kind === "error") {
     return `${summary.name} — ${summary.error}`;
   }
   if (summary.kind === "latest") {
-    return t("skills.packUpdateLatest", { name: summary.name });
+    return withAvailable(t("skills.packUpdateLatest", { name: summary.name }));
   }
-  return t("skills.packUpdateSummary", {
-    name: summary.name,
-    added: summary.added,
-    updated: summary.updated,
-    removed: summary.removed,
-  });
+  return withAvailable(
+    t("skills.packUpdateSummary", {
+      name: summary.name,
+      added: summary.added,
+      updated: summary.updated,
+      removed: summary.removed,
+    }),
+  );
 }
 
 function PackUpdateRow({
@@ -1294,6 +1304,14 @@ function PackUpdateRow({
         emptyLabel={t("skills.summaryNone")}
         testId="skill-update-unchanged"
       />
+      {(report.available?.length ?? 0) > 0 && (
+        <PackChangeList
+          label={t("skills.updateSummaryAvailable")}
+          names={report.available ?? []}
+          emptyLabel={t("skills.summaryNone")}
+          testId="skill-update-available"
+        />
+      )}
     </details>
   );
 }

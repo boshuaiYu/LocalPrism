@@ -1661,6 +1661,13 @@ fn parse_github_import_url(url: &str) -> Option<GithubImportSpec> {
     })
 }
 
+pub(crate) fn github_import_subpath(url: &str) -> Option<String> {
+    parse_github_import_url(url)
+        .and_then(|spec| spec.subpath)
+        .as_deref()
+        .and_then(safe_import_subpath)
+}
+
 fn archive_urls_for_import(url: &str) -> Vec<String> {
     if let Some(spec) = parse_github_import_url(url) {
         let mut refs = vec![spec.git_ref.clone()];
@@ -1913,84 +1920,20 @@ pub async fn skill_import_url(
 
     let project = project_path.as_deref().map(Path::new);
     let skip_existing = skip_existing.unwrap_or(false);
-    let source = manifest::SkillSource::Url {
-        url: source_url.clone(),
-    };
     let tmp_dir = short_skill_temp_dir("imp");
     std::fs::create_dir_all(&tmp_dir)
         .map_err(|error| format!("Failed to create download workspace: {error}"))?;
 
     let import_result = async {
-        if is_skill_markdown_url(&source_url) {
-            let bytes =
-                download_url_bytes(&source_url, Some(&app), MAX_SKILL_MARKDOWN_BYTES).await?;
-            let text = String::from_utf8(bytes)
-                .map_err(|error| format!("SKILL.md is not valid UTF-8: {error}"))?;
-            let folder = source_url
-                .rsplit('/')
-                .nth(1)
-                .map(sanitize_skill_folder_name)
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| "imported-skill".into());
-            let skill_dir = tmp_dir.join(folder);
-            std::fs::create_dir_all(&skill_dir)
-                .map_err(|error| format!("Failed to create skill folder: {error}"))?;
-            std::fs::write(skill_dir.join("SKILL.md"), text)
-                .map_err(|error| format!("Failed to write SKILL.md: {error}"))?;
-            emit_install_log(&app, "Copying skills...");
-            let imported = import_collected_skill_dirs(
-                vec![skill_dir],
-                &targets,
-                project,
-                source,
-                skip_existing,
-            )?;
-            emit_install_log(&app, &format!("Copied {} skills", imported.skills.len()));
-            return Ok(imported);
-        }
-
-        let spec = parse_github_import_url(&source_url);
-        let subpath = spec
-            .as_ref()
-            .and_then(|value| value.subpath.as_deref())
-            .and_then(safe_import_subpath);
-        let mut last_error = None;
-        for archive_url in archive_urls_for_import(&source_url) {
-            match download_url_bytes(&archive_url, Some(&app), MAX_SKILL_DOWNLOAD_BYTES).await {
-                Ok(bytes) => match unpack_tarball(&bytes, &tmp_dir, subpath.as_deref()) {
-                    Ok(()) => {
-                        last_error = None;
-                        break;
-                    }
-                    Err(error) => last_error = Some(error),
-                },
-                Err(error) => last_error = Some(error),
-            }
-        }
-        if let Some(error) = last_error {
-            return Err(format!(
-                "Could not download skills from {source_url}. {error}"
-            ));
-        }
-
-        let repo_dir = tmp_dir.join("repo");
-        let requested_root = subpath
-            .as_ref()
-            .map(|path| repo_dir.join(path))
-            .filter(|path| path.exists() && path.starts_with(&repo_dir));
-        let search_root = requested_root.unwrap_or_else(|| repo_dir.clone());
-        let mut skill_dirs = Vec::new();
-        import::collect_skill_dirs(&search_root, &mut skill_dirs);
-        skill_dirs.sort();
-        if skill_dirs.is_empty() {
-            return Err(
-                "Downloaded source does not contain any skills. A skill must contain SKILL.md."
-                    .into(),
-            );
-        }
+        let skill_dirs = download_skill_directories(&app, &source_url, &tmp_dir, None).await?;
         emit_install_log(&app, "Copying skills...");
-        let imported =
-            import_collected_skill_dirs(skill_dirs, &targets, project, source, skip_existing)?;
+        let imported = packs::import_new_url_skills(
+            &source_url,
+            skill_dirs,
+            &targets,
+            project,
+            skip_existing,
+        )?;
         let _ = crate::slash_commands::import_user_slash_commands_from_source(
             &tmp_dir.join("repo"),
             skip_existing,
@@ -2064,27 +2007,99 @@ pub async fn skill_refresh_pack(
         }
         return Ok(report);
     }
-    let url = source_url.unwrap_or_default();
+    let url = normalize_skill_import_url(&source_url.unwrap_or_default());
     if url.trim().is_empty() {
         return Err("This pack has no recorded link or folder to update.".into());
     }
-    let outcome =
-        skill_import_url(app.clone(), url.clone(), targets, project_path, Some(false)).await?;
-    let source = manifest::SkillSource::Url { url: url.clone() };
-    let kept: Vec<String> = outcome
-        .skills
-        .iter()
-        .map(|skill| skill.folder.clone())
-        .collect();
-    let removed = if outcome.errors.is_empty() {
-        packs::remove_source_skills_except(&source, &kept)?
-    } else {
-        Vec::new()
-    };
-    let name = packs::github_repo(&url)
-        .map(|(_, repo)| repo)
-        .unwrap_or_else(|| url.clone());
-    Ok(packs::report_from_outcome(&url, &name, outcome, removed))
+    let scope = packs::load_url_refresh_scope(&url)?;
+    let tmp_dir = short_skill_temp_dir("upd");
+    std::fs::create_dir_all(&tmp_dir)
+        .map_err(|error| format!("Failed to create download workspace: {error}"))?;
+    let name = packs::pack_refresh_display_name(&url);
+    let refresh_result = async {
+        let skill_dirs =
+            download_skill_directories(&app, &url, &tmp_dir, scope.extract_subpath.as_deref())
+                .await?;
+        let _ = crate::slash_commands::import_user_slash_commands_from_source(
+            &tmp_dir.join("repo"),
+            false,
+        );
+        packs::refresh_url_pack_from_dirs(&url, skill_dirs, &targets, project, &name)
+    }
+    .await;
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let report = refresh_result?;
+    if report.error.is_none() {
+        if let Some(pack_id) = packs::default_pack_id_from_url(&url) {
+            let _ = packs::clear_opt_out(pack_id);
+        }
+        emit_skills_changed(&app);
+    }
+    Ok(report)
+}
+
+async fn download_skill_directories(
+    app: &tauri::AppHandle,
+    source_url: &str,
+    tmp_dir: &Path,
+    extract_subpath: Option<&str>,
+) -> Result<Vec<PathBuf>, String> {
+    if is_skill_markdown_url(source_url) {
+        let bytes = download_url_bytes(source_url, Some(app), MAX_SKILL_MARKDOWN_BYTES).await?;
+        let text = String::from_utf8(bytes)
+            .map_err(|error| format!("SKILL.md is not valid UTF-8: {error}"))?;
+        let folder = source_url
+            .rsplit('/')
+            .nth(1)
+            .map(sanitize_skill_folder_name)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "imported-skill".into());
+        let skill_dir = tmp_dir.join(folder);
+        std::fs::create_dir_all(&skill_dir)
+            .map_err(|error| format!("Failed to create skill folder: {error}"))?;
+        std::fs::write(skill_dir.join("SKILL.md"), text)
+            .map_err(|error| format!("Failed to write SKILL.md: {error}"))?;
+        return Ok(vec![skill_dir]);
+    }
+
+    let subpath = extract_subpath
+        .filter(|value| !value.is_empty())
+        .and_then(safe_import_subpath)
+        .or_else(|| github_import_subpath(source_url));
+    let mut last_error = None;
+    for archive_url in archive_urls_for_import(source_url) {
+        match download_url_bytes(&archive_url, Some(app), MAX_SKILL_DOWNLOAD_BYTES).await {
+            Ok(bytes) => match unpack_tarball(&bytes, tmp_dir, subpath.as_deref()) {
+                Ok(()) => {
+                    last_error = None;
+                    break;
+                }
+                Err(error) => last_error = Some(error),
+            },
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if let Some(error) = last_error {
+        return Err(format!(
+            "Could not download skills from {source_url}. {error}"
+        ));
+    }
+
+    let repo_dir = tmp_dir.join("repo");
+    let requested_root = subpath
+        .as_ref()
+        .map(|path| repo_dir.join(path))
+        .filter(|path| path.exists() && path.starts_with(&repo_dir));
+    let search_root = requested_root.unwrap_or(repo_dir);
+    let mut skill_dirs = Vec::new();
+    import::collect_skill_dirs(&search_root, &mut skill_dirs);
+    skill_dirs.sort();
+    if skill_dirs.is_empty() {
+        return Err(
+            "Downloaded source does not contain any skills. A skill must contain SKILL.md.".into(),
+        );
+    }
+    Ok(skill_dirs)
 }
 
 #[tauri::command]

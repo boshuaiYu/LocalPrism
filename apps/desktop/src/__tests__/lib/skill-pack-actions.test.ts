@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   packUpdateRowOpen,
   packUpdateSummary,
+  withPackListName,
   type SkillPackUpdateReport,
 } from "@/lib/skill-pack-actions";
 
@@ -61,6 +62,18 @@ describe("pack update result rows", () => {
       name: "nature-skills",
       error: "network down",
     });
+  });
+
+  it("uses the pack list name when a refresh report lowercases it", () => {
+    expect(
+      withPackListName(
+        report({ id: "paper-spine", name: "paperspine" }),
+        "PaperSpine",
+      ).name,
+    ).toBe("PaperSpine");
+    expect(withPackListName(report({ name: "skills" }), "  ").name).toBe(
+      "skills",
+    );
   });
 
   it("expands a single pack and a failed pack, and collapses many packs", () => {
