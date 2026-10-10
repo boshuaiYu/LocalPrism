@@ -135,6 +135,9 @@ vi.mock("@/components/workspace/workspace-layout", () => ({
 vi.mock("@/components/environment-onboarding", () => ({
   EnvironmentOnboarding: () => null,
 }));
+vi.mock("@/components/node-runtime-prompt", () => ({
+  NodeRuntimePrompt: () => null,
+}));
 vi.mock("@/components/welcome-wizard", () => ({
   WelcomeWizard: () => <div data-testid="welcome-wizard" />,
 }));

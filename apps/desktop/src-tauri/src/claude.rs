@@ -2037,6 +2037,10 @@ fn create_command(
         cmd.env_remove("UV_PROJECT_ENVIRONMENT");
     }
 
+    // Managed Node.js is first for this child only. The app process PATH
+    // and the system PATH stay untouched.
+    current_path = crate::node_runtime::prepend_managed_node_path(&current_path);
+
     cmd.env("PATH", current_path);
 
     Ok(cmd)
@@ -6799,6 +6803,44 @@ mod tests {
             "create_command should set UV_PYTHON_INSTALL_DIR under LocalPrism home"
         );
         assert!(cache.is_dir());
+    }
+
+    #[test]
+    fn test_create_command_puts_managed_node_first_on_the_child_path() {
+        let _guard = crate::providers::paths::lock_provider_env();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("runtimes").join("node").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("node"), b"node").unwrap();
+        std::fs::write(bin.join("npx"), b"npx").unwrap();
+        let previous_home = std::env::var("LOCALPRISM_HOME").ok();
+        let previous_path = std::env::var("PATH").ok();
+        std::env::set_var("LOCALPRISM_HOME", dir.path());
+        let cmd = create_command(
+            "/usr/bin/claude",
+            vec![],
+            "/tmp/project",
+            None,
+            &SessionSkillExposure::none(),
+        )
+        .unwrap();
+        let child_path = cmd
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match previous_home {
+            Some(value) => std::env::set_var("LOCALPRISM_HOME", value),
+            None => std::env::remove_var("LOCALPRISM_HOME"),
+        }
+        let bin_text = bin.to_string_lossy().into_owned();
+        assert!(
+            child_path.starts_with(&bin_text),
+            "child PATH should start with managed node, got {child_path}"
+        );
+        assert_eq!(std::env::var("PATH").ok(), previous_path);
     }
 
     #[test]
