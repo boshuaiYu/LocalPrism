@@ -4,11 +4,22 @@ import { invoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NodeRuntimeDialog } from "@/components/node-runtime-dialog";
 import { NodeRuntimePrompt } from "@/components/node-runtime-prompt";
+import { Sidebar } from "@/components/workspace/sidebar";
 import { resetMockTauriEvents } from "@/__tests__/mocks/tauri";
+import { useSettingsStore } from "@/stores/settings-store";
 import {
   NODE_RUNTIME_DECLINED_KEY,
   useNodeRuntimeStore,
 } from "@/stores/node-runtime-store";
+import { useUvSetupStore } from "@/stores/uv-setup-store";
+
+vi.mock("next-themes", () => ({
+  useTheme: () => ({ theme: "system", setTheme: vi.fn() }),
+}));
+
+vi.mock("@tauri-apps/api/app", () => ({
+  getVersion: vi.fn().mockResolvedValue("1.0.9-5"),
+}));
 
 vi.mock("@/components/ui/button", () => ({
   Button: ({
@@ -79,6 +90,7 @@ describe("Node.js runtime UI", () => {
   });
 
   afterEach(async () => {
+    useSettingsStore.getState().setUiLanguage("en");
     await act(async () => root.unmount());
     container.remove();
     document.body.querySelector("[data-slot='dialog-portal']")?.remove();
@@ -217,5 +229,98 @@ describe("Node.js runtime UI", () => {
       await Promise.resolve();
     });
     expect(vi.mocked(invoke)).toHaveBeenCalledWith("install_node_runtime");
+  });
+
+  it("shows a Node.js row under Python and opens the runtime dialog", async () => {
+    useSettingsStore.getState().setUiLanguage("zh");
+    useUvSetupStore.setState({ status: "ready", venvReady: true });
+    Object.defineProperty(window, "ResizeObserver", {
+      configurable: true,
+      writable: true,
+      value: class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    });
+
+    const layoutControls = {
+      codeVisible: true,
+      chatVisible: true,
+      pdfVisible: true,
+      sidebarVisible: true,
+      setCodeVisible: vi.fn(),
+      setChatVisible: vi.fn(),
+      setPdfVisible: vi.fn(),
+      setSidebarVisible: vi.fn(),
+    };
+
+    async function renderWith(
+      source: "managed" | "system" | null,
+      statusText: string,
+    ) {
+      vi.mocked(invoke).mockImplementation(async (command) => {
+        if (command === "check_node_runtime") {
+          return source
+            ? runtime({
+                available: true,
+                source,
+                version: "v22.14.0",
+                node_path: "/data/runtimes/node/bin/node",
+                npx_path: "/data/runtimes/node/bin/npx",
+                managed_dir:
+                  source === "managed" ? "/data/runtimes/node" : null,
+              })
+            : runtime();
+        }
+        if (command === "check_skills_installed") {
+          return { installed: true, skill_count: 33, location: "" };
+        }
+        return undefined;
+      });
+      await act(async () => {
+        root.render(<Sidebar layoutControls={layoutControls} />);
+      });
+      const deadline = Date.now() + 1500;
+      let node: Element | null = null;
+      while (Date.now() < deadline) {
+        node = container.querySelector('[data-testid="environment-node"]');
+        const status = container.querySelector(
+          '[data-testid="environment-node-status"]',
+        );
+        if (node && status?.textContent === statusText) return node;
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        });
+      }
+      throw new Error(`Node.js row did not show “${statusText}”`);
+    }
+
+    const managed = await renderWith("managed", "已启用");
+    expect(managed.textContent).toContain("Node.js");
+    expect(managed.previousElementSibling?.textContent).toContain("Python");
+    expect(managed.previousElementSibling?.textContent).toContain("已启用");
+    expect(managed.className).toBe(
+      managed.previousElementSibling instanceof HTMLElement
+        ? managed.previousElementSibling.className
+        : "",
+    );
+
+    await act(async () => {
+      if (managed instanceof HTMLButtonElement) managed.click();
+    });
+    expect(
+      document.body.querySelector('[data-testid="node-runtime-dialog"]'),
+    ).not.toBeNull();
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    const system = await renderWith("system", "系统");
+    expect(system.textContent).toContain("Node.js");
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    const missing = await renderWith(null, "未安装");
+    expect(missing.textContent).toContain("Node.js");
   });
 });

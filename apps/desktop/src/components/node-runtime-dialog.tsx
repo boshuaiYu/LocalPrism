@@ -4,6 +4,7 @@ import {
   CheckCircle2Icon,
   DownloadIcon,
   Loader2Icon,
+  PackageIcon,
   Trash2Icon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -64,6 +65,7 @@ export function NodeRuntimeDialog({ open, onClose }: NodeRuntimeDialogProps) {
       >
         <DialogHeader>
           <DialogTitle className="flex min-w-0 items-center gap-2 pr-8">
+            <PackageIcon className="size-5 shrink-0" />
             <span className="min-w-0 truncate">{t("env.nodeEnvironment")}</span>
           </DialogTitle>
           <DialogDescription>{t("env.manageNode")}</DialogDescription>

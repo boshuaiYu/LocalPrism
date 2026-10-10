@@ -2326,10 +2326,10 @@ function EnvironmentSection({
   const nodeReady = nodeStatus === "ready";
   const nodeLabel = nodeReady
     ? nodeSource === "managed"
-      ? t("env.nodeManaged")
+      ? t("env.active")
       : t("env.nodeSystem")
     : nodeStatus === "checking"
-      ? t("env.checking")
+      ? ""
       : t("env.notInstalled");
   const skillProblem = environmentSkillProblem(skillsCheckError, skillError);
   const skillsInstalled = Boolean(skillsStatus?.installed);
@@ -2395,6 +2395,7 @@ function EnvironmentSection({
                 "shrink-0 text-xs",
                 nodeReady ? "text-foreground" : "text-muted-foreground",
               )}
+              data-testid="environment-node-status"
             >
               {nodeLabel}
             </span>
