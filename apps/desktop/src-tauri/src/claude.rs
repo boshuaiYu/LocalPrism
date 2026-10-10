@@ -5190,9 +5190,11 @@ fn strip_teach_ask_reply_note(text: &str) -> String {
 }
 
 fn normalize_rewind_text(text: &str) -> String {
-    // Drop the learning note before the 280-character cut so a lesson that
-    // almost fills the window still matches the saved row.
-    let collapsed = strip_teach_ask_reply_note(&extract_rewind_body(text))
+    // Strip the learning note before peeling wrappers. The note is appended as
+    // `\n\n` + note, so a lesson ending in `]` (`\begin{figure}[htbp]`) would
+    // make the last `]\n\n` land on the selection and leave only the note.
+    // Same order as the desktop visible-prompt peel. Then cut to 280 characters.
+    let collapsed = extract_rewind_body(&strip_teach_ask_reply_note(text))
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
@@ -7178,6 +7180,51 @@ Hello abstract
         assert!(kept[0].contains("learn-1"));
         assert!(kept[0].contains(note));
         assert!(!kept.iter().any(|line| line.contains("learn-2")));
+    }
+
+    #[test]
+    fn rewind_finds_a_figure_lesson_that_ends_with_a_bracket_before_the_note() {
+        let lesson = "请讲解这个 LaTeX 结构。\n\n结构：figure\n标题：浮动图片环境\n是什么：放图片\n\n选中文本：\n\\begin{figure}[htbp]";
+        let note = TEACH_ASK_REPLY_NOTES[1];
+        let stored = format!(
+            "[Reply mode: peer-review. Follow this speaking style for this turn only. Do not rewrite earlier messages.]\n自定义审稿口吻\n[/Reply mode]\n\n{lesson}\n\n{note}\n"
+        );
+        let matched = normalize_rewind_text(&stored);
+        assert!(!matched.is_empty());
+        assert_eq!(matched, normalize_rewind_text(lesson));
+        assert_eq!(
+            normalize_rewind_text(&format!("{stored}\r\n")),
+            normalize_rewind_text(lesson)
+        );
+        assert_eq!(
+            normalize_rewind_text(&stored.replace('\n', "\r\n")),
+            normalize_rewind_text(lesson)
+        );
+
+        let lines = vec![
+            serde_json::json!({
+                "type": "user",
+                "uuid": "figure-1",
+                "message": {"role": "user", "content": stored}
+            })
+            .to_string(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"figure 说明"}]}}"#
+                .to_string(),
+        ];
+        let kept = truncate_session_lines(
+            &lines,
+            &SessionRewindAnchor {
+                role: "user".into(),
+                text: lesson.into(),
+                ordinal: 1,
+            },
+            true,
+        )
+        .unwrap();
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0].contains("figure-1"));
+        assert!(kept[0].contains("[htbp]"));
+        assert!(kept[0].contains(note));
     }
 
     #[test]

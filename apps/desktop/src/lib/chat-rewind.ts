@@ -39,10 +39,11 @@ function extractRewindBody(text: string): string {
 }
 
 export function rewindMatchText(text: string): string {
-  // Drop the learning note before the 280-character cut. A lesson that almost
-  // fills the window would otherwise keep a fragment of the note and miss
-  // the saved row.
-  let value = stripTeachAskReplyNote(extractRewindBody(text))
+  // Strip the learning note before peeling wrappers. The note is appended as
+  // `\n\n` + note, so a lesson ending in `]` (`\begin{figure}[htbp]`) would
+  // make the last `]\n\n` land on the selection and leave only the note.
+  // Same order as visibleUserPromptText. Then cut to 280 characters.
+  let value = extractRewindBody(stripTeachAskReplyNote(text))
     .replace(/\s+/g, " ")
     .trim();
   let previous = "";
