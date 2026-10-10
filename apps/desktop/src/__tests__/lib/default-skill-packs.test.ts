@@ -5,6 +5,7 @@ import {
   DEFAULT_SKILL_PACKS,
   NATURE_SKILLS_URL,
   SCIENTIFIC_URL_PACK_ID,
+  folderPackId,
   installedSourcePack,
   isDefaultPackSkill,
   isScientificAgentSkillsSource,
@@ -281,5 +282,20 @@ describe("default skill packs", () => {
         [],
       ),
     ).toBe(true);
+  });
+
+  it("groups one Windows folder across verbatim prefix, case, and slashes", () => {
+    const windowsPack = folderPackId(String.raw`C:\Users\me\skills\scanpy`);
+    expect(folderPackId(String.raw`c:\users\me\skills\scanpy`)).toBe(
+      windowsPack,
+    );
+    expect(folderPackId(String.raw`\\?\C:\Users\me\skills\scanpy`)).toBe(
+      windowsPack,
+    );
+    expect(folderPackId("C:/Users/me/skills/scanpy")).toBe(windowsPack);
+    expect(folderPackId(String.raw`\\?\UNC\server\share\Pack`)).toBe(
+      folderPackId(String.raw`\\server\share\pack`),
+    );
+    expect(folderPackId("/Pack")).not.toBe(folderPackId("/pack"));
   });
 });

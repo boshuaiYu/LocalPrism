@@ -2,8 +2,8 @@ use crate::skills::domain::{SkillImportOutcome, SkillScope, SkillTarget};
 use crate::skills::import::{self, config_dir};
 use crate::skills::manifest::{
     assess_managed_copy, atomic_replace, deletion_allowed, metadata_is_unsafe_link,
-    stable_entry_id, ManagedSkillEntry, ManifestStore, ObservedFingerprint, SkillManifest,
-    SkillSource,
+    normalize_skill_path, skill_paths_equal, stable_entry_id, ManagedSkillEntry, ManifestStore,
+    ObservedFingerprint, SkillManifest, SkillSource,
 };
 use crate::skills::paths::{self, validate_skill_slug};
 use serde::{Deserialize, Serialize};
@@ -308,28 +308,13 @@ fn folder_paths_same(left: &str, right: &str) -> bool {
 }
 
 fn normalize_folder_key(path: &str) -> String {
-    let mut value = path.trim().replace('\\', "/");
-    if let Some(rest) = value.strip_prefix("//?/UNC/") {
-        value = format!("//{rest}");
-    } else if let Some(rest) = value.strip_prefix("//?/") {
-        value = rest.to_string();
-    }
-    while value.ends_with('/') {
-        value.pop();
-    }
-    value
+    normalize_skill_path(path)
 }
 
 /// Compare recorded folder paths. `case_insensitive` is the Windows rule so
 /// Linux tests can exercise `C:\Pack` versus `c:\pack` without a Windows host.
 pub(crate) fn folder_keys_equal_with(left: &str, right: &str, case_insensitive: bool) -> bool {
-    let left = normalize_folder_key(left);
-    let right = normalize_folder_key(right);
-    if case_insensitive {
-        left.eq_ignore_ascii_case(&right)
-    } else {
-        left == right
-    }
+    skill_paths_equal(left, right, case_insensitive)
 }
 
 fn folder_keys_equal(left: &str, right: &str) -> bool {
@@ -678,7 +663,7 @@ pub(crate) fn update_local_pack(
         report.error_code = Some("missing-folder".into());
         report.detail = Some(source_path.display().to_string());
         report.error = Some(format!(
-            "The recorded folder is gone: {}",
+            "The recorded folder or archive is gone: {}",
             source_path.display()
         ));
         return Ok(report);
@@ -1243,7 +1228,12 @@ mod tests {
         let missing = temp.path().join("missing-pack");
         let report = update_local_pack(&missing, &[user_target()], None).unwrap();
         assert_eq!(report.error_code.as_deref(), Some("missing-folder"));
-        assert!(report.detail.unwrap().contains("missing-pack"));
+        assert!(report.detail.as_deref().unwrap().contains("missing-pack"));
+        assert!(report
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("folder or archive"));
     }
 
     fn write_skill(dir: &Path, name: &str, description: &str) {

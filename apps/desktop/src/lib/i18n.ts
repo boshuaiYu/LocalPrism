@@ -513,7 +513,8 @@ const en = {
   "skills.downloadConfirmBody":
     "These packs will be downloaded again from their recorded links.",
   "skills.downloadConfirmAction": "Download and update",
-  "skills.missingFolder": "The recorded folder for {{name}} is gone: {{path}}",
+  "skills.missingFolder":
+    "The recorded folder or archive for {{name}} is gone: {{path}}",
   "skills.alreadyLatest": "Already up to date",
   "skills.updatedCount": "Updated {{count}}",
   "skills.updatedNames": "Updated {{names}}",
@@ -1119,7 +1120,7 @@ const zh: Record<MessageKey, string> = {
   "skills.downloadConfirmTitle": "下载技能包？",
   "skills.downloadConfirmBody": "将从已记录的链接重新下载这些技能包。",
   "skills.downloadConfirmAction": "下载并更新",
-  "skills.missingFolder": "{{name}} 记录的文件夹已经不存在：{{path}}",
+  "skills.missingFolder": "{{name}} 记录的文件夹或压缩包已经不存在：{{path}}",
   "skills.alreadyLatest": "已是最新",
   "skills.updatedCount": "已更新 {{count}}",
   "skills.updatedNames": "已更新 {{names}}",

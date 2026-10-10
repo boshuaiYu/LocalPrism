@@ -290,11 +290,28 @@ export interface InstalledSourcePack {
   sourceFolder?: string;
 }
 
-/** Slash-normalize a recorded folder path without changing case. */
-export function normalizeSkillSourceFolder(path: string): string {
+function stripSkillSourceFolder(path: string): string {
   let value = path.trim().replace(/\\/g, "/");
+  if (value.startsWith("//?/UNC/")) {
+    value = `//${value.slice("//?/UNC/".length)}`;
+  } else if (value.startsWith("//?/")) {
+    value = value.slice("//?/".length);
+  }
   while (value.endsWith("/")) value = value.slice(0, -1);
   return value;
+}
+
+function isWindowsStylePath(value: string): boolean {
+  return /^[a-zA-Z]:(\/|$)/.test(value) || value.startsWith("//");
+}
+
+/** Identity key for a recorded folder. Strips `\\?\` / `\\?\UNC\` and
+ * case-folds Windows drive and UNC paths so the same folder is one pack.
+ * POSIX paths stay case-sensitive.
+ */
+export function normalizeSkillSourceFolder(path: string): string {
+  const value = stripSkillSourceFolder(path);
+  return isWindowsStylePath(value) ? value.toLowerCase() : value;
 }
 
 export function folderPackId(path: string): string {
@@ -302,7 +319,7 @@ export function folderPackId(path: string): string {
 }
 
 export function folderPackName(path: string): string {
-  const normalized = normalizeSkillSourceFolder(path);
+  const normalized = stripSkillSourceFolder(path);
   const parts = normalized.split("/").filter((part) => part.length > 0);
   return parts[parts.length - 1] || normalized || path.trim();
 }

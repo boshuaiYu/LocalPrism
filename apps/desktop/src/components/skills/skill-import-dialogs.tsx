@@ -15,7 +15,7 @@ import {
 import { useI18n } from "@/lib/use-i18n";
 
 export const SKILL_ARCHIVE_FILTERS = [
-  { name: "Skill archive", extensions: ["zip", "tgz", "gz"] },
+  { name: "Skill archive", extensions: ["zip", "tar.gz", "tgz"] },
 ];
 
 export function toastImportOutcome(
