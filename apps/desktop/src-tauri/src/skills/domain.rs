@@ -15,7 +15,7 @@ pub struct SkillTarget {
     pub scope: SkillScope,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSkill {
     pub id: String,
@@ -25,6 +25,9 @@ pub struct RuntimeSkill {
     pub source_path: String,
     #[serde(default)]
     pub source_url: Option<String>,
+    /// Recorded folder import path. Distinct from `source_path`, which is the installed copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_folder: Option<String>,
     pub targets: Vec<SkillTarget>,
     pub managed: bool,
     pub compatible_runtimes: Vec<RuntimeKind>,
@@ -33,6 +36,52 @@ pub struct RuntimeSkill {
     /// Frontmatter `category`/`group`, or the parent folder when a skill is nested under one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+}
+
+/// Result of importing or re-importing one or more skills.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillImportOutcome {
+    pub skills: Vec<RuntimeSkill>,
+    pub added: Vec<String>,
+    pub updated: Vec<String>,
+    pub unchanged: Vec<String>,
+    #[serde(default)]
+    pub removed: Vec<String>,
+    #[serde(default)]
+    pub errors: Vec<String>,
+}
+
+impl SkillImportOutcome {
+    pub fn empty() -> Self {
+        Self {
+            skills: Vec::new(),
+            added: Vec::new(),
+            updated: Vec::new(),
+            unchanged: Vec::new(),
+            removed: Vec::new(),
+            errors: Vec::new(),
+        }
+    }
+}
+
+/// One installed skill that a local import would replace.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillReplacePreview {
+    pub folder: String,
+    pub old_name: String,
+    pub old_description: String,
+    pub new_name: String,
+    pub new_description: String,
+}
+
+/// Local import preview. URL imports skip this and report the outcome after download.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillImportPreview {
+    pub conflicts: Vec<SkillReplacePreview>,
+    pub added: Vec<String>,
 }
 
 #[cfg(test)]
@@ -61,6 +110,7 @@ mod tests {
             folder: "example".into(),
             source_path: "C:/skills/example".into(),
             source_url: None,
+            source_folder: None,
             targets: vec![SkillTarget {
                 runtime: RuntimeKind::Codex,
                 scope: SkillScope::User,

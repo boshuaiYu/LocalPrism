@@ -1,6 +1,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   SkillLibrary,
@@ -113,10 +114,11 @@ describe("SkillLibrary", () => {
     expect(addCard?.textContent).toContain("Import folder");
     expect(addCard?.textContent).toContain("Add from GitHub or URL");
     expect(addCard?.textContent).toContain(
-      "GitHub repo, folder URL, .tar.gz archive, or a raw SKILL.md link.",
+      "GitHub repo, folder URL, or a raw SKILL.md link. Local .zip and .tar.gz files use Import archive.",
     );
+    expect(addCard?.textContent).toContain("Import archive");
     expect(addCard?.textContent).not.toContain("LocalPrism / project");
-    expect(container.textContent).toContain("Refresh list");
+    expect(container.textContent).toContain("Rescan");
     expect(container.textContent).toContain(
       "Rescan installed skills. This does not reinstall default packs.",
     );
@@ -245,8 +247,22 @@ describe("SkillLibrary", () => {
   });
 
   it("imports a folder and a URL into the user library", async () => {
-    const importFolder = vi.fn(async () => undefined);
-    const importUrl = vi.fn(async () => undefined);
+    const importFolder = vi.fn(async () => ({
+      skills: [],
+      added: [],
+      updated: [],
+      unchanged: [],
+      removed: [],
+      errors: [],
+    }));
+    const importUrl = vi.fn(async () => ({
+      skills: [],
+      added: [],
+      updated: [],
+      unchanged: [],
+      removed: [],
+      errors: [],
+    }));
     useSkillStore.setState({ importFolder, importUrl });
     vi.mocked(open).mockResolvedValue("/skills/demo");
 
@@ -314,7 +330,14 @@ describe("SkillLibrary", () => {
   });
 
   it("keeps project install behind an advanced option", async () => {
-    const importFolder = vi.fn(async () => undefined);
+    const importFolder = vi.fn(async () => ({
+      skills: [],
+      added: [],
+      updated: [],
+      unchanged: [],
+      removed: [],
+      errors: [],
+    }));
     useSkillStore.setState({ importFolder });
     vi.mocked(open).mockResolvedValue("/skills/demo");
 
@@ -328,7 +351,7 @@ describe("SkillLibrary", () => {
     expect(advanced.tagName).toBe("DETAILS");
     expect(advanced.open).toBe(false);
     const addCard = container.querySelector('[data-testid="skill-add-card"]');
-    expect(addCard?.querySelectorAll("button[data-variant]").length).toBe(2);
+    expect(addCard?.querySelectorAll("button[data-variant]").length).toBe(3);
 
     await act(async () => {
       (
@@ -359,7 +382,14 @@ describe("SkillLibrary", () => {
   });
 
   it("forgets the project copy when the open paper changes", async () => {
-    const importFolder = vi.fn(async () => undefined);
+    const importFolder = vi.fn(async () => ({
+      skills: [],
+      added: [],
+      updated: [],
+      unchanged: [],
+      removed: [],
+      errors: [],
+    }));
     useSkillStore.setState({ importFolder });
     vi.mocked(open).mockResolvedValue("/skills/demo");
 
@@ -400,7 +430,14 @@ describe("SkillLibrary", () => {
   });
 
   it("applies a project choice made while the folder dialog is open", async () => {
-    const importFolder = vi.fn(async () => undefined);
+    const importFolder = vi.fn(async () => ({
+      skills: [],
+      added: [],
+      updated: [],
+      unchanged: [],
+      removed: [],
+      errors: [],
+    }));
     useSkillStore.setState({ importFolder });
     vi.mocked(open).mockImplementation(async () => {
       (
@@ -452,11 +489,73 @@ describe("SkillLibrary", () => {
     expect(container.textContent).toContain("添加技能");
     expect(container.textContent).toContain("导入文件夹");
     expect(container.textContent).toContain("从 GitHub 或链接添加");
-    expect(container.textContent).toContain("刷新列表");
+    expect(container.textContent).toContain("重新扫描");
+    expect(container.textContent).toContain("导入压缩包");
     expect(container.textContent).toContain(
       "重新扫描已安装的技能，不会重新安装默认技能包。",
     );
     expect(container.textContent).not.toContain("导入位置");
     expect(container.textContent).not.toContain("LocalPrism / 用户");
+  });
+
+  it("asks before replacing an existing local skill", async () => {
+    const importFolder = vi.fn(async () => ({
+      skills: [],
+      added: [],
+      updated: ["Writer"],
+      unchanged: [],
+      removed: [],
+      errors: [],
+    }));
+    useSkillStore.setState({ importFolder });
+    vi.mocked(open).mockResolvedValue("/skills/writer");
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === "get_skill_categories") return [];
+      if (command === "skill_import_preview") {
+        return {
+          conflicts: [
+            {
+              folder: "writer",
+              oldName: "Old Writer",
+              oldDescription: "old description",
+              newName: "New Writer",
+              newDescription: "new description",
+            },
+          ],
+          added: [],
+        };
+      }
+      return [];
+    });
+
+    await act(async () => {
+      root.render(<SkillLibrary projectPath="/papers/demo" />);
+    });
+    await act(async () => {
+      (
+        container.querySelector(
+          '[data-testid="skill-import-folder"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+
+    expect(importFolder).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Old Writer");
+    expect(document.body.textContent).toContain("old description");
+    expect(document.body.textContent).toContain("New Writer");
+    expect(document.body.textContent).toContain("new description");
+
+    await act(async () => {
+      (
+        document.body.querySelector(
+          '[data-testid="skill-replace-confirm"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    expect(importFolder).toHaveBeenCalledWith(
+      "/skills/writer",
+      [{ runtime: "claude", scope: "user" }],
+      "/papers/demo",
+    );
   });
 });

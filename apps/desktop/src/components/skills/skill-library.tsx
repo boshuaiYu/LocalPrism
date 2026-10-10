@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   FolderPlusIcon,
+  FileArchiveIcon,
   Link2Icon,
   RefreshCwIcon,
   ChevronDownIcon,
@@ -8,10 +9,20 @@ import {
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  SKILL_ARCHIVE_FILTERS,
+  SkillReplaceDialog,
+  toastImportOutcome,
+} from "@/components/skills/skill-import-dialogs";
 import { useSkillStore } from "@/stores/skill-store";
 import { skillCatalogDescription } from "@/lib/default-skill-packs";
+import {
+  normalizeSkillImportPreview,
+  type SkillReplacePreview,
+} from "@/lib/skill-import-flow";
 import {
   groupItemsBySkillCategory,
   type CatalogSkillCategory,
@@ -44,7 +55,15 @@ export function SkillLibrary({ projectPath = null }: SkillLibraryProps) {
   const importFolder = useSkillStore((state) => state.importFolder);
   const importUrl = useSkillStore((state) => state.importUrl);
   const removeManaged = useSkillStore((state) => state.removeManaged);
-  const [busy, setBusy] = useState<"folder" | "url" | null>(null);
+  const [busy, setBusy] = useState<"folder" | "archive" | "url" | null>(null);
+  const [replaceConflicts, setReplaceConflicts] = useState<
+    SkillReplacePreview[]
+  >([]);
+  const pendingImport = useRef<{
+    sourcePath: string;
+    targets: SkillTarget[];
+    projectPath?: string;
+  } | null>(null);
   const [scanning, setScanning] = useState(false);
   const [sourceUrl, setSourceUrl] = useState("");
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>(
@@ -90,12 +109,52 @@ export function SkillLibrary({ projectPath = null }: SkillLibraryProps) {
           name: skill.name,
           category: skill.category,
           sourceUrl: skill.sourceUrl,
+          sourceFolder: skill.sourceFolder,
         }),
         { categories: [], assignments: {} },
         catalog,
       ),
     [catalog, skills],
   );
+
+  const beginLocalImport = async (
+    sourcePath: string,
+    kind: "folder" | "archive",
+  ) => {
+    const path = projectPathRef.current;
+    const targets = targetsForSkillImport(alsoProjectRef.current, path);
+    setBusy(kind);
+    try {
+      const preview = normalizeSkillImportPreview(
+        await invoke("skill_import_preview", {
+          sourcePath,
+          targets,
+          projectPath: path ?? null,
+        }),
+      );
+      if (preview.conflicts.length > 0) {
+        pendingImport.current = {
+          sourcePath,
+          targets,
+          projectPath: path ?? undefined,
+        };
+        setReplaceConflicts(preview.conflicts);
+        return;
+      }
+      const outcome = await importFolder(
+        sourcePath,
+        targets,
+        path ?? undefined,
+      );
+      toastImportOutcome(outcome, t);
+    } catch (error) {
+      toast.error(t("skills.toastImportFailed"), {
+        description: String(error),
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const onImport = async () => {
     const selected = await open({
@@ -104,16 +163,37 @@ export function SkillLibrary({ projectPath = null }: SkillLibraryProps) {
       title: t("skills.importTitle"),
     });
     if (!selected || Array.isArray(selected)) return;
-    const path = projectPathRef.current;
+    await beginLocalImport(selected, "folder");
+  };
+
+  const onImportArchive = async () => {
+    const selected = await open({
+      directory: false,
+      multiple: false,
+      title: t("skills.importArchiveTitle"),
+      filters: SKILL_ARCHIVE_FILTERS,
+    });
+    if (!selected || Array.isArray(selected)) return;
+    await beginLocalImport(selected, "archive");
+  };
+
+  const onConfirmReplace = async () => {
+    const pending = pendingImport.current;
+    if (!pending) return;
     setBusy("folder");
     try {
-      await importFolder(
-        selected,
-        targetsForSkillImport(alsoProjectRef.current, path),
-        path ?? undefined,
+      const outcome = await importFolder(
+        pending.sourcePath,
+        pending.targets,
+        pending.projectPath,
       );
-    } catch {
-      // importFolder records the error on the skill store.
+      pendingImport.current = null;
+      setReplaceConflicts([]);
+      toastImportOutcome(outcome, t);
+    } catch (error) {
+      toast.error(t("skills.toastImportFailed"), {
+        description: String(error),
+      });
     } finally {
       setBusy(null);
     }
@@ -125,14 +205,17 @@ export function SkillLibrary({ projectPath = null }: SkillLibraryProps) {
     const path = projectPathRef.current;
     setBusy("url");
     try {
-      await importUrl(
+      const outcome = await importUrl(
         url,
         targetsForSkillImport(alsoProjectRef.current, path),
         path ?? undefined,
       );
       setSourceUrl("");
-    } catch {
-      // importUrl records the error on the skill store.
+      toastImportOutcome(outcome, t);
+    } catch (error) {
+      toast.error(t("skills.toastImportFailed"), {
+        description: String(error),
+      });
     } finally {
       setBusy(null);
     }
@@ -173,18 +256,34 @@ export function SkillLibrary({ projectPath = null }: SkillLibraryProps) {
             <p className="mt-1 flex-1 text-muted-foreground text-xs">
               {t("skills.importFolderHelp")}
             </p>
-            <Button
-              type="button"
-              size="sm"
-              className="mt-3 w-fit"
-              data-testid="skill-import-folder"
-              disabled={busy !== null}
-              onClick={() => void onImport()}
-            >
-              {busy === "folder"
-                ? t("skills.importing")
-                : t("skills.importFolder")}
-            </Button>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="sm"
+                className="w-fit"
+                data-testid="skill-import-folder"
+                disabled={busy !== null}
+                onClick={() => void onImport()}
+              >
+                {busy === "folder"
+                  ? t("skills.importing")
+                  : t("skills.importFolder")}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="w-fit"
+                data-testid="skill-import-archive"
+                disabled={busy !== null}
+                onClick={() => void onImportArchive()}
+              >
+                <FileArchiveIcon className="size-3.5" />
+                {busy === "archive"
+                  ? t("skills.importing")
+                  : t("skills.importArchive")}
+              </Button>
+            </div>
           </div>
 
           <form
@@ -334,6 +433,15 @@ export function SkillLibrary({ projectPath = null }: SkillLibraryProps) {
           <p className="text-muted-foreground text-sm">{t("skills.empty")}</p>
         )}
       </div>
+      <SkillReplaceDialog
+        conflicts={replaceConflicts}
+        busy={busy !== null}
+        onCancel={() => {
+          pendingImport.current = null;
+          setReplaceConflicts([]);
+        }}
+        onReplace={() => void onConfirmReplace()}
+      />
     </div>
   );
 }

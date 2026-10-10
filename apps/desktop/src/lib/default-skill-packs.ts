@@ -6,7 +6,6 @@ export type DefaultSkillPackId =
   | "paper-spine"
   | "academic-research-skills"
   | "nature-skills"
-  | "scientific-agent-skills"
   | "paper-humanizer-skill";
 
 export type SkillPackGroupId = DefaultSkillPackId | "imported";
@@ -73,13 +72,6 @@ export const DEFAULT_SKILL_PACKS: DefaultSkillPack[] = [
       "nature-writing",
       "nature-citation",
     ],
-  },
-  {
-    id: "scientific-agent-skills",
-    sourceUrl: SCIENTIFIC_AGENT_SKILLS_URL,
-    markerFolders: ["scanpy", "biopython", "rdkit"],
-    docsUrl:
-      "https://github.com/K-Dense-AI/scientific-agent-skills/tree/main/skills",
   },
   {
     id: "paper-humanizer-skill",
@@ -200,8 +192,6 @@ export function skillPackDisplayName(id: SkillPackGroupId): string {
       return "academic-research-skills";
     case "nature-skills":
       return "nature-skills";
-    case "scientific-agent-skills":
-      return "scientific-agent-skills";
     case "paper-humanizer-skill":
       return "paper-humanizer-skill";
     case "imported":
@@ -245,15 +235,6 @@ function skillKeys(skill: { folder: string; name?: string }): string[] {
   return [...new Set(keys)];
 }
 
-function matchesScientificFolder(
-  value: string,
-  scientificFolders?: ReadonlySet<string>,
-): boolean {
-  const key = value.trim();
-  if (!key || !scientificFolders) return false;
-  return scientificFolders.has(key) || scientificFolders.has(key.toLowerCase());
-}
-
 function githubRepoPath(url: string): { owner: string; repo: string } | null {
   const match = url.trim().match(/github\.com\/([^/]+)\/([^/#?]+)/i);
   if (!match?.[1] || !match[2]) return null;
@@ -273,15 +254,12 @@ export function isScientificAgentSkillsSource(
   );
 }
 
-/** Map an install URL onto one of the five default packs. */
+/** Map an install URL onto one of the default packs. */
 export function defaultPackIdFromSourceUrl(
   sourceUrl?: string | null,
 ): DefaultSkillPackId | null {
   const trimmed = sourceUrl?.trim();
   if (!trimmed) return null;
-  if (isScientificAgentSkillsSource(trimmed)) {
-    return "scientific-agent-skills";
-  }
   const parsed = githubRepoPath(trimmed);
   if (!parsed) return null;
   for (const pack of DEFAULT_SKILL_PACKS) {
@@ -297,10 +275,82 @@ export function defaultPackIdFromSourceUrl(
   return null;
 }
 
+export const SCIENTIFIC_URL_PACK_ID = "url:scientific-agent-skills";
+
+export interface InstalledSourcePack {
+  id: string;
+  name: string;
+  kind: "url" | "folder";
+  refreshUrl?: string;
+  sourceFolder?: string;
+}
+
+/** Slash-normalize a recorded folder path without changing case. */
+export function normalizeSkillSourceFolder(path: string): string {
+  let value = path.trim().replace(/\\/g, "/");
+  while (value.endsWith("/")) value = value.slice(0, -1);
+  return value;
+}
+
+export function folderPackId(path: string): string {
+  return `folder:${normalizeSkillSourceFolder(path)}`;
+}
+
+export function folderPackName(path: string): string {
+  const normalized = normalizeSkillSourceFolder(path);
+  const parts = normalized.split("/").filter((part) => part.length > 0);
+  return parts[parts.length - 1] || normalized || path.trim();
+}
+
+/**
+ * Group a non-default import by GitHub repository or recorded folder.
+ * scientific-agent-skills stays one URL pack so an existing install can be
+ * removed, but it is not a default pack.
+ */
+export function installedSourcePack(skill: {
+  sourceUrl?: string | null;
+  sourceFolder?: string | null;
+}): InstalledSourcePack | null {
+  const url = skill.sourceUrl?.trim();
+  if (url) {
+    if (isScientificAgentSkillsSource(url)) {
+      return {
+        id: SCIENTIFIC_URL_PACK_ID,
+        name: "scientific-agent-skills",
+        kind: "url",
+        refreshUrl: SCIENTIFIC_AGENT_SKILLS_URL,
+      };
+    }
+    const repo = githubRepoPath(url);
+    if (repo) {
+      return {
+        id: `url:${repo.owner}/${repo.repo}`,
+        name: repo.repo,
+        kind: "url",
+        refreshUrl: githubRepoHome(url),
+      };
+    }
+    return {
+      id: `url:${url}`,
+      name: url,
+      kind: "url",
+      refreshUrl: url,
+    };
+  }
+  const folder = skill.sourceFolder?.trim();
+  if (!folder) return null;
+  return {
+    id: folderPackId(folder),
+    name: folderPackName(folder),
+    kind: "folder",
+    sourceFolder: folder,
+  };
+}
+
 /** Group a skill by install URL, then by folder when no URL was recorded. */
 export function resolveSkillPackId(
   skill: { folder: string; name?: string; sourceUrl?: string | null },
-  scientificFolders?: ReadonlySet<string>,
+  _scientificFolders?: ReadonlySet<string>,
 ): SkillPackGroupId {
   if (skill.sourceUrl?.trim()) {
     return (
@@ -322,9 +372,6 @@ export function resolveSkillPackId(
   const nature = DEFAULT_SKILL_PACKS.find(
     (pack) => pack.id === "nature-skills",
   );
-  const scientific = DEFAULT_SKILL_PACKS.find(
-    (pack) => pack.id === "scientific-agent-skills",
-  );
   const humanizer = DEFAULT_SKILL_PACKS.find(
     (pack) => pack.id === "paper-humanizer-skill",
   );
@@ -336,15 +383,6 @@ export function resolveSkillPackId(
   }
   if (humanizer && keys.some((key) => folderMatchesPack(key, humanizer))) {
     return "paper-humanizer-skill";
-  }
-  if (
-    keys.some(
-      (key) =>
-        (scientific && folderMatchesPack(key, scientific)) ||
-        matchesScientificFolder(key, scientificFolders),
-    )
-  ) {
-    return "scientific-agent-skills";
   }
   return "imported";
 }

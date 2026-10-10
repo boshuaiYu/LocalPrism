@@ -54,6 +54,16 @@ pub fn source_url_from_skill_source(source: &SkillSource) -> Option<String> {
     }
 }
 
+pub fn source_folder_from_skill_source(source: &SkillSource) -> Option<String> {
+    match source {
+        SkillSource::Folder { path } => {
+            let trimmed = path.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        SkillSource::Url { .. } | SkillSource::Curated { .. } => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManagedSkillEntry {
@@ -179,6 +189,7 @@ pub fn merge_manifest_with_disk(
         let canonical_source = comparable_path(&canonical_source);
 
         let mut matched_source = None;
+        let mut matched_folder = None;
         skill.managed = skill.targets.iter().any(|target| {
             let Ok(id) = stable_entry_id(target, &skill.folder) else {
                 return false;
@@ -190,12 +201,14 @@ pub fn merge_manifest_with_disk(
                     && comparable_destination(&entry.destination) == canonical_source;
                 if matches {
                     matched_source = source_url_from_skill_source(&entry.source);
+                    matched_folder = source_folder_from_skill_source(&entry.source);
                 }
                 matches
             })
         });
         if skill.managed {
             skill.source_url = matched_source;
+            skill.source_folder = matched_folder;
         }
     }
     disk_skills
@@ -559,14 +572,10 @@ fn validate_entry(entry: &ManagedSkillEntry) -> Result<(), ManifestError> {
         }
     };
     if !valid {
-        return Err(ManifestError::InvalidData(
-            match entry.target.scope {
-                SkillScope::User => "managed destination must be inside skills or .skills".into(),
-                SkillScope::Project => {
-                    "managed destination must be inside .localprism/skills".into()
-                }
-            },
-        ));
+        return Err(ManifestError::InvalidData(match entry.target.scope {
+            SkillScope::User => "managed destination must be inside skills or .skills".into(),
+            SkillScope::Project => "managed destination must be inside .localprism/skills".into(),
+        }));
     }
     Ok(())
 }
@@ -772,6 +781,7 @@ mod tests {
             folder: folder.into(),
             source_path: path.to_string_lossy().to_string(),
             source_url: None,
+            source_folder: None,
             targets: vec![target],
             managed: true,
             compatible_runtimes: vec![RuntimeKind::Claude, RuntimeKind::Codex],

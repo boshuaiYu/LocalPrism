@@ -19,7 +19,6 @@ import {
   ACADEMIC_RESEARCH_SKILLS_URL,
   DEFAULT_SKILL_PACKS,
   NATURE_SKILLS_URL,
-  SCIENTIFIC_AGENT_SKILLS_URL,
 } from "@/lib/default-skill-packs";
 import { PAPERSPINE_SKILLS_URL } from "@/lib/paperspine";
 import type { RuntimeSkill, SkillTarget } from "@/runtime/types";
@@ -232,9 +231,6 @@ describe("skill-store", () => {
             skill({ folder: "nature-polishing", name: "Nature polishing" }),
           ];
         }
-        if (sourceUrl === SCIENTIFIC_AGENT_SKILLS_URL) {
-          return [skill({ folder: "scanpy", name: "Scanpy" })];
-        }
         return [];
       }
       return [];
@@ -276,9 +272,6 @@ describe("skill-store", () => {
         if (sourceUrl === NATURE_SKILLS_URL) {
           return [skill({ folder: "nature-polishing" })];
         }
-        if (sourceUrl === SCIENTIFIC_AGENT_SKILLS_URL) {
-          return [skill({ folder: "scanpy" })];
-        }
         return [];
       }
       return [];
@@ -319,9 +312,6 @@ describe("skill-store", () => {
             skill({ folder: "nature-polishing", name: "Nature polishing" }),
           ];
         }
-        if (sourceUrl === SCIENTIFIC_AGENT_SKILLS_URL) {
-          return [skill({ folder: "scanpy", name: "Scanpy" })];
-        }
         return [];
       }
       return [];
@@ -333,11 +323,9 @@ describe("skill-store", () => {
       "paper-spine",
       "academic-research-skills",
       "nature-skills",
-      "scientific-agent-skills",
       "paper-humanizer-skill",
     ]);
     expect(results.map((item) => item.status)).toEqual([
-      "imported",
       "imported",
       "imported",
       "imported",
@@ -355,12 +343,15 @@ describe("skill-store", () => {
       projectPath: null,
       skipExisting: true,
     });
-    expect(invoke).toHaveBeenCalledWith("skill_import_url", {
-      sourceUrl: SCIENTIFIC_AGENT_SKILLS_URL,
-      targets: [{ runtime: "claude", scope: "user" }],
-      projectPath: null,
-      skipExisting: true,
-    });
+    expect(
+      invoke.mock.calls.some(
+        ([command, args]) =>
+          command === "skill_import_url" &&
+          String((args as { sourceUrl?: string }).sourceUrl).includes(
+            "scientific-agent-skills",
+          ),
+      ),
+    ).toBe(false);
   });
 
   it("skips default packs that already have a marker skill", async () => {
@@ -404,7 +395,6 @@ describe("skill-store", () => {
       "already",
       "already",
       "already",
-      "already",
     ]);
     expect(
       invoke.mock.calls.some(([command]) => command === "skill_import_url"),
@@ -441,7 +431,6 @@ describe("skill-store", () => {
     expect(results.map((item) => item.status)).toEqual([
       "imported",
       "imported",
-      "already",
       "already",
       "already",
     ]);
@@ -490,11 +479,10 @@ describe("skill-store", () => {
       "imported",
       "imported",
       "imported",
-      "imported",
     ]);
     expect(
       invoke.mock.calls.filter(([command]) => command === "skill_import_url"),
-    ).toHaveLength(5);
+    ).toHaveLength(4);
     expect(invoke).toHaveBeenCalledWith("skill_import_url", {
       sourceUrl: PAPERSPINE_SKILLS_URL,
       targets: [{ runtime: "claude", scope: "user" }],
@@ -533,6 +521,66 @@ describe("skill-store", () => {
 
     expect(results.every((item) => item.status === "imported")).toBe(true);
     expect(skipFlags.some((skipExisting) => skipExisting === false)).toBe(true);
+  });
+
+  it("skips opted-out default packs and never installs scientific-agent-skills", async () => {
+    invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (
+        command === "skill_list" ||
+        command === "list_agents" ||
+        command === "slash_commands_list"
+      ) {
+        return [];
+      }
+      if (command === "skill_pack_preferences") {
+        return {
+          version: 1,
+          optedOutPackIds: ["nature-skills"],
+          retiredPacksPurged: [],
+        };
+      }
+      if (command === "skill_purge_retired_packs") {
+        return {
+          id: "scientific-agent-skills",
+          name: "scientific-agent-skills",
+          added: [],
+          updated: [],
+          removed: ["Scanpy"],
+          unchanged: [],
+        };
+      }
+      if (command === "skill_import_url") {
+        return [];
+      }
+      return args ?? [];
+    });
+
+    const results = await useSkillStore.getState().ensureDefaultSkillPacks({
+      force: true,
+    });
+
+    expect(results.find((item) => item.id === "nature-skills")?.status).toBe(
+      "opted-out",
+    );
+    expect(
+      invoke.mock.calls.some(
+        ([command, args]) =>
+          command === "skill_import_url" &&
+          (args as { sourceUrl?: string }).sourceUrl === NATURE_SKILLS_URL,
+      ),
+    ).toBe(false);
+    expect(
+      invoke.mock.calls.some(
+        ([command, args]) =>
+          command === "skill_import_url" &&
+          String((args as { sourceUrl?: string }).sourceUrl ?? "").includes(
+            "scientific-agent-skills",
+          ),
+      ),
+    ).toBe(false);
+    expect(results.map((item) => item.id)).not.toContain(
+      "scientific-agent-skills",
+    );
   });
 
   it("keeps every failed pack download visible for retry", async () => {

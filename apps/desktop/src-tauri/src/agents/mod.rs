@@ -598,6 +598,7 @@ mod tests {
             folder: folder.into(),
             source_path: String::new(),
             source_url: None,
+            source_folder: None,
             targets: vec![crate::skills::domain::SkillTarget {
                 runtime: RuntimeKind::Claude,
                 scope,
