@@ -73,7 +73,6 @@ describe("translate", () => {
       "paper-spine",
       "academic-research-skills",
       "nature-skills",
-      "scientific-agent-skills",
       "paper-humanizer-skill",
     ] as const) {
       const name = skillPackDisplayName(id);

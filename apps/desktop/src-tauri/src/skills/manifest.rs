@@ -54,6 +54,16 @@ pub fn source_url_from_skill_source(source: &SkillSource) -> Option<String> {
     }
 }
 
+pub fn source_folder_from_skill_source(source: &SkillSource) -> Option<String> {
+    match source {
+        SkillSource::Folder { path } => {
+            let trimmed = path.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        SkillSource::Url { .. } | SkillSource::Curated { .. } => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManagedSkillEntry {
@@ -179,6 +189,7 @@ pub fn merge_manifest_with_disk(
         let canonical_source = comparable_path(&canonical_source);
 
         let mut matched_source = None;
+        let mut matched_folder = None;
         skill.managed = skill.targets.iter().any(|target| {
             let Ok(id) = stable_entry_id(target, &skill.folder) else {
                 return false;
@@ -190,12 +201,14 @@ pub fn merge_manifest_with_disk(
                     && comparable_destination(&entry.destination) == canonical_source;
                 if matches {
                     matched_source = source_url_from_skill_source(&entry.source);
+                    matched_folder = source_folder_from_skill_source(&entry.source);
                 }
                 matches
             })
         });
         if skill.managed {
             skill.source_url = matched_source;
+            skill.source_folder = matched_folder;
         }
     }
     disk_skills
@@ -210,7 +223,8 @@ pub fn assess_managed_copy(
     let Some(entry) = manifest.entries.iter().find(|entry| entry.id == entry_id) else {
         return ManagedCopyState::Unmanaged;
     };
-    if comparable_destination(&entry.destination) != comparable_path(observed_destination) {
+    let observed = observed_destination.to_string_lossy();
+    if !skill_paths_equal(&entry.destination, &observed, cfg!(windows)) {
         return ManagedCopyState::PathMismatch;
     }
 
@@ -231,23 +245,14 @@ pub fn assess_managed_copy(
         }
         Err(_) => return ManagedCopyState::Unreadable,
     };
-    if comparable_destination(&entry.destination) != comparable_path(&canonical) {
-        return ManagedCopyState::PathMismatch;
-    }
-
-    match fingerprint {
-        ObservedFingerprint::Missing => ManagedCopyState::Missing,
-        ObservedFingerprint::Unreadable => ManagedCopyState::Unreadable,
-        ObservedFingerprint::Sha256(observed) => {
-            if observed.len() != 64 || !observed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                ManagedCopyState::Unreadable
-            } else if observed.eq_ignore_ascii_case(&entry.content_sha256) {
-                ManagedCopyState::Unchanged
-            } else {
-                ManagedCopyState::Modified
-            }
-        }
-    }
+    classify_managed_copy_paths(
+        &entry.destination,
+        &observed,
+        &canonical.to_string_lossy(),
+        &fingerprint,
+        &entry.content_sha256,
+        cfg!(windows),
+    )
 }
 
 pub fn deletion_allowed(state: ManagedCopyState, confirm_modified: bool) -> bool {
@@ -559,14 +564,10 @@ fn validate_entry(entry: &ManagedSkillEntry) -> Result<(), ManifestError> {
         }
     };
     if !valid {
-        return Err(ManifestError::InvalidData(
-            match entry.target.scope {
-                SkillScope::User => "managed destination must be inside skills or .skills".into(),
-                SkillScope::Project => {
-                    "managed destination must be inside .localprism/skills".into()
-                }
-            },
-        ));
+        return Err(ManifestError::InvalidData(match entry.target.scope {
+            SkillScope::User => "managed destination must be inside skills or .skills".into(),
+            SkillScope::Project => "managed destination must be inside .localprism/skills".into(),
+        }));
     }
     Ok(())
 }
@@ -585,19 +586,85 @@ fn path_component_matches(component: Option<&std::ffi::OsStr>, expected: &str) -
     }
 }
 
+/// Slash-normalize a skill path and strip a Windows verbatim prefix (`\\?\`
+/// or `\\?\UNC\`). Trailing separators are dropped. Case is preserved;
+/// callers pass `case_insensitive` so Linux tests can apply the Windows rule.
+pub(crate) fn normalize_skill_path(path: &str) -> String {
+    let mut value = path.trim().replace('\\', "/");
+    if let Some(rest) = value.strip_prefix("//?/UNC/") {
+        value = format!("//{rest}");
+    } else if let Some(rest) = value.strip_prefix("//?/") {
+        value = rest.to_string();
+    }
+    while value.ends_with('/') {
+        value.pop();
+    }
+    value
+}
+
+pub(crate) fn skill_paths_equal(left: &str, right: &str, case_insensitive: bool) -> bool {
+    let left = normalize_skill_path(left);
+    let right = normalize_skill_path(right);
+    if case_insensitive {
+        left.eq_ignore_ascii_case(&right)
+    } else {
+        left == right
+    }
+}
+
+fn skill_path_key(path: &str, case_insensitive: bool) -> String {
+    let key = normalize_skill_path(path);
+    if case_insensitive {
+        key.to_ascii_lowercase()
+    } else {
+        key
+    }
+}
+
 fn comparable_destination(destination: &str) -> String {
-    #[cfg(windows)]
-    {
-        destination.replace('/', "\\").to_ascii_lowercase()
-    }
-    #[cfg(not(windows))]
-    {
-        destination.to_owned()
-    }
+    skill_path_key(destination, cfg!(windows))
 }
 
 fn comparable_path(path: &Path) -> String {
     comparable_destination(&path.to_string_lossy())
+}
+
+/// Path and fingerprint half of [`assess_managed_copy`]. `canonical` is the
+/// string `canonicalize` would return, including a Windows `\\?\` prefix.
+/// This does not touch the filesystem, so tests can feed those strings on Linux.
+pub(crate) fn classify_managed_copy_paths(
+    recorded: &str,
+    observed: &str,
+    canonical: &str,
+    fingerprint: &ObservedFingerprint,
+    expected_hash: &str,
+    case_insensitive: bool,
+) -> ManagedCopyState {
+    if !skill_paths_equal(recorded, observed, case_insensitive)
+        || !skill_paths_equal(recorded, canonical, case_insensitive)
+    {
+        return ManagedCopyState::PathMismatch;
+    }
+    fingerprint_copy_state(fingerprint, expected_hash)
+}
+
+fn fingerprint_copy_state(
+    fingerprint: &ObservedFingerprint,
+    expected_hash: &str,
+) -> ManagedCopyState {
+    match fingerprint {
+        ObservedFingerprint::Missing => ManagedCopyState::Missing,
+        ObservedFingerprint::Unreadable => ManagedCopyState::Unreadable,
+        ObservedFingerprint::Sha256(observed) => {
+            if observed.len() != 64 || !observed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                ManagedCopyState::Unreadable
+            } else if observed.eq_ignore_ascii_case(expected_hash) {
+                ManagedCopyState::Unchanged
+            } else {
+                ManagedCopyState::Modified
+            }
+        }
+    }
 }
 
 pub(crate) fn metadata_is_unsafe_link(metadata: &std::fs::Metadata) -> bool {
@@ -633,7 +700,7 @@ fn io_error(operation: &'static str, path: &Path, error: io::Error) -> ManifestE
 }
 
 #[cfg(windows)]
-fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
+pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
@@ -668,7 +735,7 @@ fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
+pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
     std::fs::rename(source, destination)
 }
 
@@ -772,6 +839,7 @@ mod tests {
             folder: folder.into(),
             source_path: path.to_string_lossy().to_string(),
             source_url: None,
+            source_folder: None,
             targets: vec![target],
             managed: true,
             compatible_runtimes: vec![RuntimeKind::Claude, RuntimeKind::Codex],
@@ -1227,6 +1295,75 @@ mod tests {
             ),
             ManagedCopyState::Unreadable
         );
+    }
+
+    #[test]
+    fn windows_verbatim_canonical_path_is_the_same_managed_copy() {
+        let recorded = r"C:\Users\me\claude-home\skills\scanpy";
+        let expected = hash('a');
+        let unchanged = classify_managed_copy_paths(
+            recorded,
+            r"C:/Users/me/claude-home/skills/scanpy",
+            r"\\?\C:\Users\me\claude-home\skills\scanpy",
+            &ObservedFingerprint::Sha256(expected.clone()),
+            &expected,
+            true,
+        );
+        assert_eq!(unchanged, ManagedCopyState::Unchanged);
+        assert!(deletion_allowed(unchanged, false));
+
+        let different_case = classify_managed_copy_paths(
+            r"C:\Users\Me\Claude-Home\Skills\scanpy",
+            r"c:/users/me/claude-home/skills/scanpy",
+            r"\\?\c:\users\me\claude-home\skills\scanpy",
+            &ObservedFingerprint::Sha256(expected.clone()),
+            &expected,
+            true,
+        );
+        assert_eq!(different_case, ManagedCopyState::Unchanged);
+
+        let modified = classify_managed_copy_paths(
+            recorded,
+            recorded,
+            r"\\?\C:\Users\me\claude-home\skills\scanpy",
+            &ObservedFingerprint::Sha256(hash('b')),
+            &expected,
+            true,
+        );
+        assert_eq!(modified, ManagedCopyState::Modified);
+
+        let elsewhere = classify_managed_copy_paths(
+            recorded,
+            r"D:\elsewhere\skills\scanpy",
+            r"\\?\D:\elsewhere\skills\scanpy",
+            &ObservedFingerprint::Sha256(expected.clone()),
+            &expected,
+            true,
+        );
+        assert_eq!(elsewhere, ManagedCopyState::PathMismatch);
+        assert!(!deletion_allowed(elsewhere, false));
+
+        let posix = classify_managed_copy_paths(
+            "/Pack/skills/scanpy",
+            "/pack/skills/scanpy",
+            "/pack/skills/scanpy",
+            &ObservedFingerprint::Sha256(expected.clone()),
+            &expected,
+            false,
+        );
+        assert_eq!(posix, ManagedCopyState::PathMismatch);
+
+        assert!(skill_paths_equal(
+            r"\\?\UNC\server\share\skills\scanpy",
+            r"\\server\share\skills\scanpy",
+            true,
+        ));
+        assert!(skill_paths_equal(
+            r"C:\Users\me\claude-home\skills\scanpy\",
+            r"//?/C:/Users/me/claude-home/skills/scanpy",
+            true,
+        ));
+        assert!(!skill_paths_equal("/Pack", "/pack", false));
     }
 
     #[test]

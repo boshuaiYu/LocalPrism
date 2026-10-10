@@ -41,31 +41,29 @@ describe("buildSkillsBrowserCategories", () => {
       ],
     });
 
-    expect(categories.slice(0, 5).map((category) => category.id)).toEqual([
+    expect(categories.slice(0, 4).map((category) => category.id)).toEqual([
       installedBrowserCategoryId("paper-spine"),
       installedBrowserCategoryId("academic-research-skills"),
       installedBrowserCategoryId("nature-skills"),
-      installedBrowserCategoryId("scientific-agent-skills"),
       installedBrowserCategoryId("paper-humanizer-skill"),
     ]);
-    expect(categories.slice(0, 5).map((category) => category.name)).toEqual([
+    expect(categories.slice(0, 4).map((category) => category.name)).toEqual([
       "PaperSpine",
       "academic-research-skills",
       "nature-skills",
-      "scientific-agent-skills",
       "paper-humanizer-skill",
     ]);
-    expect(categories.slice(5).map((category) => category.name)).toEqual([
+    expect(categories.slice(4).map((category) => category.name)).toEqual([
       "Methods",
       "my-writer",
+      "scanpy",
     ]);
     expect(
-      categories.slice(0, 5).map((category) => category.sourceUrl),
+      categories.slice(0, 4).map((category) => category.sourceUrl),
     ).toEqual([
       "https://github.com/WUBING2023/PaperSpine/tree/main/dist/claude/skills",
       "https://github.com/Imbad0202/academic-research-skills",
       "https://github.com/Yuan1z0825/nature-skills/tree/main/skills",
-      "https://github.com/K-Dense-AI/scientific-agent-skills/tree/main/skills",
       "https://github.com/crabin/paper-humanizer-skill",
     ]);
     expect(
@@ -124,5 +122,41 @@ describe("buildSkillsBrowserCategories", () => {
         .find((category) => category.name === "lab-notes")
         ?.skills.map((skill) => skill.folder),
     ).toEqual(["lab-notes"]);
+  });
+
+  it("keeps a folder import out of the official pack that shares its name", () => {
+    const categories = buildSkillsBrowserCategories({
+      installedSkills: [
+        {
+          folder: "nature-polishing",
+          name: "Draft",
+          sourceFolder: "/tmp/drafts/nature-polishing",
+        },
+      ],
+      catalog: [],
+    });
+    expect(
+      categories.find((category) => category.defaultPackId === "nature-skills")
+        ?.skill_count,
+    ).toBe(0);
+    expect(
+      categories
+        .find((category) => category.sourceKind === "folder")
+        ?.skills.map((skill) => skill.folder),
+    ).toEqual(["nature-polishing"]);
+  });
+
+  it("hides an opted-out default pack until it has skills again", () => {
+    const categories = buildSkillsBrowserCategories({
+      installedSkills: [],
+      catalog: [],
+      optedOutPackIds: ["paper-spine"],
+    });
+    expect(categories.map((category) => category.name)).not.toContain(
+      "PaperSpine",
+    );
+    expect(categories.map((category) => category.name)).toContain(
+      "nature-skills",
+    );
   });
 });

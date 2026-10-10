@@ -4,11 +4,13 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 use tauri::{Emitter, Manager, WebviewWindow};
 
+mod archive;
 pub mod domain;
 pub mod exposure;
 mod fetch;
 pub mod import;
 pub mod manifest;
+pub mod packs;
 pub mod paperspine;
 pub mod paths;
 
@@ -1533,6 +1535,7 @@ pub async fn import_skill_from_folder(
     )
     .await?;
     Ok(installed
+        .skills
         .into_iter()
         .map(|skill| SkillInfo {
             id: skill.folder.clone(),
@@ -1550,28 +1553,59 @@ pub async fn skill_import(
     source_path: String,
     targets: Vec<domain::SkillTarget>,
     project_path: Option<String>,
-) -> Result<Vec<domain::RuntimeSkill>, String> {
+) -> Result<domain::SkillImportOutcome, String> {
     let source = PathBuf::from(&source_path);
-    if !source.is_dir() {
-        return Err("Selected path is not a folder".into());
-    }
-
-    let mut skill_dirs = Vec::new();
-    import::collect_skill_dirs(&source, &mut skill_dirs);
-    skill_dirs.sort();
     let project = project_path.as_deref().map(Path::new);
-    let imported = import_collected_skill_dirs(
-        skill_dirs,
-        &targets,
-        project,
-        manifest::SkillSource::Folder {
-            path: source.to_string_lossy().to_string(),
-        },
-        false,
-    )?;
-    let _ = crate::slash_commands::import_user_slash_commands_from_source(&source, true);
+    let imported = if archive::is_skill_archive(&source) {
+        import_archive_source(&source, &targets, project)?
+    } else if source.is_dir() {
+        let mut skill_dirs = Vec::new();
+        import::collect_skill_dirs(&source, &mut skill_dirs);
+        skill_dirs.sort();
+        import_collected_skill_dirs(
+            skill_dirs,
+            &targets,
+            project,
+            manifest::SkillSource::Folder {
+                path: source.to_string_lossy().to_string(),
+            },
+            false,
+        )?
+    } else {
+        return Err("Choose a skill folder, a .zip archive, or a .tar.gz archive.".into());
+    };
+    if source.is_dir() {
+        let _ = crate::slash_commands::import_user_slash_commands_from_source(&source, true);
+    }
     emit_skills_changed(&app);
     Ok(imported)
+}
+
+fn import_archive_source(
+    source: &Path,
+    targets: &[domain::SkillTarget],
+    project: Option<&Path>,
+) -> Result<domain::SkillImportOutcome, String> {
+    let workspace = short_skill_temp_dir("arc");
+    std::fs::create_dir_all(&workspace)
+        .map_err(|error| format!("Failed to create archive workspace: {error}"))?;
+    let imported = (|| {
+        let root = archive::extract_skill_archive(source, &workspace, ExtractLimits::default())?;
+        let mut skill_dirs = Vec::new();
+        import::collect_skill_dirs(&root, &mut skill_dirs);
+        skill_dirs.sort();
+        import_collected_skill_dirs(
+            skill_dirs,
+            targets,
+            project,
+            manifest::SkillSource::Folder {
+                path: source.to_string_lossy().to_string(),
+            },
+            false,
+        )
+    })();
+    let _ = std::fs::remove_dir_all(&workspace);
+    imported
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1772,48 +1806,87 @@ fn github_ssh_to_https(raw: &str) -> Option<String> {
     Some(format!("https://github.com/{rest}"))
 }
 
-fn import_collected_skill_dirs(
+pub(crate) fn import_collected_skill_dirs(
     skill_dirs: Vec<PathBuf>,
     targets: &[domain::SkillTarget],
     project: Option<&Path>,
     source: manifest::SkillSource,
     skip_existing: bool,
-) -> Result<Vec<domain::RuntimeSkill>, String> {
+) -> Result<domain::SkillImportOutcome, String> {
     if skill_dirs.is_empty() {
         return Err(
             "Downloaded source does not contain any skills. A skill must contain SKILL.md.".into(),
         );
     }
-    let mut imported = Vec::new();
-    let mut errors = Vec::new();
+    let manifest = import::config_dir()
+        .ok()
+        .and_then(|dir| manifest::ManifestStore::new(dir).load().ok());
+    let mut outcome = domain::SkillImportOutcome::empty();
     for skill_dir in skill_dirs {
+        let parsed = import::validate_skill_dir(&skill_dir).ok();
+        let name = parsed
+            .as_ref()
+            .map(|item| item.0.name.clone())
+            .or_else(|| {
+                skill_dir
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "skill".to_string());
+        let folder = parsed
+            .as_ref()
+            .map(|item| item.0.folder.clone())
+            .unwrap_or_else(|| name.clone());
+        let new_hash = import::fingerprint_skill_dir(&skill_dir).ok();
+        let old_hash = manifest.as_ref().and_then(|manifest| {
+            targets.iter().find_map(|target| {
+                let id = manifest::stable_entry_id(target, &folder).ok()?;
+                manifest
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id == id)
+                    .map(|entry| entry.content_sha256.clone())
+            })
+        });
         let existing = import::snapshot_installed_targets(&skill_dir, targets, project);
         let already_installed = !targets.is_empty() && existing.len() == targets.len();
         if skip_existing && already_installed {
-            imported.extend(existing);
+            outcome.unchanged.push(name);
+            outcome.skills.extend(existing);
             continue;
         }
         match import::import_skill_to_targets(&skill_dir, targets, project, source.clone()) {
-            Ok(mut batch) => imported.append(&mut batch),
+            Ok(mut batch) => {
+                if old_hash.is_none() {
+                    outcome.added.push(name);
+                } else if new_hash.is_some() && new_hash == old_hash {
+                    outcome.unchanged.push(name);
+                } else {
+                    outcome.updated.push(name);
+                }
+                outcome.skills.append(&mut batch);
+            }
             Err(error) => {
                 if already_installed {
-                    imported.extend(existing);
+                    outcome.unchanged.push(name);
+                    outcome.skills.extend(existing);
                 } else {
-                    errors.push(error.to_string());
+                    outcome.errors.push(error.to_string());
                 }
             }
         }
     }
-    if imported.is_empty() {
-        if errors.is_empty() {
+    if outcome.skills.is_empty() {
+        if outcome.errors.is_empty() {
             return Err(
                 "Downloaded source does not contain any skills. A skill must contain SKILL.md."
                     .into(),
             );
         }
-        return Err(errors.join("\n"));
+        return Err(outcome.errors.join("\n"));
     }
-    Ok(imported)
+    Ok(outcome)
 }
 
 #[tauri::command]
@@ -1823,7 +1896,7 @@ pub async fn skill_import_url(
     targets: Vec<domain::SkillTarget>,
     project_path: Option<String>,
     skip_existing: Option<bool>,
-) -> Result<Vec<domain::RuntimeSkill>, String> {
+) -> Result<domain::SkillImportOutcome, String> {
     let source_url = normalize_skill_import_url(&source_url);
     if source_url.is_empty() {
         return Err("Skill URL cannot be empty".into());
@@ -1872,7 +1945,7 @@ pub async fn skill_import_url(
                 source,
                 skip_existing,
             )?;
-            emit_install_log(&app, &format!("Copied {} skills", imported.len()));
+            emit_install_log(&app, &format!("Copied {} skills", imported.skills.len()));
             return Ok(imported);
         }
 
@@ -1922,16 +1995,136 @@ pub async fn skill_import_url(
             &tmp_dir.join("repo"),
             skip_existing,
         );
-        emit_install_log(&app, &format!("Copied {} skills", imported.len()));
+        emit_install_log(&app, &format!("Copied {} skills", imported.skills.len()));
         Ok(imported)
     }
     .await;
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
     if import_result.is_ok() {
+        if let Some(pack_id) = packs::default_pack_id_from_url(&source_url) {
+            let _ = packs::clear_opt_out(pack_id);
+        }
         emit_skills_changed(&app);
     }
     import_result
+}
+
+#[tauri::command]
+pub fn skill_pack_preferences() -> Result<packs::SkillPackPreferences, String> {
+    packs::load_home_preferences()
+}
+
+#[tauri::command]
+pub fn skill_purge_retired_packs(
+    app: tauri::AppHandle,
+) -> Result<packs::SkillPackUpdateReport, String> {
+    let report = packs::purge_retired_default_packs()?;
+    if !report.removed.is_empty() {
+        emit_skills_changed(&app);
+    }
+    Ok(report)
+}
+
+#[tauri::command]
+pub fn skill_remove_pack(
+    app: tauri::AppHandle,
+    source_url: Option<String>,
+    source_folder: Option<String>,
+    default_pack_id: Option<String>,
+    opt_out: Option<bool>,
+) -> Result<packs::SkillPackUpdateReport, String> {
+    let report = packs::remove_pack_source(
+        source_url.as_deref(),
+        source_folder.as_deref(),
+        default_pack_id.as_deref(),
+        opt_out.unwrap_or(false),
+    )?;
+    emit_skills_changed(&app);
+    Ok(report)
+}
+
+#[tauri::command]
+pub async fn skill_refresh_pack(
+    app: tauri::AppHandle,
+    source_url: Option<String>,
+    source_folder: Option<String>,
+    targets: Vec<domain::SkillTarget>,
+    project_path: Option<String>,
+) -> Result<packs::SkillPackUpdateReport, String> {
+    let project = project_path.as_deref().map(Path::new);
+    if let Some(folder) = source_folder
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let report = packs::update_local_pack(Path::new(folder), &targets, project)?;
+        if report.error.is_none() {
+            emit_skills_changed(&app);
+        }
+        return Ok(report);
+    }
+    let url = source_url.unwrap_or_default();
+    if url.trim().is_empty() {
+        return Err("This pack has no recorded link or folder to update.".into());
+    }
+    let outcome =
+        skill_import_url(app.clone(), url.clone(), targets, project_path, Some(false)).await?;
+    let source = manifest::SkillSource::Url { url: url.clone() };
+    let kept: Vec<String> = outcome
+        .skills
+        .iter()
+        .map(|skill| skill.folder.clone())
+        .collect();
+    let removed = if outcome.errors.is_empty() {
+        packs::remove_source_skills_except(&source, &kept)?
+    } else {
+        Vec::new()
+    };
+    let name = packs::github_repo(&url)
+        .map(|(_, repo)| repo)
+        .unwrap_or_else(|| url.clone());
+    Ok(packs::report_from_outcome(&url, &name, outcome, removed))
+}
+
+#[tauri::command]
+pub fn skill_import_preview(
+    source_path: String,
+    targets: Vec<domain::SkillTarget>,
+    project_path: Option<String>,
+) -> Result<domain::SkillImportPreview, String> {
+    let source = PathBuf::from(&source_path);
+    let project = project_path.as_deref().map(Path::new);
+    let (skill_dirs, workspace) = if source.is_dir() {
+        let mut skill_dirs = Vec::new();
+        import::collect_skill_dirs(&source, &mut skill_dirs);
+        skill_dirs.sort();
+        (skill_dirs, None)
+    } else if archive::is_skill_archive(&source) {
+        let workspace = short_skill_temp_dir("prv");
+        std::fs::create_dir_all(&workspace)
+            .map_err(|error| format!("Failed to create archive workspace: {error}"))?;
+        let root =
+            match archive::extract_skill_archive(&source, &workspace, ExtractLimits::default()) {
+                Ok(root) => root,
+                Err(error) => {
+                    let _ = std::fs::remove_dir_all(&workspace);
+                    return Err(error);
+                }
+            };
+        let mut skill_dirs = Vec::new();
+        import::collect_skill_dirs(&root, &mut skill_dirs);
+        skill_dirs.sort();
+        (skill_dirs, Some(workspace))
+    } else {
+        return Err("Choose a skill folder, a .zip archive, or a .tar.gz archive.".into());
+    };
+    let preview = import::preview_skill_directories(&skill_dirs, &targets, project)
+        .map_err(|error| error.to_string());
+    if let Some(workspace) = workspace {
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+    preview
 }
 
 #[tauri::command]
@@ -2234,14 +2427,9 @@ pub async fn delete_installed_skill(
 #[tauri::command]
 pub async fn uninstall_scientific_skills(
     app: tauri::AppHandle,
-    project_path: Option<String>,
+    _project_path: Option<String>,
 ) -> Result<(), String> {
-    let target = skills_dir(project_path.as_deref())?;
-
-    if target.exists() {
-        std::fs::remove_dir_all(&target).map_err(|e| format!("Failed to remove skills: {}", e))?;
-    }
-
+    packs::uninstall_all_managed_skills()?;
     emit_skills_changed(&app);
     Ok(())
 }

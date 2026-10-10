@@ -1,6 +1,7 @@
 import {
   DEFAULT_SKILL_PACKS,
   IMPORTED_SKILL_PACK_ID,
+  installedSourcePack,
   resolveSkillPackId,
   skillPackDisplayName,
   type SkillPackGroupId,
@@ -24,7 +25,11 @@ export interface CatalogSkillCategory {
   skills: Array<{ folder: string }>;
 }
 
-export type SkillCategorySource = SkillPackGroupId | "custom";
+export type SkillCategorySource =
+  | SkillPackGroupId
+  | "url"
+  | "folder"
+  | "custom";
 
 export interface ResolvedSkillCategory {
   id: string;
@@ -228,19 +233,32 @@ export function resolveSkillCategory(
     name?: string;
     category?: string | null;
     sourceUrl?: string | null;
+    sourceFolder?: string | null;
   },
   _snapshot: SkillCategorySnapshot,
   catalog: CatalogSkillCategory[],
-  catalogMap = catalogFolderMap(catalog),
+  _catalogMap = catalogFolderMap(catalog),
 ): ResolvedSkillCategory {
-  // A recorded install URL decides the pack. The scientific catalog is only
-  // a fallback for skills that have no sourceUrl.
-  const scientificFolders = input.sourceUrl?.trim()
-    ? undefined
-    : new Set([...catalogMap.keys()].map((folder) => folder.toLowerCase()));
-  const packId = resolveSkillPackId(input, scientificFolders);
+  // A recorded install URL for a default pack wins. Other URLs and recorded
+  // folders stay their own packs. Catalog folders are not a default pack.
+  const packId = resolveSkillPackId(input);
   if (packId !== IMPORTED_SKILL_PACK_ID) {
     return packCategory(packId);
+  }
+  const sourcePack = installedSourcePack(input);
+  if (sourcePack?.kind === "url") {
+    return {
+      id: sourcePack.id,
+      name: sourcePack.name,
+      source: "url",
+    };
+  }
+  if (sourcePack?.kind === "folder") {
+    return {
+      id: sourcePack.id,
+      name: sourcePack.name,
+      source: "folder",
+    };
   }
   const explicit = explicitCategoryLabel(input.category);
   if (explicit) {
@@ -274,6 +292,7 @@ export function groupItemsBySkillCategory<T>(
     name: string;
     category?: string | null;
     sourceUrl?: string | null;
+    sourceFolder?: string | null;
   },
   snapshot: SkillCategorySnapshot,
   catalog: CatalogSkillCategory[],
@@ -303,6 +322,8 @@ export function groupItemsBySkillCategory<T>(
 
   const sourceOrder: SkillCategorySource[] = [
     ...DEFAULT_SKILL_PACKS.map((pack) => pack.id),
+    "url",
+    "folder",
     "custom",
     "imported",
   ];

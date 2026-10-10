@@ -51,16 +51,17 @@ describe("skill categories", () => {
       ["paper-spine", "PaperSpine"],
       ["academic-research-skills", "academic-research-skills"],
       ["nature-skills", "nature-skills"],
-      ["scientific-agent-skills", "scientific-agent-skills"],
       ["paper-humanizer-skill", "paper-humanizer-skill"],
-      ["category:lab-notes", "lab-notes"],
+      ["url:example/lab-notes", "lab-notes"],
+      ["url:scientific-agent-skills", "scientific-agent-skills"],
       ["category:mystery", "mystery"],
+      ["category:scanpy", "scanpy"],
     ]);
     expect(
       groups
-        .find((group) => group.id === "scientific-agent-skills")
+        .find((group) => group.id === "url:scientific-agent-skills")
         ?.items.map((item) => item.folder),
-    ).toEqual(["scanpy", "waypoint-bio"]);
+    ).toEqual(["waypoint-bio"]);
     expect(
       groups.find((group) => group.id === "category:mystery")?.items,
     ).toEqual([{ folder: "mystery", name: "Mystery" }]);
@@ -74,7 +75,7 @@ describe("skill categories", () => {
         emptySkillCategorySnapshot(),
         catalog,
       ).id,
-    ).toBe("scientific-agent-skills");
+    ).toBe("url:scientific-agent-skills");
     expect(
       resolveSkillCategory(
         {
@@ -86,9 +87,9 @@ describe("skill categories", () => {
         catalog,
       ),
     ).toEqual({
-      id: "category:scanpy",
+      id: "url:example/scanpy",
       name: "scanpy",
-      source: "custom",
+      source: "url",
     });
     expect(
       resolveSkillCategory(
@@ -97,9 +98,9 @@ describe("skill categories", () => {
         catalog,
       ),
     ).toEqual({
-      id: "scientific-agent-skills",
-      name: "scientific-agent-skills",
-      source: "scientific-agent-skills",
+      id: "category:scanpy",
+      name: "scanpy",
+      source: "custom",
     });
   });
 
@@ -143,7 +144,7 @@ describe("skill categories", () => {
       groups.map((group) => [group.id, group.items.map((item) => item.folder)]),
     ).toEqual([
       ["nature-skills", ["nature-polishing"]],
-      ["scientific-agent-skills", ["scanpy"]],
+      ["category:bioinformatics", ["scanpy"]],
       ["category:my-writer", ["my-writer"]],
     ]);
   });
@@ -185,7 +186,7 @@ describe("skill categories", () => {
         snapshot,
         catalog,
       ).id,
-    ).toBe("scientific-agent-skills");
+    ).toBe("category:写作");
     expect(
       resolveSkillCategory(
         {
@@ -197,6 +198,17 @@ describe("skill categories", () => {
         catalog,
       ).id,
     ).toBe("nature-skills");
+    expect(
+      resolveSkillCategory(
+        {
+          folder: "nature-new-skill",
+          name: "Nature new skill",
+          sourceFolder: "/tmp/imports/nature-new-skill",
+        },
+        snapshot,
+        catalog,
+      ).source,
+    ).toBe("folder");
     expect(
       resolveSkillCategory(
         { folder: "lab-helper", name: "literature-review" },
@@ -223,7 +235,7 @@ describe("skill categories", () => {
         snapshot,
         catalog,
       ).id,
-    ).toBe("scientific-agent-skills");
+    ).toBe("category:scanpy");
     expect(
       resolveSkillCategory(
         { folder: "nature-polishing", name: "Nature polishing" },

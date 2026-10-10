@@ -44,6 +44,8 @@ export interface RuntimeSkill {
   folder: string;
   sourcePath: string;
   sourceUrl?: string | null;
+  /** Recorded folder or archive path. Distinct from the installed sourcePath. */
+  sourceFolder?: string | null;
   targets: SkillTarget[];
   managed: boolean;
   compatibleRuntimes: RuntimeKind[];

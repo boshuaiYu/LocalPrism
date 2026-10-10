@@ -4,7 +4,11 @@ import {
   areDefaultSkillPacksReady,
   DEFAULT_SKILL_PACKS,
   NATURE_SKILLS_URL,
+  SCIENTIFIC_URL_PACK_ID,
+  folderPackId,
+  installedSourcePack,
   isDefaultPackSkill,
+  isScientificAgentSkillsSource,
   resolveSkillPackId,
   SCIENTIFIC_AGENT_SKILLS_URL,
   githubRepoLabel,
@@ -27,16 +31,21 @@ describe("default skill packs", () => {
     expect(byId["nature-skills"]?.sourceUrl).toBe(NATURE_SKILLS_URL);
     expect(NATURE_SKILLS_URL).toContain("Yuan1z0825/nature-skills");
     expect(NATURE_SKILLS_URL).toContain("tree/main/skills");
-    expect(byId["scientific-agent-skills"]?.sourceUrl).toBe(
-      SCIENTIFIC_AGENT_SKILLS_URL,
-    );
+    expect(DEFAULT_SKILL_PACKS.map((pack) => pack.id)).toEqual([
+      "paper-spine",
+      "academic-research-skills",
+      "nature-skills",
+      "paper-humanizer-skill",
+    ]);
     expect(SCIENTIFIC_AGENT_SKILLS_URL).toContain(
       "K-Dense-AI/scientific-agent-skills",
     );
     expect(byId["paper-spine"]?.sourceUrl).toContain("WUBING2023/PaperSpine");
-    expect(byId["scientific-agent-skills"]?.sourceUrl).toContain(
-      "K-Dense-AI/scientific-agent-skills",
-    );
+    expect(
+      DEFAULT_SKILL_PACKS.some((pack) =>
+        pack.sourceUrl.includes("scientific-agent-skills"),
+      ),
+    ).toBe(false);
     expect(githubRepoLabel(PAPERSPINE_SKILLS_URL)).toBe(
       "WUBING2023/PaperSpine",
     );
@@ -139,16 +148,20 @@ describe("default skill packs", () => {
     ).toBe(false);
   });
 
-  it("does not treat PaperSpine alone as a scientific pack", () => {
-    const scientific = DEFAULT_SKILL_PACKS.find(
-      (pack) => pack.id === "scientific-agent-skills",
-    )!;
+  it("does not install scientific-agent-skills as a default pack", () => {
+    const packIds: string[] = DEFAULT_SKILL_PACKS.map((pack) => pack.id);
+    expect(packIds).not.toContain("scientific-agent-skills");
     expect(
-      shouldInstallDefaultPack([{ folder: "paper-spine" }], [], scientific),
+      areDefaultSkillPacksReady(
+        [
+          { folder: "paper-spine" },
+          { folder: "deep-research" },
+          { folder: "nature-polishing" },
+          { folder: "paper-humanizer" },
+        ],
+        [],
+      ),
     ).toBe(true);
-    expect(
-      shouldInstallDefaultPack([{ folder: "scanpy" }], [], scientific),
-    ).toBe(false);
   });
 
   it("is ready only when PaperSpine and the three default packs are present", () => {
@@ -160,7 +173,7 @@ describe("default skill packs", () => {
       "nature-skills",
     );
     expect(resolveSkillPackId({ folder: "scanpy" }, new Set(["scanpy"]))).toBe(
-      "scientific-agent-skills",
+      "imported",
     );
     expect(resolveSkillPackId({ folder: "paper-humanizer" })).toBe(
       "paper-humanizer-skill",
@@ -173,27 +186,38 @@ describe("default skill packs", () => {
         folder: "waypoint-bio",
         sourceUrl: SCIENTIFIC_AGENT_SKILLS_URL,
       }),
-    ).toBe("scientific-agent-skills");
+    ).toBe("imported");
+    expect(
+      installedSourcePack({
+        sourceUrl: SCIENTIFIC_AGENT_SKILLS_URL,
+      })?.id,
+    ).toBe(SCIENTIFIC_URL_PACK_ID);
     expect(
       resolveSkillPackId({
         folder: "docx",
         sourceUrl:
           "https://github.com/K-Dense-AI/scientific-agent-skills/tree/main/skills/docx",
       }),
-    ).toBe("scientific-agent-skills");
+    ).toBe("imported");
+    expect(
+      installedSourcePack({
+        sourceUrl:
+          "https://github.com/K-Dense-AI/claude-scientific-skills/tree/main/skills/docx",
+      })?.id,
+    ).toBe(SCIENTIFIC_URL_PACK_ID);
     expect(
       resolveSkillPackId({
         folder: "literature-review",
         sourceUrl: SCIENTIFIC_AGENT_SKILLS_URL,
       }),
-    ).toBe("scientific-agent-skills");
+    ).toBe("imported");
     expect(
       resolveSkillPackId({
         folder: "peer-review",
         sourceUrl:
           "https://github.com/K-Dense-AI/scientific-agent-skills/tree/main/skills/peer-review",
       }),
-    ).toBe("scientific-agent-skills");
+    ).toBe("imported");
     expect(
       resolveSkillPackId(
         {
@@ -211,6 +235,28 @@ describe("default skill packs", () => {
     ).toBe("imported");
     expect(resolveSkillPackId({ folder: "my-writer" })).toBe("imported");
     expect(
+      resolveSkillPackId({
+        folder: "nature-custom",
+        name: "nature-figure",
+        sourceFolder: "/tmp/imports/nature-custom",
+      }),
+    ).toBe("imported");
+    expect(
+      installedSourcePack({
+        sourceFolder: "/tmp/imports/nature-custom",
+      })?.kind,
+    ).toBe("folder");
+    expect(
+      isScientificAgentSkillsSource(
+        "https://github.com/someone-else/scientific-agent-skills",
+      ),
+    ).toBe(false);
+    expect(
+      installedSourcePack({
+        sourceUrl: "https://github.com/someone-else/scientific-agent-skills",
+      })?.id,
+    ).not.toBe(SCIENTIFIC_URL_PACK_ID);
+    expect(
       resolveSkillPackId({ folder: "lab-helper", name: "nature-figure" }),
     ).toBe("nature-skills");
     expect(
@@ -218,10 +264,10 @@ describe("default skill packs", () => {
         { folder: "notes", name: "Scanpy" },
         new Set(["scanpy"]),
       ),
-    ).toBe("scientific-agent-skills");
+    ).toBe("imported");
     expect(isDefaultPackSkill({ folder: "my-writer" })).toBe(false);
     expect(isDefaultPackSkill({ folder: "scanpy" }, new Set(["scanpy"]))).toBe(
-      true,
+      false,
     );
     expect(areDefaultSkillPacksReady([], [])).toBe(false);
     expect(
@@ -236,5 +282,20 @@ describe("default skill packs", () => {
         [],
       ),
     ).toBe(true);
+  });
+
+  it("groups one Windows folder across verbatim prefix, case, and slashes", () => {
+    const windowsPack = folderPackId(String.raw`C:\Users\me\skills\scanpy`);
+    expect(folderPackId(String.raw`c:\users\me\skills\scanpy`)).toBe(
+      windowsPack,
+    );
+    expect(folderPackId(String.raw`\\?\C:\Users\me\skills\scanpy`)).toBe(
+      windowsPack,
+    );
+    expect(folderPackId("C:/Users/me/skills/scanpy")).toBe(windowsPack);
+    expect(folderPackId(String.raw`\\?\UNC\server\share\Pack`)).toBe(
+      folderPackId(String.raw`\\server\share\pack`),
+    );
+    expect(folderPackId("/Pack")).not.toBe(folderPackId("/pack"));
   });
 });

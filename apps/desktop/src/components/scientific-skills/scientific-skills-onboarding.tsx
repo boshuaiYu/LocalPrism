@@ -13,6 +13,8 @@ import {
   Loader2Icon,
   ChevronLeftIcon,
   FolderPlusIcon,
+  FileArchiveIcon,
+  Link2Icon,
   XIcon,
   GithubIcon,
 } from "lucide-react";
@@ -25,6 +27,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -50,15 +53,27 @@ import {
   skillGithubUrl,
   skillPackDocsUrl,
 } from "@/lib/default-skill-packs";
+import {
+  SKILL_ARCHIVE_FILTERS,
+  SkillReplaceDialog,
+  toastImportOutcome,
+} from "@/components/skills/skill-import-dialogs";
+import {
+  normalizeSkillImportPreview,
+  type SkillReplacePreview,
+} from "@/lib/skill-import-flow";
+import {
+  categoryRefreshTarget,
+  normalizePackUpdateReport,
+  optedOutPackIdSet,
+  remoteRefreshTargets,
+  updateAllTargets,
+  type PackRefreshTarget,
+  type SkillPackUpdateReport,
+} from "@/lib/skill-pack-actions";
+import type { SkillTarget } from "@/runtime/types";
 
 const STORAGE_KEY = "scientific-skills-installed";
-
-interface InstallResult {
-  success: boolean;
-  skills_installed: number;
-  target_dir: string;
-  message: string;
-}
 
 interface SkillsStatus {
   installed: boolean;
@@ -88,15 +103,32 @@ export function ScientificSkillsOnboarding({
   const [isInstalling, setIsInstalling] = useState(false);
   const [isComplete, setIsComplete] = useState(false);
   const [installLogs, setInstallLogs] = useState<string[]>([]);
-  const [installResult, setInstallResult] = useState<InstallResult | null>(
-    null,
-  );
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<SkillsStatus | null>(null);
   const [installedSkills, setInstalledSkills] = useState<SkillInfo[]>([]);
   const [isUninstalling, setIsUninstalling] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [confirmUninstallAllOpen, setConfirmUninstallAllOpen] = useState(false);
+  const [optedOutIds, setOptedOutIds] = useState<string[]>([]);
+  const [confirmTargets, setConfirmTargets] = useState<
+    PackRefreshTarget[] | null
+  >(null);
+  const [updateReports, setUpdateReports] = useState<SkillPackUpdateReport[]>(
+    [],
+  );
+  const [uninstallPack, setUninstallPack] = useState<
+    (PackRefreshTarget & { count: number }) | null
+  >(null);
+  const [importChooserOpen, setImportChooserOpen] = useState(false);
+  const [importUrlDraft, setImportUrlDraft] = useState("");
+  const [replaceConflicts, setReplaceConflicts] = useState<
+    SkillReplacePreview[]
+  >([]);
+  const pendingImportRef = useRef<{
+    sourcePath: string;
+    targets: SkillTarget[];
+  } | null>(null);
+  const pendingUpdatesRef = useRef<PackRefreshTarget[]>([]);
   const [deleteTarget, setDeleteTarget] = useState<SkillEntryData | null>(null);
   const [deletingSkillFolder, setDeletingSkillFolder] = useState<string | null>(
     null,
@@ -106,9 +138,6 @@ export function ScientificSkillsOnboarding({
   const selectedTargets = useSkillStore((state) => state.selectedTargets);
   const importFolder = useSkillStore((state) => state.importFolder);
   const refreshSkills = useSkillStore((state) => state.refresh);
-  const updateDefaultSkillPacks = useSkillStore(
-    (state) => state.updateDefaultSkillPacks,
-  );
   const installingPackId = useSkillStore((state) => state.installingPackId);
   const installedRuntimeSkills = useSkillStore((state) => state.skills);
   const projectPath = useDocumentStore((state) => state.projectRoot);
@@ -196,10 +225,12 @@ export function ScientificSkillsOnboarding({
       buildSkillsBrowserCategories({
         installedSkills: [
           ...installedRuntimeSkills.map((skill) => ({
+            id: skill.managed ? skill.id : undefined,
             name: skill.name,
             folder: skill.folder,
             category: skill.category,
             sourceUrl: skill.sourceUrl,
+            sourceFolder: skill.sourceFolder,
           })),
           ...installedSkills
             .filter(
@@ -214,8 +245,9 @@ export function ScientificSkillsOnboarding({
             })),
         ],
         catalog: categories,
+        optedOutPackIds: optedOutIds,
       }),
-    [categories, installedRuntimeSkills, installedSkills],
+    [categories, installedRuntimeSkills, installedSkills, optedOutIds],
   );
 
   useEffect(() => {
@@ -225,10 +257,10 @@ export function ScientificSkillsOnboarding({
     ) {
       return;
     }
-    const firstInstalled = displayCategories.find((category) =>
-      category.id.startsWith("installed:"),
+    const firstWithSkills = displayCategories.find(
+      (category) => category.skill_count > 0,
     );
-    setSelectedId(firstInstalled?.id ?? displayCategories[0]?.id ?? null);
+    setSelectedId(firstWithSkills?.id ?? displayCategories[0]?.id ?? null);
   }, [displayCategories, selectedId]);
 
   const totalSkills = displayCategories.reduce(
@@ -243,67 +275,150 @@ export function ScientificSkillsOnboarding({
     (status?.installed ?? false) ||
     displayCategories.some((category) => category.skill_count > 0);
 
-  const handleInstall = useCallback(async () => {
-    installBackendLogSeenRef.current = false;
-    let noBackendLogTimer: number | undefined;
-    const preparing = t("skills.preparing");
-    const preparingPrefix = t("skills.preparingPrefix");
-    setInstallLogs([preparing]);
-    setIsInstalling(true);
-    setIsComplete(false);
-    setInstallResult(null);
-    setError(null);
-
+  const reloadOptOuts = useCallback(async () => {
     try {
-      noBackendLogTimer = window.setTimeout(() => {
-        if (installBackendLogSeenRef.current || !mountedRef.current) return;
-        setInstallLogs((previous) => {
-          const hasBackendLog = previous.some(
-            (line) => !line.startsWith(preparingPrefix),
-          );
-          if (hasBackendLog) return previous;
-          return [...previous, t("skills.waitingInstaller")];
-        });
-      }, 2500);
-
-      await new Promise((resolve) => window.setTimeout(resolve, 150));
-      if (!mountedRef.current) return;
-
-      const results = await updateDefaultSkillPacks();
-      if (noBackendLogTimer !== undefined) {
-        window.clearTimeout(noBackendLogTimer);
-      }
-      if (!mountedRef.current) return;
-      const imported = results.filter(
-        (item) => item.status === "imported",
-      ).length;
-      const failed = results.find((item) => item.status === "error");
-      if (failed) {
-        throw new Error(
-          failed.error ?? t("skills.updateFailedId", { id: failed.id }),
-        );
-      }
-      setInstallResult({
-        success: true,
-        skills_installed: imported,
-        target_dir: "LocalPrism skills",
-        message: `Updated ${imported} default skill packs`,
-      });
-      setIsComplete(true);
-      localStorage.setItem(STORAGE_KEY, "true");
-      await checkStatus();
-      await refreshSkills(projectPath ?? undefined);
-    } catch (e) {
-      if (noBackendLogTimer !== undefined) {
-        window.clearTimeout(noBackendLogTimer);
-      }
-      if (!mountedRef.current) return;
-      const message = String(e);
-      setInstallLogs((previous) => [...previous, message]);
-      setError(message);
-      setIsInstalling(false);
+      const preferences = await invoke("skill_pack_preferences");
+      const ids = [...optedOutPackIdSet(preferences)];
+      if (mountedRef.current) setOptedOutIds(ids);
+      return new Set(ids);
+    } catch {
+      return null;
     }
-  }, [checkStatus, projectPath, refreshSkills, t, updateDefaultSkillPacks]);
+  }, []);
+
+  useEffect(() => {
+    void reloadOptOuts();
+  }, [reloadOptOuts]);
+
+  const runPackUpdates = useCallback(
+    async (targets: PackRefreshTarget[]) => {
+      if (targets.length === 0) {
+        toast.message(t("skills.selectPackToUpdate"));
+        return;
+      }
+      pendingUpdatesRef.current = targets;
+      installBackendLogSeenRef.current = false;
+      let noBackendLogTimer: number | undefined;
+      const preparing = t("skills.preparing");
+      const preparingPrefix = t("skills.preparingPrefix");
+      setInstallLogs([preparing]);
+      setUpdateReports([]);
+      setIsInstalling(true);
+      setIsComplete(false);
+      setError(null);
+      try {
+        noBackendLogTimer = window.setTimeout(() => {
+          if (installBackendLogSeenRef.current || !mountedRef.current) return;
+          setInstallLogs((previous) => {
+            const hasBackendLog = previous.some(
+              (line) => !line.startsWith(preparingPrefix),
+            );
+            if (hasBackendLog) return previous;
+            return [...previous, t("skills.waitingInstaller")];
+          });
+        }, 2500);
+        const reports: SkillPackUpdateReport[] = [];
+        for (const target of targets) {
+          if (!mountedRef.current) return;
+          setInstallLogs((previous) => [...previous, target.name]);
+          try {
+            const report = normalizePackUpdateReport(
+              await invoke("skill_refresh_pack", {
+                sourceUrl: target.sourceUrl ?? null,
+                sourceFolder: target.sourceFolder ?? null,
+                targets: useSkillStore.getState().selectedTargets,
+                projectPath: null,
+              }),
+            );
+            if (!report.name) report.name = target.name;
+            if (!report.id) report.id = target.id;
+            reports.push(report);
+          } catch (error) {
+            reports.push({
+              id: target.id,
+              name: target.name,
+              added: [],
+              updated: [],
+              removed: [],
+              unchanged: [],
+              error: String(error),
+            });
+          }
+        }
+        if (noBackendLogTimer !== undefined) {
+          window.clearTimeout(noBackendLogTimer);
+        }
+        if (!mountedRef.current) return;
+        setUpdateReports(reports);
+        const failed = reports.filter((report) => report.error);
+        await checkStatus();
+        await refreshSkills(projectPath ?? undefined);
+        await reloadOptOuts();
+        for (const report of reports) {
+          if (report.errorCode === "missing-folder") {
+            toast.error(
+              t("skills.missingFolder", {
+                name: report.name,
+                path: report.detail ?? "",
+              }),
+            );
+          }
+        }
+        if (failed.length > 0 && failed.length === reports.length) {
+          setError(
+            failed.map((report) => report.error ?? report.name).join("\n"),
+          );
+        }
+        setIsComplete(true);
+        setIsInstalling(false);
+        if (failed.length < reports.length) {
+          localStorage.setItem(STORAGE_KEY, "true");
+        }
+      } catch (error) {
+        if (noBackendLogTimer !== undefined) {
+          window.clearTimeout(noBackendLogTimer);
+        }
+        if (!mountedRef.current) return;
+        const message = String(error);
+        setInstallLogs((previous) => [...previous, message]);
+        setError(message);
+        setIsInstalling(false);
+      }
+    },
+    [checkStatus, projectPath, refreshSkills, reloadOptOuts, t],
+  );
+
+  const requestPackUpdates = useCallback(
+    (targets: PackRefreshTarget[]) => {
+      if (targets.length === 0) {
+        toast.message(t("skills.selectPackToUpdate"));
+        return;
+      }
+      const remote = remoteRefreshTargets(targets);
+      if (remote.length === 0) {
+        void runPackUpdates(targets);
+        return;
+      }
+      pendingUpdatesRef.current = targets;
+      setConfirmTargets(targets);
+    },
+    [runPackUpdates, t],
+  );
+
+  const handleUpdateSelected = useCallback(() => {
+    const category = displayCategories.find((item) => item.id === selectedId);
+    const target = category ? categoryRefreshTarget(category) : null;
+    if (!target) {
+      toast.message(t("skills.noPackSource"));
+      return;
+    }
+    requestPackUpdates([target]);
+  }, [displayCategories, requestPackUpdates, selectedId, t]);
+
+  const handleUpdateAll = useCallback(() => {
+    const targets = updateAllTargets(displayCategories, new Set(optedOutIds));
+    requestPackUpdates(targets);
+  }, [displayCategories, optedOutIds, requestPackUpdates]);
 
   const handleUninstall = useCallback(async () => {
     setIsUninstalling(true);
@@ -330,41 +445,147 @@ export function ScientificSkillsOnboarding({
     }
   }, [checkStatus, projectPath, refreshSkills, t]);
 
-  const handleImportSkill = useCallback(async () => {
+  const importLocalSource = useCallback(
+    async (sourcePath: string) => {
+      const targets = useSkillStore.getState().selectedTargets;
+      setIsImporting(true);
+      try {
+        const preview = normalizeSkillImportPreview(
+          await invoke("skill_import_preview", {
+            sourcePath,
+            targets,
+            projectPath: null,
+          }),
+        );
+        if (preview.conflicts.length > 0) {
+          pendingImportRef.current = { sourcePath, targets };
+          setReplaceConflicts(preview.conflicts);
+          return;
+        }
+        const outcome = await importFolder(sourcePath, targets);
+        localStorage.setItem(STORAGE_KEY, "true");
+        await checkStatus();
+        await refreshSkills(projectPath ?? undefined);
+        toastImportOutcome(outcome, t);
+      } catch (error) {
+        toast.error(t("skills.toastImportFailed"), {
+          description: String(error),
+        });
+      } finally {
+        setIsImporting(false);
+      }
+    },
+    [checkStatus, importFolder, projectPath, refreshSkills, t],
+  );
+
+  const handleImportFolder = useCallback(async () => {
+    const selectedFolder = await open({
+      directory: true,
+      multiple: false,
+      title: t("skills.importFolderTitle"),
+    });
+    if (typeof selectedFolder !== "string") return;
+    setImportChooserOpen(false);
+    await importLocalSource(selectedFolder);
+  }, [importLocalSource, t]);
+
+  const handleImportArchive = useCallback(async () => {
+    const selectedFile = await open({
+      directory: false,
+      multiple: false,
+      title: t("skills.importArchiveTitle"),
+      filters: SKILL_ARCHIVE_FILTERS,
+    });
+    if (typeof selectedFile !== "string") return;
+    setImportChooserOpen(false);
+    await importLocalSource(selectedFile);
+  }, [importLocalSource, t]);
+
+  const handleImportUrl = useCallback(async () => {
+    const url = importUrlDraft.trim();
+    if (!url) return;
+    const targets = useSkillStore.getState().selectedTargets;
     setIsImporting(true);
     try {
-      const selectedFolder = await open({
-        directory: true,
-        multiple: false,
-        title: t("skills.importFolderTitle"),
-      });
-
-      if (typeof selectedFolder !== "string") return;
-
-      const targets = useSkillStore.getState().selectedTargets;
-      await importFolder(selectedFolder, targets, projectPath ?? undefined);
-
+      const outcome = await useSkillStore
+        .getState()
+        .importUrl(url, targets, undefined, undefined, false);
+      setImportUrlDraft("");
+      setImportChooserOpen(false);
       localStorage.setItem(STORAGE_KEY, "true");
       await checkStatus();
       await refreshSkills(projectPath ?? undefined);
-      toast.success(t("skills.toastImported"), {
-        description: t("skills.toastImportedBody"),
-      });
-    } catch (e) {
+      toastImportOutcome(outcome, t);
+    } catch (error) {
       toast.error(t("skills.toastImportFailed"), {
-        description: String(e),
+        description: String(error),
+      });
+    } finally {
+      setIsImporting(false);
+    }
+  }, [checkStatus, importUrlDraft, projectPath, refreshSkills, t]);
+
+  const handleConfirmReplace = useCallback(async () => {
+    const pending = pendingImportRef.current;
+    if (!pending) return;
+    setIsImporting(true);
+    try {
+      const outcome = await importFolder(pending.sourcePath, pending.targets);
+      pendingImportRef.current = null;
+      setReplaceConflicts([]);
+      localStorage.setItem(STORAGE_KEY, "true");
+      await checkStatus();
+      await refreshSkills(projectPath ?? undefined);
+      toastImportOutcome(outcome, t);
+    } catch (error) {
+      toast.error(t("skills.toastImportFailed"), {
+        description: String(error),
       });
     } finally {
       setIsImporting(false);
     }
   }, [checkStatus, importFolder, projectPath, refreshSkills, t]);
 
+  const handleUninstallPack = useCallback(async () => {
+    if (!uninstallPack) return;
+    const packName = uninstallPack.name;
+    setIsUninstalling(true);
+    try {
+      await invoke("skill_remove_pack", {
+        sourceUrl: uninstallPack.sourceUrl ?? null,
+        sourceFolder: uninstallPack.sourceFolder ?? null,
+        defaultPackId: uninstallPack.defaultPackId ?? null,
+        optOut: Boolean(uninstallPack.defaultPackId),
+      });
+      setUninstallPack(null);
+      await reloadOptOuts();
+      await checkStatus();
+      await refreshSkills(projectPath ?? undefined);
+      toast.success(t("skills.toastPackUninstalled", { name: packName }));
+    } catch (error) {
+      toast.error(t("skills.toastUninstallFailed"), {
+        description: String(error),
+      });
+    } finally {
+      setIsUninstalling(false);
+    }
+  }, [
+    checkStatus,
+    projectPath,
+    refreshSkills,
+    reloadOptOuts,
+    t,
+    uninstallPack,
+  ]);
+
   const handleConfirmDeleteSkill = useCallback(async () => {
-    if (!deleteTarget) return;
+    if (!deleteTarget?.id) return;
+    const entryId = deleteTarget.id;
     setDeletingSkillFolder(deleteTarget.folder);
     try {
-      await invoke("delete_installed_skill", {
-        skillFolder: deleteTarget.folder,
+      await invoke("skill_delete_managed", {
+        entryId,
+        confirmModified: false,
       });
       toast.success(t("skills.toastDeleted"), {
         description: deleteTarget.name,
@@ -417,18 +638,47 @@ export function ScientificSkillsOnboarding({
               ) : (
                 <FlaskConicalIcon className="size-5 text-muted-foreground" />
               )}
-              {isComplete
-                ? t("skills.updateComplete")
-                : error
-                  ? t("skills.updateFailed")
+              {error
+                ? t("skills.updateFailed")
+                : isComplete
+                  ? t("skills.updateComplete")
                   : t("skills.updating")}
             </DialogTitle>
-            {isComplete && (
-              <DialogDescription>
-                {t("skills.packsUpdated", {
-                  count: installResult?.skills_installed ?? 0,
-                })}
-              </DialogDescription>
+            {(isComplete || error) && updateReports.length > 0 && (
+              <div className="space-y-2" data-testid="skill-update-summary">
+                {updateReports.map((report) => (
+                  <details
+                    key={`${report.id}:${report.name}`}
+                    className="rounded-md border border-border/70 px-3 py-2 text-xs"
+                    open={Boolean(report.error)}
+                  >
+                    <summary className="cursor-pointer font-medium">
+                      {report.name}
+                      {report.error ? ` — ${report.error}` : ""}
+                    </summary>
+                    <PackChangeList
+                      label={t("skills.updateSummaryAdded")}
+                      names={report.added}
+                      emptyLabel={t("skills.summaryNone")}
+                    />
+                    <PackChangeList
+                      label={t("skills.updateSummaryUpdated")}
+                      names={report.updated}
+                      emptyLabel={t("skills.summaryNone")}
+                    />
+                    <PackChangeList
+                      label={t("skills.updateSummaryRemoved")}
+                      names={report.removed}
+                      emptyLabel={t("skills.summaryNone")}
+                    />
+                    <PackChangeList
+                      label={t("skills.updateSummaryUnchanged")}
+                      names={report.unchanged}
+                      emptyLabel={t("skills.summaryNone")}
+                    />
+                  </details>
+                ))}
+              </div>
             )}
           </DialogHeader>
 
@@ -453,7 +703,7 @@ export function ScientificSkillsOnboarding({
               <Button
                 variant="outline"
                 size="sm"
-                onClick={handleInstall}
+                onClick={() => void runPackUpdates(pendingUpdatesRef.current)}
                 className="gap-1.5"
               >
                 <RefreshCwIcon className="size-3.5" />
@@ -510,7 +760,8 @@ export function ScientificSkillsOnboarding({
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={handleInstall}
+                      data-testid="skill-pack-update"
+                      onClick={handleUpdateSelected}
                       className="gap-1.5"
                     >
                       <RefreshCwIcon className="size-3.5" />
@@ -519,20 +770,21 @@ export function ScientificSkillsOnboarding({
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => setConfirmUninstallAllOpen(true)}
-                      disabled={isUninstalling}
-                      className="gap-1.5 text-destructive hover:text-destructive"
+                      data-testid="skill-pack-update-all"
+                      onClick={handleUpdateAll}
+                      className="gap-1.5"
                     >
-                      {isUninstalling ? (
-                        <Loader2Icon className="size-3.5 animate-spin" />
-                      ) : (
-                        <Trash2Icon className="size-3.5" />
-                      )}
-                      {t("skills.uninstall")}
+                      <RefreshCwIcon className="size-3.5" />
+                      {t("skills.updateAll")}
                     </Button>
                   </>
                 ) : (
-                  <Button size="sm" onClick={handleInstall} className="gap-1.5">
+                  <Button
+                    size="sm"
+                    data-testid="skill-pack-update-all"
+                    onClick={handleUpdateAll}
+                    className="gap-1.5"
+                  >
                     <DownloadIcon className="size-3.5" />
                     {t("skills.installAll")}
                   </Button>
@@ -544,7 +796,8 @@ export function ScientificSkillsOnboarding({
                   variant="outline"
                   size="sm"
                   data-tour="tour-skill-import"
-                  onClick={handleImportSkill}
+                  data-testid="skill-import-open"
+                  onClick={() => setImportChooserOpen(true)}
                   disabled={
                     isImporting ||
                     isInstalling ||
@@ -560,6 +813,30 @@ export function ScientificSkillsOnboarding({
                   )}
                   {t("skills.importSkill")}
                 </Button>
+                {isInstalled ? (
+                  <details className="relative" data-testid="skill-pack-more">
+                    <summary className="inline-flex h-8 cursor-pointer list-none items-center rounded-md border border-input bg-background px-3 text-sm [&::-webkit-details-marker]:hidden">
+                      {t("skills.moreActions")}
+                    </summary>
+                    <div className="absolute right-0 z-30 mt-1 w-56 rounded-md border bg-popover p-3 shadow-md">
+                      <p className="mb-2 font-medium text-destructive text-xs">
+                        {t("skills.dangerZone")}
+                      </p>
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        size="sm"
+                        data-testid="skill-pack-uninstall-all"
+                        disabled={isUninstalling}
+                        onClick={() => setConfirmUninstallAllOpen(true)}
+                        className="w-full gap-1.5"
+                      >
+                        <Trash2Icon className="size-3.5" />
+                        {t("skills.uninstallAllAction")}
+                      </Button>
+                    </div>
+                  </details>
+                ) : null}
               </div>
             </div>
           </DialogHeader>
@@ -619,6 +896,21 @@ export function ScientificSkillsOnboarding({
                       installedSkillFolders={installedSkillFolders}
                       deletingSkillFolder={deletingSkillFolder}
                       onDeleteSkill={setDeleteTarget}
+                      onUninstallPack={
+                        selected.skill_count > 0
+                          ? () => {
+                              const target = categoryRefreshTarget(selected);
+                              if (!target) {
+                                toast.message(t("skills.noPackSource"));
+                                return;
+                              }
+                              setUninstallPack({
+                                ...target,
+                                count: selected.skill_count,
+                              });
+                            }
+                          : undefined
+                      }
                     />
                   </div>
                 </ScrollArea>
@@ -679,6 +971,7 @@ export function ScientificSkillsOnboarding({
               size="sm"
               disabled={deletingSkillFolder !== null}
               onClick={handleConfirmDeleteSkill}
+              data-testid="skill-delete-confirm"
               className="gap-1.5"
             >
               {deletingSkillFolder ? (
@@ -691,6 +984,171 @@ export function ScientificSkillsOnboarding({
           </div>
         </DialogContent>
       </Dialog>
+
+      <Dialog
+        open={confirmTargets !== null}
+        onOpenChange={(open) => {
+          if (!open && !isInstalling) setConfirmTargets(null);
+        }}
+      >
+        <DialogContent
+          className="sm:max-w-sm"
+          data-testid="skill-download-confirm"
+        >
+          <DialogHeader>
+            <DialogTitle>{t("skills.downloadConfirmTitle")}</DialogTitle>
+            <DialogDescription>
+              {t("skills.downloadConfirmBody")}
+            </DialogDescription>
+          </DialogHeader>
+          <ul className="space-y-1 text-sm">
+            {remoteRefreshTargets(confirmTargets ?? []).map((target) => (
+              <li key={target.id}>{target.name}</li>
+            ))}
+          </ul>
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setConfirmTargets(null)}
+            >
+              {t("chrome.cancel")}
+            </Button>
+            <Button
+              size="sm"
+              data-testid="skill-download-confirm-action"
+              onClick={() => {
+                const targets = confirmTargets ?? [];
+                setConfirmTargets(null);
+                void runPackUpdates(targets);
+              }}
+            >
+              {t("skills.downloadConfirmAction")}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={uninstallPack !== null}
+        onOpenChange={(open) => {
+          if (!open && !isUninstalling) setUninstallPack(null);
+        }}
+      >
+        <DialogContent
+          className="sm:max-w-sm"
+          data-testid="skill-pack-uninstall-confirm"
+        >
+          <DialogHeader>
+            <DialogTitle>
+              {t("skills.uninstallPackTitle", {
+                name: uninstallPack?.name ?? "",
+              })}
+            </DialogTitle>
+            <DialogDescription>
+              {t("skills.uninstallPackBody")}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-destructive text-xs">
+            {t("skills.uninstallPackCount", {
+              name: uninstallPack?.name ?? "",
+              count: uninstallPack?.count ?? 0,
+            })}
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={isUninstalling}
+              onClick={() => setUninstallPack(null)}
+            >
+              {t("chrome.cancel")}
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              data-testid="skill-pack-uninstall-confirm-action"
+              disabled={isUninstalling}
+              onClick={() => void handleUninstallPack()}
+            >
+              {t("skills.uninstallPack")}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={importChooserOpen} onOpenChange={setImportChooserOpen}>
+        <DialogContent
+          className="sm:max-w-md"
+          data-testid="skill-import-chooser"
+        >
+          <DialogHeader>
+            <DialogTitle>{t("skills.importChooserTitle")}</DialogTitle>
+            <DialogDescription>{t("skills.addHelp")}</DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              size="sm"
+              data-testid="skill-dialog-import-folder"
+              disabled={isImporting}
+              onClick={() => void handleImportFolder()}
+            >
+              <FolderPlusIcon className="size-3.5" />
+              {t("skills.importFolder")}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              data-testid="skill-dialog-import-archive"
+              disabled={isImporting}
+              onClick={() => void handleImportArchive()}
+            >
+              <FileArchiveIcon className="size-3.5" />
+              {t("skills.importArchive")}
+            </Button>
+          </div>
+          <form
+            className="space-y-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleImportUrl();
+            }}
+          >
+            <p className="text-muted-foreground text-xs">
+              {t("skills.addUrlHelp")}
+            </p>
+            <div className="flex gap-2">
+              <Input
+                value={importUrlDraft}
+                onChange={(event) => setImportUrlDraft(event.target.value)}
+                placeholder={t("skills.addUrlPlaceholder")}
+                aria-label={t("skills.addUrl")}
+                data-testid="skill-dialog-import-url"
+              />
+              <Button
+                type="submit"
+                size="sm"
+                disabled={isImporting || importUrlDraft.trim().length === 0}
+              >
+                <Link2Icon className="size-3.5" />
+                {t("skills.addUrlAction")}
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <SkillReplaceDialog
+        conflicts={replaceConflicts}
+        busy={isImporting}
+        onCancel={() => {
+          pendingImportRef.current = null;
+          setReplaceConflicts([]);
+        }}
+        onReplace={() => void handleConfirmReplace()}
+      />
 
       <Dialog
         open={confirmUninstallAllOpen}
@@ -779,18 +1237,36 @@ function SkillGithubLink({ href, label }: { href: string; label: string }) {
   );
 }
 
+function PackChangeList({
+  label,
+  names,
+  emptyLabel,
+}: {
+  label: string;
+  names: string[];
+  emptyLabel: string;
+}) {
+  return (
+    <p className="mt-1 text-muted-foreground">
+      {label}: {names.length > 0 ? names.join(", ") : emptyLabel}
+    </p>
+  );
+}
+
 function CategoryDetail({
   category,
   isInstalled,
   installedSkillFolders,
   deletingSkillFolder,
   onDeleteSkill,
+  onUninstallPack,
 }: {
   category: SkillCategoryData | SkillsBrowserCategory;
   isInstalled: boolean;
   installedSkillFolders: Set<string>;
   deletingSkillFolder: string | null;
   onDeleteSkill: (skill: SkillEntryData) => void;
+  onUninstallPack?: () => void;
 }) {
   const { t } = useI18n();
   const Icon = ICON_MAP[category.icon] || FlaskConicalIcon;
@@ -937,6 +1413,19 @@ function CategoryDetail({
               label={githubRepoLabel(packHomeUrl)}
             />
           ) : null}
+          {onUninstallPack ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="mt-3 text-destructive hover:text-destructive"
+              data-testid="skill-pack-uninstall"
+              onClick={onUninstallPack}
+            >
+              <Trash2Icon className="size-3.5" />
+              {t("skills.uninstallPack")}
+            </Button>
+          ) : null}
         </div>
       </div>
 
@@ -953,7 +1442,8 @@ function CategoryDetail({
         ) : (
           <div className="grid grid-cols-2 gap-1.5">
             {category.skills.map((skill) => {
-              const canDelete = installedSkillFolders.has(skill.folder);
+              const canDelete =
+                Boolean(skill.id) && installedSkillFolders.has(skill.folder);
               const isDeleting = deletingSkillFolder === skill.folder;
               return (
                 <div

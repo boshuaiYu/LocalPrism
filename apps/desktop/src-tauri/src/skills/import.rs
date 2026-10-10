@@ -1,5 +1,7 @@
 use crate::runtime::RuntimeKind;
-use crate::skills::domain::{RuntimeSkill, SkillScope, SkillTarget};
+use crate::skills::domain::{
+    RuntimeSkill, SkillImportPreview, SkillReplacePreview, SkillScope, SkillTarget,
+};
 use crate::skills::manifest::{
     assess_managed_copy, deletion_allowed, stable_entry_id, ManagedSkillEntry, ManifestStore,
     ObservedFingerprint, SkillSource,
@@ -115,10 +117,7 @@ fn directory_name_overrides_declared_folder(folder_name: &str) -> bool {
     )
 }
 
-fn yaml_mapping_string(
-    mapping: &serde_yaml::Mapping,
-    key: &str,
-) -> Option<String> {
+fn yaml_mapping_string(mapping: &serde_yaml::Mapping, key: &str) -> Option<String> {
     mapping
         .get(serde_yaml::Value::String(key.into()))
         .and_then(|value| match value {
@@ -234,9 +233,10 @@ fn skill_display_category(
     skill_dir: &Path,
     root: Option<&Path>,
 ) -> Option<String> {
-    parsed.category.clone().or_else(|| {
-        root.and_then(|root| category_from_parent_folder(skill_dir, root))
-    })
+    parsed
+        .category
+        .clone()
+        .or_else(|| root.and_then(|root| category_from_parent_folder(skill_dir, root)))
 }
 
 fn lenient_frontmatter_field(raw: &str, key: &str) -> Option<String> {
@@ -246,11 +246,7 @@ fn lenient_frontmatter_field(raw: &str, key: &str) -> Option<String> {
         let Some(rest) = trimmed.strip_prefix(&prefix) else {
             continue;
         };
-        let value = rest
-            .trim()
-            .trim_matches('"')
-            .trim_matches('\'')
-            .trim();
+        let value = rest.trim().trim_matches('"').trim_matches('\'').trim();
         if !value.is_empty() {
             return Some(value.to_string());
         }
@@ -561,6 +557,7 @@ pub fn snapshot_installed_targets(
             folder,
             source_path: destination.to_string_lossy().to_string(),
             source_url: None,
+            source_folder: None,
             targets: vec![target.clone()],
             managed: true,
             compatible_runtimes: parsed.compatible_runtimes.clone(),
@@ -570,6 +567,52 @@ pub fn snapshot_installed_targets(
         });
     }
     snapshots
+}
+
+pub fn preview_skill_directories(
+    skill_dirs: &[PathBuf],
+    targets: &[SkillTarget],
+    project_path: Option<&Path>,
+) -> Result<SkillImportPreview, ImportError> {
+    if skill_dirs.is_empty() {
+        return Err(ImportError::from(
+            "Selected source does not contain any skills. A skill must contain SKILL.md.",
+        ));
+    }
+    let mut conflicts = Vec::new();
+    let mut added = Vec::new();
+    for skill_dir in skill_dirs {
+        let (parsed, _) = validate_skill_dir(skill_dir)?;
+        let mut replaced = false;
+        for target in targets {
+            let Ok(root) = resolve_skill_root(target.runtime, target.scope, project_path) else {
+                continue;
+            };
+            let Ok(destination) = skill_destination(&root, &parsed.folder) else {
+                continue;
+            };
+            if find_skill_md(&destination).is_none() {
+                continue;
+            }
+            let (old_name, old_description) = match validate_skill_dir(&destination) {
+                Ok((installed, _)) => (installed.name, installed.description),
+                Err(_) => (parsed.folder.clone(), String::new()),
+            };
+            conflicts.push(SkillReplacePreview {
+                folder: parsed.folder.clone(),
+                old_name,
+                old_description,
+                new_name: parsed.name.clone(),
+                new_description: parsed.description.clone(),
+            });
+            replaced = true;
+            break;
+        }
+        if !replaced {
+            added.push(parsed.name.clone());
+        }
+    }
+    Ok(SkillImportPreview { conflicts, added })
 }
 
 pub fn import_skill_to_targets(
@@ -669,6 +712,7 @@ pub fn import_skill_to_targets(
                 folder: item.folder.clone(),
                 source_path: item.destination.to_string_lossy().to_string(),
                 source_url: crate::skills::manifest::source_url_from_skill_source(&source),
+                source_folder: crate::skills::manifest::source_folder_from_skill_source(&source),
                 targets: vec![item.target.clone()],
                 managed: true,
                 compatible_runtimes: parsed.compatible_runtimes.clone(),
@@ -747,6 +791,7 @@ pub fn list_runtime_skills(project_path: Option<&Path>) -> Result<Vec<RuntimeSki
                 folder,
                 source_path: skill_dir.to_string_lossy().to_string(),
                 source_url: None,
+                source_folder: None,
                 targets: vec![target.clone()],
                 managed: false,
                 compatible_runtimes: parsed.compatible_runtimes,
@@ -883,6 +928,7 @@ pub fn auto_import_project_skills(project_path: &Path) -> Result<Vec<RuntimeSkil
                 folder,
                 source_path: canonical.to_string_lossy().to_string(),
                 source_url: None,
+                source_folder: Some(canonical.to_string_lossy().to_string()),
                 targets: vec![target.clone()],
                 managed: true,
                 compatible_runtimes: parsed.compatible_runtimes,

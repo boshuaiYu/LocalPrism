@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { toast } from "sonner";
 import { create } from "zustand";
 import type {
   RuntimeKind,
@@ -12,6 +13,16 @@ import {
   shouldInstallDefaultPack,
   type DefaultSkillPackId,
 } from "@/lib/default-skill-packs";
+import { translate } from "@/lib/i18n";
+import {
+  normalizeSkillImportOutcome,
+  type SkillImportOutcome,
+} from "@/lib/skill-import-flow";
+import {
+  normalizePackUpdateReport,
+  optedOutPackIdSet,
+} from "@/lib/skill-pack-actions";
+import { useSettingsStore } from "@/stores/settings-store";
 import { isPaperSpineSkill } from "@/lib/paperspine";
 import {
   notifySkillsListUpdated,
@@ -35,7 +46,7 @@ function invokeErrorMessage(error: unknown): string {
 
 export type DefaultSkillPackResult = {
   id: string;
-  status: "already" | "imported" | "error";
+  status: "already" | "imported" | "error" | "opted-out";
   error?: string;
 };
 
@@ -59,14 +70,14 @@ export interface SkillStoreState {
     targets: SkillTarget[],
     projectPath?: string,
     categoryId?: string,
-  ) => Promise<void>;
+  ) => Promise<SkillImportOutcome>;
   importUrl: (
     sourceUrl: string,
     targets: SkillTarget[],
     projectPath?: string,
     categoryId?: string,
     skipExisting?: boolean,
-  ) => Promise<void>;
+  ) => Promise<SkillImportOutcome>;
   removeManaged: (entryId: string, confirmModified: boolean) => Promise<void>;
   autoImportProject: (projectPath: string) => Promise<number>;
   ensurePaperSpineSkills: () => Promise<"already" | "imported">;
@@ -139,18 +150,21 @@ export const useSkillStore = create<SkillStoreState>((set, get) => ({
   importFolder: async (sourcePath, targets, projectPath, categoryId) => {
     set({ loading: true, error: null });
     try {
-      const imported = await invoke<RuntimeSkill[]>("skill_import", {
-        sourcePath,
-        targets,
-        projectPath: projectPath ?? null,
-      });
+      const imported = normalizeSkillImportOutcome(
+        await invoke("skill_import", {
+          sourcePath,
+          targets,
+          projectPath: projectPath ?? null,
+        }),
+      );
       if (categoryId) {
         useSkillCategoryStore.getState().assignFolders(
-          imported.map((skill) => skill.folder),
+          imported.skills.map((skill) => skill.folder),
           categoryId,
         );
       }
       await get().refresh(projectPath);
+      return imported;
     } catch (error) {
       set({
         loading: false,
@@ -169,19 +183,22 @@ export const useSkillStore = create<SkillStoreState>((set, get) => ({
   ) => {
     set({ loading: true, error: null });
     try {
-      const imported = await invoke<RuntimeSkill[]>("skill_import_url", {
-        sourceUrl,
-        targets,
-        projectPath: projectPath ?? null,
-        skipExisting: skipExisting === true,
-      });
+      const imported = normalizeSkillImportOutcome(
+        await invoke("skill_import_url", {
+          sourceUrl,
+          targets,
+          projectPath: projectPath ?? null,
+          skipExisting: skipExisting === true,
+        }),
+      );
       if (categoryId) {
         useSkillCategoryStore.getState().assignFolders(
-          imported.map((skill) => skill.folder),
+          imported.skills.map((skill) => skill.folder),
           categoryId,
         );
       }
       await get().refresh(projectPath);
+      return imported;
     } catch (error) {
       set({
         loading: false,
@@ -247,6 +264,33 @@ export const useSkillStore = create<SkillStoreState>((set, get) => ({
     const operation = (async () => {
       await get().refresh();
       await useAgentStore.getState().refresh("claude");
+      let preferences: Awaited<ReturnType<typeof invoke>> | null = null;
+      try {
+        preferences = await invoke("skill_pack_preferences");
+      } catch {
+        return DEFAULT_SKILL_PACKS.map((pack) => ({
+          id: pack.id,
+          status: "error" as const,
+          error: "Could not read skill pack preferences",
+        }));
+      }
+      const optedOut = optedOutPackIdSet(preferences);
+      try {
+        const purged = normalizePackUpdateReport(
+          await invoke("skill_purge_retired_packs"),
+        );
+        if (purged.removed.length > 0) {
+          const language = useSettingsStore.getState().uiLanguage;
+          toast.message(
+            translate(language, "skills.retiredRemoved", {
+              count: purged.removed.length,
+            }),
+          );
+          await get().refresh();
+        }
+      } catch {
+        // A failed purge must not reinstall retired packs on this pass.
+      }
       const results: DefaultSkillPackResult[] = [];
       const listOfficialSlash = async () => {
         try {
@@ -263,6 +307,10 @@ export const useSkillStore = create<SkillStoreState>((set, get) => ({
       let slash = await listOfficialSlash();
 
       for (const pack of DEFAULT_SKILL_PACKS) {
+        if (optedOut.has(pack.id)) {
+          results.push({ id: pack.id, status: "opted-out" });
+          continue;
+        }
         const skills = get().skills ?? [];
         const agents = useAgentStore.getState().agents ?? [];
         if (

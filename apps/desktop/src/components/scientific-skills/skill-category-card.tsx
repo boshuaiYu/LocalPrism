@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 
 export interface SkillEntryData {
+  id?: string;
   name: string;
   folder: string;
 }
