@@ -61,6 +61,7 @@ import {
   skillPackDocsUrl,
 } from "@/lib/default-skill-packs";
 import {
+  isSkillArchivePath,
   SKILL_ARCHIVE_FILTERS,
   SkillReplaceDialog,
   toastImportOutcome,
@@ -509,6 +510,10 @@ export function ScientificSkillsOnboarding({
       filters: SKILL_ARCHIVE_FILTERS,
     });
     if (typeof selectedFile !== "string") return;
+    if (!isSkillArchivePath(selectedFile)) {
+      toast.error(t("skills.archiveTypeRejected"));
+      return;
+    }
     setImportChooserOpen(false);
     await importLocalSource(selectedFile);
   }, [importLocalSource, t]);
@@ -1246,7 +1251,7 @@ function packUpdateSummaryText(
     return next;
   };
   if (summary.kind === "error") {
-    return `${summary.name} — ${summary.error}`;
+    return `${summary.name} · ${t("skills.packRowFailed")} — ${summary.error}`;
   }
   if (summary.kind === "latest") {
     return withNotes(t("skills.packUpdateLatest", { name: summary.name }));
@@ -1286,10 +1291,27 @@ function PackUpdateRow({
       data-testid="skill-update-pack"
     >
       <summary
-        className="cursor-pointer font-medium"
+        className={cn(
+          "cursor-pointer font-medium",
+          report.error && "text-destructive",
+        )}
         data-testid="skill-update-pack-summary"
       >
-        {packUpdateSummaryText(report, t)}
+        {report.error ? (
+          <span
+            className="inline-flex items-center gap-1.5 text-destructive"
+            data-testid="skill-update-pack-failure"
+          >
+            <AlertCircleIcon
+              aria-hidden
+              className="size-3.5 shrink-0 text-destructive"
+              data-testid="skill-update-pack-error-icon"
+            />
+            <span>{packUpdateSummaryText(report, t)}</span>
+          </span>
+        ) : (
+          packUpdateSummaryText(report, t)
+        )}
       </summary>
       <PackChangeList
         label={t("skills.updateSummaryAdded")}

@@ -3,6 +3,16 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+
+const { toastError } = vi.hoisted(() => ({ toastError: vi.fn() }));
+
+vi.mock("sonner", () => ({
+  toast: {
+    success: vi.fn(),
+    error: toastError,
+    message: vi.fn(),
+  },
+}));
 import {
   SkillLibrary,
   targetsForSkillImport,
@@ -92,6 +102,8 @@ describe("SkillLibrary", () => {
     await act(async () => root.unmount());
     container.remove();
     useSkillStore.setState(snapshot, true);
+    toastError.mockReset();
+    vi.mocked(open).mockReset();
   });
 
   it("starts with collapsed packs and hides path and default status noise", async () => {
@@ -479,6 +491,73 @@ describe("SkillLibrary", () => {
     expect(
       container.querySelector('[data-testid="skill-import-advanced"]'),
     ).toBeNull();
+  });
+
+  it("filters archives as zip, gz, and tgz, then rejects a plain gz file", async () => {
+    const importFolder = vi.fn(async () => ({
+      skills: [],
+      added: ["Writer"],
+      updated: [],
+      unchanged: [],
+      removed: [],
+      errors: [],
+    }));
+    useSkillStore.setState({ importFolder });
+    vi.mocked(open).mockResolvedValueOnce("C:\\skills\\pack.tar.gz");
+
+    await act(async () => {
+      root.render(<SkillLibrary projectPath="/papers/demo" />);
+    });
+    await act(async () => {
+      (
+        container.querySelector(
+          '[data-testid="skill-import-archive"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+
+    expect(open).toHaveBeenCalledWith(
+      expect.objectContaining({
+        directory: false,
+        multiple: false,
+        filters: [{ name: "Skill archive", extensions: ["zip", "gz", "tgz"] }],
+      }),
+    );
+    expect(importFolder).toHaveBeenCalledWith(
+      "C:\\skills\\pack.tar.gz",
+      [{ runtime: "claude", scope: "user" }],
+      "/papers/demo",
+    );
+    expect(toastError).not.toHaveBeenCalled();
+
+    vi.mocked(open).mockResolvedValueOnce("/tmp/notes.gz");
+    await act(async () => {
+      (
+        container.querySelector(
+          '[data-testid="skill-import-archive"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    expect(toastError).toHaveBeenCalledWith(
+      "Choose a .zip, .tar.gz, or .tgz archive.",
+    );
+    expect(importFolder).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      useSettingsStore.setState({ uiLanguage: "zh" });
+    });
+    vi.mocked(open).mockResolvedValueOnce("/tmp/notes.tar");
+    await act(async () => {
+      (
+        container.querySelector(
+          '[data-testid="skill-import-archive"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    expect(toastError).toHaveBeenCalledWith(
+      "请选择 .zip、.tar.gz 或 .tgz 压缩包。",
+    );
+    expect(importFolder).toHaveBeenCalledTimes(1);
   });
 
   it("uses Chinese labels for the add and refresh controls", async () => {

@@ -13,6 +13,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  isSkillArchivePath,
   SKILL_ARCHIVE_FILTERS,
   SkillReplaceDialog,
   toastImportOutcome,
@@ -174,6 +175,10 @@ export function SkillLibrary({ projectPath = null }: SkillLibraryProps) {
       filters: SKILL_ARCHIVE_FILTERS,
     });
     if (!selected || Array.isArray(selected)) return;
+    if (!isSkillArchivePath(selected)) {
+      toast.error(t("skills.archiveTypeRejected"));
+      return;
+    }
     await beginLocalImport(selected, "archive");
   };
 
