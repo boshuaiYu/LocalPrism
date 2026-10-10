@@ -124,7 +124,44 @@ function isStandaloneMathLine(line: string): boolean {
 function toDisplayMath(inner: string, trailing = ""): string {
   const body = inner.trim();
   const punct = trailing.trim();
-  return punct ? `$$\n${body}\n$$${punct}` : `$$\n${body}\n$$`;
+  const block = `$$\n${body}\n$$`;
+  // `$$.` is not a closing fence. Punctuation has to start the next line.
+  return punct ? `${block}\n${punct}` : block;
+}
+
+/**
+ * A line that is only `$$` closes display math. `$$。` does not, and KaTeX
+ * then paints the following prose red. Split that suffix off when a fence
+ * is already open. An opening `$$ label` line stays intact.
+ */
+function separateClosingMathFence(text: string): string {
+  const lines = text.split("\n");
+  let open = false;
+  const out: string[] = [];
+  for (const line of lines) {
+    const exact = /^[ \t]*\$\$[ \t]*$/.test(line);
+    if (!open) {
+      if (exact) open = true;
+      else if (
+        /^[ \t]*\$\$\S/.test(line) &&
+        line.indexOf("$$", line.indexOf("$$") + 2) < 0
+      ) {
+        open = true;
+      }
+      out.push(line);
+      continue;
+    }
+    const stuck = /^([ \t]*\$\$)[ \t]*(\S[\s\S]*)$/.exec(line);
+    if (stuck) {
+      out.push(stuck[1] ?? "$$");
+      out.push(stuck[2] ?? "");
+      open = false;
+      continue;
+    }
+    if (exact) open = false;
+    out.push(line);
+  }
+  return out.join("\n");
 }
 
 const TEX_DISPLAY_RE = /\\\[([\s\S]+?)\\\]/g;
@@ -436,11 +473,11 @@ function normalizeChunk(chunk: string): string {
   const rewritten = rewriteBareTex(rewriteExplicitOutsideDollars(masked.text));
   const protectedMath = protectMath(rewritten);
   const protectedEnv = protectMathEnvironments(protectedMath.text);
-  return masked.restore(
-    protectedMath.restore(
-      protectedEnv.restore(transformMathLines(protectedEnv.text)),
-    ),
+  const restoredMath = protectedMath.restore(
+    protectedEnv.restore(transformMathLines(protectedEnv.text)),
   );
+  // Inline code is still masked, so a backtick example of `$$。` stays source.
+  return masked.restore(separateClosingMathFence(restoredMath));
 }
 
 function lineStartOffset(lines: string[], index: number): number {

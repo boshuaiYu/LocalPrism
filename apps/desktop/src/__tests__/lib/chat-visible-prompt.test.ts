@@ -79,6 +79,12 @@ describe("visibleUserPromptText", () => {
     expect(visibleUserPromptText(appendTeachAskReplyNote(styled, "zh"))).toBe(
       "请审这一段",
     );
+    expect(
+      visibleUserPromptText(`${appendTeachAskReplyNote(styled, "zh")}\n`),
+    ).toBe("请审这一段");
+    expect(
+      visibleUserPromptText(`${appendTeachAskReplyNote(styled, "en")}\r\n`),
+    ).toBe("请审这一段");
   });
 
   it("strips built-in reply-mode instructions from older prompts without a file line", () => {

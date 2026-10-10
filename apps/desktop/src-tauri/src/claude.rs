@@ -5142,9 +5142,16 @@ fn truncate_session_lines(
     Ok(lines[..=end].to_vec())
 }
 
+/// Keep in sync with `teach.askReplyFormat` in `apps/desktop/src/lib/i18n.ts`.
+const TEACH_ASK_REPLY_NOTES: &[&str] = &[
+    "Reply format: write inline math as $...$ and display math as a $$...$$ block on its own lines. Put LaTeX source in a fenced latex code block. Do not wrap $$ in backticks.",
+    "回复格式：行内公式写成 $...$，独立公式用单独成行的 $$...$$。LaTeX 源码放在 latex 代码块里。不要用反引号包住 $$。",
+];
+
 /// Saved transcripts store the prompt that was sent, including reply-mode
-/// instructions, the open-file header, and selected text. The chat shows the
-/// user text after the last wrapper. Peel those wrappers before comparing.
+/// instructions, the open-file header, selected text, and the learning-tab
+/// reply-format note. The chat shows the user text after those wrappers.
+/// Peel them before comparing.
 fn extract_rewind_body(text: &str) -> String {
     let normalized = text.replace("\r\n", "\n");
     let trimmed = normalized.trim_start();
@@ -5167,8 +5174,25 @@ fn extract_rewind_body(text: &str) -> String {
     }
 }
 
+fn strip_teach_ask_reply_note(text: &str) -> String {
+    let mut current = text.to_string();
+    loop {
+        let end = current.trim_end();
+        let Some(note) = TEACH_ASK_REPLY_NOTES
+            .iter()
+            .copied()
+            .find(|note| !note.is_empty() && end.ends_with(note))
+        else {
+            return current;
+        };
+        current = end[..end.len() - note.len()].trim_end().to_string();
+    }
+}
+
 fn normalize_rewind_text(text: &str) -> String {
-    let collapsed = extract_rewind_body(text)
+    // Drop the learning note before the 280-character cut so a lesson that
+    // almost fills the window still matches the saved row.
+    let collapsed = strip_teach_ask_reply_note(&extract_rewind_body(text))
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
@@ -7098,6 +7122,62 @@ Hello abstract
         assert_eq!(second.len(), 2);
         assert!(second[0].contains("user-visible-1"));
         assert!(!second.iter().any(|line| line.contains("user-visible-2")));
+    }
+
+    #[test]
+    fn rewind_finds_a_learning_prompt_with_a_trailing_reply_format_note() {
+        let lesson = "请讲解这个 LaTeX 结构。\n\n结构：figure";
+        let note = TEACH_ASK_REPLY_NOTES[1];
+        let stored = format!(
+            "[Reply mode: peer-review. Follow this speaking style for this turn only. Do not rewrite earlier messages.]\n自定义审稿口吻\n[/Reply mode]\n\n{lesson}\n\n{note}\n"
+        );
+        assert_eq!(
+            normalize_rewind_text(&stored),
+            normalize_rewind_text(lesson)
+        );
+        assert_eq!(
+            normalize_rewind_text(&format!("{lesson}\n\n{note}\r\n")),
+            normalize_rewind_text(lesson)
+        );
+        assert_eq!(
+            normalize_rewind_text(&format!("Explain this.\n\n{}\n", TEACH_ASK_REPLY_NOTES[0])),
+            normalize_rewind_text("Explain this.")
+        );
+        assert_ne!(
+            normalize_rewind_text(&format!("{lesson}更多\n\n{note}")),
+            normalize_rewind_text(lesson)
+        );
+
+        let lines = vec![
+            serde_json::json!({
+                "type": "user",
+                "uuid": "learn-1",
+                "message": {"role": "user", "content": stored}
+            })
+            .to_string(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"公式说明"}]}}"#
+                .to_string(),
+            serde_json::json!({
+                "type": "user",
+                "uuid": "learn-2",
+                "message": {"role": "user", "content": format!("{lesson}更多")}
+            })
+            .to_string(),
+        ];
+        let kept = truncate_session_lines(
+            &lines,
+            &SessionRewindAnchor {
+                role: "user".into(),
+                text: lesson.into(),
+                ordinal: 1,
+            },
+            true,
+        )
+        .unwrap();
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0].contains("learn-1"));
+        assert!(kept[0].contains(note));
+        assert!(!kept.iter().any(|line| line.contains("learn-2")));
     }
 
     #[test]

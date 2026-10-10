@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { displayConversationTitle } from "@/components/claude-chat/session-selector";
-import { buildTeachAskPrompt } from "@/lib/latex-teach-ask";
+import {
+  appendTeachAskReplyNote,
+  buildTeachAskPrompt,
+} from "@/lib/latex-teach-ask";
+import { applyReplyStyleToPrompt } from "@/lib/reply-mode";
 import {
   planLatexTeachAsk,
   type LatexLearnTabLike,
@@ -435,6 +439,8 @@ describe("sendLatexTeachAsk", () => {
     expect(second?.sessionId).toBe("learn-a");
     expect(second?.agentId).toBe("peer-review");
     expect(second?.prompt).toContain("请讲解这个 LaTeX 报错");
+    expect(second?.prompt).toContain("回复格式：");
+    expect(userTexts(afterError[0])[1]).not.toContain("回复格式：");
     expect(second?.prompt).toContain("miss.png");
     expect(second?.prompt).not.toContain("[Currently open file:");
 
@@ -454,9 +460,21 @@ describe("sendLatexTeachAsk", () => {
     ]);
     expect(guidePrompt).not.toContain(SECRET_SELECTION);
     expect(startRequests()[2]?.prompt).toContain("请讲解这份 LaTeX 入门引导");
+    expect(startRequests()[2]?.prompt).toContain("回复格式：");
+    expect(userTexts(afterGuide[0])[2]).not.toContain("回复格式：");
     expect(startRequests()[2]?.prompt).not.toContain(SECRET_SELECTION);
     expect(userTexts(mainTab())).toEqual(["writing chat"]);
     expect(mainTab()?.draft.pinnedContexts[0]?.selectedText).toBe("keep-chip");
+  });
+
+  it("does not append the learning reply-format note on the writing tab", async () => {
+    stopTab("tab-main");
+    await useClaudeChatStore
+      .getState()
+      .sendPrompt("Please revise the abstract.");
+    expect(lastStart()?.prompt).toContain("Please revise the abstract.");
+    expect(lastStart()?.prompt).not.toContain("回复格式：");
+    expect(lastStart()?.prompt).not.toContain("Reply format:");
   });
 
   it("queues a second question while the learning turn is still streaming", async () => {
@@ -530,6 +548,12 @@ describe("sendLatexTeachAsk", () => {
       messages: [],
       isStreaming: false,
     }));
+    const savedLesson = `${appendTeachAskReplyNote(
+      applyReplyStyleToPrompt(constructPrompt, "peer-review", [
+        { id: "peer-review", instructions: "自定义审稿口吻" },
+      ]),
+      "zh",
+    )}\n`;
     vi.mocked(invoke).mockImplementation(async (command, args) => {
       if (command !== "runtime_read_conversation") return undefined;
       const reference = (args as { reference: ConversationRef }).reference;
@@ -538,7 +562,7 @@ describe("sendLatexTeachAsk", () => {
         items: [
           {
             type: "user",
-            message: { content: [{ type: "text", text: constructPrompt }] },
+            message: { content: [{ type: "text", text: savedLesson }] },
           },
           {
             type: "assistant",
@@ -554,6 +578,9 @@ describe("sendLatexTeachAsk", () => {
     expect(learn?.id).toBe(learnId);
     expect(learn?.title).toBe("边写边学");
     expect(userTexts(learn)).toEqual([constructPrompt, errorPrompt]);
+    expect(userTexts(learn)[0]).not.toContain("回复格式：");
+    expect(userTexts(learn)[0]).not.toContain("自定义审稿口吻");
+    expect(lastStart()?.prompt).toContain("回复格式：");
     expect(invoke).toHaveBeenCalledWith("runtime_read_conversation", {
       reference: {
         runtime: "claude",

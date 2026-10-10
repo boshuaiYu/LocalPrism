@@ -298,11 +298,27 @@ describe("normalizeChatMath", () => {
       normalizeChatMath("参数 \\(w\\)、\\(F(w)\\)、\\(N\\) 与 \\(n_i\\)。"),
     ).toBe("参数 $w$、$F(w)$、$N$ 与 $n_i$。");
     expect(normalizeChatMath("\\[ n_i \\]")).toBe("$$\nn_i\n$$");
+    expect(normalizeChatMath("\\[ok\\]")).toBe("$$\nok\n$$");
+    expect(normalizeChatMath("\\[id\\]")).toBe("$$\nid\n$$");
     expect(normalizeChatMath("\\[1\\]")).toBe("\\[1\\]");
+    expect(normalizeChatMath("\\[Figure 1\\]")).toBe("\\[Figure 1\\]");
     expect(
       normalizeChatMath(
         "\\[ \\begin{equation} \\min_w F(w) \\end{equation} \\]",
       ),
     ).toBe("$$\n\\begin{equation} \\min_w F(w) \\end{equation}\n$$");
+  });
+
+  it("moves punctuation off an existing closing $$ fence", () => {
+    expect(normalizeChatMath("$$\nx\n$$。")).toBe("$$\nx\n$$\n。");
+    expect(normalizeChatMath("$$\nx = 1\n$$。下一句")).toBe(
+      "$$\nx = 1\n$$\n。下一句",
+    );
+    expect(normalizeChatMath("$$ label\nx = 1\n$$")).toBe(
+      "$$ label\nx = 1\n$$",
+    );
+    expect(normalizeChatMath("It costs $5 and $10.")).toBe(
+      "It costs $5 and $10.",
+    );
   });
 });

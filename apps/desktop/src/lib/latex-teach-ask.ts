@@ -38,12 +38,18 @@ export function appendTeachAskReplyNote(
 }
 
 export function stripTeachAskReplyNote(text: string): string {
-  const end = text.replace(/[ \t]+$/g, "");
-  for (const note of TEACH_ASK_REPLY_NOTES) {
-    if (!note || !end.endsWith(note)) continue;
-    return end.slice(0, -note.length).replace(/\n+$/, "");
+  let current = text;
+  for (;;) {
+    // JSONL rows often end in `\n` or `\r\n`. Trim every trailing whitespace
+    // character before the suffix check, then keep the original text when
+    // the note is absent.
+    const end = current.replace(/\s+$/g, "");
+    const note = TEACH_ASK_REPLY_NOTES.find(
+      (item) => item && end.endsWith(item),
+    );
+    if (!note) return current;
+    current = end.slice(0, -note.length).replace(/\s+$/g, "");
   }
-  return text;
 }
 
 /**

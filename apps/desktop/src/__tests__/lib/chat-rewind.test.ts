@@ -8,6 +8,8 @@ import {
   rewindTextsMatch,
   rewindUserResendPrompt,
 } from "@/lib/chat-rewind";
+import { appendTeachAskReplyNote } from "@/lib/latex-teach-ask";
+import { applyReplyStyleToPrompt } from "@/lib/reply-mode";
 
 function user(text: string, extra: Partial<ClaudeStreamMessage> = {}) {
   return {
@@ -64,6 +66,45 @@ describe("chat rewind", () => {
         "Rewrite the abstract carefully now",
       ),
     ).toBe(false);
+  });
+
+  it("matches a learning lesson to the saved prompt that ends with the reply-format note", () => {
+    const lesson = "请讲解这个 LaTeX 结构。\n\n结构：figure\n标题：单行公式";
+    const stored = appendTeachAskReplyNote(
+      applyReplyStyleToPrompt(lesson, "peer-review", [
+        { id: "peer-review", instructions: "自定义审稿口吻" },
+      ]),
+      "zh",
+    );
+    expect(stored).toContain("回复格式：");
+    expect(rewindMatchText(stored)).toBe(rewindMatchText(lesson));
+    expect(rewindMatchText(`${stored}\n`)).toBe(rewindMatchText(lesson));
+    expect(rewindMatchText(`${stored}\r\n`)).toBe(rewindMatchText(lesson));
+    expect(
+      rewindTextsMatch(rewindMatchText(stored), rewindMatchText(lesson)),
+    ).toBe(true);
+    expect(
+      rewindTextsMatch(
+        rewindMatchText(lesson),
+        rewindMatchText(`${lesson}更多`),
+      ),
+    ).toBe(false);
+    expect(
+      rewindMatchText(appendTeachAskReplyNote(`${lesson}更多`, "zh")),
+    ).not.toBe(rewindMatchText(lesson));
+
+    const messages = [
+      user(stored),
+      assistant("公式说明"),
+      user(lesson),
+      assistant("再讲一次"),
+    ];
+    expect(rewindAnchor(messages, 0)).toMatchObject({
+      role: "user",
+      text: rewindMatchText(lesson),
+      ordinal: 1,
+    });
+    expect(rewindAnchor(messages, 2)?.ordinal).toBe(2);
   });
 
   it("keeps the selected user message and drops the later reply", () => {

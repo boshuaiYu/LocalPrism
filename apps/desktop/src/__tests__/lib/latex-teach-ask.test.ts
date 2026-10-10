@@ -143,7 +143,13 @@ describe("buildTeachAskPrompt", () => {
     expect(en).toContain("fenced latex code block");
     expect(stripTeachAskReplyNote(zh)).toBe(lesson);
     expect(stripTeachAskReplyNote(en)).toBe("Explain this LaTeX construct.");
+    expect(stripTeachAskReplyNote(`${zh}\n`)).toBe(lesson);
+    expect(stripTeachAskReplyNote(`${zh}\r\n`)).toBe(lesson);
+    expect(stripTeachAskReplyNote(`${en} \n`)).toBe(
+      "Explain this LaTeX construct.",
+    );
     expect(appendTeachAskReplyNote(zh, "zh")).toBe(zh);
     expect(stripTeachAskReplyNote(lesson)).toBe(lesson);
+    expect(stripTeachAskReplyNote(`${lesson}\n`)).toBe(`${lesson}\n`);
   });
 });
