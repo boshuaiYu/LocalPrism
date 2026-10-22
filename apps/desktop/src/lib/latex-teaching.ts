@@ -1707,7 +1707,7 @@ export function resolveLesson(
   // environment", so it keeps the literal `\begin{name}` label.
   const bodyVars =
     ref.kind === "construct" && ref.wholeEnvironment
-      ? { tag: ref.label, detail }
+      ? { tag: `\\begin{${ref.wholeEnvironment}}`, detail }
       : vars;
   const tone = copy.tone ?? "info";
   const snippet = copy.snippet
