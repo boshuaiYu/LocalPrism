@@ -334,6 +334,24 @@ impl ManifestStore {
         match self.read_current()? {
             ReadState::Missing => Ok(SkillManifest::default()),
             ReadState::Loaded(manifest) => Ok(manifest),
+            ReadState::LoadedNeedsUpgrade(manifest) => {
+                // A v1 file that carries v2-only fields is exactly what older
+                // builds (beta5) treat as corrupt and wipe. Rewriting it as
+                // the current version makes them refuse it instead. Best
+                // effort: the data is already loaded, so a failed upgrade is
+                // retried on the next load or write.
+                let Ok(_lock) = self.acquire_lock() else {
+                    return Ok(manifest);
+                };
+                match self.read_current() {
+                    Ok(ReadState::LoadedNeedsUpgrade(locked)) => {
+                        let _ = self.write_atomic(&locked);
+                        Ok(locked)
+                    }
+                    Ok(ReadState::Loaded(locked)) => Ok(locked),
+                    _ => Ok(manifest),
+                }
+            }
             ReadState::Unparseable => {
                 let _lock = self.acquire_lock()?;
                 self.load_or_recover_locked()
@@ -407,7 +425,7 @@ impl ManifestStore {
     fn load_or_recover_locked(&self) -> Result<SkillManifest, ManifestError> {
         match self.read_current()? {
             ReadState::Missing => Ok(SkillManifest::default()),
-            ReadState::Loaded(manifest) => Ok(manifest),
+            ReadState::Loaded(manifest) | ReadState::LoadedNeedsUpgrade(manifest) => Ok(manifest),
             ReadState::Unparseable => self.recover_corrupt_locked(),
         }
     }
@@ -452,6 +470,9 @@ impl ManifestStore {
             ManifestError::InvalidData(message) => invalid(message),
             other => invalid(other.to_string()),
         })?;
+        if version < u64::from(SKILL_MANIFEST_VERSION) && has_fields_newer_than_v1(&manifest) {
+            return Ok(ReadState::LoadedNeedsUpgrade(manifest));
+        }
         Ok(ReadState::Loaded(manifest))
     }
 
@@ -528,8 +549,23 @@ impl ManifestStore {
 enum ReadState {
     Missing,
     Loaded(SkillManifest),
+    /// A v1 file written by builds between #151 and the v2 bump: it already
+    /// carries v2-only fields, which v1 readers reject as corrupt.
+    LoadedNeedsUpgrade(SkillManifest),
     /// The file exists but is not JSON.
     Unparseable,
+}
+
+/// True when a manifest uses fields that only v2 defines, so a v1 reader
+/// with `deny_unknown_fields` (beta5 and earlier) would reject it.
+fn has_fields_newer_than_v1(manifest: &SkillManifest) -> bool {
+    manifest.entries.iter().any(|entry| {
+        matches!(
+            &entry.source,
+            SkillSource::Url { subpath, selected, .. }
+                if subpath.is_some() || !selected.is_empty()
+        )
+    })
 }
 
 struct ManifestLock(File);
@@ -1660,6 +1696,16 @@ mod tests {
             }
             other => panic!("expected url source, got {other:?}"),
         }
+
+        // Older v1 readers would wipe this file, so loading rewrites it as
+        // the current version (which they refuse without touching it).
+        let on_disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(on_disk["version"], SKILL_MANIFEST_VERSION);
+        assert_eq!(on_disk["entries"][0]["source"]["subpath"], "writer");
+        assert_eq!(on_disk["entries"][0]["source"]["selected"][0], "writer");
+        assert!(backups(&store).is_empty());
+        assert_eq!(store.load().unwrap(), loaded);
     }
 
     #[test]
