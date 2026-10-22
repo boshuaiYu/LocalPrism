@@ -913,6 +913,7 @@ export const ChatComposer: FC<{
 
     setInput(newInput);
     setSlashQuery(null);
+    slashHasResultsRef.current = true;
 
     // Refocus and move cursor to end
     setTimeout(() => {
@@ -1535,6 +1536,7 @@ export const ChatComposer: FC<{
           onResultsChange={handleSlashResultsChange}
           onClose={() => {
             setSlashQuery(null);
+            slashHasResultsRef.current = true;
           }}
         />
       )}

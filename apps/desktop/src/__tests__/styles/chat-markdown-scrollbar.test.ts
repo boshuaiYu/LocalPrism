@@ -11,6 +11,8 @@ const TARGETS = [
   ".chat-markdown .katex-display",
   ".chat-markdown pre.chat-markdown-code",
   ".chat-markdown .chat-latex-preview",
+  ".chat-markdown :not(.katex-display) > .katex",
+  ".chat-markdown .chat-markdown-table",
 ];
 
 /** Declarations of the first rule whose selector list is exactly `selectors`. */
@@ -25,7 +27,7 @@ function ruleBody(selectors: string[]): string {
 }
 
 describe("chat markdown horizontal scrollbars", () => {
-  it("lets wide math and code scroll inside the bubble", () => {
+  it("lets wide math, code and tables scroll inside the bubble", () => {
     const body = ruleBody(TARGETS);
     expect(body).toMatch(/overflow-x:\s*auto/);
     expect(body).toMatch(/max-width:\s*100%/);
