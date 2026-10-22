@@ -5,6 +5,7 @@ import {
   lessonRefForDiagnostic,
   lessonRefForSelection,
   resolveLesson,
+  sameTeachLesson,
   shouldOfferEmptyGuide,
   shouldShowTeachEntry,
   shouldShowTeachPanel,
@@ -423,6 +424,188 @@ describe("latex teaching selection labels", () => {
     expect(ref.id).toBe("equation");
     expect(resolveLesson(ref, "zh").banner).toBe("已选中 equation 环境");
     expect(resolveLesson(ref, "en").tag).toBe("equation environment");
+  });
+
+  it("keeps the closing tag when only \\end{equation} is selected", () => {
+    const ref = lessonRefForSelection(selection(String.raw`\end{equation}`))!;
+    expect(ref).toMatchObject({
+      kind: "construct",
+      id: "equation",
+      label: String.raw`\end{equation}`,
+    });
+    expect(ref).not.toHaveProperty("wholeEnvironment");
+    expect(resolveLesson(ref, "zh").banner).toBe(
+      String.raw`已选中 \end{equation}`,
+    );
+    expect(resolveLesson(ref, "en").banner).toBe(
+      String.raw`Selected \end{equation}`,
+    );
+  });
+
+  it("does not pair a begin and end whose names differ", () => {
+    const ref = lessonRefForSelection(
+      selection(String.raw`\begin{equation} E = mc^{2} \end{figure}`),
+    )!;
+    expect(ref).toMatchObject({
+      kind: "construct",
+      id: "equation",
+      label: String.raw`\begin{equation}`,
+    });
+    expect(ref).not.toHaveProperty("wholeEnvironment");
+  });
+
+  it("only closes the environment on top of the stack", () => {
+    const ref = lessonRefForSelection(
+      selection(
+        String.raw`\begin{figure} \begin{equation} E = mc^{2} \end{figure}`,
+      ),
+    )!;
+    expect(ref).not.toHaveProperty("wholeEnvironment");
+    expect(ref).toMatchObject({ label: String.raw`\begin{figure}` });
+    expect(resolveLesson(ref, "en").banner).toBe(
+      String.raw`Selected \begin{figure}`,
+    );
+  });
+
+  it("ignores a commented-out \\end when pairing", () => {
+    const ref = lessonRefForSelection(
+      selection(
+        [
+          String.raw`\begin{equation}`,
+          "E = mc^{2}",
+          String.raw`% \end{equation}`,
+        ].join("\n"),
+      ),
+    )!;
+    expect(ref).not.toHaveProperty("wholeEnvironment");
+    expect(resolveLesson(ref, "zh").banner).toBe(
+      String.raw`已选中 \begin{equation}`,
+    );
+  });
+
+  it("ignores a commented-out \\begin when pairing", () => {
+    const ref = lessonRefForSelection(
+      selection(
+        [
+          String.raw`% \begin{equation}`,
+          "E = mc^{2}",
+          String.raw`\end{equation}`,
+        ].join("\n"),
+      ),
+    )!;
+    expect(ref).not.toHaveProperty("wholeEnvironment");
+    expect(resolveLesson(ref, "en").banner).toBe(
+      String.raw`Selected \end{equation}`,
+    );
+  });
+
+  it("keeps an escaped percent sign when stripping comments", () => {
+    const ref = lessonRefForSelection(
+      selection(
+        [String.raw`\begin{equation}`, String.raw`50\% \end{equation}`].join(
+          "\n",
+        ),
+      ),
+    )!;
+    expect(ref).toMatchObject({ wholeEnvironment: "equation" });
+    expect(resolveLesson(ref, "en").banner).toBe(
+      "Selected equation environment",
+    );
+  });
+
+  it("changes only the title and banner for an uncatalogued environment", () => {
+    const ref = lessonRefForSelection(
+      selection(
+        String.raw`\begin{theorem} Every bounded sequence converges. \end{theorem}`,
+      ),
+    )!;
+    expect(ref).toMatchObject({
+      kind: "construct",
+      id: "environment",
+      wholeEnvironment: "theorem",
+    });
+    const zh = resolveLesson(ref, "zh");
+    const en = resolveLesson(ref, "en");
+    expect(zh.tag).toBe("theorem 环境");
+    expect(zh.banner).toBe("已选中 theorem 环境");
+    expect(zh.title).toBe("环境");
+    expect(
+      zh.what.startsWith(String.raw`\begin{theorem} 用来开始或结束一个环境。`),
+    ).toBe(true);
+    expect(en.tag).toBe("theorem environment");
+    expect(en.banner).toBe("Selected theorem environment");
+    expect(
+      en.what.startsWith(
+        String.raw`\begin{theorem} begins or ends an environment.`,
+      ),
+    ).toBe(true);
+    for (const text of [zh.what, en.what, ...zh.points, ...en.points]) {
+      expect(text).not.toContain("theorem 环境");
+      expect(text).not.toContain("theorem environment");
+    }
+  });
+
+  it("uses the earliest of sibling complete environments", () => {
+    const ref = lessonRefForSelection(
+      selection(
+        [
+          String.raw`\begin{equation} a = b \end{equation}`,
+          String.raw`\begin{figure} \centering \end{figure}`,
+        ].join("\n"),
+      ),
+    )!;
+    expect(ref).toMatchObject({ id: "equation", wholeEnvironment: "equation" });
+    expect(resolveLesson(ref, "en").banner).toBe(
+      "Selected equation environment",
+    );
+  });
+
+  it("pairs a same-name nest from the inside out", () => {
+    const ref = lessonRefForSelection(
+      selection(
+        [
+          String.raw`\begin{minipage}{0.5\textwidth}`,
+          String.raw`  \begin{minipage}{0.4\textwidth} x \end{minipage}`,
+          String.raw`\end{minipage}`,
+        ].join("\n"),
+      ),
+    )!;
+    expect(ref).toMatchObject({ wholeEnvironment: "minipage" });
+    expect(resolveLesson(ref, "zh").banner).toBe("已选中 minipage 环境");
+  });
+
+  it("pairs only the inner environment when a same-name outer is unclosed", () => {
+    const ref = lessonRefForSelection(
+      selection(
+        [
+          String.raw`\begin{minipage}{0.5\textwidth}`,
+          String.raw`  \begin{minipage}{0.4\textwidth} x \end{minipage}`,
+        ].join("\n"),
+      ),
+    )!;
+    expect(ref).toMatchObject({ wholeEnvironment: "minipage" });
+  });
+
+  it("does not treat an unstarred begin and a starred end as one environment", () => {
+    const ref = lessonRefForSelection(
+      selection(String.raw`\begin{align} a &= b \end{align*}`),
+    )!;
+    expect(ref).toMatchObject({
+      id: "align",
+      label: String.raw`\begin{align}`,
+    });
+    expect(ref).not.toHaveProperty("wholeEnvironment");
+  });
+
+  it("tells a begin-only lesson apart from the whole environment", () => {
+    const opening = lessonRefForSelection(
+      selection(String.raw`\begin{equation}`),
+    )!;
+    const whole = lessonRefForSelection(
+      selection(String.raw`\begin{equation} x \end{equation}`),
+    )!;
+    expect(sameTeachLesson(opening, whole)).toBe(false);
+    expect(sameTeachLesson(whole, { ...whole })).toBe(true);
   });
 });
 

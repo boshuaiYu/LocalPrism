@@ -16,8 +16,9 @@ export type TeachLessonRef =
       label: string;
       /**
        * Environment name when the selection contains a matched
-       * `\begin{name}` and `\end{name}`. `label` is the English tag;
-       * the banner localizes that name for the active language.
+       * `\begin{name}` and `\end{name}`. `label` stays the literal
+       * `\begin{name}` for the lesson body; the tag and banner localize
+       * "name environment" for the active language.
        */
       wholeEnvironment?: string;
     }
@@ -1453,19 +1454,27 @@ function refForWholeEnvironment(name: string): TeachLessonRef {
   return {
     kind: "construct",
     id,
-    label: wholeEnvironmentTag(name, "en"),
+    label: `\\begin{${name}}`,
     wholeEnvironment: name,
   };
 }
 
+/** Drop TeX line comments; an escaped `\%` is kept. */
+function stripTexComments(text: string): string {
+  return text.replace(/(^|[^\\])%[^\n]*/gm, "$1");
+}
+
 /**
- * Pair `\begin{name}` with `\end{name}` by stack, keeping the star in the
- * name. The complete environment that starts earliest is the outermost.
+ * Pair `\begin{name}` with `\end{name}` on a strict stack, keeping the star
+ * in the name. An `\end` only closes the environment on top of the stack;
+ * a mismatched `\end` discards every open environment, so nothing opened
+ * before it can be reported as complete. TeX comments are ignored. The
+ * complete environment that starts earliest is the outermost.
  */
 function outermostCompleteEnvironment(text: string): string | null {
   const stack: Array<{ name: string; start: number }> = [];
   let best: { name: string; start: number } | null = null;
-  for (const match of text.matchAll(constructPattern())) {
+  for (const match of stripTexComments(text).matchAll(constructPattern())) {
     const at = match.index ?? 0;
     if (match[1]) {
       stack.push({ name: match[1], start: at });
@@ -1473,14 +1482,14 @@ function outermostCompleteEnvironment(text: string): string | null {
     }
     const endName = match[2];
     if (!endName) continue;
-    for (let index = stack.length - 1; index >= 0; index -= 1) {
-      const open = stack[index];
-      if (!open || open.name !== endName) continue;
-      stack.length = index;
-      if (!best || open.start < best.start) {
-        best = { name: endName, start: open.start };
-      }
-      break;
+    const open = stack.pop();
+    if (!open) continue;
+    if (open.name !== endName) {
+      stack.length = 0;
+      continue;
+    }
+    if (!best || open.start < best.start) {
+      best = { name: endName, start: open.start };
     }
   }
   return best?.name ?? null;
@@ -1497,7 +1506,10 @@ function refForCommand(name: string): TeachLessonRef {
 function matchConstructText(text: string): TeachLessonRef | null {
   const whole = outermostCompleteEnvironment(text);
   if (whole) return refForWholeEnvironment(whole);
-  const match = constructPattern().exec(text);
+  // Prefer live code; a selection that is only a comment still gets a card.
+  const match =
+    constructPattern().exec(stripTexComments(text)) ??
+    constructPattern().exec(text);
   if (match) {
     if (match[1]) return refForEnvironment(match[1], false);
     if (match[2]) return refForEnvironment(match[2], true);
@@ -1612,7 +1624,7 @@ export function shouldShowTeachPanel(enabled: boolean, open: boolean): boolean {
 
 export function isStarterTex(content: string): boolean {
   if (!content.trim()) return true;
-  let text = content.replace(/(^|[^\\])%[^\n]*/gm, "$1");
+  let text = stripTexComments(content);
   text = text.replace(/\\documentclass\s*(?:\[[^\]]*\])?\s*\{[^}]*\}/g, "");
   text = text.replace(/\\usepackage\s*(?:\[[^\]]*\])?\s*\{[^}]*\}/g, "");
   text = text.replace(/\\begin\s*\{document\}/g, "");
@@ -1690,9 +1702,16 @@ export function resolveLesson(
     rawDetail || (ref.kind === "error" ? fallbackDetail(ref.id, language) : "");
   const tag = displayTag(ref, language);
   const vars = { tag, detail };
+  // A whole-environment tag only fits the title and banner. The body copy
+  // (e.g. the generic environment lesson) reads "{{tag}} begins or ends an
+  // environment", so it keeps the literal `\begin{name}` label.
+  const bodyVars =
+    ref.kind === "construct" && ref.wholeEnvironment
+      ? { tag: ref.label, detail }
+      : vars;
   const tone = copy.tone ?? "info";
   const snippet = copy.snippet
-    ? fill(localize(copy.snippet, language), vars)
+    ? fill(localize(copy.snippet, language), bodyVars)
     : null;
   return {
     id: ref.id,
@@ -1701,8 +1720,10 @@ export function resolveLesson(
     tag,
     title: fill(localize(copy.title, language), vars),
     banner: fill(localize(copy.banner, language), vars),
-    what: fill(localize(copy.what, language), vars),
-    points: copy.points.map((point) => fill(localize(point, language), vars)),
+    what: fill(localize(copy.what, language), bodyVars),
+    points: copy.points.map((point) =>
+      fill(localize(point, language), bodyVars),
+    ),
     snippet,
     insertable: copy.insertable ?? (tone !== "error" && Boolean(copy.snippet)),
     source: copy.source ? localize(copy.source, language) : null,
