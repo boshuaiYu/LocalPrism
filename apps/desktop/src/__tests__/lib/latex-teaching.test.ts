@@ -286,6 +286,146 @@ Hello
   });
 });
 
+describe("latex teaching selection labels", () => {
+  function selection(selected: string) {
+    return {
+      selected,
+      line: selected,
+      selectionStartInLine: 0,
+      selectionEndInLine: selected.length,
+    };
+  }
+
+  it("labels a selection that contains a matched begin and end as the whole environment", () => {
+    const ref = lessonRefForSelection(
+      selection(String.raw`\begin{equation} E = mc^{2} \end{equation}`),
+    );
+    expect(ref).toMatchObject({ kind: "construct", id: "equation" });
+    const zh = resolveLesson(ref!, "zh");
+    const en = resolveLesson(ref!, "en");
+    expect(zh.tag).toBe("equation 环境");
+    expect(zh.banner).toBe("已选中 equation 环境");
+    expect(zh.title).toBe("单行公式");
+    expect(en.tag).toBe("equation environment");
+    expect(en.banner).toBe("Selected equation environment");
+    expect(en.title).toBe("Displayed equation");
+  });
+
+  it("keeps the opening tag when only \\begin{equation} is selected", () => {
+    const ref = lessonRefForSelection(selection(String.raw`\begin{equation}`))!;
+    expect(ref).toMatchObject({
+      kind: "construct",
+      id: "equation",
+      label: String.raw`\begin{equation}`,
+    });
+    expect(resolveLesson(ref, "zh").tag).toBe(String.raw`\begin{equation}`);
+    expect(resolveLesson(ref, "zh").banner).toBe(
+      String.raw`已选中 \begin{equation}`,
+    );
+    expect(resolveLesson(ref, "en").tag).toBe(String.raw`\begin{equation}`);
+    expect(resolveLesson(ref, "en").banner).toBe(
+      String.raw`Selected \begin{equation}`,
+    );
+  });
+
+  it("keeps a single command label when the selection is one command", () => {
+    const ref = lessonRefForSelection(selection(String.raw`\textbf{Hello}`))!;
+    expect(ref).toMatchObject({
+      kind: "construct",
+      id: "textbf",
+      label: String.raw`\textbf`,
+    });
+    expect(resolveLesson(ref, "zh").tag).toBe(String.raw`\textbf`);
+    expect(resolveLesson(ref, "zh").banner).toBe(String.raw`已选中 \textbf`);
+    expect(resolveLesson(ref, "en").tag).toBe(String.raw`\textbf`);
+    expect(resolveLesson(ref, "en").banner).toBe(String.raw`Selected \textbf`);
+  });
+
+  it("labels a starred environment with the star kept on the name", () => {
+    const ref = lessonRefForSelection(
+      selection(String.raw`\begin{align*} a &= b \end{align*}`),
+    )!;
+    expect(ref).toMatchObject({ kind: "construct", id: "align" });
+    expect(resolveLesson(ref, "zh").tag).toBe("align* 环境");
+    expect(resolveLesson(ref, "zh").banner).toBe("已选中 align* 环境");
+    expect(resolveLesson(ref, "en").tag).toBe("align* environment");
+    expect(resolveLesson(ref, "en").banner).toBe("Selected align* environment");
+    expect(resolveLesson(ref, "zh").title).toBe("多行对齐公式");
+  });
+
+  it("uses the outermost complete environment when environments are nested", () => {
+    const ref = lessonRefForSelection(
+      selection(
+        [
+          String.raw`\begin{figure}[htbp]`,
+          String.raw`  \centering`,
+          String.raw`  \begin{equation}`,
+          "    E = mc^{2}",
+          String.raw`  \end{equation}`,
+          String.raw`\end{figure}`,
+        ].join("\n"),
+      ),
+    )!;
+    expect(ref.id).toBe("figure");
+    expect(resolveLesson(ref, "zh").tag).toBe("figure 环境");
+    expect(resolveLesson(ref, "zh").banner).toBe("已选中 figure 环境");
+    expect(resolveLesson(ref, "en").tag).toBe("figure environment");
+    expect(resolveLesson(ref, "en").banner).toBe("Selected figure environment");
+    expect(resolveLesson(ref, "zh").title).toBe("浮动图片环境");
+  });
+
+  it("keeps an inner complete environment when the outer begin has no matching end", () => {
+    const ref = lessonRefForSelection(
+      selection(
+        [
+          String.raw`\begin{figure}`,
+          String.raw`  \begin{equation}`,
+          "    E = mc^{2}",
+          String.raw`  \end{equation}`,
+        ].join("\n"),
+      ),
+    )!;
+    expect(ref.id).toBe("equation");
+    expect(resolveLesson(ref, "zh").banner).toBe("已选中 equation 环境");
+    expect(resolveLesson(ref, "en").banner).toBe(
+      "Selected equation environment",
+    );
+  });
+
+  it("does not treat a starred begin and an unstarred end as one environment", () => {
+    const ref = lessonRefForSelection(
+      selection(String.raw`\begin{align*} a &= b \end{align}`),
+    )!;
+    expect(ref).toMatchObject({
+      kind: "construct",
+      id: "align",
+      label: String.raw`\begin{align*}`,
+    });
+    expect(resolveLesson(ref, "zh").banner).toBe(
+      String.raw`已选中 \begin{align*}`,
+    );
+    expect(resolveLesson(ref, "en").banner).toBe(
+      String.raw`Selected \begin{align*}`,
+    );
+  });
+
+  it("prefers a complete environment over a command that appears first", () => {
+    const ref = lessonRefForSelection(
+      selection(
+        [
+          String.raw`\label{eq:energy}`,
+          String.raw`\begin{equation}`,
+          "  E = mc^{2}",
+          String.raw`\end{equation}`,
+        ].join("\n"),
+      ),
+    )!;
+    expect(ref.id).toBe("equation");
+    expect(resolveLesson(ref, "zh").banner).toBe("已选中 equation 环境");
+    expect(resolveLesson(ref, "en").tag).toBe("equation environment");
+  });
+});
+
 interface TeachScopeState {
   projectRoot: string | null;
   projectGeneration: number;

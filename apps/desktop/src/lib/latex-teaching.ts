@@ -10,7 +10,17 @@ type Localized = { en: string; zh: string };
 export type TeachLessonKind = "construct" | "error" | "guide";
 
 export type TeachLessonRef =
-  | { kind: "construct"; id: string; label: string }
+  | {
+      kind: "construct";
+      id: string;
+      label: string;
+      /**
+       * Environment name when the selection contains a matched
+       * `\begin{name}` and `\end{name}`. `label` is the English tag;
+       * the banner localizes that name for the active language.
+       */
+      wholeEnvironment?: string;
+    }
   | { kind: "error"; id: string; label: string; detail: string }
   | { kind: "guide"; id: "empty-project" };
 
@@ -60,6 +70,7 @@ function points(...rows: Array<[string, string]>): Localized[] {
 }
 
 const SELECTED = L("Selected {{tag}}", "已选中 {{tag}}");
+const WHOLE_ENVIRONMENT = L("{{name}} environment", "{{name}} 环境");
 
 function lesson(
   title: Localized,
@@ -1437,6 +1448,44 @@ function refForEnvironment(name: string, closing: boolean): TeachLessonRef {
   return { kind: "construct", id, label };
 }
 
+function refForWholeEnvironment(name: string): TeachLessonRef {
+  const id = ENV_TO_ID[bareName(name)] ?? "environment";
+  return {
+    kind: "construct",
+    id,
+    label: wholeEnvironmentTag(name, "en"),
+    wholeEnvironment: name,
+  };
+}
+
+/**
+ * Pair `\begin{name}` with `\end{name}` by stack, keeping the star in the
+ * name. The complete environment that starts earliest is the outermost.
+ */
+function outermostCompleteEnvironment(text: string): string | null {
+  const stack: Array<{ name: string; start: number }> = [];
+  let best: { name: string; start: number } | null = null;
+  for (const match of text.matchAll(constructPattern())) {
+    const at = match.index ?? 0;
+    if (match[1]) {
+      stack.push({ name: match[1], start: at });
+      continue;
+    }
+    const endName = match[2];
+    if (!endName) continue;
+    for (let index = stack.length - 1; index >= 0; index -= 1) {
+      const open = stack[index];
+      if (!open || open.name !== endName) continue;
+      stack.length = index;
+      if (!best || open.start < best.start) {
+        best = { name: endName, start: open.start };
+      }
+      break;
+    }
+  }
+  return best?.name ?? null;
+}
+
 function refForCommand(name: string): TeachLessonRef {
   if (name === "begin" || name === "end") {
     return { kind: "construct", id: "environment", label: `\\${name}` };
@@ -1446,6 +1495,8 @@ function refForCommand(name: string): TeachLessonRef {
 }
 
 function matchConstructText(text: string): TeachLessonRef | null {
+  const whole = outermostCompleteEnvironment(text);
+  if (whole) return refForWholeEnvironment(whole);
   const match = constructPattern().exec(text);
   if (match) {
     if (match[1]) return refForEnvironment(match[1], false);
@@ -1543,7 +1594,7 @@ export function sameTeachLesson(a: TeachLessonRef, b: TeachLessonRef): boolean {
   if (a.kind !== b.kind || a.id !== b.id) return false;
   if (a.kind === "guide" || b.kind === "guide") return true;
   if (a.kind === "construct" && b.kind === "construct") {
-    return a.label === b.label;
+    return a.label === b.label && a.wholeEnvironment === b.wholeEnvironment;
   }
   if (a.kind === "error" && b.kind === "error") {
     return a.label === b.label && a.detail === b.detail;
@@ -1590,6 +1641,20 @@ function localize(copy: Localized, language: UiLanguage): string {
   return language === "zh" ? copy.zh : copy.en;
 }
 
+function wholeEnvironmentTag(name: string, language: UiLanguage): string {
+  return fill(localize(WHOLE_ENVIRONMENT, language), { name });
+}
+
+function displayTag(ref: TeachLessonRef, language: UiLanguage): string {
+  if (ref.kind === "guide") {
+    return language === "zh" ? "空白文稿" : "blank file";
+  }
+  if (ref.kind === "construct" && ref.wholeEnvironment) {
+    return wholeEnvironmentTag(ref.wholeEnvironment, language);
+  }
+  return ref.label;
+}
+
 function fill(template: string, vars: Record<string, string>): string {
   return template.replace(
     /\{\{(\w+)\}\}/g,
@@ -1623,12 +1688,7 @@ export function resolveLesson(
   const rawDetail = ref.kind === "error" ? ref.detail.trim() : "";
   const detail =
     rawDetail || (ref.kind === "error" ? fallbackDetail(ref.id, language) : "");
-  const tag =
-    ref.kind === "guide"
-      ? language === "zh"
-        ? "空白文稿"
-        : "blank file"
-      : ref.label;
+  const tag = displayTag(ref, language);
   const vars = { tag, detail };
   const tone = copy.tone ?? "info";
   const snippet = copy.snippet
