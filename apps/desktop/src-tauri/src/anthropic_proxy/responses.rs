@@ -71,6 +71,7 @@ pub fn prepare_codex_request(
     {
         append_input_for_message(&mut input, message);
     }
+    normalize_tool_call_pairs(&mut input);
 
     let mut tools = Vec::new();
     let mut dynamic_notes = Vec::new();
@@ -186,16 +187,26 @@ fn append_responses_message(input: &mut Vec<Value>, message: &Value, provider: b
     match message.get("content") {
         Some(Value::String(text)) => push_role_text(input, role, text),
         Some(Value::Array(blocks)) => {
+            // Text and images are buffered so adjacent blocks share one
+            // message item, but the buffer is flushed before any call or
+            // reasoning item so the original block order is kept. Emitting
+            // the text after the calls would put a message between a
+            // function_call and its function_call_output, which Responses
+            // rejects.
             let mut texts = Vec::new();
             let mut images = Vec::new();
             for block in blocks {
                 match block.get("type").and_then(Value::as_str) {
-                    Some("tool_use") => input.push(function_call_from_block(block)),
+                    Some("tool_use") => {
+                        flush_role_content(input, role, provider, &mut texts, &mut images);
+                        input.push(function_call_from_block(block));
+                    }
                     Some("tool_result") => {
                         input.push(function_output_from_block(block, provider));
                     }
                     Some("thinking" | "reasoning" | "redacted_thinking") if provider => {
                         if let Some(item) = reasoning_input_from_block(block) {
+                            flush_role_content(input, role, provider, &mut texts, &mut images);
                             input.push(item);
                         }
                     }
@@ -211,14 +222,116 @@ fn append_responses_message(input: &mut Vec<Value>, message: &Value, provider: b
                     }
                 }
             }
-            if provider && !images.is_empty() {
-                push_role_parts(input, role, &texts, images);
-            } else if !texts.is_empty() {
-                push_role_text(input, role, &texts.join("\n"));
-            }
+            flush_role_content(input, role, provider, &mut texts, &mut images);
         }
         _ => {}
     }
+}
+
+/// Emit buffered text (and, for providers, image parts) as one message item.
+fn flush_role_content(
+    input: &mut Vec<Value>,
+    role: &str,
+    provider: bool,
+    texts: &mut Vec<String>,
+    images: &mut Vec<Value>,
+) {
+    if provider && !images.is_empty() {
+        push_role_parts(input, role, texts, std::mem::take(images));
+    } else if !texts.is_empty() {
+        push_role_text(input, role, &texts.join("\n"));
+    }
+    texts.clear();
+    images.clear();
+}
+
+/// Output text sent for a call whose result never arrived (for example the
+/// turn was interrupted). Responses rejects a function_call with no output.
+const MISSING_TOOL_RESULT_OUTPUT: &str = "[interrupted: no tool result]";
+
+fn item_type(item: &Value) -> Option<&str> {
+    item.get("type").and_then(Value::as_str)
+}
+
+fn item_call_id(item: &Value) -> &str {
+    item.get("call_id").and_then(Value::as_str).unwrap_or("")
+}
+
+/// Make every function_call be followed by its function_call_output.
+///
+/// Responses requires each call's output to come after the call with no
+/// message in between. Each run of consecutive function_call items keeps
+/// its calls together (parallel calls) and is followed directly by their
+/// outputs in call order. A call with no output gets a synthetic one, and
+/// an output whose call_id matches no call is dropped. Input that already
+/// has this shape is left unchanged.
+fn normalize_tool_call_pairs(input: &mut Vec<Value>) {
+    use std::collections::{HashSet, VecDeque};
+
+    let call_ids: HashSet<String> = input
+        .iter()
+        .filter(|item| item_type(item) == Some("function_call"))
+        .map(|item| item_call_id(item).to_string())
+        .collect();
+    let has_outputs = input
+        .iter()
+        .any(|item| item_type(item) == Some("function_call_output"));
+    if call_ids.is_empty() && !has_outputs {
+        return;
+    }
+
+    let items = std::mem::take(input);
+    // Outputs keyed by call_id, in their original order. Orphans are dropped.
+    let mut outputs: HashMap<String, VecDeque<Value>> = HashMap::new();
+    for item in &items {
+        if item_type(item) == Some("function_call_output") {
+            let call_id = item_call_id(item);
+            if call_ids.contains(call_id) {
+                outputs
+                    .entry(call_id.to_string())
+                    .or_default()
+                    .push_back(item.clone());
+            }
+        }
+    }
+
+    let mut normalized = Vec::with_capacity(items.len() + call_ids.len());
+    // Calls of the current run whose outputs have not been placed yet.
+    let mut pending_calls: Vec<String> = Vec::new();
+    let mut place_outputs = |normalized: &mut Vec<Value>, pending: &mut Vec<String>| {
+        for call_id in pending.drain(..) {
+            let output = outputs
+                .get_mut(&call_id)
+                .and_then(VecDeque::pop_front)
+                .unwrap_or_else(|| {
+                    json!({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": MISSING_TOOL_RESULT_OUTPUT,
+                    })
+                });
+            normalized.push(output);
+        }
+    };
+    for item in items {
+        match item_type(&item) {
+            Some("function_call") => {
+                pending_calls.push(item_call_id(&item).to_string());
+                normalized.push(item);
+            }
+            // Outputs were collected above and are re-placed after their
+            // run of calls; any other item also ends the run.
+            Some("function_call_output") => {
+                place_outputs(&mut normalized, &mut pending_calls);
+            }
+            _ => {
+                place_outputs(&mut normalized, &mut pending_calls);
+                normalized.push(item);
+            }
+        }
+    }
+    place_outputs(&mut normalized, &mut pending_calls);
+    *input = normalized;
 }
 
 fn function_call_from_block(block: &Value) -> Value {
@@ -380,6 +493,7 @@ pub fn anthropic_to_provider_responses(request: &Value, model: &str) -> Result<V
     {
         append_responses_message(&mut input, message, true);
     }
+    normalize_tool_call_pairs(&mut input);
 
     let tools = request
         .get("tools")
@@ -2432,10 +2546,18 @@ mod tests {
         assert_eq!(first["tools"][0]["name"], "Bash");
         assert_eq!(first["tools"][1]["name"], "Read");
 
-        let prefix = first["input"].as_array().expect("input");
+        let first_input = first["input"].as_array().expect("input");
         let next = second["input"].as_array().expect("input");
-        assert!(next.len() > prefix.len());
-        assert_eq!(&next[..prefix.len()], prefix.as_slice());
+        // The first request ends on a call with no result yet, so it gets a
+        // synthetic output (Responses rejects a call with no output). Every
+        // item before it is shared with the next request.
+        let (synthetic, prefix) = first_input.split_last().expect("items");
+        assert_eq!(synthetic["type"], "function_call_output");
+        assert_eq!(synthetic["call_id"], "call_1");
+        assert_eq!(synthetic["output"], MISSING_TOOL_RESULT_OUTPUT);
+        assert!(next.len() > first_input.len());
+        assert_eq!(&next[..prefix.len()], prefix);
+        assert_eq!(next[prefix.len()]["output"], "file body");
         assert_eq!(
             next[1]["arguments"].as_str(),
             prefix[1]["arguments"].as_str()
@@ -3145,5 +3267,235 @@ mod tests {
         )
         .expect_err("failed status");
         assert!(error.contains("model not found"));
+    }
+
+    fn ordering_credential() -> CodexProxyCredential {
+        CodexProxyCredential {
+            access_token: "t".into(),
+            refresh_token: None,
+            account_id: None,
+            model: "gpt-5.6-sol".into(),
+            effort: None,
+            usage_slot: 0,
+        }
+    }
+
+    /// Input items of both translators, as `kind:detail` strings.
+    fn input_shapes(request: &Value) -> [Vec<String>; 2] {
+        let codex = anthropic_to_codex_responses(request, &ordering_credential()).expect("codex");
+        let provider =
+            anthropic_to_provider_responses(request, "deepseek-v4-pro").expect("provider");
+        [codex, provider].map(|body| {
+            body["input"]
+                .as_array()
+                .expect("input")
+                .iter()
+                .map(|item| match item_type(item) {
+                    Some("function_call") => format!("call:{}", item_call_id(item)),
+                    Some("function_call_output") => format!(
+                        "out:{}:{}",
+                        item_call_id(item),
+                        item["output"].as_str().unwrap_or("<parts>")
+                    ),
+                    Some("reasoning") => "reasoning".to_string(),
+                    _ => format!(
+                        "{}:{}",
+                        item["role"].as_str().unwrap_or("?"),
+                        item["content"][0]["text"].as_str().unwrap_or("")
+                    ),
+                })
+                .collect()
+        })
+    }
+
+    fn tool_use(id: &str) -> Value {
+        json!({ "type": "tool_use", "id": id, "name": "Read", "input": { "path": "a.tex" } })
+    }
+
+    fn tool_result(id: &str, text: &str) -> Value {
+        json!({ "type": "tool_result", "tool_use_id": id, "content": text })
+    }
+
+    #[test]
+    fn assistant_text_keeps_its_place_around_tool_calls() {
+        let request = json!({
+            "messages": [
+                { "role": "user", "content": "go" },
+                { "role": "assistant", "content": [
+                    { "type": "text", "text": "Let me read it." },
+                    tool_use("call_1"),
+                    { "type": "text", "text": "Reading now." }
+                ]},
+                { "role": "user", "content": [tool_result("call_1", "file body")] }
+            ]
+        });
+        for shapes in input_shapes(&request) {
+            assert_eq!(
+                shapes,
+                [
+                    "user:go",
+                    "assistant:Let me read it.",
+                    "call:call_1",
+                    "out:call_1:file body",
+                    "assistant:Reading now.",
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn tool_result_in_the_next_user_message_follows_its_call() {
+        let request = json!({
+            "messages": [
+                { "role": "user", "content": "go" },
+                { "role": "assistant", "content": [tool_use("call_1")] },
+                { "role": "user", "content": [
+                    tool_result("call_1", "ok"),
+                    { "type": "text", "text": "thanks" }
+                ]}
+            ]
+        });
+        for shapes in input_shapes(&request) {
+            assert_eq!(
+                shapes,
+                ["user:go", "call:call_1", "out:call_1:ok", "user:thanks"]
+            );
+        }
+    }
+
+    #[test]
+    fn dangling_call_gets_a_synthetic_output() {
+        let request = json!({
+            "messages": [
+                { "role": "user", "content": "go" },
+                { "role": "assistant", "content": [
+                    { "type": "text", "text": "Checking." },
+                    tool_use("call_1")
+                ]},
+                { "role": "user", "content": "never mind, stop" }
+            ]
+        });
+        for shapes in input_shapes(&request) {
+            assert_eq!(
+                shapes,
+                [
+                    "user:go",
+                    "assistant:Checking.",
+                    "call:call_1",
+                    format!("out:call_1:{MISSING_TOOL_RESULT_OUTPUT}").as_str(),
+                    "user:never mind, stop",
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn orphan_tool_result_is_dropped() {
+        let request = json!({
+            "messages": [
+                { "role": "user", "content": "go" },
+                { "role": "assistant", "content": [tool_use("call_1")] },
+                { "role": "user", "content": [
+                    tool_result("call_1", "ok"),
+                    tool_result("call_gone", "stale")
+                ]}
+            ]
+        });
+        for shapes in input_shapes(&request) {
+            assert_eq!(shapes, ["user:go", "call:call_1", "out:call_1:ok"]);
+        }
+    }
+
+    #[test]
+    fn parallel_calls_stay_together_and_outputs_follow_in_call_order() {
+        let request = json!({
+            "messages": [
+                { "role": "user", "content": "go" },
+                { "role": "assistant", "content": [
+                    { "type": "text", "text": "Reading three files." },
+                    tool_use("call_a"),
+                    tool_use("call_b"),
+                    tool_use("call_c")
+                ]},
+                { "role": "user", "content": [
+                    tool_result("call_c", "C"),
+                    tool_result("call_a", "A")
+                ]},
+                { "role": "assistant", "content": "Done." }
+            ]
+        });
+        for shapes in input_shapes(&request) {
+            assert_eq!(
+                shapes,
+                [
+                    "user:go",
+                    "assistant:Reading three files.",
+                    "call:call_a",
+                    "call:call_b",
+                    "call:call_c",
+                    "out:call_a:A",
+                    format!("out:call_b:{MISSING_TOOL_RESULT_OUTPUT}").as_str(),
+                    "out:call_c:C",
+                    "assistant:Done.",
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn provider_reasoning_flushes_text_before_it() {
+        let request = json!({
+            "messages": [
+                { "role": "user", "content": "go" },
+                { "role": "assistant", "content": [
+                    { "type": "text", "text": "First." },
+                    { "type": "thinking", "thinking": "plan" },
+                    tool_use("call_1"),
+                ]},
+                { "role": "user", "content": [tool_result("call_1", "ok")] }
+            ]
+        });
+        let [_, provider] = input_shapes(&request);
+        assert_eq!(
+            provider,
+            [
+                "user:go",
+                "assistant:First.",
+                "reasoning",
+                "call:call_1",
+                "out:call_1:ok"
+            ]
+        );
+    }
+
+    #[test]
+    fn well_formed_tool_sequences_are_left_unchanged() {
+        let mut input = vec![
+            json!({ "role": "user", "content": [{ "type": "input_text", "text": "go" }] }),
+            json!({ "type": "function_call", "call_id": "a", "name": "Read", "arguments": "{}" }),
+            json!({ "type": "function_call_output", "call_id": "a", "output": "A" }),
+            json!({ "type": "function_call", "call_id": "b", "name": "Read", "arguments": "{}" }),
+            json!({ "type": "function_call", "call_id": "c", "name": "Read", "arguments": "{}" }),
+            json!({ "type": "function_call_output", "call_id": "b", "output": "B" }),
+            json!({ "type": "function_call_output", "call_id": "c", "output": "C" }),
+        ];
+        let before = input.clone();
+        normalize_tool_call_pairs(&mut input);
+        assert_eq!(input, before);
+    }
+
+    #[test]
+    fn output_listed_before_its_call_is_moved_after_it() {
+        let mut input = vec![
+            json!({ "type": "function_call_output", "call_id": "a", "output": "A" }),
+            json!({ "role": "assistant", "content": [{ "type": "output_text", "text": "x" }] }),
+            json!({ "type": "function_call", "call_id": "a", "name": "Read", "arguments": "{}" }),
+        ];
+        normalize_tool_call_pairs(&mut input);
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0]["role"], "assistant");
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[2]["type"], "function_call_output");
+        assert_eq!(input[2]["output"], "A");
     }
 }
