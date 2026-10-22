@@ -57,6 +57,18 @@ pub fn config_dir() -> Result<PathBuf, ImportError> {
     crate::providers::paths::localprism_home().map_err(ImportError::from)
 }
 
+/// Fail fast, before anything is downloaded or copied, when the skill
+/// manifest cannot be used (for example it was written by a newer build).
+/// Installs would otherwise copy files and then fail to record them. This
+/// is also what stops default skill packs from auto-installing in that case.
+pub fn ensure_manifest_usable() -> Result<(), String> {
+    let config = config_dir().map_err(|error| error.to_string())?;
+    ManifestStore::new(config)
+        .load()
+        .map(|_| ())
+        .map_err(|error| format!("Skill manifest is not usable: {error}"))
+}
+
 pub fn find_skill_md(skill_dir: &Path) -> Option<PathBuf> {
     for name in ["SKILL.md", "skill.md"] {
         let candidate = skill_dir.join(name);
