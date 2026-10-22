@@ -559,7 +559,10 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
     if (!canPreview) setShowPreview(false);
   }, [canPreview]);
 
-  const hasResults = isLoading || displayedCommands.length > 0;
+  // Only a search with no match leaves Enter to the composer. A bare `/` on
+  // an empty tab (no skills, collapsed groups, failed load) must not send.
+  const hasNoSearchMatch = isSearching && displayedCommands.length === 0;
+  const hasResults = isLoading || !hasNoSearchMatch;
   useLayoutEffect(() => {
     onResultsChange?.(hasResults);
   }, [hasResults, onResultsChange]);
@@ -580,12 +583,9 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
           break;
         case "Enter":
         case "Tab":
-          // Shift+Enter inserts a newline. With no command to pick, Enter
-          // is left to the composer, which sends the text.
-          if (
-            e.key === "Enter" &&
-            (e.shiftKey || displayedCommands.length === 0)
-          ) {
+          // Shift+Enter inserts a newline. When a search matches nothing,
+          // Enter is left to the composer, which sends the text.
+          if (e.key === "Enter" && (e.shiftKey || hasNoSearchMatch)) {
             break;
           }
           e.preventDefault();
@@ -625,6 +625,7 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
     displayedCommands,
+    hasNoSearchMatch,
     selectedIndex,
     onSelect,
     onClose,

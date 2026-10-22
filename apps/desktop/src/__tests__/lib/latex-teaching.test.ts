@@ -108,6 +108,27 @@ Hello
 \end{document}
 `),
     ).toBe(false);
+    expect(
+      isStarterTex(String.raw`\documentclass{article} % 50\% draft
+\begin{document}
+% \\ only a comment
+\end{document}
+`),
+    ).toBe(true);
+    expect(
+      isStarterTex(String.raw`\documentclass{article}
+\begin{document}
+\\% a line break, then a comment
+\end{document}
+`),
+    ).toBe(false);
+    expect(
+      isStarterTex(String.raw`\documentclass{article}
+\begin{document}
+50\% done
+\end{document}
+`),
+    ).toBe(false);
     expect(shouldOfferEmptyGuide(false, blank)).toBe(false);
     expect(shouldOfferEmptyGuide(true, blank)).toBe(true);
     expect(
@@ -511,6 +532,55 @@ describe("latex teaching selection labels", () => {
     expect(resolveLesson(ref, "en").banner).toBe(
       "Selected equation environment",
     );
+  });
+
+  it("treats a percent after a line break \\\\ as a comment when pairing", () => {
+    const ref = lessonRefForSelection(
+      selection(String.raw`\begin{equation} a \\% \end{equation}`),
+    )!;
+    expect(ref).toMatchObject({ id: "equation" });
+    expect(ref).not.toHaveProperty("wholeEnvironment");
+    expect(resolveLesson(ref, "en").banner).toBe(
+      String.raw`Selected \begin{equation}`,
+    );
+  });
+
+  it("keeps a percent after an odd run of backslashes when pairing", () => {
+    for (const text of [
+      String.raw`\begin{equation} 100\% \end{equation}`,
+      String.raw`\begin{equation} a \\\% \end{equation}`,
+    ]) {
+      expect(lessonRefForSelection(selection(text))).toMatchObject({
+        wholeEnvironment: "equation",
+      });
+    }
+  });
+
+  it("prefers live code over a commented construct in the per-line fallback", () => {
+    const line = String.raw`\emph{x} % \begin{figure}`;
+    const selected = "ph{x} % \\";
+    const start = line.indexOf(selected);
+    expect(
+      lessonRefForSelection({
+        selected,
+        line,
+        selectionStartInLine: start,
+        selectionEndInLine: start + selected.length,
+      }),
+    ).toMatchObject({ kind: "construct", label: String.raw`\emph` });
+  });
+
+  it("still explains a construct selected inside a comment in the per-line fallback", () => {
+    const line = String.raw`% \begin{figure}`;
+    const start = line.indexOf("egin{fig");
+    expect(
+      lessonRefForSelection({
+        selected: "egin{fig",
+        line,
+        selectionStartInLine: start,
+        selectionEndInLine: start + "egin{fig".length,
+      }),
+    ).toMatchObject({ id: "figure", label: String.raw`\begin{figure}` });
   });
 
   it("changes only the title and banner for an uncatalogued environment", () => {

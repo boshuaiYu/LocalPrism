@@ -1459,9 +1459,14 @@ function refForWholeEnvironment(name: string): TeachLessonRef {
   };
 }
 
-/** Drop TeX line comments; an escaped `\%` is kept. */
+/**
+ * Drop TeX line comments. A `%` after an odd run of backslashes is an
+ * escaped `\%` and is kept; after an even run (`\\%`, a line break and
+ * then a comment) it starts a comment. Text before a comment keeps its
+ * offsets.
+ */
 function stripTexComments(text: string): string {
-  return text.replace(/(^|[^\\])%[^\n]*/gm, "$1");
+  return text.replace(/(^|[^\\])((?:\\\\)*)%[^\n]*/gm, "$1$2");
 }
 
 /**
@@ -1536,8 +1541,21 @@ export function lessonRefForSelection(
   const end = input.selectionEndInLine;
   if (!(end > start)) return null;
 
+  // Prefer live code; a selection inside a comment still gets a card.
+  return (
+    constructOverlapping(stripTexComments(input.line), start, end) ??
+    constructOverlapping(input.line, start, end)
+  );
+}
+
+/** The construct a line's token overlapping [start, end) teaches, if any. */
+function constructOverlapping(
+  line: string,
+  start: number,
+  end: number,
+): TeachLessonRef | null {
   let fallback: TeachLessonRef | null = null;
-  for (const match of input.line.matchAll(constructPattern())) {
+  for (const match of line.matchAll(constructPattern())) {
     const index = match.index ?? 0;
     const tokenEnd = index + match[0].length;
     if (tokenEnd <= start || index >= end) continue;

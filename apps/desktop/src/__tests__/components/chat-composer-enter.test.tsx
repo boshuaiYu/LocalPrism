@@ -361,4 +361,66 @@ describe("ChatComposer Enter handling", () => {
     expect(sendPrompt).not.toHaveBeenCalled();
     expect(field().value).toBe("see ");
   });
+
+  it("does not send a bare / when the slash picker tab is empty", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "list_agents") return Promise.resolve(builtinAgents);
+      return Promise.resolve([]);
+    });
+    await renderComposer();
+    await type("/");
+    await vi.waitFor(() => {
+      expect(slashPickerText()).toContain("No commands available");
+    });
+
+    expect(await pressEnter()).toBe(true);
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(field().value).toBe("/");
+  });
+
+  it("does not send a bare / when the slash command list fails to load", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "list_agents") return Promise.resolve(builtinAgents);
+      if (command === "slash_commands_list") {
+        return Promise.reject(new Error("list failed"));
+      }
+      return Promise.resolve([]);
+    });
+    await renderComposer();
+    await type("/");
+    await vi.waitFor(() => {
+      expect(slashPickerText()).toContain("No commands available");
+    });
+
+    expect(await pressEnter()).toBe(true);
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(field().value).toBe("/");
+  });
+
+  it("keeps a bare / from sending after Escape closes a no-results picker", async () => {
+    await renderComposer();
+    await type("/xyz");
+    await vi.waitFor(() => {
+      expect(slashPickerText()).toContain('No results for "xyz"');
+    });
+    await act(async () => {
+      field().dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(slashPickerText()).not.toContain("No results for");
+
+    // Reopened on the empty Skills tab: Enter still must not send.
+    await type("/");
+    await vi.waitFor(() => {
+      expect(slashPickerText()).toContain("No commands available");
+    });
+    expect(await pressEnter()).toBe(true);
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(field().value).toBe("/");
+  });
 });

@@ -1,4 +1,4 @@
-import { createRef } from "react";
+import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
@@ -341,5 +341,82 @@ describe("SlashCommandPicker", () => {
     expect(enter().defaultPrevented).toBe(true);
     expect(onSelect).toHaveBeenCalledTimes(1);
     expect(onSelect.mock.calls[0]?.[0]).toMatchObject({ name: "ars-plan" });
+  });
+
+  it.each([
+    ["no skills are installed", async () => []],
+    [
+      "the command list fails to load",
+      async () => {
+        throw new Error("list failed");
+      },
+    ],
+  ])("keeps a bare / from sending when %s", async (_label, list) => {
+    vi.mocked(invoke).mockImplementation(async (name: string) => {
+      if (name === "slash_commands_list") return list();
+      return [];
+    });
+    const onSelect = vi.fn();
+    const onResultsChange = vi.fn();
+    root.render(
+      <SlashCommandPicker
+        projectPath={null}
+        query=""
+        anchorRef={anchorRefFor()}
+        onSelect={onSelect}
+        onClose={vi.fn()}
+        onResultsChange={onResultsChange}
+      />,
+    );
+    await vi.waitFor(() => {
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith(
+        "slash_commands_list",
+        expect.anything(),
+      );
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(onResultsChange).toHaveBeenLastCalledWith(true);
+    expect(onResultsChange).not.toHaveBeenCalledWith(false);
+
+    expect(enter().defaultPrevented).toBe(true);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("keeps a bare / from sending when every skill group is collapsed", async () => {
+    const onSelect = vi.fn();
+    const onResultsChange = vi.fn();
+    root.render(
+      <SlashCommandPicker
+        projectPath={null}
+        query=""
+        anchorRef={anchorRefFor()}
+        onSelect={onSelect}
+        onClose={vi.fn()}
+        onResultsChange={onResultsChange}
+      />,
+    );
+    const skillItem = '[data-testid="slash-command-item-skill-paper-spine"]';
+    await vi.waitFor(() => {
+      expect(document.body.querySelector(skillItem)).toBeTruthy();
+    });
+    // Collapse every skill category header.
+    const groupToggles = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>(
+        "div.space-y-1 > div > button",
+      ),
+    );
+    expect(groupToggles.length).toBeGreaterThan(0);
+    await act(async () => {
+      for (const toggle of groupToggles) {
+        toggle.dispatchEvent(
+          new MouseEvent("mousedown", { bubbles: true, cancelable: true }),
+        );
+      }
+    });
+    expect(document.body.querySelector(skillItem)).toBeNull();
+    expect(onResultsChange).toHaveBeenLastCalledWith(true);
+
+    expect(enter().defaultPrevented).toBe(true);
+    expect(onSelect).not.toHaveBeenCalled();
   });
 });
