@@ -11,12 +11,24 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-pub const SKILL_MANIFEST_VERSION: u32 = 1;
+/// Schema version written by this build.
+///
+/// Bump this whenever an entry gains, loses or changes a field. Older builds
+/// refuse (and leave untouched) any manifest whose version is newer than the
+/// one they know, so a bump is what keeps an older build from rewriting a
+/// newer manifest without the fields it does not understand.
+///
+/// - 1: original schema.
+/// - 2: URL sources may carry `subpath` and `selected` (both optional).
+pub const SKILL_MANIFEST_VERSION: u32 = 2;
+/// Oldest on-disk version this build can read. Older versions are migrated
+/// in memory and written back as [`SKILL_MANIFEST_VERSION`] on the next write.
+const MIN_SUPPORTED_MANIFEST_VERSION: u32 = 1;
 const MANIFEST_FILENAME: &str = "skills-manifest.json";
 const LEGACY_MANIFEST_DIRECTORY: &str = "ClaudePrism";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillManifest {
     pub version: u32,
     pub entries: Vec<ManagedSkillEntry>,
@@ -32,7 +44,7 @@ impl Default for SkillManifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum SkillSource {
     Folder {
         path: String,
@@ -84,7 +96,7 @@ pub fn source_folder_from_skill_source(source: &SkillSource) -> Option<String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct ManagedSkillEntry {
     pub id: String,
     pub declared_name: String,
@@ -122,7 +134,19 @@ impl fmt::Display for ManifestError {
             ),
             Self::InvalidData(message) => write!(formatter, "Invalid skill manifest: {message}"),
             Self::UnsupportedVersion(version) => {
-                write!(formatter, "Unsupported skill manifest version: {version}")
+                write!(
+                    formatter,
+                    "Unsupported skill manifest version {version} (this build reads versions \
+                     {MIN_SUPPORTED_MANIFEST_VERSION} to {SKILL_MANIFEST_VERSION}). The file was \
+                     left unchanged."
+                )?;
+                if *version > u64::from(SKILL_MANIFEST_VERSION) {
+                    write!(
+                        formatter,
+                        " It was written by a newer LocalPrism; update LocalPrism to manage skills."
+                    )?;
+                }
+                Ok(())
             }
         }
     }
@@ -298,11 +322,19 @@ impl ManifestStore {
         &self.path
     }
 
+    /// Read the manifest.
+    ///
+    /// - Missing file: an empty manifest (nothing is created).
+    /// - Older supported version: migrated in memory only.
+    /// - Newer version, or valid JSON that is not a valid manifest: an error;
+    ///   the file is never renamed or overwritten.
+    /// - Bytes that are not JSON at all: moved to a `.corrupt-*.bak` backup
+    ///   and replaced with an empty manifest.
     pub fn load(&self) -> Result<SkillManifest, ManifestError> {
         match self.read_current()? {
             ReadState::Missing => Ok(SkillManifest::default()),
             ReadState::Loaded(manifest) => Ok(manifest),
-            ReadState::Corrupt => {
+            ReadState::Unparseable => {
                 let _lock = self.acquire_lock()?;
                 self.load_or_recover_locked()
             }
@@ -376,7 +408,7 @@ impl ManifestStore {
         match self.read_current()? {
             ReadState::Missing => Ok(SkillManifest::default()),
             ReadState::Loaded(manifest) => Ok(manifest),
-            ReadState::Corrupt => self.recover_corrupt_locked(),
+            ReadState::Unparseable => self.recover_corrupt_locked(),
         }
     }
 
@@ -387,27 +419,44 @@ impl ManifestStore {
             Err(error) => return Err(io_error("read", &self.path, error)),
         };
 
+        // Only bytes that are not JSON at all count as corrupt. Anything that
+        // parses is left exactly as it is, because it may be a manifest from
+        // another build that this one does not fully understand.
         let value: serde_json::Value = match serde_json::from_slice(&bytes) {
             Ok(value) => value,
-            Err(_) => return Ok(ReadState::Corrupt),
+            Err(_) => return Ok(ReadState::Unparseable),
+        };
+        let invalid = |message: String| {
+            ManifestError::InvalidData(format!(
+                "{} could not be read ({message}). The file was left unchanged; \
+                 fix or move it aside to manage skills again.",
+                self.path.display()
+            ))
         };
         let Some(version) = value.get("version").and_then(serde_json::Value::as_u64) else {
-            return Ok(ReadState::Corrupt);
+            return Err(invalid("missing or non-integer \"version\"".into()));
         };
-        if version != u64::from(SKILL_MANIFEST_VERSION) {
+        if version > u64::from(SKILL_MANIFEST_VERSION)
+            || version < u64::from(MIN_SUPPORTED_MANIFEST_VERSION)
+        {
             return Err(ManifestError::UnsupportedVersion(version));
         }
 
-        let manifest: SkillManifest = match serde_json::from_value(value) {
-            Ok(manifest) => manifest,
-            Err(_) => return Ok(ReadState::Corrupt),
-        };
-        if validate_manifest(&manifest).is_err() {
-            return Ok(ReadState::Corrupt);
-        }
+        let mut manifest: SkillManifest =
+            serde_json::from_value(value).map_err(|error| invalid(error.to_string()))?;
+        // Older supported versions are a subset of the current schema; the
+        // file itself is only rewritten (as the current version) by a later
+        // locked update.
+        manifest.version = SKILL_MANIFEST_VERSION;
+        validate_manifest(&manifest).map_err(|error| match error {
+            ManifestError::InvalidData(message) => invalid(message),
+            other => invalid(other.to_string()),
+        })?;
         Ok(ReadState::Loaded(manifest))
     }
 
+    /// Only for bytes that are not JSON. The original bytes are kept in a
+    /// uniquely named backup next to the manifest.
     fn recover_corrupt_locked(&self) -> Result<SkillManifest, ManifestError> {
         let backup = corrupt_backup_path(&self.path);
         std::fs::rename(&self.path, &backup)
@@ -479,7 +528,8 @@ impl ManifestStore {
 enum ReadState {
     Missing,
     Loaded(SkillManifest),
-    Corrupt,
+    /// The file exists but is not JSON.
+    Unparseable,
 }
 
 struct ManifestLock(File);
@@ -947,7 +997,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_round_trip_uses_the_exact_camel_case_wire_schema() {
+    fn round_trip_uses_the_exact_camel_case_wire_schema() {
         let temp = tempfile::tempdir().unwrap();
         let store = ManifestStore::new(temp.path());
         let manifest = SkillManifest {
@@ -963,7 +1013,7 @@ mod tests {
         assert_eq!(store.load().unwrap(), manifest);
         let value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
-        assert_eq!(value["version"], 1);
+        assert_eq!(value["version"], SKILL_MANIFEST_VERSION);
         assert_eq!(value["entries"][0]["declaredName"], "Skill writer");
         assert_eq!(value["entries"][0]["contentSha256"], hash('a'));
         assert_eq!(value["entries"][0]["source"]["type"], "curated");
@@ -1116,10 +1166,10 @@ mod tests {
     fn unsupported_future_version_is_left_untouched() {
         let temp = tempfile::tempdir().unwrap();
         let store = ManifestStore::new(temp.path());
-        let future = br#"{"version":2,"entries":[],"futureField":true}"#;
+        let future = br#"{"version":3,"entries":[],"futureField":true}"#;
         write_unchecked(store.path(), future);
 
-        assert_eq!(store.load(), Err(ManifestError::UnsupportedVersion(2)));
+        assert_eq!(store.load(), Err(ManifestError::UnsupportedVersion(3)));
         assert_eq!(std::fs::read(store.path()).unwrap(), future);
         assert!(backups(&store).is_empty());
     }
@@ -1128,19 +1178,19 @@ mod tests {
     fn locked_update_refuses_to_overwrite_an_unsupported_future_version() {
         let temp = tempfile::tempdir().unwrap();
         let store = ManifestStore::new(temp.path());
-        let future = br#"{"version":2,"entries":[],"futureField":true}"#;
+        let future = br#"{"version":3,"entries":[],"futureField":true}"#;
         write_unchecked(store.path(), future);
 
         assert_eq!(
             store.update(|_| Ok(())),
-            Err(ManifestError::UnsupportedVersion(2))
+            Err(ManifestError::UnsupportedVersion(3))
         );
         assert_eq!(std::fs::read(store.path()).unwrap(), future);
         assert!(backups(&store).is_empty());
     }
 
     #[test]
-    fn semantic_id_corruption_is_backed_up_instead_of_adopted() {
+    fn semantic_id_corruption_is_an_error_and_never_adopted_or_wiped() {
         let temp = tempfile::tempdir().unwrap();
         let store = ManifestStore::new(temp.path());
         let mut invalid = entry(
@@ -1156,8 +1206,13 @@ mod tests {
         .unwrap();
         write_unchecked(store.path(), &bytes);
 
-        assert_eq!(store.load().unwrap(), SkillManifest::default());
-        assert_eq!(backups(&store).len(), 1);
+        assert!(matches!(store.load(), Err(ManifestError::InvalidData(_))));
+        assert!(matches!(
+            store.update(|_| Ok(())),
+            Err(ManifestError::InvalidData(_))
+        ));
+        assert_eq!(std::fs::read(store.path()).unwrap(), bytes);
+        assert!(backups(&store).is_empty());
     }
 
     #[cfg(windows)]
@@ -1187,7 +1242,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_targets_and_destinations_are_semantic_corruption() {
+    fn duplicate_targets_and_destinations_are_errors_that_keep_the_file() {
         let temp = tempfile::tempdir().unwrap();
         for duplicate_kind in ["target", "destination"] {
             let config = temp.path().join(duplicate_kind);
@@ -1209,8 +1264,9 @@ mod tests {
             .unwrap();
             write_unchecked(store.path(), &bytes);
 
-            assert_eq!(store.load().unwrap(), SkillManifest::default());
-            assert_eq!(backups(&store).len(), 1);
+            assert!(matches!(store.load(), Err(ManifestError::InvalidData(_))));
+            assert_eq!(std::fs::read(store.path()).unwrap(), bytes);
+            assert!(backups(&store).is_empty());
         }
     }
 
@@ -1532,5 +1588,205 @@ mod tests {
         let json = serde_json::to_string(&source).unwrap();
         let loaded: SkillSource = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded, source);
+    }
+
+    /// A manifest as written by builds before the version bump (v1, no
+    /// `subpath`/`selected`).
+    fn v1_manifest_json(root: &Path) -> String {
+        let destination = root.join("skills").join("writer");
+        serde_json::json!({
+            "version": 1,
+            "entries": [{
+                "id": "claude:user:writer",
+                "declaredName": "Skill writer",
+                "folder": "writer",
+                "source": {
+                    "type": "url",
+                    "url": "https://github.com/example/skills/tree/main/writer"
+                },
+                "contentSha256": hash('a'),
+                "target": { "runtime": "claude", "scope": "user" },
+                "destination": destination.to_string_lossy(),
+                "installedAt": "2026-07-17T00:00:00Z",
+                "updatedAt": "2026-07-17T00:00:00Z"
+            }]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn v1_manifest_loads_and_is_migrated_in_memory_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ManifestStore::new(temp.path());
+        let v1 = v1_manifest_json(temp.path());
+        write_unchecked(store.path(), v1.as_bytes());
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.version, SKILL_MANIFEST_VERSION);
+        assert_eq!(loaded.entries.len(), 1);
+        assert_eq!(loaded.entries[0].id, "claude:user:writer");
+        // Reading never rewrites the file.
+        assert_eq!(std::fs::read(store.path()).unwrap(), v1.as_bytes());
+        assert!(backups(&store).is_empty());
+
+        // The next real write upgrades it and keeps the entry.
+        store.revise_sources(|_| None).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(value["version"], SKILL_MANIFEST_VERSION);
+        assert_eq!(value["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(value["entries"][0]["id"], "claude:user:writer");
+    }
+
+    #[test]
+    fn v1_manifest_with_url_selection_fields_from_unbumped_builds_loads() {
+        // Builds between #151 and the version bump wrote v1 files that
+        // already carried `subpath`/`selected`.
+        let temp = tempfile::tempdir().unwrap();
+        let store = ManifestStore::new(temp.path());
+        let mut value: serde_json::Value =
+            serde_json::from_str(&v1_manifest_json(temp.path())).unwrap();
+        value["entries"][0]["source"]["subpath"] = "writer".into();
+        value["entries"][0]["source"]["selected"] = serde_json::json!(["writer"]);
+        write_unchecked(store.path(), value.to_string().as_bytes());
+
+        let loaded = store.load().unwrap();
+        match &loaded.entries[0].source {
+            SkillSource::Url {
+                subpath, selected, ..
+            } => {
+                assert_eq!(subpath.as_deref(), Some("writer"));
+                assert_eq!(selected, &vec!["writer".to_string()]);
+            }
+            other => panic!("expected url source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn current_version_with_unknown_extra_fields_loads() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ManifestStore::new(temp.path());
+        let mut value: serde_json::Value =
+            serde_json::from_str(&v1_manifest_json(temp.path())).unwrap();
+        value["version"] = SKILL_MANIFEST_VERSION.into();
+        value["topLevelExtra"] = serde_json::json!({ "nested": true });
+        value["entries"][0]["entryExtra"] = "x".into();
+        value["entries"][0]["source"]["sourceExtra"] = 7.into();
+        value["entries"][0]["target"]["targetExtra"] = serde_json::Value::Null;
+        let bytes = value.to_string();
+        write_unchecked(store.path(), bytes.as_bytes());
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.entries.len(), 1);
+        assert_eq!(loaded.entries[0].folder, "writer");
+        assert_eq!(std::fs::read(store.path()).unwrap(), bytes.as_bytes());
+        assert!(backups(&store).is_empty());
+    }
+
+    #[test]
+    fn newer_version_with_entries_is_byte_identical_after_load_and_update() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ManifestStore::new(temp.path());
+        let mut value: serde_json::Value =
+            serde_json::from_str(&v1_manifest_json(temp.path())).unwrap();
+        let newer = SKILL_MANIFEST_VERSION + 1;
+        value["version"] = newer.into();
+        value["entries"][0]["source"] = serde_json::json!({ "type": "someNewKind" });
+        let bytes = value.to_string();
+        write_unchecked(store.path(), bytes.as_bytes());
+
+        assert_eq!(
+            store.load(),
+            Err(ManifestError::UnsupportedVersion(u64::from(newer)))
+        );
+        let extra = entry(
+            temp.path(),
+            "other",
+            target(RuntimeKind::Claude, SkillScope::User),
+        );
+        assert_eq!(
+            store.upsert(extra),
+            Err(ManifestError::UnsupportedVersion(u64::from(newer)))
+        );
+        assert!(store.remove("claude:user:writer").is_err());
+        assert_eq!(std::fs::read(store.path()).unwrap(), bytes.as_bytes());
+        assert!(backups(&store).is_empty());
+        assert!(store
+            .load()
+            .unwrap_err()
+            .to_string()
+            .contains("left unchanged"));
+    }
+
+    #[test]
+    fn valid_json_with_the_wrong_shape_is_never_wiped() {
+        let temp = tempfile::tempdir().unwrap();
+        let cases: Vec<String> = vec![
+            // Missing version.
+            r#"{"entries":[]}"#.into(),
+            // Version of the wrong type.
+            r#"{"version":"1","entries":[]}"#.into(),
+            // Not an object.
+            "[]".into(),
+            "null".into(),
+            // Entries of the wrong type.
+            r#"{"version":1,"entries":{}}"#.into(),
+            // Entry missing required fields.
+            r#"{"version":1,"entries":[{"id":"claude:user:writer"}]}"#.into(),
+            // Unknown source kind.
+            {
+                let mut value: serde_json::Value =
+                    serde_json::from_str(&v1_manifest_json(temp.path())).unwrap();
+                value["entries"][0]["source"] = serde_json::json!({ "type": "carrierPigeon" });
+                value.to_string()
+            },
+        ];
+        for (index, bytes) in cases.iter().enumerate() {
+            let config = temp.path().join(format!("case-{index}"));
+            let store = ManifestStore::new(&config);
+            write_unchecked(store.path(), bytes.as_bytes());
+
+            let error = store.load().unwrap_err();
+            assert!(
+                matches!(error, ManifestError::InvalidData(_)),
+                "case {index}: {error:?}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains("left unchanged"),
+                "case {index}: {message}"
+            );
+            assert_eq!(message.matches("Invalid skill manifest").count(), 1);
+            assert!(store
+                .upsert(entry(
+                    &config,
+                    "writer",
+                    target(RuntimeKind::Claude, SkillScope::User),
+                ))
+                .is_err());
+            assert_eq!(
+                std::fs::read(store.path()).unwrap(),
+                bytes.as_bytes(),
+                "case {index}"
+            );
+            assert!(backups(&store).is_empty(), "case {index}");
+        }
+    }
+
+    #[test]
+    fn garbage_json_is_backed_up_byte_for_byte_then_replaced_with_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ManifestStore::new(temp.path());
+        let garbage: &[u8] = b"\x00\xffnot json {{{";
+        write_unchecked(store.path(), garbage);
+
+        assert_eq!(store.load().unwrap(), SkillManifest::default());
+        let backup_paths = backups(&store);
+        assert_eq!(backup_paths.len(), 1);
+        assert_eq!(std::fs::read(&backup_paths[0]).unwrap(), garbage);
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(value["version"], SKILL_MANIFEST_VERSION);
+        assert_eq!(value["entries"], serde_json::json!([]));
     }
 }

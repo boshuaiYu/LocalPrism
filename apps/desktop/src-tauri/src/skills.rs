@@ -1554,6 +1554,7 @@ pub async fn skill_import(
     targets: Vec<domain::SkillTarget>,
     project_path: Option<String>,
 ) -> Result<domain::SkillImportOutcome, String> {
+    import::ensure_manifest_usable()?;
     let source = PathBuf::from(&source_path);
     let project = project_path.as_deref().map(Path::new);
     let imported = if archive::is_skill_archive(&source) {
@@ -1931,6 +1932,7 @@ pub async fn skill_import_url(
     let parsed_source =
         reqwest::Url::parse(&source_url).map_err(|error| format!("Invalid skill URL: {error}"))?;
     validate_skill_fetch_url(&parsed_source)?;
+    import::ensure_manifest_usable()?;
 
     let project = project_path.as_deref().map(Path::new);
     let skip_existing = skip_existing.unwrap_or(false);
@@ -2009,6 +2011,7 @@ pub async fn skill_refresh_pack(
     targets: Vec<domain::SkillTarget>,
     project_path: Option<String>,
 ) -> Result<packs::SkillPackUpdateReport, String> {
+    import::ensure_manifest_usable()?;
     let project = project_path.as_deref().map(Path::new);
     if let Some(folder) = source_folder
         .as_deref()
