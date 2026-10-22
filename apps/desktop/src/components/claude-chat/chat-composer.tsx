@@ -104,6 +104,7 @@ import {
   resolveVisibleSlashMessage,
 } from "@/lib/slash-command-send";
 import { createLogger } from "@/lib/debug/logger";
+import { isImeComposing } from "@/lib/ime";
 
 const log = createLogger("chat-composer");
 
@@ -114,6 +115,16 @@ const EMPTY_GUIDANCE: QueuedGuidance[] = [];
 
 // Re-export for other modules
 export type { SlashCommand };
+
+/**
+ * The slash picker query, or null when the picker should be closed. The
+ * picker is only open while the whole input is `/command` with no
+ * whitespace; once an argument follows (`/xyz hello`), it is a message.
+ */
+export function slashQueryFromInput(value: string): string | null {
+  const match = value.match(/^\/(\S*)$/);
+  return match ? (match[1] ?? "") : null;
+}
 
 interface PinnedContext {
   label: string;
@@ -688,7 +699,12 @@ export const ChatComposer: FC<{
 
   // / slash command state
   const [slashQuery, setSlashQuery] = useState<string | null>(null);
-  const slashSelectedRef = useRef(false); // true after user picks a command — suppresses re-open
+  // Whether the open picker has a command Enter would select. Until the
+  // picker reports (or while it loads) Enter stays with the picker.
+  const slashHasResultsRef = useRef(true);
+  const handleSlashResultsChange = useCallback((hasResults: boolean) => {
+    slashHasResultsRef.current = hasResults;
+  }, []);
 
   // Keep refs to latest input/pinnedContexts so the tab-switch effect can
   // save the draft without depending on these values (which would cause loops).
@@ -897,7 +913,6 @@ export const ChatComposer: FC<{
 
     setInput(newInput);
     setSlashQuery(null);
-    slashSelectedRef.current = true;
 
     // Refocus and move cursor to end
     setTimeout(() => {
@@ -1222,7 +1237,6 @@ export const ChatComposer: FC<{
     setInput("");
     setMentionQuery(null);
     setSlashQuery(null);
-    slashSelectedRef.current = false;
 
     let contextOverride: PromptContextOverride | undefined;
     if (pinnedContexts.length > 0) {
@@ -1290,11 +1304,17 @@ export const ChatComposer: FC<{
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      // The Enter that confirms an IME candidate must not send or select.
+      if (isImeComposing(e.nativeEvent)) return;
+
       // Slash command picker is open — let the picker handle keyboard events
-      // (it uses window.addEventListener for ArrowUp/Down, Enter, Tab, Escape)
+      // (it uses window.addEventListener for ArrowUp/Down, Enter, Tab, Escape).
+      // With no matching command, Enter falls through and sends the text.
       if (slashQuery !== null) {
+        const pickerTakesEnter =
+          e.key === "Enter" && !e.shiftKey && slashHasResultsRef.current;
         if (
-          e.key === "Enter" ||
+          pickerTakesEnter ||
           e.key === "ArrowDown" ||
           e.key === "ArrowUp" ||
           e.key === "Tab" ||
@@ -1317,7 +1337,7 @@ export const ChatComposer: FC<{
           setMentionIndex((i) => Math.max(i - 1, 0));
           return;
         }
-        if (e.key === "Enter" || e.key === "Tab") {
+        if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
           e.preventDefault();
           void selectMention(mentionFiles[mentionIndex]);
           return;
@@ -1356,19 +1376,15 @@ export const ChatComposer: FC<{
       const value = e.target.value;
       setInput(value);
 
-      // Detect / slash command trigger — only at the very start of input
-      const slashMatch = value.match(/^\/(\S*)$/);
-      if (slashMatch) {
-        // Typing /query with no space yet — open picker. The model menu
-        // cannot stay up underneath it.
-        slashSelectedRef.current = false;
-        setSlashQuery(slashMatch[1]);
+      // Detect / slash command trigger — only while the whole input is
+      // `/query` with no whitespace. Typing a space (an argument or a plain
+      // message such as `/xyz hello`) closes the picker.
+      const nextSlashQuery = slashQueryFromInput(value);
+      setSlashQuery(nextSlashQuery);
+      if (nextSlashQuery !== null) {
+        // The model menu cannot stay up underneath the picker.
         setMentionQuery(null);
         setModelPickerOpen(false);
-      } else if (slashSelectedRef.current) {
-        // User already selected a command — don't re-open picker
-      } else if (!value.startsWith("/")) {
-        setSlashQuery(null);
       }
 
       // Detect @ mention trigger (only when not in slash command mode)
@@ -1516,6 +1532,7 @@ export const ChatComposer: FC<{
           query={slashQuery}
           anchorRef={composerRef}
           onSelect={selectSlashCommand}
+          onResultsChange={handleSlashResultsChange}
           onClose={() => {
             setSlashQuery(null);
           }}

@@ -23,6 +23,7 @@ import {
   ChevronLeftIcon,
   ChevronDownIcon,
 } from "lucide-react";
+import { isImeComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 import {
   groupItemsBySkillCategory,
@@ -55,6 +56,11 @@ interface SlashCommandPickerProps {
   anchorRef: RefObject<HTMLDivElement | null>;
   onSelect: (command: SlashCommand) => void;
   onClose: () => void;
+  /**
+   * Reports whether Enter would select a command. While loading the picker
+   * still owns Enter; with no match the composer sends the text instead.
+   */
+  onResultsChange?: (hasResults: boolean) => void;
 }
 
 type Tab = "skills" | "default" | "custom";
@@ -369,6 +375,7 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
   anchorRef,
   onSelect,
   onClose,
+  onResultsChange,
 }) => {
   const [commands, setCommands] = useState<SlashCommand[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -552,9 +559,16 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
     if (!canPreview) setShowPreview(false);
   }, [canPreview]);
 
+  const hasResults = isLoading || displayedCommands.length > 0;
+  useLayoutEffect(() => {
+    onResultsChange?.(hasResults);
+  }, [hasResults, onResultsChange]);
+
   // Keyboard navigation via window listener
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // The Enter that confirms an IME candidate must not select.
+      if (isImeComposing(e)) return;
       switch (e.key) {
         case "Escape":
           e.preventDefault();
@@ -566,6 +580,14 @@ export const SlashCommandPicker: FC<SlashCommandPickerProps> = ({
           break;
         case "Enter":
         case "Tab":
+          // Shift+Enter inserts a newline. With no command to pick, Enter
+          // is left to the composer, which sends the text.
+          if (
+            e.key === "Enter" &&
+            (e.shiftKey || displayedCommands.length === 0)
+          ) {
+            break;
+          }
           e.preventDefault();
           if (
             displayedCommands.length > 0 &&

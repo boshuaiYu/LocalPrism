@@ -157,6 +157,7 @@ describe("MarkdownRenderer links", () => {
     const code = markdown.querySelector("pre");
     expect(code?.className).toMatch(/overflow-x-auto/);
     expect(code?.className).toMatch(/chat-markdown-code/);
+    expect(code?.className).toMatch(/\bmin-w-0\b/);
     const table = markdown.querySelector(".chat-markdown-table");
     expect(table).toBeTruthy();
     expect(table?.className).toMatch(/overflow-x-auto/);

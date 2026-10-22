@@ -394,7 +394,7 @@ const CodeBlock: FC<{ language: string; code: string; preview?: boolean }> = ({
       <div className="not-prose group relative my-2">
         <div
           data-testid="chat-latex-preview"
-          className="chat-latex-preview max-w-full overflow-x-auto rounded-lg border border-border/70 bg-muted/30 px-3 py-1"
+          className="chat-latex-preview min-w-0 max-w-full overflow-x-auto rounded-lg border border-border/70 bg-muted/30 px-3 py-1"
           dangerouslySetInnerHTML={{ __html: latexHtml }}
         />
         {isLatex && (
@@ -408,7 +408,7 @@ const CodeBlock: FC<{ language: string; code: string; preview?: boolean }> = ({
 
   return (
     <div className="not-prose group relative my-2">
-      <pre className="chat-markdown-code max-w-full overflow-x-auto whitespace-pre rounded bg-muted p-3 text-sm [overflow-wrap:normal]">
+      <pre className="chat-markdown-code min-w-0 max-w-full overflow-x-auto whitespace-pre rounded bg-muted p-3 text-sm [overflow-wrap:normal]">
         <code>{code}</code>
       </pre>
 

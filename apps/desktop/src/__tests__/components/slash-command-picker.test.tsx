@@ -268,4 +268,78 @@ describe("SlashCommandPicker", () => {
     });
     expect(document.body.textContent).not.toContain("stale-skill");
   });
+  function anchorRefFor() {
+    const anchorRef = createRef<HTMLDivElement>();
+    Object.defineProperty(anchorRef, "current", {
+      value: anchor,
+      writable: true,
+    });
+    return anchorRef;
+  }
+
+  function enter(init: KeyboardEventInit = {}): KeyboardEvent {
+    const event = new KeyboardEvent("keydown", {
+      key: "Enter",
+      keyCode: 13,
+      bubbles: true,
+      cancelable: true,
+      ...init,
+    });
+    window.dispatchEvent(event);
+    return event;
+  }
+
+  it("leaves Enter to the composer when no command matches", async () => {
+    const onSelect = vi.fn();
+    const onResultsChange = vi.fn();
+    root.render(
+      <SlashCommandPicker
+        projectPath={null}
+        query="zzz"
+        anchorRef={anchorRefFor()}
+        onSelect={onSelect}
+        onClose={vi.fn()}
+        onResultsChange={onResultsChange}
+      />,
+    );
+    await vi.waitFor(() => {
+      expect(document.body.textContent).toContain('No results for "zzz"');
+    });
+    expect(onResultsChange).toHaveBeenLastCalledWith(false);
+
+    expect(enter().defaultPrevented).toBe(false);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("selects on Enter, but not on Shift+Enter or an IME Enter", async () => {
+    const onSelect = vi.fn();
+    const onResultsChange = vi.fn();
+    root.render(
+      <SlashCommandPicker
+        projectPath={null}
+        query="ars"
+        anchorRef={anchorRefFor()}
+        onSelect={onSelect}
+        onClose={vi.fn()}
+        onResultsChange={onResultsChange}
+      />,
+    );
+    await vi.waitFor(() => {
+      expect(
+        document.body.querySelector(
+          '[data-testid="slash-command-item-user-ars-plan"]',
+        ),
+      ).toBeTruthy();
+    });
+    expect(onResultsChange).toHaveBeenLastCalledWith(true);
+
+    expect(enter({ shiftKey: true }).defaultPrevented).toBe(false);
+    expect(enter({ isComposing: true }).defaultPrevented).toBe(false);
+    expect(enter({ keyCode: 229 }).defaultPrevented).toBe(false);
+    expect(onSelect).not.toHaveBeenCalled();
+
+    expect(enter().defaultPrevented).toBe(true);
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onSelect.mock.calls[0]?.[0]).toMatchObject({ name: "ars-plan" });
+  });
 });
