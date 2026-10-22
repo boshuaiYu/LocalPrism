@@ -536,11 +536,68 @@
 }
 
 .chat-markdown .katex-display {
+  min-width: 0;
   max-width: 100%;
   margin: 0.75em 0;
   overflow-x: auto;
   overflow-y: hidden;
   padding-bottom: 0.25rem;
+}
+
+/*
+ * Wide display math and code blocks scroll sideways inside the bubble. A
+ * styled ::-webkit-scrollbar is a classic, always-visible scrollbar in
+ * Chromium (WebView2) and WebKit (macOS WKWebView, Linux WebKitGTK), so the
+ * block no longer looks cut off until hovered. Same rule on every OS.
+ * scrollbar-width/scrollbar-color are only a fallback for engines without
+ * ::-webkit-scrollbar: Chromium 121+ ignores ::-webkit-scrollbar once they
+ * are set, which would bring back the platform (overlay) scrollbar.
+ */
+.chat-markdown .katex-display,
+.chat-markdown pre.chat-markdown-code,
+.chat-markdown .chat-latex-preview {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  /* Reset an inherited thin/colored scrollbar so ::-webkit-scrollbar applies. */
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+}
+
+.chat-markdown .katex-display::-webkit-scrollbar,
+.chat-markdown pre.chat-markdown-code::-webkit-scrollbar,
+.chat-markdown .chat-latex-preview::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.chat-markdown .katex-display::-webkit-scrollbar-track,
+.chat-markdown pre.chat-markdown-code::-webkit-scrollbar-track,
+.chat-markdown .chat-latex-preview::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chat-markdown .katex-display::-webkit-scrollbar-thumb,
+.chat-markdown pre.chat-markdown-code::-webkit-scrollbar-thumb,
+.chat-markdown .chat-latex-preview::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background: var(--muted-foreground);
+  background: color-mix(in oklab, var(--muted-foreground) 55%, transparent);
+}
+
+.chat-markdown .katex-display::-webkit-scrollbar-thumb:hover,
+.chat-markdown pre.chat-markdown-code::-webkit-scrollbar-thumb:hover,
+.chat-markdown .chat-latex-preview::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-foreground);
+}
+
+@supports not selector(::-webkit-scrollbar) {
+  .chat-markdown .katex-display,
+  .chat-markdown pre.chat-markdown-code,
+  .chat-markdown .chat-latex-preview {
+    scrollbar-width: thin;
+    scrollbar-color: var(--muted-foreground) transparent;
+  }
 }
 
 .chat-markdown .chat-markdown-table {
